@@ -56,6 +56,9 @@ job_inputs <- list(
   job_name = "susine_sim_grid_demo",
   
   HPC = TRUE,
+  
+  mem = "2G",
+  time = "02:59:59",
 
   # Email used for SLURM notifications
   email = "mgc5166@psu.edu",

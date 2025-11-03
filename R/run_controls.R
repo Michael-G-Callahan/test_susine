@@ -181,22 +181,22 @@ assign_task_ids <- function(runs, runs_per_task, shuffle_seed = NULL) {
   if (runs_per_task < 1) {
     stop("runs_per_task must be >= 1")
   }
-  
+
   n_runs <- nrow(runs)
-  
+
   # Create shuffled order
   if (!is.null(shuffle_seed)) {
     set.seed(shuffle_seed)
   }
   shuffled_idx <- sample(n_runs)
-  
+
   # Assign task_ids based on shuffled order
   runs_shuffled <- runs %>%
     dplyr::mutate(shuffled_order = shuffled_idx) %>%
     dplyr::arrange(shuffled_order) %>%
     dplyr::mutate(task_id = ((dplyr::row_number() - 1L) %/% as.integer(runs_per_task)) + 1L) %>%
     dplyr::arrange(run_id)  # unshuffle back to original run_id order
-  
+
   tasks_summary <- runs_shuffled %>%
     dplyr::group_by(task_id) %>%
     dplyr::summarise(runs_per_task = dplyr::n(), .groups = "drop") %>%
@@ -227,6 +227,8 @@ assign_task_ids <- function(runs, runs_per_task, shuffle_seed = NULL) {
 #' @export
 make_job_config <- function(job_name,
                             HPC = FALSE,
+                            time = "02:59:00",
+                            mem = "2G",
                             use_case_ids,
                             L_grid,
                             y_noise_grid,
@@ -283,8 +285,8 @@ make_job_config <- function(job_name,
         model_average = model_average_settings
       ),
       slurm = list(
-        time = "01:00:00",
-        mem = "2G",
+        time = time,
+        mem = mem,
         cpus_per_task = 1,
         partition = NULL,
         # NEW: plumbed through for render_slurm_script()
@@ -322,7 +324,7 @@ write_job_artifacts <- function(job_config,
   ensure_dir(paths$slurm_output_dir)
   ensure_dir(paths$slurm_prints_dir)
   ensure_dir(paths$slurm_scripts_dir)
-  
+
   # Clear temp directory and create fresh
   unlink(paths$temp_dir, recursive = TRUE)
   ensure_dir(paths$temp_dir)
