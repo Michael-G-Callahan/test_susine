@@ -53,63 +53,80 @@ simulate_effect_sizes <- function(p,
   list(beta = beta, causal_idx = causal_idx)
 }
 
-#' Construct mu_0 and sigma_0_2 priors from effect sizes.
+#' Construct mu_0 and sigma_0_2 priors from effect sizes using annotation knobs.
 #'
 #' @param beta Numeric vector of true effects.
-#' @param noise_causal Variance fraction for mu_0 - beta on causal SNPs.
-#' @param noise_nonc Variance fraction for mu_0 - beta on non-causal SNPs.
+#' @param annotation_r2 Target fraction of causal effect variance captured by the annotation.
+#' @param inflate_match Degree (0-1) to inflate non-causal annotations to match causal scale.
+#' @param gamma_shrink Optional shrinkage slope used when converting annotations to prior variances.
 #' @param base_sigma2 Optional baseline prior variance.
+#' @param effect_sd Nominal standard deviation used for causal effects (fallback when beta variance is zero).
 #'
-#' @return List with `mu_0`, `sigma_0_2`, and `prior_inclusion_weights`.
+#' @return List with `mu_0`, `sigma_0_2`, `prior_inclusion_weights`, and `observed_r2`.
 #' @keywords internal
 simulate_priors <- function(beta,
-                            noise_causal,
-                            noise_nonc,
-                            base_sigma2 = NULL) {
+                            annotation_r2,
+                            inflate_match,
+                            gamma_shrink = NA_real_,
+                            base_sigma2 = NULL,
+                            effect_sd = NULL) {
   p <- length(beta)
   causal_idx <- which(beta != 0)
   noncausal_idx <- setdiff(seq_len(p), causal_idx)
 
-  beta_causal <- beta[causal_idx]
-  effect_var <- stats::var(beta_causal)
-  if (is.na(effect_var) || effect_var == 0) {
-    effect_var <- max(stats::var(beta), 1e-3)
+  if (is.null(effect_sd) || !is.finite(effect_sd) || effect_sd <= 0) {
+    effect_sd <- sqrt(max(stats::var(beta[causal_idx]), stats::var(beta), 1))
   }
-  if (is.na(effect_var) || effect_var == 0) {
-    effect_var <- 1
+  annotation_r2 <- pmin(pmax(annotation_r2 %||% 0, 0), 1)
+  inflate_match <- max(inflate_match %||% 0, 0)
+
+  causal_var <- stats::var(beta[causal_idx])
+  if (is.na(causal_var) || causal_var == 0) {
+    causal_var <- effect_sd^2
   }
 
-  sd_causal <- sqrt(max(noise_causal, 0)) * sqrt(effect_var)
-  sd_noncausal <- sqrt(max(noise_nonc, 0)) * sqrt(effect_var)
+  if (annotation_r2 <= 0) {
+    noise_var <- causal_var
+  } else if (annotation_r2 >= 1) {
+    noise_var <- 0
+  } else {
+    noise_var <- causal_var * (1 - annotation_r2) / annotation_r2
+  }
 
   mu_0 <- numeric(p)
   if (length(causal_idx)) {
-    mu_0[causal_idx] <- beta_causal + stats::rnorm(length(causal_idx), sd = sd_causal)
+    mu_0[causal_idx] <- beta[causal_idx] + stats::rnorm(length(causal_idx), sd = sqrt(noise_var))
   }
   if (length(noncausal_idx)) {
-    mu_0[noncausal_idx] <- stats::rnorm(length(noncausal_idx), mean = 0, sd = sd_noncausal)
+    target_var <- noise_var + inflate_match * causal_var
+    mu_0[noncausal_idx] <- stats::rnorm(length(noncausal_idx), sd = sqrt(target_var))
   }
 
-  base_sigma2 <- base_sigma2 %||% effect_var
+  observed_r2 <- NA_real_
+  if (length(causal_idx) > 1 && stats::sd(beta[causal_idx]) > 0 && stats::sd(mu_0[causal_idx]) > 0) {
+    observed_r2 <- stats::cor(mu_0[causal_idx], beta[causal_idx])^2
+  }
+
+  base_sigma2 <- base_sigma2 %||% causal_var
   if (is.na(base_sigma2) || base_sigma2 <= 0) {
-    base_sigma2 <- effect_var
-  }
-  sigma_0_2 <- rep(base_sigma2, p)
-  if (length(causal_idx)) {
-    sigma_0_2[causal_idx] <- pmax(base_sigma2 * (1 - noise_causal), base_sigma2 * 0.25)
-  }
-  if (length(noncausal_idx)) {
-    sigma_0_2[noncausal_idx] <- base_sigma2 * (1 + noise_nonc)
+    base_sigma2 <- effect_sd^2
   }
 
-  scores <- abs(mu_0)
-  scores <- scores + 1e-6
+  if (!is.null(gamma_shrink) && is.finite(gamma_shrink)) {
+    scale <- if (effect_sd > 0) effect_sd else sqrt(causal_var)
+    sigma_0_2 <- base_sigma2 * exp(-gamma_shrink * abs(mu_0) / scale)
+  } else {
+    sigma_0_2 <- rep(base_sigma2, p)
+  }
+
+  scores <- abs(mu_0) + 1e-6
   prior_weights <- scores / sum(scores)
 
   list(
     mu_0 = mu_0,
     sigma_0_2 = sigma_0_2,
-    prior_inclusion_weights = prior_weights
+    prior_inclusion_weights = prior_weights,
+    observed_r2 = observed_r2
   )
 }
 
@@ -145,8 +162,9 @@ simulate_phenotype <- function(X, beta, noise_fraction, seed = NULL) {
 #' Generate a single simulation dataset for a run specification.
 #'
 #' @param spec Named list or data.frame row containing simulation controls.
-#'   Required fields: `seed`, `p_star`, `y_noise`, `prior_noise_causal`,
-#'   `prior_noise_nonc`. Optional: `effect_sd`, `standardize_X`.
+#'   Required fields: `seed`, `p_star`, `y_noise`. Optional prior controls:
+#'   `annotation_r2`, `inflate_match`, `gamma_shrink`. Additional optional inputs:
+#'   `effect_sd`, `standardize_X`.
 #' @param base_X Optional matrix to reuse instead of loading the package data.
 #'
 #' @return List with design matrix, phenotype, ground-truth beta, priors, and
@@ -179,9 +197,11 @@ generate_simulation_data <- function(spec,
   )
   priors <- simulate_priors(
     beta = effects$beta,
-    noise_causal = spec$prior_noise_causal %||% 0,
-    noise_nonc = spec$prior_noise_nonc %||% 1,
-    base_sigma2 = stats::var(phenotype$y)
+    annotation_r2 = spec$annotation_r2 %||% 0,
+    inflate_match = spec$inflate_match %||% 0,
+    gamma_shrink = spec$gamma_shrink,
+    base_sigma2 = stats::var(phenotype$y),
+    effect_sd = spec$effect_sd %||% 1
   )
 
   list(
@@ -192,6 +212,10 @@ generate_simulation_data <- function(spec,
     mu_0 = priors$mu_0,
     sigma_0_2 = priors$sigma_0_2,
     prior_inclusion_weights = priors$prior_inclusion_weights,
-    causal_idx = effects$causal_idx
+    causal_idx = effects$causal_idx,
+    annotation_r2_observed = priors$observed_r2,
+    annotation_r2_target = spec$annotation_r2 %||% NA_real_,
+    inflate_match = spec$inflate_match %||% NA_real_,
+    gamma_shrink = spec$gamma_shrink %||% NA_real_
   )
 }

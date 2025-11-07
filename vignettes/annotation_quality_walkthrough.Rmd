@@ -1,0 +1,376 @@
+---
+title: "Annotation Quality Walkthrough: SuSiNE vs SuSiE"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+editor_options:
+  chunk_output_type: console
+---
+
+# Overview
+
+This workbook walks through a minimal simulation that highlights how a single SNP-level annotation vector can be routed into the SuSiNE (mean-informed) or SuSiE (variance-informed) models. We introduce two knobs:
+
+- `lambda_align` — how strongly the annotation aligns with the true effects (`1 = perfect`, `0 = pure noise`);
+- `rho_noise` — how much extra noise is injected into non-causal SNP annotations (scaled to the effect size).
+
+We start from a fixed fine-mapping region, generate effects, construct annotations using these knobs, and compare the downstream impact when the same information is passed through the mean (`mu_0`) or the variance (`sigma_0^2`).
+
+```{r setup, message=FALSE}
+here::i_am("vignettes/annotation_quality_walkthrough.Rmd")
+library(devtools)
+library(susine)
+load_all()
+
+data("N3finemapping")
+attach(N3finemapping)
+
+library(dplyr)
+library(ggplot2)
+```
+
+# 1. Simulate Effects and Phenotype
+
+```{r simulate-effects}
+set.seed(42)
+n <- nrow(X)
+p <- ncol(X)
+
+L_true <- 10
+causal_idx <- sort(sample(seq_len(p), L_true))
+
+effect_sd <- 1
+beta <- numeric(p)
+beta[causal_idx] <- rnorm(L_true, mean = 0, sd = effect_sd)
+
+y_noise <- 0.3
+signal <- as.vector(X %*% beta)
+sigma2 <- var(signal) * (y_noise / (1 - y_noise))
+y <- signal + rnorm(n, sd = sqrt(sigma2))
+
+cat("Causal SNPs:", paste(causal_idx, collapse = ", "), "\n")
+cat("Effect SD used for causals:", effect_sd, "\n")
+```
+
+# 2. Build an Annotation with Two Knobs
+
+We describe the annotation quality using two scalar parameters:
+
+- `annotation_r2` — the target fraction of variance in the causal effects explained by the annotation (e.g. 0.25, 0.5, 0.75);
+- `inflate_match` — how much to inflate the variance of non-causal annotations so it matches the causal annotation scale (`0 = none`, `1 = fully matched`, intermediate values interpolate).
+
+The helper below implements both scenarios. It adds Gaussian noise to the causal effects so the resulting annotation achieves the desired `annotation_r2`, then adjusts the non-causal variance according to `inflate_match`.
+
+```{r annotation-helper}
+generate_annotation <- function(beta,
+                                causal_idx,
+                                annotation_r2,
+                                inflate_match,
+                                effect_sd) {
+  stopifnot(annotation_r2 >= 0, annotation_r2 <= 1, inflate_match >= 0)
+  causal_var <- stats::var(beta[causal_idx])
+  if (is.na(causal_var) || causal_var == 0) {
+    causal_var <- effect_sd^2
+  }
+  if (annotation_r2 <= 0) {
+    noise_var <- causal_var
+  } else if (annotation_r2 >= 1) {
+    noise_var <- 0
+  } else {
+    noise_var <- causal_var * (1 - annotation_r2) / annotation_r2
+  }
+
+  annotation <- numeric(length(beta))
+  noise_sd_causal <- sqrt(noise_var)
+  annotation[causal_idx] <- beta[causal_idx] + rnorm(length(causal_idx), sd = noise_sd_causal)
+
+  target_var_nonc <- noise_var + inflate_match * causal_var
+  noise_sd_nonc <- sqrt(target_var_nonc)
+  non_idx <- setdiff(seq_along(beta), causal_idx)
+  annotation[non_idx] <- rnorm(length(non_idx), sd = noise_sd_nonc)
+
+  annotation
+}
+```
+
+```{r annotation-knobs}
+annotation_r2 <- 0.8      # proportion of causal effect variance explained by annotation
+inflate_match <- 1   # 0=no inflation, 1=match causal annotation scale
+
+annotation <- generate_annotation(
+  beta = beta,
+  causal_idx = causal_idx,
+  annotation_r2 = annotation_r2,
+  inflate_match = inflate_match,
+  effect_sd = effect_sd
+)
+
+annotation_tbl <- tibble(
+  snp = seq_len(p),
+  beta = beta,
+  annotation = annotation,
+  causal = as.integer(seq_len(p) %in% causal_idx)
+)
+
+safe_cor <- function(x, y) {
+  if (sd(x) == 0 || sd(y) == 0 || all(is.na(x)) || all(is.na(y))) {
+    return(NA_real_)
+  }
+  cor(x, y)
+}
+
+annotation_tbl %>%
+  group_by(causal) %>%
+  summarise(
+    mean_annotation = mean(annotation),
+    sd_annotation = sd(annotation),
+    cor_with_beta = safe_cor(annotation, beta),
+    .groups = "drop"
+  )
+```
+
+```{r annotation-plot, fig.width=7, fig.height=4}
+ggplot(annotation_tbl, aes(x = beta, y = annotation, colour = factor(causal))) +
+  geom_point(alpha = 0.6) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", colour = "grey40") +
+  labs(
+    colour = "Causal",
+    x = "True effect (beta)",
+    y = "Annotation",
+    title = "Annotation quality: mix of alignment and noise"
+  ) +
+  theme_minimal()
+```
+
+# 3. Convert Annotation to Priors
+
+We now send the annotation through the two modelling pathways:
+
+- **Mean-informed (SuSiNE):** set `mu_0 = annotation`, retain a neutral variance.
+- **Variance-informed (SuSiE-style):** map the annotation magnitude to prior variances while keeping `mu_0 = 0`.
+
+```{r priors}
+base_sigma2 <- var(y)
+
+mu_prior <- annotation
+
+gamma_shrink <- 0.8  # governs how aggressively |annotation| shrinks variance
+
+sigma_prior <- base_sigma2 * exp(-gamma_shrink * abs(annotation) / effect_sd)
+
+prior_tbl <- tibble(
+  snp = seq_len(p),
+  mu_prior = mu_prior,
+  sigma_prior = sigma_prior,
+  causal = as.integer(seq_len(p) %in% causal_idx)
+)
+
+prior_tbl %>%
+  group_by(causal) %>%
+  summarise(
+    mean_mu = mean(mu_prior),
+    sd_mu = sd(mu_prior),
+    mean_sigma = mean(sigma_prior),
+    sd_sigma = sd(sigma_prior),
+    .groups = "drop"
+  )
+```
+
+# 4. Fit Models
+
+We fit three models to compare how the prior is consumed:
+
+1. Baseline SuSiNE with no annotation information.
+2. Mean-informed SuSiNE (`mu_0 = annotation`).
+3. Variance-informed SuSiE-like fit (`mu_0 = 0`, `sigma_0^2 = sigma_prior`).
+
+```{r fit-models}
+fit_baseline <- susine(
+  L = L_true,
+  X = X,
+  y = y,
+  prior_update_method = "none",
+  verbose = FALSE
+)
+
+fit_mean <- susine(
+  L = L_true,
+  X = X,
+  y = y,
+  mu_0 = mu_prior,
+  sigma_0_2 = base_sigma2,
+  prior_update_method = "none",
+  verbose = FALSE
+)
+
+fit_variance <- susine(
+  L = L_true,
+  X = X,
+  y = y,
+  mu_0 = 0,
+  sigma_0_2 = sigma_prior,
+  prior_update_method = "none",
+  verbose = FALSE
+)
+```
+
+# 5. Evaluate Fits
+
+```{r metrics-helpers, message=FALSE}
+if (!requireNamespace("PRROC", quietly = TRUE)) {
+  install.packages("PRROC")
+}
+library(PRROC)
+
+truth <- integer(p)
+truth[causal_idx] <- 1L
+
+pr_auc <- function(pips, truth) {
+  pr <- PRROC::pr.curve(
+    scores.class0 = pips[truth == 1],
+    scores.class1 = pips[truth == 0],
+    curve = FALSE
+  )
+  pr$auc.davis.goadrich
+}
+
+cross_entropy <- function(pips, truth) {
+  eps <- .Machine$double.eps
+  pips <- pmin(pmax(pips, eps), 1 - eps)
+  -mean(truth * log(pips) + (1 - truth) * log(1 - pips))
+}
+
+summarise_fit <- function(fit, label) {
+  tibble(
+    model = label,
+    elbo = tail(fit$model_fit$elbo, 1),
+    pr_auc = pr_auc(fit$model_fit$PIPs, truth),
+    cross_entropy = cross_entropy(fit$model_fit$PIPs, truth)
+  )
+}
+```
+
+```{r compare-metrics}
+bind_rows(
+  summarise_fit(fit_baseline, "SuSiNE baseline"),
+  summarise_fit(fit_mean, "SuSiNE mean-informed"),
+  summarise_fit(fit_variance, "SuSiE variance-informed")
+)
+```
+
+```{r pip-plot, fig.width=7, fig.height=4}
+pip_tbl <- tibble(
+  snp = seq_len(p),
+  truth = truth,
+  baseline = fit_baseline$model_fit$PIPs,
+  mean_informed = fit_mean$model_fit$PIPs,
+  variance_informed = fit_variance$model_fit$PIPs
+) %>%
+  tidyr::pivot_longer(
+    cols = c(baseline, mean_informed, variance_informed),
+    names_to = "model",
+    values_to = "pip"
+  )
+
+ggplot(pip_tbl, aes(x = snp, y = pip, colour = model)) +
+  geom_line() +
+  geom_point(aes(shape = factor(truth)), size = 1.1) +
+  scale_shape_manual(values = c(`0` = 1, `1` = 16), labels = c("Noncausal", "Causal")) +
+  labs(
+    colour = "Model",
+    shape = "Truth",
+    x = "SNP index",
+    y = "Posterior inclusion probability"
+  ) +
+  theme_minimal()
+```
+
+# 6. Experiment with Knobs
+
+To see how the annotation `R^2` and non-causal inflation affect performance, we wrap the logic into a helper and sweep across a grid.
+
+```{r sweep-helper}
+run_experiment <- function(annotation_r2, inflate_match, gamma_shrink, seed = 1) {
+  set.seed(seed)
+
+  annotation <- generate_annotation(
+    beta = beta,
+    causal_idx = causal_idx,
+    annotation_r2 = annotation_r2,
+    inflate_match = inflate_match,
+    effect_sd = effect_sd
+  )
+
+  sigma_prior <- base_sigma2 * exp(-gamma_shrink * abs(annotation) / effect_sd)
+
+  observed_r2 <- safe_cor(annotation[causal_idx], beta[causal_idx])^2
+
+  fit_mean <- susine(
+    L = L_true, X = X, y = y,
+    mu_0 = annotation,
+    sigma_0_2 = base_sigma2,
+    prior_update_method = "none",
+    verbose = FALSE
+  )
+
+  fit_variance <- susine(
+    L = L_true, X = X, y = y,
+    mu_0 = 0,
+    sigma_0_2 = sigma_prior,
+    prior_update_method = "none",
+    verbose = FALSE
+  )
+
+  tibble(
+    annotation_r2 = annotation_r2,
+    inflate_match = inflate_match,
+    gamma_shrink = gamma_shrink,
+    observed_r2 = observed_r2,
+    model = c("mean", "variance"),
+    pr_auc = c(
+      pr_auc(fit_mean$model_fit$PIPs, truth),
+      pr_auc(fit_variance$model_fit$PIPs, truth)
+    ),
+    cross_entropy = c(
+      cross_entropy(fit_mean$model_fit$PIPs, truth),
+      cross_entropy(fit_variance$model_fit$PIPs, truth)
+    )
+  )
+}
+```
+
+```{r sweep-grid, message=FALSE}
+grid_results <- tidyr::crossing(
+  annotation_r2 = c(0.25, 0.5, 0.75),
+  inflate_match = c(0, 0.5, 1),
+  gamma_shrink = c(0.4, 0.8)
+) %>%
+  purrr::pmap_dfr(function(annotation_r2, inflate_match, gamma_shrink) {
+    run_experiment(annotation_r2, inflate_match, gamma_shrink, seed = 2)
+  })
+
+grid_results
+```
+
+```{r sweep-plot, fig.width=8, fig.height=4}
+ggplot(grid_results, aes(x = annotation_r2, y = pr_auc, colour = model)) +
+  geom_point() +
+  geom_line() +
+  facet_grid(gamma_shrink ~ inflate_match, labeller = label_bquote(rows = gamma == .(gamma_shrink),
+                                                                   cols = inflate == .(inflate_match))) +
+  labs(
+    title = "PR-AUC across annotation quality knobs",
+    x = "Annotation R^2 (causal variance explained)",
+    y = "PR-AUC"
+  ) +
+  theme_minimal()
+```
+
+# Summary
+
+- A single annotation vector can be routed through `mu_0` (SuSiNE) or `sigma_0^2` (SuSiE-style).
+- The causal annotation quality knob (`annotation_r2`) determines how much signal survives; higher values benefit SuSiNE most, while SuSiE needs calibrated shrinkage to keep up.
+- The non-causal inflation knob (`inflate_match`) controls how misleading the variance-only approach can become; matching scales (`inflate_match = 1`) narrows the gap, whereas small values highlight SuSiNE's advantage under informative means.

@@ -2,28 +2,25 @@
 
 #' Build a tidy grid of prior-quality settings.
 #'
-#' @param causal_levels Numeric vector (either fractions or percentages) for
-#'   causal SNP prior noise.
-#' @param noncausal_levels Numeric vector (fractions or percentages) for
-#'   non-causal SNP prior noise.
-#' @return Tibble with columns `prior_noise_causal`, `prior_noise_nonc`, and
+#' @param annotation_r2_levels Numeric vector of target annotation R^2 values for causal SNPs.
+#' @param inflate_match_levels Numeric vector indicating how strongly to inflate non-causal annotations.
+#' @param gamma_shrink_levels Numeric vector of shrinkage slopes for variance-informed runs.
+#' @return Tibble with columns `annotation_r2`, `inflate_match`, `gamma_shrink`, and
 #'   `prior_quality_id`.
 #' @export
-prior_quality_grid <- function(causal_levels = c(0.2, 0.4, 0.6, 0.8),
-                               noncausal_levels = causal_levels) {
-  normalize <- function(x) {
-    x <- unique(x)
-    x <- x[!is.na(x)]
-    if (any(x > 1)) {
-      x <- x / 100
-    }
-    x
+prior_quality_grid <- function(annotation_r2_levels = c(0.25, 0.5, 0.75),
+                               inflate_match_levels = c(0, 0.5, 1),
+                               gamma_shrink_levels = c(0.4, 0.8)) {
+  ann_vals <- unique(annotation_r2_levels)
+  inflate_vals <- unique(inflate_match_levels)
+  gamma_vals <- unique(gamma_shrink_levels)
+  if (!any(is.na(gamma_vals))) {
+    gamma_vals <- c(gamma_vals, NA_real_)
   }
-  c_levels <- normalize(causal_levels)
-  nc_levels <- normalize(noncausal_levels)
   grid <- tidyr::expand_grid(
-    prior_noise_causal = c_levels,
-    prior_noise_nonc = nc_levels
+    annotation_r2 = ann_vals,
+    inflate_match = inflate_vals,
+    gamma_shrink = gamma_vals
   )
   dplyr::mutate(grid, prior_quality_id = dplyr::row_number())
 }
@@ -48,8 +45,8 @@ make_run_tables <- function(use_case_ids,
                             data_scenarios,
                             grid_mode = c("full", "minimal")) {
   if (!is.data.frame(prior_quality) ||
-      !all(c("prior_noise_causal", "prior_noise_nonc") %in% names(prior_quality))) {
-    stop("prior_quality must be a tibble with prior_noise_causal and prior_noise_nonc columns.")
+      !all(c("annotation_r2", "inflate_match", "gamma_shrink") %in% names(prior_quality))) {
+    stop("prior_quality must contain annotation_r2, inflate_match, and gamma_shrink columns.")
   }
   grid_mode <- match.arg(grid_mode)
   use_cases <- resolve_use_cases(use_case_ids)
@@ -71,21 +68,26 @@ make_run_tables <- function(use_case_ids,
   }
 
   build_minimal_grid <- function() {
-    causal_vals <- unique(prior_quality$prior_noise_causal)
-    noncausal_vals <- unique(prior_quality$prior_noise_nonc)
-    if (!length(causal_vals)) {
-      causal_vals <- 0
+    ann_vals <- unique(prior_quality$annotation_r2)
+    inflate_vals <- unique(prior_quality$inflate_match)
+    gamma_vals <- unique(prior_quality$gamma_shrink)
+    if (!length(ann_vals)) {
+      ann_vals <- NA_real_
     }
-    if (!length(noncausal_vals)) {
-      noncausal_vals <- 0
+    if (!length(inflate_vals)) {
+      inflate_vals <- NA_real_
+    }
+    if (!length(gamma_vals)) {
+      gamma_vals <- NA_real_
     }
     values <- list(
       data_scenario = unique(data_scenarios),
       L = unique(L_grid),
       y_noise = unique(y_noise_grid),
       p_star = unique(p_star_grid),
-      prior_noise_causal = causal_vals,
-      prior_noise_nonc = noncausal_vals
+      annotation_r2 = ann_vals,
+      inflate_match = inflate_vals,
+      gamma_shrink = gamma_vals
     )
     lengths <- vapply(values, length, integer(1))
     n_rows <- max(lengths)
@@ -94,8 +96,9 @@ make_run_tables <- function(use_case_ids,
       L = rep_len(values$L, n_rows),
       y_noise = rep_len(values$y_noise, n_rows),
       p_star = rep_len(values$p_star, n_rows),
-      prior_noise_causal = rep_len(values$prior_noise_causal, n_rows),
-      prior_noise_nonc = rep_len(values$prior_noise_nonc, n_rows),
+      annotation_r2 = rep_len(values$annotation_r2, n_rows),
+      inflate_match = rep_len(values$inflate_match, n_rows),
+      gamma_shrink = rep_len(values$gamma_shrink, n_rows),
       prior_quality_id = seq_len(n_rows)
     ) %>%
       dplyr::mutate(scenario_id = seq_along(data_scenario))
@@ -122,8 +125,19 @@ make_run_tables <- function(use_case_ids,
   ) %>%
     dplyr::left_join(scenarios, by = "scenario_id") %>%
     dplyr::left_join(
-      dplyr::select(use_cases, use_case_id, requires_prior_quality),
+      dplyr::select(use_cases, use_case_id, requires_prior_quality, mu_strategy, sigma_strategy),
       by = "use_case_id"
+    )
+
+  runs <- runs %>%
+    dplyr::mutate(
+      needs_annotation = requires_prior_quality,
+      needs_gamma = requires_prior_quality & sigma_strategy == "functional"
+    ) %>%
+    dplyr::filter(
+      !needs_annotation |
+        (needs_gamma & !is.na(gamma_shrink)) |
+        (!needs_gamma & is.na(gamma_shrink))
     )
 
   default_scenarios <- scenarios %>%
@@ -145,18 +159,23 @@ make_run_tables <- function(use_case_ids,
         prior_quality_id,
         as.integer(NA)
       ),
-      prior_noise_causal = dplyr::if_else(
+      annotation_r2 = dplyr::if_else(
         requires_prior_quality,
-        prior_noise_causal,
+        annotation_r2,
         as.numeric(NA)
       ),
-      prior_noise_nonc = dplyr::if_else(
+      inflate_match = dplyr::if_else(
         requires_prior_quality,
-        prior_noise_nonc,
+        inflate_match,
+        as.numeric(NA)
+      ),
+      gamma_shrink = dplyr::if_else(
+        needs_gamma,
+        gamma_shrink,
         as.numeric(NA)
       )
     ) %>%
-    dplyr::select(-default_scenario_id) %>%
+    dplyr::select(-default_scenario_id, -needs_annotation, -needs_gamma, -mu_strategy, -sigma_strategy) %>%
     dplyr::distinct() %>%
     dplyr::arrange(scenario_id, use_case_id, seed) %>%
     dplyr::mutate(run_id = dplyr::row_number())
@@ -495,6 +514,14 @@ render_slurm_script <- function(job_config, run_task_script) {
 summarise_job_config <- function(job_config) {
   runs <- job_config$tables$runs
   runs %>%
-    dplyr::group_by(use_case_id, L, y_noise, p_star, prior_noise_causal, prior_noise_nonc) %>%
+    dplyr::group_by(
+      use_case_id,
+      L,
+      y_noise,
+      p_star,
+      annotation_r2,
+      inflate_match,
+      gamma_shrink
+    ) %>%
     dplyr::summarise(n_runs = dplyr::n(), .groups = "drop")
 }

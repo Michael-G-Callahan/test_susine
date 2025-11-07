@@ -1,0 +1,376 @@
+---
+title: "SuSiNE Simulation Results Collection"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, message=FALSE}
+here::i_am("vignettes/collect_results_workbook.Rmd")
+library(here)
+here()
+
+library(devtools)
+devtools::load_all(".")
+
+library(dplyr)
+library(tidyr)
+library(readr)
+library(knitr)
+library(purrr)
+library(fs)
+```
+
+# Results Collection Workflow
+
+This workbook validates simulation outputs, combines metrics into master
+tables, and performs basic diagnostics on collected results.
+
+# 1. Specify the Job
+
+Provide the job name and parent array ID from your completed run.
+
+```{r job-inputs}
+job_inputs <- list(
+  # Job identifier (from run_history folder name)
+  job_name = "susine_sim_grid_demo",
+  
+  # Parent SLURM array job ID (from run_history/job_name/[PARENT_ID]/)
+  parent_job_id = "45832058",
+  
+  # Root output directory
+  output_root = here("output")
+)
+```
+
+# 2. Load Run Table and Paths
+
+Read the run configuration and establish paths to input/output.
+
+```{r setup-paths}
+run_history_dir <- file.path(
+  job_inputs$output_root,
+  "run_history",
+  job_inputs$job_name,
+  job_inputs$parent_job_id
+)
+
+results_dir <- file.path(
+  job_inputs$output_root,
+  "slurm_output",
+  job_inputs$job_name,
+  job_inputs$parent_job_id
+)
+
+combined_dir <- file.path(results_dir, "combined")
+
+# Verify paths exist
+if (!dir.exists(run_history_dir)) {
+  stop("Run history directory not found: ", run_history_dir)
+}
+if (!dir.exists(results_dir)) {
+  stop("Results directory not found: ", results_dir)
+}
+
+# Create combined output directory
+dir.create(combined_dir, showWarnings = FALSE, recursive = TRUE)
+
+# Load run table
+run_table <- read_csv(
+  file.path(run_history_dir, "run_table.csv"),
+  show_col_types = FALSE
+)
+
+cat("Loaded run_table with", nrow(run_table), "runs\n")
+```
+
+# 3. Validate Output Files
+
+Check that each run has all expected output files with correct structure.
+
+```{r validate-outputs}
+#' Compute shard path for a given run_id
+compute_shard_path <- function(run_id, shard_size = 1000L) {
+  shard_idx <- (run_id - 1L) %/% as.integer(shard_size)
+  sprintf("shard-%03d", shard_idx)
+}
+
+#' Check if a run's output files exist and have correct structure
+check_run_output <- function(run_row, results_dir, shard_size = 1000L) {
+  run_id <- run_row$run_id
+  shard_dir <- compute_shard_path(run_id, shard_size)
+  run_dir <- file.path(results_dir, shard_dir, sprintf("run-%05d", run_id))
+  
+  issues <- character(0)
+  
+  # Check model_metrics.csv exists and has 2 rows (unfiltered + filtered)
+  model_metrics_path <- file.path(run_dir, "model_metrics.csv")
+  if (!file.exists(model_metrics_path)) {
+    issues <- c(issues, "missing: model_metrics.csv")
+  } else {
+    mm <- read_csv(model_metrics_path, show_col_types = FALSE)
+    if (nrow(mm) != 2) {
+      issues <- c(issues, sprintf("model_metrics.csv has %d rows (expected 2)", nrow(mm)))
+    }
+  }
+  
+  # Check effect_metrics.csv exists (if applicable)
+  effect_metrics_path <- file.path(run_dir, "effect_metrics.csv")
+  if (file.exists(effect_metrics_path)) {
+    em <- read_csv(effect_metrics_path, show_col_types = FALSE)
+    expected_rows_unfiltered <- run_row$L  # L is number of effects
+    unfiltered_rows <- sum(em$filtering == "unfiltered", na.rm = TRUE)
+    filtered_rows <- sum(em$filtering == "purity_filtered", na.rm = TRUE)
+    
+    if (unfiltered_rows != expected_rows_unfiltered) {
+      issues <- c(issues, sprintf("effect_metrics.csv has %d unfiltered rows (expected %d)", 
+                                  unfiltered_rows, expected_rows_unfiltered))
+    }
+    if (filtered_rows > expected_rows_unfiltered) {
+      issues <- c(issues, sprintf("effect_metrics.csv has %d purity_filtered rows (expected 0-%d)", 
+                                  filtered_rows, expected_rows_unfiltered))
+    }
+  }
+  # effect_metrics can be missing if no effects were detected
+  
+  # Check pip.csv exists
+  pip_path <- file.path(run_dir, "pip.csv")
+  if (!file.exists(pip_path)) {
+    issues <- c(issues, "missing: pip.csv")
+  }
+  
+  # Check truth.csv exists
+  truth_path <- file.path(run_dir, "truth.csv")
+  if (!file.exists(truth_path)) {
+    issues <- c(issues, "missing: truth.csv")
+  }
+  
+  # Check fit.rds exists
+  fit_path <- file.path(run_dir, "fit.rds")
+  if (!file.exists(fit_path)) {
+    issues <- c(issues, "missing: fit.rds")
+  }
+  
+  list(
+    run_id = run_id,
+    has_issues = length(issues) > 0,
+    issues = if (length(issues) > 0) paste(issues, collapse = "; ") else NA_character_
+  )
+}
+
+# Validate all runs (with progress updates)
+n_runs <- nrow(run_table)
+# progress step: max(10% of runs, 1000)
+step <- max(as.integer(ceiling(n_runs * 0.10)), 1000L)
+cat(sprintf("Validating %d runs (progress printed every %d runs)...\n", n_runs, step))
+
+validation_list <- vector("list", n_runs)
+for (i in seq_len(n_runs)) {
+  validation_list[[i]] <- check_run_output(run_table[i, ], results_dir)
+  if ((i %% step) == 0L || i == n_runs) {
+    cat(sprintf("  → Validated %d/%d runs (%.1f%%)\n", i, n_runs, 100 * i / n_runs))
+  }
+}
+validation_results <- dplyr::bind_rows(validation_list)
+
+# Report summary
+n_missing <- sum(validation_results$has_issues)
+cat("\nValidation Summary:\n")
+cat("  Total runs:", nrow(validation_results), "\n")
+cat("  Valid runs:", nrow(validation_results) - n_missing, "\n")
+cat("  Runs with issues:", n_missing, "\n")
+
+if (n_missing > 0) {
+  cat("\nRuns with issues:\n")
+  print(filter(validation_results, has_issues))
+}
+```
+
+# 4. Combine Effect and Model Metrics
+
+Collect all metrics from individual runs into master tables.
+
+```{r combine-metrics}
+#' Read effect metrics from a single run, add run metadata
+read_effect_metrics <- function(run_id, run_row, results_dir, shard_size = 1000L) {
+  shard_dir <- compute_shard_path(run_id, shard_size)
+  effect_path <- file.path(
+    results_dir,
+    shard_dir,
+    sprintf("run-%05d", run_id),
+    "effect_metrics.csv"
+  )
+  
+  if (!file.exists(effect_path)) {
+    return(NULL)
+  }
+  
+  em <- read_csv(effect_path, show_col_types = FALSE) %>%
+    select(-indices)  # Remove indices column to save memory
+  
+  em
+}
+
+#' Read model metrics from a single run, add run metadata
+read_model_metrics <- function(run_id, run_row, results_dir, shard_size = 1000L) {
+  shard_dir <- compute_shard_path(run_id, shard_size)
+  model_path <- file.path(
+    results_dir,
+    shard_dir,
+    sprintf("run-%05d", run_id),
+    "model_metrics.csv"
+  )
+  
+  if (!file.exists(model_path)) {
+    return(NULL)
+  }
+  
+  read_csv(model_path, show_col_types = FALSE)
+}
+
+## Combine all effect metrics (with progress)
+cat("Collecting effect metrics...\n")
+n_runs <- nrow(run_table)
+step <- max(as.integer(ceiling(n_runs * 0.10)), 1000L)
+effect_metrics_list <- vector("list", n_runs)
+for (i in seq_len(n_runs)) {
+  effect_metrics_list[[i]] <- read_effect_metrics(run_table$run_id[i], run_table[i, ], results_dir)
+  if ((i %% step) == 0L || i == n_runs) {
+    cat(sprintf("  → Collected effect metrics for %d/%d runs (%.1f%%)\n", i, n_runs, 100 * i / n_runs))
+  }
+}
+effect_metrics_combined <- bind_rows(effect_metrics_list)
+cat("  Combined", nrow(effect_metrics_combined), "effect metric rows\n")
+
+## Combine all model metrics (with progress)
+cat("Collecting model metrics...\n")
+model_metrics_list <- vector("list", n_runs)
+for (i in seq_len(n_runs)) {
+  model_metrics_list[[i]] <- read_model_metrics(run_table$run_id[i], run_table[i, ], results_dir)
+  if ((i %% step) == 0L || i == n_runs) {
+    cat(sprintf("  → Collected model metrics for %d/%d runs (%.1f%%)\n", i, n_runs, 100 * i / n_runs))
+  }
+}
+model_metrics_combined <- bind_rows(model_metrics_list)
+cat("  Combined", nrow(model_metrics_combined), "model metric rows\n")
+
+# Save combined tables
+write_csv(
+  effect_metrics_combined,
+  file.path(combined_dir, "effect_metrics_combined.csv")
+)
+write_csv(
+  model_metrics_combined,
+  file.path(combined_dir, "model_metrics_combined.csv")
+)
+
+cat("\nSaved combined tables to:", combined_dir, "\n")
+```
+
+# 5. Basic Diagnostics
+
+Check for missing values and anomalies in aggregated results.
+
+```{r diagnostics}
+# Calculate NA percentage per seed for model metrics
+na_by_seed <- model_metrics_combined %>%
+  group_by(seed) %>%
+  summarise(
+    across(everything(), ~sum(is.na(.)) / n() * 100, .names = "{.col}_na_pct"),
+    n_rows = n(),
+    .groups = "drop"
+  ) %>%
+  pivot_longer(
+    cols = ends_with("_na_pct"),
+    names_to = "column",
+    values_to = "na_pct"
+  ) %>%
+  filter(na_pct > 0) %>%
+  arrange(desc(na_pct))
+
+cat("\nNA Percentage by Seed and Column (only showing columns with NAs):\n")
+if (nrow(na_by_seed) > 0) {
+  print(na_by_seed)
+} else {
+  cat("  No missing values detected!\n")
+}
+
+# Overall summary
+cat("\n\nOverall Data Quality:\n")
+cat("  Model metrics rows:", nrow(model_metrics_combined), "\n")
+cat("  Model metrics columns:", ncol(model_metrics_combined), "\n")
+cat("  Total cells:", nrow(model_metrics_combined) * ncol(model_metrics_combined), "\n")
+cat("  Total NAs:", sum(is.na(model_metrics_combined)), "\n")
+cat("  Overall NA%:", 
+    round(sum(is.na(model_metrics_combined)) / 
+            (nrow(model_metrics_combined) * ncol(model_metrics_combined)) * 100, 2), 
+    "%\n")
+
+cat("\n  Effect metrics rows:", nrow(effect_metrics_combined), "\n")
+cat("  Effect metrics columns:", ncol(effect_metrics_combined), "\n")
+cat("  Total NAs:", sum(is.na(effect_metrics_combined)), "\n")
+```
+
+# 6. Visual Summary
+
+Display NA percentages by seed in a table.
+
+```{r na-summary-table}
+na_summary <- model_metrics_combined %>%
+  group_by(seed) %>%
+  summarise(
+    n_rows = n(),
+    total_cells = n() * ncol(model_metrics_combined),
+    total_nas = sum(is.na(across(everything()))),
+    na_pct = round(total_nas / total_cells * 100, 2),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(na_pct))
+
+kable(na_summary, caption = "NA Percentage by Seed")
+```
+
+# 7. Delete Shard Folders (Optional)
+
+Once you've confirmed the data looks good, set `delete_shards <- TRUE` to
+clean up the original output folders and keep only the combined tables.
+
+```{r delete-shards}
+delete_shards <- FALSE  # flip to TRUE when ready to delete
+
+if (delete_shards) {
+  cat("Deleting shard folders...\n")
+  
+  # List all shard directories
+  shard_dirs <- list.dirs(results_dir, full.names = TRUE, recursive = FALSE)
+  shard_dirs <- shard_dirs[grepl("^shard-", basename(shard_dirs))]
+  
+  for (shard_dir in shard_dirs) {
+    unlink(shard_dir, recursive = TRUE)
+    cat("  Deleted:", basename(shard_dir), "\n")
+  }
+  
+  cat("Deletion complete. Combined results saved in:", combined_dir, "\n")
+} else {
+  cat("Shards not deleted (delete_shards is FALSE).\n")
+  cat("To delete shards and keep only combined results, set delete_shards <- TRUE\n")
+}
+```
+
+# 8. Summary
+
+Results collection complete! 
+
+**Combined tables saved to:**
+- `effect_metrics_combined.csv`
+- `model_metrics_combined.csv`
+
+**Original shard folders:** `slurm_output/<job_name>/<parent_job_id>/shard-*/`
+(Delete by setting `delete_shards <- TRUE` in step 7)
+
+You can now proceed to the summary and visualization workbook.

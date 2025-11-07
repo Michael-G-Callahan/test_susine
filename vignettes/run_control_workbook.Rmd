@@ -67,7 +67,7 @@ job_inputs <- list(
   output_root = here("output"),
 
   # Grid mode: "full" for Cartesian product, "minimal" for lightweight smoke tests
-  grid_mode = "full",
+  grid_mode = "minimal",
 
   # Which predefined model variants to include (see use_case_catalog())
   use_cases = c("a_i", "a_ii", "a_iii", "a_iv",
@@ -79,12 +79,13 @@ job_inputs <- list(
   y_noise = c(0.50, 0.7, 0.9, 0.95),
   p_star_grid = c(1, 5, 10, 20),
 
-  # Prior quality grid (percentages or fractions are accepted)
-  prior_noise_causal = c(0.25, 0.50, 0.75),
-  prior_noise_nonc = c(0.25, 0.5, 0.75),
+  # Prior quality grid parameters
+  annotation_r2 = c(0.25, 0.50, 0.75),
+  inflate_match = c(0, 0.5, 1),
+  gamma_shrink = c(0.4, 0.8),
 
   # Seeds applied to every scenario/use-case combination
-  seeds = 1:25,
+  seeds = 1:5,
 
   # Number of runs to assign to each SLURM array task
   # (~2112 total runs / 150 per task = ~14 tasks, well under SLURM QoS limits)
@@ -108,8 +109,9 @@ Convert the user inputs into the tidy tables that power the task runner.
 
 ```{r build-config}
 prior_quality <- prior_quality_grid(
-  causal_levels = job_inputs$prior_noise_causal,
-  noncausal_levels = job_inputs$prior_noise_nonc
+  annotation_r2_levels = job_inputs$annotation_r2,
+  inflate_match_levels = job_inputs$inflate_match,
+  gamma_shrink_levels = job_inputs$gamma_shrink
 )
 
 job_config <- make_job_config(
@@ -150,7 +152,7 @@ and model selection).
 ```{r preview-scenarios}
 job_config$tables$scenarios %>%
   select(scenario_id, data_scenario, L, y_noise, p_star,
-         prior_noise_causal, prior_noise_nonc) %>%
+         annotation_r2, inflate_match, gamma_shrink) %>%
   kable()
 ```
 

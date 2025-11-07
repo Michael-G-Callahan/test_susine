@@ -123,8 +123,9 @@ generate_data_for_run <- function(run_row, job_config) {
       seed = as.integer(run_row$seed),
       p_star = as.integer(run_row$p_star),
       y_noise = as.numeric(run_row$y_noise),
-      prior_noise_causal = as.numeric(run_row$prior_noise_causal),
-      prior_noise_nonc = as.numeric(run_row$prior_noise_nonc),
+      annotation_r2 = as.numeric(run_row$annotation_r2),
+      inflate_match = as.numeric(run_row$inflate_match),
+      gamma_shrink = as.numeric(run_row$gamma_shrink),
       effect_sd = run_row[["effect_sd"]] %||% 1
     )
     return(generate_simulation_data(spec))
@@ -142,7 +143,7 @@ run_use_case <- function(use_case, run_row, data_bundle, job_config) {
 
   mu_0 <- if (mu_strategy %in% c("functional", "eb_mu")) data_bundle$mu_0 else 0
   sigma_0_2 <- if (sigma_strategy %in% c("functional", "eb_sigma")) data_bundle$sigma_0_2 else NULL
-  pi_weights <- if (identical(sigma_strategy, "functional")) data_bundle$prior_inclusion_weights else NULL
+  pi_weights <- NULL
 
   extra <- use_case$extra_compute[[1]]
   if (length(extra) && is.na(extra)) {
@@ -158,7 +159,7 @@ run_use_case <- function(use_case, run_row, data_bundle, job_config) {
     mu_0 = mu_0,
     sigma_0_2 = sigma_0_2,
     prior_inclusion_weights = pi_weights,
-    prior_update_method = use_case$prior_update_method[[1]] %||% "none",
+    prior_update_method = use_case$prior_update_method[[1]],
     verbose = FALSE
   )
   if (resolve_flag(use_case$auto_scale_mu[[1]], FALSE)) {

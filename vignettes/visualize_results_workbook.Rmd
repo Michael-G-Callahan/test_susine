@@ -1,0 +1,150 @@
+---
+title: "SuSiNE Simulation Results: Model Performance Comparison"
+subtitle: "Comparing uninformed, annotation-informed, and compute-boosted SuSiNE models"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_sections: true
+    theme: default
+    code_folding: hide
+---
+
+# Overview
+
+This workbook visualizes performance comparisons across the full suite of SuSiNE model variants from our simulation study:
+
+-   Uninformed models: With no prior information, using naive or empirical Bayes strategies for `mu_0` and `sigma_0^2`, which approach is best?
+-  Annotation-informed models: Leveraging functional annotation data to inform priors on effect sizes (through the mean, variance or both), which approach is best? How do they fair over different prior qualities?
+-   Compute-boosted models: Using techniques like tempering/annealing or model averaging to improve inference, how much do these strategies help?
+
+
+## Preliminaries: packages amd data
+
+```{r setup, message=FALSE}
+here::i_am("vignettes/visualize_results_workbook.Rmd")
+here()
+```
+
+```{r load-data, message=FALSE}
+# INPUTS
+job_name = "susine_sim_grid_demo"
+job_id = "45832058"
+
+# Load necessary libraries
+library(dplyr)
+library(readr)
+library(ggplot2)
+
+# Define file paths
+run_table_path <- file.path(here(), "output", "run_history", job_name, job_id, "run_table.csv")
+use_cases_path <- file.path(here(), "output", "run_history", job_name, job_id, "use_cases.csv")
+effect_metrics_path <- file.path(here(), "output", "slurm_output", job_name, job_id, "combined", "effect_metrics_combined.csv")
+model_metrics_path <- file.path(here(), "output", "slurm_output", job_name, job_id, "combined", "model_metrics_combined.csv")
+
+# Load the data
+run_table <- read_csv(run_table_path)
+use_cases <- read_csv(use_cases_path)
+effect_metrics <- read_csv(effect_metrics_path)
+model_metrics <- read_csv(model_metrics_path)
+
+# Create full_run_settings
+full_run_settings <- left_join(run_table, use_cases, by = "use_case_id")
+
+# Join metrics with run settings
+# Rename use_case_id in model_metrics to avoid conflict
+model_metrics_renamed <- model_metrics %>%
+  rename(use_case_id_metric = use_case_id)
+model_metrics_full <- left_join(model_metrics_renamed, full_run_settings, by = "run_id")
+
+effect_metrics_renamed <- effect_metrics %>%
+    rename(use_case_id_metric = use_case_id)
+effect_metrics_full <- left_join(effect_metrics_renamed, full_run_settings, by = "run_id")
+
+# Display the first few rows of the joined tables
+head(model_metrics_full)
+head(effect_metrics_full)
+```
+
+## Compared amongst uninformed models
+
+```{r uninformed-model-comparison}
+# Filter for uninformed models and average over seeds
+# compute the average AUPRC and the average log cross-entropy (mean of log of each seed's cross_entropy)
+eps <- 1e-12
+uninformed_metrics_summary <- model_metrics_full %>%
+  filter(use_case_id %in% c("a_i", "a_ii", "a_iii", "a_iv")) %>%
+  group_by(use_case_id, label, p_star, y_noise, L) %>%
+  summarise(
+    AUPRC = mean(AUPRC, na.rm = TRUE),
+    log_cross_entropy = mean(log(cross_entropy + eps), na.rm = TRUE),
+    .groups = 'drop'
+  )
+
+# Plot AUPRC vs y_noise, faceted by L and p_star
+ggplot(uninformed_metrics_summary, aes(x = y_noise, y = AUPRC, color = label)) +
+  geom_line() +
+  geom_point() +
+  facet_grid(L ~ p_star, labeller = label_bquote(rows = L: .(L), cols = p_star: .(p_star))) +
+  labs(title = "AUPRC for Uninformed Models (Averaged over seeds)",
+       x = "y_noise (Noise Level)",
+       y = "Average AUPRC",
+       color = "Use Case") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+
+```
+
+```{r informed-model-comparison}
+# Filter and summarise informed models (and baseline a_i) for L = p_star = 5
+eps <- 1e-12
+informed_metrics_summary <- model_metrics_full %>%
+  filter(use_case_id %in% c("a_i", "b_i", "b_ii", "b_iii")) %>%
+  filter(L == 10, p_star == 10) %>%
+  group_by(use_case_id, label, p_star, y_noise, L, annotation_r2, inflate_match, gamma_shrink) %>%
+  summarise(
+    AUPRC = mean(AUPRC, na.rm = TRUE),
+    log_cross_entropy = mean(log(cross_entropy + eps), na.rm = TRUE),
+    .groups = 'drop'
+  ) %>%
+  mutate(
+    gamma_label = if_else(is.na(gamma_shrink), "none", sprintf("gamma=%.2f", gamma_shrink))
+  )
+
+# Expand baseline (a_i) across all non-NA annotation combinations so it appears in each non-NA facet
+priors_grid <- informed_metrics_summary %>%
+  filter(!is.na(annotation_r2) & !is.na(inflate_match)) %>%
+  distinct(annotation_r2, inflate_match)
+
+baseline_rows <- informed_metrics_summary %>% filter(use_case_id == "a_i")
+
+if(nrow(baseline_rows) > 0 & nrow(priors_grid) > 0) {
+  # replicate baseline across prior grid while preserving y_noise and other grouping vars
+  baseline_expanded <- baseline_rows %>%
+    select(-annotation_r2, -inflate_match) %>%
+    tidyr::crossing(priors_grid)
+
+  combined_metrics <- bind_rows(
+    informed_metrics_summary %>% filter(use_case_id != "a_i"),
+    baseline_expanded
+  )
+} else {
+  combined_metrics <- informed_metrics_summary
+}
+
+# Plot AUPRC vs y_noise, faceted by prior noise settings (rows = noncausal, cols = causal)
+ggplot(combined_metrics, aes(x = y_noise, y = AUPRC, color = label, linetype = gamma_label)) +
+  geom_line() +
+  geom_point() +
+  facet_grid(inflate_match ~ annotation_r2, labeller = label_bquote(rows = inflate: .(inflate_match), cols = annotation_r2: .(annotation_r2))) +
+  labs(title = "AUPRC for Informed Models (L = p_star = 5, Averaged over seeds)",
+       x = "y_noise (Noise Level)",
+       y = "Average AUPRC",
+       color = "Use Case",
+       linetype = "Variance shrinkage") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```

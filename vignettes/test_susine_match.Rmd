@@ -14,6 +14,7 @@ This tutorial walks through SuSiNE use cases with increasing amounts of prior in
 
 ```{r}
 library(devtools)
+library(susine)
 load_all()
 
 # utils::data("SuSiE_N3_X", package = "susine")
