@@ -67,7 +67,7 @@ job_inputs <- list(
   output_root = here("output"),
 
   # Grid mode: "full" for Cartesian product, "minimal" for lightweight smoke tests
-  grid_mode = "minimal",
+  grid_mode = "full",
 
   # Which predefined model variants to include (see use_case_catalog())
   use_cases = c("a_i", "a_ii", "a_iii", "a_iv",
@@ -78,14 +78,15 @@ job_inputs <- list(
   L_grid = c(1, 5, 10, 20),
   y_noise = c(0.50, 0.7, 0.9, 0.95),
   p_star_grid = c(1, 5, 10, 20),
+  pair_L_p_star = TRUE,
 
   # Prior quality grid parameters
-  annotation_r2 = c(0.25, 0.50, 0.75),
+  annotation_r2 = c(0.25, 0.50, 0.75, 0.9),
   inflate_match = c(0, 0.5, 1),
   gamma_shrink = c(0.4, 0.8),
 
   # Seeds applied to every scenario/use-case combination
-  seeds = 1:5,
+  seeds = 1:100,
 
   # Number of runs to assign to each SLURM array task
   # (~2112 total runs / 150 per task = ~14 tasks, well under SLURM QoS limits)
@@ -99,6 +100,10 @@ job_inputs <- list(
   purity_threshold = 0.50
 )
 ```
+
+Set `pair_L_p_star = TRUE` to lock `L_grid` and `p_star_grid` together (only identical
+values are paired when the full grid is built); flip it to `FALSE` if you want the
+complete Cartesian product again.
 
 Double-check that `job_name` is meaningful and unique – it determines
 where the job history and outputs are stored.
@@ -129,7 +134,8 @@ job_config <- make_job_config(
   output_root = job_inputs$output_root,
   credible_set_rho = job_inputs$credible_set_rho,
   purity_threshold = job_inputs$purity_threshold,
-  grid_mode = job_inputs$grid_mode
+  grid_mode = job_inputs$grid_mode,
+  pair_L_p_star = job_inputs$pair_L_p_star
 )
 ```
 
@@ -140,7 +146,7 @@ job_config <- make_job_config(
 ```{r preview-use-cases}
 job_config$tables$use_cases %>%
   filter(use_case_id %in% job_inputs$use_cases) %>%
-  select(use_case_id, label, model_family, mu_strategy, sigma_strategy, extra_compute) %>%
+  select(use_case_id, label, mu_strategy, sigma_strategy, extra_compute) %>%
   kable()
 ```
 

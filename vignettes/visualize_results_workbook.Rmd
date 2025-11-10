@@ -24,14 +24,22 @@ This workbook visualizes performance comparisons across the full suite of SuSiNE
 ## Preliminaries: packages amd data
 
 ```{r setup, message=FALSE}
+library(here)
 here::i_am("vignettes/visualize_results_workbook.Rmd")
 here()
+knitr::opts_chunk$set(
+  fig.width = 12,   # width in inches (increase if your plots are wide)
+  fig.height = 8,   # height in inches
+  dpi = 300,        # resolution
+  fig.retina = 2,   # effective pixel scaling for retina
+  out.width = "100%" # scale in HTML output
+)
 ```
 
 ```{r load-data, message=FALSE}
 # INPUTS
 job_name = "susine_sim_grid_demo"
-job_id = "45832058"
+job_id = "46054709"
 
 # Load necessary libraries
 library(dplyr)
@@ -94,16 +102,42 @@ ggplot(uninformed_metrics_summary, aes(x = y_noise, y = AUPRC, color = label)) +
        color = "Use Case") +
   theme_minimal() +
   theme(legend.position = "bottom")
+```
 
+This grid also lets us isolate the gains from the heavier-compute variants.
 
+```{r compute-scaled-comparison}
+compute_metrics_summary <- model_metrics_full %>%
+  filter(use_case_id %in% c("a_i", "c_i", "c_ii")) %>%
+  group_by(use_case_id, label, p_star, y_noise, L) %>%
+  summarise(
+    AUPRC = mean(AUPRC, na.rm = TRUE),
+    .groups = 'drop'
+  )
+
+ggplot(compute_metrics_summary, aes(x = y_noise, y = AUPRC, color = label)) +
+  geom_line() +
+  geom_point() +
+  facet_grid(L ~ p_star, labeller = label_bquote(rows = L: .(L), cols = p_star: .(p_star))) +
+  labs(
+    title = "AUPRC for Baseline vs. Compute-Heavy Models",
+    subtitle = "Faceted by L (rows) and prior size p_star (columns); averaged over seeds",
+    x = "y_noise (Noise Level)",
+    y = "Average AUPRC",
+    color = "Use Case"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
 ```
 
 ```{r informed-model-comparison}
 # Filter and summarise informed models (and baseline a_i) for L = p_star = 5
 eps <- 1e-12
-informed_metrics_summary <- model_metrics_full %>%
-  filter(use_case_id %in% c("a_i", "b_i", "b_ii", "b_iii")) %>%
-  filter(L == 10, p_star == 10) %>%
+informed_metrics_raw <- model_metrics_full %>%
+  filter(use_case_id %in% c("a_i", "b_i", "b_ii")) %>%
+  filter(L == 5, p_star == 5)
+
+informed_metrics_summary <- informed_metrics_raw %>%
   group_by(use_case_id, label, p_star, y_noise, L, annotation_r2, inflate_match, gamma_shrink) %>%
   summarise(
     AUPRC = mean(AUPRC, na.rm = TRUE),
@@ -145,6 +179,58 @@ ggplot(combined_metrics, aes(x = y_noise, y = AUPRC, color = label, linetype = g
        y = "Average AUPRC",
        color = "Use Case",
        linetype = "Variance shrinkage") +
+  theme_minimal() +
+  theme(legend.position = "right")
+```
+
+```{r informed-model-annotation-quality-grid, fig.width=10, fig.height=6}
+# Filter for a specific noise level to replicate the structure of the example plot
+# Let's choose y_noise = 0.7 as a representative example
+informed_metrics_fixed_noise_raw <- informed_metrics_raw %>%
+  filter(y_noise == 0.5)
+
+# Extract the baseline AUPRC to use as a reference line
+# We'll use the summarized data for a stable baseline
+baseline_auprc <- informed_metrics_summary %>%
+  filter(y_noise == 0.5, use_case_id == "a_i") %>%
+  pull(AUPRC) %>%
+  unique()
+
+# Data for main facets (models with defined gamma_shrink)
+plot_data <- informed_metrics_fixed_noise_raw %>%
+  filter(!is.na(gamma_shrink))
+
+# Data to overlay on all facets (model with NA gamma_shrink)
+overlay_data <- informed_metrics_fixed_noise_raw %>%
+  filter(is.na(gamma_shrink) & use_case_id != "a_i")
+
+# Get the gamma levels from the main plot data to duplicate the overlay data
+gamma_levels <- unique(plot_data$gamma_shrink)
+
+# Duplicate overlay_data for each level of gamma_shrink
+overlay_data_expanded <- do.call(rbind, lapply(gamma_levels, function(gamma) {
+  overlay_data$gamma_shrink <- gamma
+  overlay_data
+}))
+
+# Plot AUPRC vs annotation_r2, faceted by inflate_match and gamma_shrink
+ggplot(plot_data, aes(x = factor(annotation_r2), y = AUPRC, color = label)) +
+  geom_hline(aes(yintercept = baseline_auprc, linetype = "Baseline (Uninformed)"), color = "red") +
+  # geom_boxplot(width = 0.2, position = position_dodge(0.8)) +
+  stat_summary(fun = mean, geom = "line", aes(group = label), position = position_dodge(0.8)) +
+  # Add the overlay layer for the 'sigma naive' model
+  # geom_boxplot(data = overlay_data_expanded, width = 0.2, position = position_dodge(0.8)) +
+  stat_summary(data = overlay_data_expanded, fun = mean, geom = "line", aes(group = label), position = position_dodge(0.8)) +
+  facet_grid(gamma_shrink ~ inflate_match, labeller = label_bquote(rows = gamma == .(gamma_shrink), cols = inflate == .(inflate_match))) +
+  labs(
+    title = "AUPRC vs. Annotation R^2 (at y_noise=0.7)",
+    subtitle = "Faceted by annotation noise parameters. Boxplots show distribution over seeds.",
+    x = "Annotation R^2 (Causal Variance Explained)",
+    y = "AUPRC",
+    color = "Model",
+    linetype = ""
+  ) +
+  scale_linetype_manual(values = c("Baseline (Uninformed)" = "dashed")) +
   theme_minimal() +
   theme(legend.position = "bottom")
 ```

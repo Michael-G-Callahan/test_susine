@@ -86,99 +86,141 @@ run_table <- read_csv(
   show_col_types = FALSE
 )
 
-cat("Loaded run_table with", nrow(run_table), "runs\n")
-```
-
-# 3. Validate Output Files
-
-Check that each run has all expected output files with correct structure.
-
-```{r validate-outputs}
-#' Compute shard path for a given run_id
-compute_shard_path <- function(run_id, shard_size = 1000L) {
-  shard_idx <- (run_id - 1L) %/% as.integer(shard_size)
-  sprintf("shard-%03d", shard_idx)
+job_config_path <- file.path(run_history_dir, "job_config.json")
+if (!file.exists(job_config_path)) {
+  stop("Job configuration not found: ", job_config_path)
+}
+job_config <- test_susine:::load_job_config(job_config_path)
+shard_size <- job_config$job$slurm$shard_size_output
+if (is.null(shard_size) || shard_size <= 0) {
+  shard_size <- 1000L
 }
 
-#' Check if a run's output files exist and have correct structure
-check_run_output <- function(run_row, results_dir, shard_size = 1000L) {
-  run_id <- run_row$run_id
-  shard_dir <- compute_shard_path(run_id, shard_size)
-  run_dir <- file.path(results_dir, shard_dir, sprintf("run-%05d", run_id))
-  
-  issues <- character(0)
-  
-  # Check model_metrics.csv exists and has 2 rows (unfiltered + filtered)
-  model_metrics_path <- file.path(run_dir, "model_metrics.csv")
-  if (!file.exists(model_metrics_path)) {
-    issues <- c(issues, "missing: model_metrics.csv")
-  } else {
-    mm <- read_csv(model_metrics_path, show_col_types = FALSE)
-    if (nrow(mm) != 2) {
-      issues <- c(issues, sprintf("model_metrics.csv has %d rows (expected 2)", nrow(mm)))
-    }
+cat("Loaded run_table with", nrow(run_table), "runs\n")
+cat("Shard size (results sharding):", shard_size, "\n")
+```
+
+# 3. Build the Shard Manifest
+
+Each shard holds up to `shard_size` runs. Summarise the run distribution up
+front so we can launch one collection task per shard instead of looping over
+every run inside this workbook.
+
+```{r shard-manifest}
+shard_manifest <- test_susine::build_shard_manifest(
+  job_name = job_inputs$job_name,
+  parent_job_id = job_inputs$parent_job_id,
+  output_root = job_inputs$output_root,
+  shard_size = shard_size
+)
+
+manifest_path <- file.path(combined_dir, "shard_manifest.csv")
+write_csv(shard_manifest, manifest_path)
+
+cat("Detected", nrow(shard_manifest), "shards (up to", shard_size, "runs each)\n")
+kable(shard_manifest, caption = "Shard manifest")
+```
+
+# 4. Kick Off Shard Collection
+
+Each shard can be validated and combined in parallel via the new
+`collect_shard.R` helper. Adjust the settings below, knit the chunk to write a
+SLURM script, then submit it (either manually or by setting `auto_launch <- TRUE`
+on an HPC login node with `sbatch` available).
+
+```{r shard-collection-job}
+collection_job <- list(
+  job_label = paste0(job_inputs$job_name, "_collect"),
+  time = "00:30:00",
+  mem = "4G",
+  cpus = 1,
+  partition = NULL,
+  email = if (!is.null(job_config$job$email)) job_config$job$email else NA_character_,
+  HPC = isTRUE(job_config$job$HPC),
+  quiet = TRUE,
+  force = FALSE,
+  auto_launch = FALSE
+)
+
+collect_script_path <- here("inst", "scripts", "collect_shard.R")
+
+collection_script <- test_susine::write_shard_collection_job(
+  job_name = job_inputs$job_name,
+  parent_job_id = job_inputs$parent_job_id,
+  shard_indices = shard_manifest$shard_idx,
+  output_root = job_inputs$output_root,
+  collect_script = collect_script_path,
+  job_label = collection_job$job_label,
+  time = collection_job$time,
+  mem = collection_job$mem,
+  cpus_per_task = collection_job$cpus,
+  partition = collection_job$partition,
+  email = collection_job$email,
+  HPC = collection_job$HPC,
+  quiet = collection_job$quiet,
+  force = collection_job$force
+)
+
+cat("Shard collection script written to:", collection_script, "\n")
+
+if (isTRUE(collection_job$auto_launch)) {
+  sbatch_bin <- Sys.which("sbatch")
+  if (!nzchar(sbatch_bin)) {
+    stop("auto_launch is TRUE but sbatch was not found on this system.")
   }
-  
-  # Check effect_metrics.csv exists (if applicable)
-  effect_metrics_path <- file.path(run_dir, "effect_metrics.csv")
-  if (file.exists(effect_metrics_path)) {
-    em <- read_csv(effect_metrics_path, show_col_types = FALSE)
-    expected_rows_unfiltered <- run_row$L  # L is number of effects
-    unfiltered_rows <- sum(em$filtering == "unfiltered", na.rm = TRUE)
-    filtered_rows <- sum(em$filtering == "purity_filtered", na.rm = TRUE)
-    
-    if (unfiltered_rows != expected_rows_unfiltered) {
-      issues <- c(issues, sprintf("effect_metrics.csv has %d unfiltered rows (expected %d)", 
-                                  unfiltered_rows, expected_rows_unfiltered))
-    }
-    if (filtered_rows > expected_rows_unfiltered) {
-      issues <- c(issues, sprintf("effect_metrics.csv has %d purity_filtered rows (expected 0-%d)", 
-                                  filtered_rows, expected_rows_unfiltered))
-    }
-  }
-  # effect_metrics can be missing if no effects were detected
-  
-  # Check pip.csv exists
-  pip_path <- file.path(run_dir, "pip.csv")
-  if (!file.exists(pip_path)) {
-    issues <- c(issues, "missing: pip.csv")
-  }
-  
-  # Check truth.csv exists
-  truth_path <- file.path(run_dir, "truth.csv")
-  if (!file.exists(truth_path)) {
-    issues <- c(issues, "missing: truth.csv")
-  }
-  
-  # Check fit.rds exists
-  fit_path <- file.path(run_dir, "fit.rds")
-  if (!file.exists(fit_path)) {
-    issues <- c(issues, "missing: fit.rds")
-  }
-  
-  list(
-    run_id = run_id,
-    has_issues = length(issues) > 0,
-    issues = if (length(issues) > 0) paste(issues, collapse = "; ") else NA_character_
+  system2(sbatch_bin, collection_script)
+} else {
+  cat("Submit via: sbatch", collection_script, "\n")
+}
+```
+
+# 5. Monitor Shard Outputs
+
+Each shard task writes three files inside `combined/shards/`:
+
+- `validation_shard-XXX.csv`
+- `model_metrics_shard-XXX.csv`
+- `effect_metrics_shard-XXX.csv` (optional when no effects were detected)
+
+Use the table below to verify progress before aggregating.
+
+```{r shard-status}
+shards_dir <- file.path(results_dir, "combined", "shards")
+shard_status <- shard_manifest %>%
+  mutate(
+    validation_file = file.path(shards_dir, sprintf("validation_%s.csv", shard_dir)),
+    model_file = file.path(shards_dir, sprintf("model_metrics_%s.csv", shard_dir)),
+    effect_file = file.path(shards_dir, sprintf("effect_metrics_%s.csv", shard_dir)),
+    validation_ready = file.exists(validation_file),
+    model_ready = file.exists(model_file),
+    effect_ready = file.exists(effect_file)
+  )
+
+kable(
+  shard_status %>%
+    select(shard_idx, run_count, validation_ready, model_ready, effect_ready),
+  caption = "Shard completion status"
+)
+```
+
+# 6. Aggregate Validation Results
+
+Once every shard has produced a validation CSV we can combine them quickly.
+
+```{r aggregate-validation}
+if (!all(shard_status$validation_ready)) {
+  pending <- shard_status$shard_dir[!shard_status$validation_ready]
+  stop(
+    "Shard collection still in flight. Missing validation files for: ",
+    paste(pending, collapse = ", ")
   )
 }
 
-# Validate all runs (with progress updates)
-n_runs <- nrow(run_table)
-# progress step: max(10% of runs, 1000)
-step <- max(as.integer(ceiling(n_runs * 0.10)), 1000L)
-cat(sprintf("Validating %d runs (progress printed every %d runs)...\n", n_runs, step))
+validation_results <- purrr::map_dfr(
+  shard_status$validation_file,
+  ~read_csv(.x, show_col_types = FALSE)
+)
 
-validation_list <- vector("list", n_runs)
-for (i in seq_len(n_runs)) {
-  validation_list[[i]] <- check_run_output(run_table[i, ], results_dir)
-  if ((i %% step) == 0L || i == n_runs) {
-    cat(sprintf("  → Validated %d/%d runs (%.1f%%)\n", i, n_runs, 100 * i / n_runs))
-  }
-}
-validation_results <- dplyr::bind_rows(validation_list)
-
-# Report summary
 n_missing <- sum(validation_results$has_issues)
 cat("\nValidation Summary:\n")
 cat("  Total runs:", nrow(validation_results), "\n")
@@ -191,88 +233,44 @@ if (n_missing > 0) {
 }
 ```
 
-# 4. Combine Effect and Model Metrics
+# 7. Combine Effect and Model Metrics
 
-Collect all metrics from individual runs into master tables.
+Bind one CSV per shard instead of one per run. This keeps the workbook fast
+while retaining the familiar combined outputs.
 
 ```{r combine-metrics}
-#' Read effect metrics from a single run, add run metadata
-read_effect_metrics <- function(run_id, run_row, results_dir, shard_size = 1000L) {
-  shard_dir <- compute_shard_path(run_id, shard_size)
-  effect_path <- file.path(
-    results_dir,
-    shard_dir,
-    sprintf("run-%05d", run_id),
-    "effect_metrics.csv"
-  )
-  
-  if (!file.exists(effect_path)) {
-    return(NULL)
-  }
-  
-  em <- read_csv(effect_path, show_col_types = FALSE) %>%
-    select(-indices)  # Remove indices column to save memory
-  
-  em
+if (!all(shard_status$model_ready)) {
+  pending <- shard_status$shard_dir[!shard_status$model_ready]
+  stop("Missing model metrics shard files for: ", paste(pending, collapse = ", "))
 }
 
-#' Read model metrics from a single run, add run metadata
-read_model_metrics <- function(run_id, run_row, results_dir, shard_size = 1000L) {
-  shard_dir <- compute_shard_path(run_id, shard_size)
-  model_path <- file.path(
-    results_dir,
-    shard_dir,
-    sprintf("run-%05d", run_id),
-    "model_metrics.csv"
-  )
-  
-  if (!file.exists(model_path)) {
-    return(NULL)
-  }
-  
-  read_csv(model_path, show_col_types = FALSE)
-}
-
-## Combine all effect metrics (with progress)
-cat("Collecting effect metrics...\n")
-n_runs <- nrow(run_table)
-step <- max(as.integer(ceiling(n_runs * 0.10)), 1000L)
-effect_metrics_list <- vector("list", n_runs)
-for (i in seq_len(n_runs)) {
-  effect_metrics_list[[i]] <- read_effect_metrics(run_table$run_id[i], run_table[i, ], results_dir)
-  if ((i %% step) == 0L || i == n_runs) {
-    cat(sprintf("  → Collected effect metrics for %d/%d runs (%.1f%%)\n", i, n_runs, 100 * i / n_runs))
-  }
-}
-effect_metrics_combined <- bind_rows(effect_metrics_list)
-cat("  Combined", nrow(effect_metrics_combined), "effect metric rows\n")
-
-## Combine all model metrics (with progress)
-cat("Collecting model metrics...\n")
-model_metrics_list <- vector("list", n_runs)
-for (i in seq_len(n_runs)) {
-  model_metrics_list[[i]] <- read_model_metrics(run_table$run_id[i], run_table[i, ], results_dir)
-  if ((i %% step) == 0L || i == n_runs) {
-    cat(sprintf("  → Collected model metrics for %d/%d runs (%.1f%%)\n", i, n_runs, 100 * i / n_runs))
-  }
-}
-model_metrics_combined <- bind_rows(model_metrics_list)
-cat("  Combined", nrow(model_metrics_combined), "model metric rows\n")
-
-# Save combined tables
-write_csv(
-  effect_metrics_combined,
-  file.path(combined_dir, "effect_metrics_combined.csv")
+model_metrics_combined <- purrr::map_dfr(
+  shard_status$model_file,
+  ~read_csv(.x, show_col_types = FALSE)
 )
-write_csv(
-  model_metrics_combined,
-  file.path(combined_dir, "model_metrics_combined.csv")
-)
+cat("Combined", nrow(model_metrics_combined), "model metric rows\n")
+
+model_output_path <- file.path(combined_dir, "model_metrics_combined.csv")
+write_csv(model_metrics_combined, model_output_path)
+
+effect_files <- shard_status$effect_file[shard_status$effect_ready]
+if (length(effect_files)) {
+  effect_metrics_combined <- purrr::map_dfr(
+    effect_files,
+    ~read_csv(.x, show_col_types = FALSE)
+  )
+  cat("Combined", nrow(effect_metrics_combined), "effect metric rows\n")
+  effect_output_path <- file.path(combined_dir, "effect_metrics_combined.csv")
+  write_csv(effect_metrics_combined, effect_output_path)
+} else {
+  effect_metrics_combined <- tibble::tibble()
+  cat("No effect metrics detected across shards; skipping effect CSV output.\n")
+}
 
 cat("\nSaved combined tables to:", combined_dir, "\n")
 ```
 
-# 5. Basic Diagnostics
+# 8. Basic Diagnostics
 
 Check for missing values and anomalies in aggregated results.
 
@@ -316,7 +314,7 @@ cat("  Effect metrics columns:", ncol(effect_metrics_combined), "\n")
 cat("  Total NAs:", sum(is.na(effect_metrics_combined)), "\n")
 ```
 
-# 6. Visual Summary
+# 9. Visual Summary
 
 Display NA percentages by seed in a table.
 
@@ -335,10 +333,11 @@ na_summary <- model_metrics_combined %>%
 kable(na_summary, caption = "NA Percentage by Seed")
 ```
 
-# 7. Delete Shard Folders (Optional)
+# 10. Delete Shard Folders (Optional)
 
 Once you've confirmed the data looks good, set `delete_shards <- TRUE` to
-clean up the original output folders and keep only the combined tables.
+clean up the original per-run shard folders while keeping the combined and
+per-shard CSVs under `combined/`.
 
 ```{r delete-shards}
 delete_shards <- FALSE  # flip to TRUE when ready to delete
@@ -362,7 +361,7 @@ if (delete_shards) {
 }
 ```
 
-# 8. Summary
+# 11. Summary
 
 Results collection complete! 
 
@@ -371,6 +370,6 @@ Results collection complete!
 - `model_metrics_combined.csv`
 
 **Original shard folders:** `slurm_output/<job_name>/<parent_job_id>/shard-*/`
-(Delete by setting `delete_shards <- TRUE` in step 7)
+(Delete by setting `delete_shards <- TRUE` in step 10)
 
 You can now proceed to the summary and visualization workbook.

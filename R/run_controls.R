@@ -34,6 +34,8 @@ prior_quality_grid <- function(annotation_r2_levels = c(0.25, 0.5, 0.75),
 #' @param p_star_grid Integer vector for number of causal SNPs.
 #' @param seeds Integer vector of RNG seeds.
 #' @param data_scenarios Character vector naming the data sources.
+#' @param pair_L_p_star Logical; when TRUE (and `grid_mode == "full"`), the grid pairs matching
+#'   `L` and `p_star` values instead of taking their Cartesian product.
 #' @return List with elements `scenarios`, `runs`, and `tasks`.
 #' @keywords internal
 make_run_tables <- function(use_case_ids,
@@ -43,7 +45,8 @@ make_run_tables <- function(use_case_ids,
                             p_star_grid,
                             seeds,
                             data_scenarios,
-                            grid_mode = c("full", "minimal")) {
+                            grid_mode = c("full", "minimal"),
+                            pair_L_p_star = FALSE) {
   if (!is.data.frame(prior_quality) ||
       !all(c("annotation_r2", "inflate_match", "gamma_shrink") %in% names(prior_quality))) {
     stop("prior_quality must contain annotation_r2, inflate_match, and gamma_shrink columns.")
@@ -53,15 +56,33 @@ make_run_tables <- function(use_case_ids,
   if (!nrow(use_cases)) {
     stop("No valid use cases selected.")
   }
+  unique_L <- unique(L_grid)
+  unique_p <- unique(p_star_grid)
 
   build_full_grid <- function() {
-    tidyr::expand_grid(
-      data_scenario = data_scenarios,
-      L = unique(L_grid),
+    lp_pairs <- if (isTRUE(pair_L_p_star)) {
+      if (!setequal(unique_L, unique_p)) {
+        stop("When pair_L_p_star = TRUE, L_grid and p_star_grid must have the same unique values.")
+      }
+      tibble::tibble(L = unique_L, p_star = unique_L)
+    } else {
+      tidyr::expand_grid(L = unique_L, p_star = unique_p)
+    }
+
+    base_grid <- tidyr::expand_grid(
+      data_scenario = unique(data_scenarios),
       y_noise = unique(y_noise_grid),
-      p_star = unique(p_star_grid),
       prior_quality_id = prior_quality$prior_quality_id
-    ) %>%
+    )
+
+    base_grid %>%
+      dplyr::mutate(.join_key = 1L) %>%
+      dplyr::inner_join(
+        lp_pairs %>% dplyr::mutate(.join_key = 1L),
+        by = ".join_key"
+      ) %>%
+      dplyr::select(-.join_key) %>%
+      dplyr::select(data_scenario, L, y_noise, p_star, prior_quality_id, dplyr::everything()) %>%
       dplyr::left_join(prior_quality, by = "prior_quality_id") %>%
       dplyr::arrange(data_scenario, L, y_noise, p_star, prior_quality_id) %>%
       dplyr::mutate(scenario_id = dplyr::row_number())
@@ -241,6 +262,8 @@ assign_task_ids <- function(runs, runs_per_task, shuffle_seed = NULL) {
 #' @param purity_threshold Minimum purity to keep CS in filtered summary.
 #' @param anneal_settings Named list for tempering runs.
 #' @param model_average_settings Named list for model averaging runs.
+#' @param pair_L_p_star Logical; when TRUE, the full grid pairs `L` and `p_star` values 1-1
+#'   instead of expanding their Cartesian product.
 #'
 #' @return Job configuration list ready to serialize.
 #' @export
@@ -261,6 +284,7 @@ make_job_config <- function(job_name,
                             credible_set_rho = 0.95,
                             purity_threshold = 0.5,
                             grid_mode = c("full", "minimal"),
+                            pair_L_p_star = FALSE,
                             # NEW: sharding + padding controls (can be overridden per call)
                             shard_size_output = 1000L,  # 0 disables sharding for slurm_output
                             shard_size_prints = 1000L,  # 0 disables sharding for slurm_prints
@@ -285,7 +309,8 @@ make_job_config <- function(job_name,
     p_star_grid = p_star_grid,
     seeds = seeds,
     data_scenarios = data_scenarios,
-    grid_mode = grid_mode
+    grid_mode = grid_mode,
+    pair_L_p_star = pair_L_p_star
   )
 
   runs_tasks <- assign_task_ids(tables$runs, runs_per_task = runs_per_task)

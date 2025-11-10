@@ -8,26 +8,26 @@
 #' @export
 use_case_catalog <- function() {
   tibble::tribble(
-    ~use_case_id, ~group, ~label, ~model_family, ~mu_strategy, ~sigma_strategy,
+    ~use_case_id, ~group, ~label, ~mu_strategy, ~sigma_strategy,
     ~prior_update_method, ~auto_scale_mu, ~auto_scale_sigma,
     ~extra_compute, ~requires_prior_quality,
-    "a_i",   "1a", "SuSiE - naive sigma, naive mu",          "susine", "naive",      "naive",
+    "a_i",   "1a", "SuSiE - naive sigma, naive mu",           "naive",      "naive",
     "none",       FALSE, FALSE, "none",       FALSE,
-    "a_ii",  "1a", "SuSiE - EB sigma, naive mu",             "susine", "naive",      "eb_sigma",
+    "a_ii",  "1a", "SuSiE - EB sigma, naive mu",              "naive",      "eb_sigma",
     "var",        FALSE, FALSE, "none",       FALSE,
-    "a_iii", "1a", "SuSiNE - EB mu, naive sigma",             "susine", "eb_mu",      "naive",
+    "a_iii", "1a", "SuSiNE - EB mu, naive sigma",             "eb_mu",      "naive",
     "mean",       FALSE, FALSE, "none",       FALSE,
-    "a_iv",  "1a", "SuSiNE - EB mu & sigma",                  "susine", "eb_mu",      "eb_sigma",
+    "a_iv",  "1a", "SuSiNE - EB mu & sigma",                  "eb_mu",      "eb_sigma",
     "both",       FALSE, FALSE, "none",       FALSE,
-    "b_i",   "1b", "SuSiE + functional sigma (mu=0)",        "susine", "naive",      "functional",
+    "b_i",   "1b", "SuSiE + functional sigma (mu=0)",        "naive",      "functional",
     "none",       FALSE, FALSE, "none",       TRUE,
-    "b_ii",  "1b", "SuSiNE + functional mu (sigma naive)",    "susine", "functional", "naive",
+    "b_ii",  "1b", "SuSiNE + functional mu (sigma naive)",    "functional", "naive",
     "none",       FALSE, FALSE, "none",       TRUE,
-    "b_iii", "1b", "SuSiNE + functional mu & sigma",          "susine", "functional", "functional",
+    "b_iii", "1b", "SuSiNE + functional mu (sigma EB)",       "functional", "eb_sigma",
     "none",       FALSE, FALSE, "none",       TRUE,
-    "c_i",   "1c", "SuSiNE + tempering/annealing",            "susine", "naive",      "naive",
+    "c_i",   "1c", "SuSiNE + tempering/annealing",            "naive",      "naive",
     "none",       FALSE, FALSE, "anneal",     FALSE,
-    "c_ii",  "1c", "SuSiNE + model averaging (multi-init)",   "susine", "naive",      "naive",
+    "c_ii",  "1c", "SuSiNE + model averaging (multi-init)",   "naive",      "naive",
     "none",       FALSE, FALSE, "model_avg",  FALSE
   )
 }
