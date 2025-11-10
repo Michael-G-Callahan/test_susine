@@ -16,12 +16,14 @@ BugReports: https://github.com/Michael-G-Callahan/test.susine/issues
 Imports:
     susine,
     dplyr,
+    magrittr,
     tidyr,
     purrr,
     tibble,
     jsonlite,
     readr,
-    matrixStats
+    matrixStats,
+    rlang
 Suggests:
     knitr,
     susieR
