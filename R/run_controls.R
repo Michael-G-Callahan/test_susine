@@ -388,14 +388,12 @@ make_run_tables <- function(use_case_ids,
 #'
 #' @param runs Run tibble from [make_run_tables()].
 #' @param runs_per_task Integer number of runs assigned to each SLURM task.
-#' @param shard_size_output Integer shard size used when grouping runs.
 #' @param shuffle_seed Optional seed for reproducible shuffling (default: NULL for random).
 #' @param shuffle Logical; when FALSE, assign runs to tasks in run_id order (no shuffling).
 #' @return Tibble with `task_id` and `shuffled_order` columns added, and supporting task summary.
 #' @keywords internal
 assign_task_ids <- function(runs,
                             runs_per_task,
-                            shard_size_output = 1000L,
                             shuffle_seed = NULL,
                             shuffle = TRUE) {
   if (runs_per_task < 1) {
@@ -415,44 +413,10 @@ assign_task_ids <- function(runs,
       dplyr::mutate(task_id = ((dplyr::row_number() - 1L) %/% as.integer(runs_per_task)) + 1L) %>%
       dplyr::arrange(run_id)
   } else {
-    shard_size_output <- as.integer(shard_size_output %||% n_runs)
-    shard_ids <- ((runs$run_id - 1L) %/% shard_size_output)
-    shard_summary <- tibble::tibble(
-      shard_idx = shard_ids,
-      run_id = runs$run_id
-    ) %>%
-      dplyr::group_by(shard_idx) %>%
-      dplyr::summarise(run_count = dplyr::n(), .groups = "drop") %>%
-      dplyr::arrange(shard_idx)
-
-    shard_task_map <- shard_summary %>%
-      dplyr::mutate(
-        task_id = {
-          task_ids <- integer(n())
-          current_task <- 1L
-          current_count <- 0L
-          for (i in seq_len(n())) {
-            shard_runs <- run_count[i]
-            if (current_count > 0L && (current_count + shard_runs) > runs_per_task) {
-              current_task <- current_task + 1L
-              current_count <- 0L
-            }
-            task_ids[i] <- current_task
-            current_count <- current_count + shard_runs
-          }
-          task_ids
-        }
-      ) %>%
-      dplyr::select(shard_idx, task_id)
-
     runs_shuffled <- runs %>%
-      dplyr::mutate(
-        shard_idx = shard_ids,
-        shuffled_order = seq_len(n_runs)
-      ) %>%
-      dplyr::left_join(shard_task_map, by = "shard_idx") %>%
-      dplyr::select(-shard_idx) %>%
-      dplyr::arrange(run_id)
+      dplyr::mutate(shuffled_order = seq_len(n_runs)) %>%
+      dplyr::arrange(run_id) %>%
+      dplyr::mutate(task_id = ((dplyr::row_number() - 1L) %/% as.integer(runs_per_task)) + 1L)
   }
 
   tasks_summary <- runs_shuffled %>%
@@ -550,7 +514,7 @@ make_job_config <- function(job_name,
     data_matrix_catalog = data_matrix_catalog
   )
 
-  shuffle_runs <- isTRUE(verbose_file_output)
+  shuffle_runs <- TRUE
   runs_tasks <- assign_task_ids(
     tables$runs,
     runs_per_task = runs_per_task,
