@@ -1,5 +1,10 @@
 #!/usr/bin/env Rscript
 
+sanitize_path <- function(path) {
+  if (is.null(path)) return(path)
+  gsub("~+~", " ", path, fixed = TRUE)
+}
+
 suppressPackageStartupMessages(library(devtools))
 
 find_repo_root <- function() {
@@ -9,9 +14,10 @@ find_repo_root <- function() {
   script_dir <- NULL
   if (length(file_idx)) {
     script_path <- sub(file_arg, "", cmd[file_idx[1]])
+    script_path <- sanitize_path(script_path)
     script_dir <- dirname(normalizePath(script_path, winslash = "/", mustWork = TRUE))
   } else if (!is.null(sys.frames()[[1]]$ofile)) {
-    script_dir <- dirname(normalizePath(sys.frames()[[1]]$ofile, winslash = "/", mustWork = TRUE))
+    script_dir <- dirname(normalizePath(sanitize_path(sys.frames()[[1]]$ofile), winslash = "/", mustWork = TRUE))
   }
   if (is.null(script_dir)) {
     script_dir <- getwd()
