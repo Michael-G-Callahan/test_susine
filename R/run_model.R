@@ -61,6 +61,17 @@ load_job_config <- function(path) {
   cfg$tables$scenarios <- tibble::as_tibble(cfg$tables$scenarios)
   cfg$tables$tasks <- tibble::as_tibble(cfg$tables$tasks)
   cfg$tables$use_cases <- tibble::as_tibble(cfg$tables$use_cases)
+
+  repo_override <- Sys.getenv("SUSINE_REPO_ROOT", unset = "")
+  if (nzchar(repo_override) && dir.exists(repo_override)) {
+    cfg$paths$repo_root <- normalizePath(repo_override, winslash = "/", mustWork = TRUE)
+  } else {
+    stored_root <- cfg$paths$repo_root
+    if (is.null(stored_root) || !dir.exists(stored_root)) {
+      cfg$paths$repo_root <- normalizePath(getwd(), winslash = "/", mustWork = FALSE)
+    }
+  }
+
   cfg
 }
 
@@ -599,13 +610,34 @@ resolve_matrix_absolute_path <- function(path, repo_root) {
   if (is.null(path) || is.na(path) || !nzchar(path)) {
     return(NA_character_)
   }
-  repo_norm <- normalizePath(repo_root, winslash = "/", mustWork = TRUE)
-  candidate <- normalizePath(path, winslash = "/", mustWork = FALSE)
-  if (startsWith(candidate, "/") || grepl("^[A-Za-z]:/", candidate)) {
-    normalizePath(candidate, winslash = "/", mustWork = TRUE)
-  } else {
-    normalizePath(file.path(repo_norm, candidate), winslash = "/", mustWork = TRUE)
+  sanitize <- function(p) gsub("\\\\", "/", p)
+  repo_norm <- NA_character_
+  if (!is.null(repo_root) && nzchar(repo_root) && dir.exists(repo_root)) {
+    repo_norm <- sanitize(normalizePath(repo_root, winslash = "/", mustWork = TRUE))
   }
+  path_clean <- sanitize(path)
+  candidates <- c(path_clean)
+
+  if (!is.na(repo_norm)) {
+    candidates <- c(candidates, file.path(repo_norm, path_clean))
+    stripped_drive <- sub("^[A-Za-z]:", "", path_clean)
+    stripped_drive <- sub("^/+", "", stripped_drive)
+    candidates <- c(candidates, file.path(repo_norm, stripped_drive))
+    repo_base <- basename(repo_norm)
+    pattern <- paste0(".*/", repo_base, "/")
+    if (grepl(pattern, path_clean)) {
+      trimmed <- sub(pattern, "", path_clean)
+      candidates <- c(candidates, file.path(repo_norm, trimmed))
+    }
+  }
+
+  candidates <- unique(candidates)
+  for (cand in candidates) {
+    if (nzchar(cand) && file.exists(cand)) {
+      return(normalizePath(cand, winslash = "/", mustWork = TRUE))
+    }
+  }
+  stop("Matrix path not found: ", path)
 }
 
 load_sampled_matrix <- function(matrix_row, repo_root) {

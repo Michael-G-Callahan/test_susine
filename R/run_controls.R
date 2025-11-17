@@ -37,11 +37,20 @@ relativize_path <- function(path, root) {
       return(NA_character_)
     }
     path_norm <- normalizePath(p, winslash = "/", mustWork = FALSE)
+    path_norm <- gsub("\\\\", "/", path_norm)
     prefix <- paste0(root_norm, "/")
     if (startsWith(path_norm, prefix)) {
       substring(path_norm, nchar(prefix) + 1L)
     } else {
-      path_norm
+      repo_base <- basename(root_norm)
+      pattern <- paste0("/", repo_base, "/")
+      match_idx <- regexpr(pattern, path_norm, fixed = TRUE)
+      if (match_idx > 0) {
+        start <- match_idx + nchar(pattern)
+        substring(path_norm, start)
+      } else {
+        path_norm
+      }
     }
   })
 }
@@ -518,7 +527,6 @@ make_job_config <- function(job_name,
   runs_tasks <- assign_task_ids(
     tables$runs,
     runs_per_task = runs_per_task,
-    shard_size_output = shard_size_output,
     shuffle_seed = NULL,
     shuffle = shuffle_runs
   )

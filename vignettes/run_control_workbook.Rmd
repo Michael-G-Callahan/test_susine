@@ -283,11 +283,11 @@ if (commit_artifacts) {
 ```{r test the first run locally}
 # Define paths and arguments
 run_task_script <- here("inst", "scripts", "run_task.R")
-job_name <- "susine_sim_grid_demo"
+job_name <- "susie_paper_scenario_1_recreation"
 task_id <- "1" # Using the first task for testing
 job_root <- here("output")
 # Note: config_path now points to temp folder, not run_history
-config_path <- here("output", "temp", "susine_sim_grid_demo", "job_config.json")
+config_path <- here("output", "temp", job_name, "job_config.json")
 
 # Construct the full command
 command <- sprintf(
@@ -307,10 +307,10 @@ system(command)
 ```
 
 ```{r debug run_task function}
-job_name   <- "susine_sim_grid_demo"
+job_name   <- "susie_paper_scenario_1_recreation"
 task_id    <- 1L
 job_root   <- here("output")
-config_path <- here("output", "temp", "susine_sim_grid_demo", "job_config.json")
+config_path <- here("output", "temp", job_name, "job_config.json")
 quiet      <- FALSE
 
 options(error = quote(browser(skipCalls = 1)))  # drop into the debugger on error
