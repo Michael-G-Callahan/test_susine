@@ -25,6 +25,89 @@ prior_quality_grid <- function(annotation_r2_levels = c(0.25, 0.5, 0.75),
   dplyr::mutate(grid, prior_quality_id = dplyr::row_number())
 }
 
+#' Convert an absolute path to one relative to the repository root.
+#' @keywords internal
+relativize_path <- function(path, root) {
+  if (is.null(path) || is.na(path) || !nzchar(path)) {
+    return(NA_character_)
+  }
+  root_norm <- normalizePath(root, winslash = "/", mustWork = TRUE)
+  path_norm <- normalizePath(path, winslash = "/", mustWork = FALSE)
+  prefix <- paste0(root_norm, "/")
+  if (startsWith(path_norm, prefix)) {
+    substring(path_norm, nchar(prefix) + 1L)
+  } else {
+    path_norm
+  }
+}
+
+#' Build a catalog of available design matrices for the requested scenarios.
+#'
+#' @param requested_scenarios Character vector.
+#' @param repo_root Root of the repository (used to relativize paths).
+#' @param summary_path Optional CSV produced by the sampling workbook that lists
+#'   `matrix_path`/`manifest_path` pairs for scenarios 1-4.
+#' @return Tibble with one row per matrix, including `matrix_id`, `data_scenario`,
+#'   `matrix_path`, and metadata such as participant/snps counts.
+#' @keywords internal
+build_data_matrix_catalog <- function(requested_scenarios,
+                                      repo_root,
+                                      summary_path = NULL) {
+  repo_root <- normalizePath(repo_root, winslash = "/", mustWork = TRUE)
+  scenarios <- unique(requested_scenarios)
+  summary_tbl <- NULL
+  if (!is.null(summary_path) && file.exists(summary_path)) {
+    summary_tbl <- readr::read_csv(summary_path, show_col_types = FALSE)
+  }
+
+  make_entry <- function(scenario) {
+    scenario_lower <- tolower(scenario)
+    if (scenario_lower %in% c("simulation_n3", "sim_n3")) {
+      tibble::tibble(
+        data_scenario = scenario,
+        dataset_label = "simulation_n3",
+        participant_count = NA_integer_,
+        snps_post = NA_integer_,
+        snp_set = NA_character_,
+        matrix_path = NA_character_,
+        manifest_path = NA_character_,
+        source = "simulation"
+      )
+    } else {
+      if (is.null(summary_tbl) || !nrow(summary_tbl)) {
+        stop(
+          "No sampled scenario summary found. ",
+          "Provide `summary_path` when calling make_job_config() ",
+          "or run the sampling workbook first."
+        )
+      }
+      subset <- dplyr::filter(summary_tbl, .data$scenario == !!scenario)
+      if (!nrow(subset)) {
+        stop("Scenario '", scenario, "' is not present in ", summary_path, ".")
+      }
+      subset %>%
+        dplyr::transmute(
+          data_scenario = .data$scenario,
+          dataset_label = .data$gene,
+          participant_count = as.integer(.data$participant_count),
+          snps_post = as.integer(.data$snps_post),
+          snp_set = .data$snp_set,
+          matrix_path = relativize_path(.data$matrix_path, repo_root),
+          manifest_path = relativize_path(.data$manifest_path, repo_root),
+          source = "sampled"
+        )
+    }
+  }
+
+  catalog <- purrr::map_dfr(scenarios, make_entry) %>%
+    dplyr::group_by(.data$data_scenario) %>%
+    dplyr::mutate(matrix_index = dplyr::row_number()) %>%
+    dplyr::ungroup() %>%
+    dplyr::mutate(matrix_id = dplyr::row_number())
+
+  catalog
+}
+
 #' Construct the full run table for a job.
 #'
 #' @param use_case_ids Character vector of use-case identifiers.
@@ -46,10 +129,14 @@ make_run_tables <- function(use_case_ids,
                             seeds,
                             data_scenarios,
                             grid_mode = c("full", "minimal"),
-                            pair_L_p_star = FALSE) {
+                            pair_L_p_star = FALSE,
+                            data_matrix_catalog = NULL) {
   if (!is.data.frame(prior_quality) ||
       !all(c("annotation_r2", "inflate_match", "gamma_shrink") %in% names(prior_quality))) {
     stop("prior_quality must contain annotation_r2, inflate_match, and gamma_shrink columns.")
+  }
+  if (is.null(data_matrix_catalog) || !nrow(data_matrix_catalog)) {
+    stop("data_matrix_catalog must be supplied with one row per available matrix.")
   }
   grid_mode <- match.arg(grid_mode)
   use_cases <- resolve_use_cases(use_case_ids)
@@ -131,6 +218,17 @@ make_run_tables <- function(use_case_ids,
     build_full_grid()
   }
 
+  scenario_matrix_map <- scenarios %>%
+    dplyr::select(scenario_id, data_scenario) %>%
+    dplyr::inner_join(
+      dplyr::filter(data_matrix_catalog, .data$data_scenario %in% unique(data_scenarios)),
+      by = "data_scenario"
+    )
+
+  if (!nrow(scenario_matrix_map)) {
+    stop("No matrix metadata found for the requested scenarios.")
+  }
+
   seed_values <- unique(seeds)
   if (!length(seed_values)) {
     stop("At least one seed must be supplied.")
@@ -140,10 +238,16 @@ make_run_tables <- function(use_case_ids,
   }
 
   runs <- tidyr::expand_grid(
-    scenario_id = scenarios$scenario_id,
+    scenario_matrix_index = seq_len(nrow(scenario_matrix_map)),
     use_case_id = use_cases$use_case_id,
     seed = seed_values
   ) %>%
+    dplyr::left_join(
+      scenario_matrix_map %>%
+        dplyr::mutate(scenario_matrix_index = dplyr::row_number()),
+      by = "scenario_matrix_index"
+    ) %>%
+    dplyr::select(-scenario_matrix_index) %>%
     dplyr::left_join(scenarios, by = "scenario_id") %>%
     dplyr::left_join(
       dplyr::select(use_cases, use_case_id, requires_prior_quality, mu_strategy, sigma_strategy),
@@ -205,6 +309,7 @@ make_run_tables <- function(use_case_ids,
 
   list(
     scenarios = scenarios,
+    data_matrices = data_matrix_catalog,
     runs = runs,
     use_cases = use_cases
   )
@@ -278,6 +383,9 @@ make_job_config <- function(job_name,
                             p_star_grid,
                             seeds,
                             data_scenarios = "simulation_n3",
+                            repo_root = ".",
+                            sampled_scenario_summary = NULL,
+                            data_matrix_catalog = NULL,
                             runs_per_task = 150,
                             email = "mgc5166@psu.edu",
                             output_root = "output",
@@ -300,6 +408,14 @@ make_job_config <- function(job_name,
                             )) {
 
   grid_mode <- match.arg(grid_mode)
+  repo_root <- normalizePath(repo_root, winslash = "/", mustWork = TRUE)
+  if (is.null(data_matrix_catalog)) {
+    data_matrix_catalog <- build_data_matrix_catalog(
+      requested_scenarios = unique(data_scenarios),
+      repo_root = repo_root,
+      summary_path = sampled_scenario_summary
+    )
+  }
 
   tables <- make_run_tables(
     use_case_ids = use_case_ids,
@@ -310,7 +426,8 @@ make_job_config <- function(job_name,
     seeds = seeds,
     data_scenarios = data_scenarios,
     grid_mode = grid_mode,
-    pair_L_p_star = pair_L_p_star
+    pair_L_p_star = pair_L_p_star,
+    data_matrix_catalog = data_matrix_catalog
   )
 
   runs_tasks <- assign_task_ids(tables$runs, runs_per_task = runs_per_task)
@@ -340,6 +457,7 @@ make_job_config <- function(job_name,
       )
     ),
     paths = list(
+      repo_root = repo_root,
       output_root = output_root,
       run_history_dir = file.path(output_root, "run_history", job_name),
       temp_dir = file.path(output_root, "temp", job_name),
@@ -349,6 +467,7 @@ make_job_config <- function(job_name,
     ),
     tables = list(
       scenarios = tables$scenarios,
+      data_matrices = tables$data_matrices,
       runs = runs_tasks$runs,
       tasks = runs_tasks$tasks,
       use_cases = tables$use_cases
@@ -387,6 +506,9 @@ write_job_artifacts <- function(job_config,
 
   scenario_path <- file.path(paths$temp_dir, "scenario_table.csv")
   readr::write_csv(job_config$tables$scenarios, scenario_path)
+
+  data_matrix_path <- file.path(paths$temp_dir, "data_matrices.csv")
+  readr::write_csv(job_config$tables$data_matrices, data_matrix_path)
 
   use_case_path <- file.path(paths$temp_dir, "use_cases.csv")
   readr::write_csv(job_config$tables$use_cases, use_case_path)
@@ -540,6 +662,8 @@ summarise_job_config <- function(job_config) {
   runs <- job_config$tables$runs
   runs %>%
     dplyr::group_by(
+      data_scenario,
+      matrix_id,
       use_case_id,
       L,
       y_noise,

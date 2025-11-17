@@ -1,0 +1,340 @@
+---
+title: "SuSiE Gene Simulation Sampler"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: false
+    number_sections: false
+---
+
+This workbook reproduces the SuSiE-style genotype sampling pipeline in one shot. It (1) samples 150 autosomal genes, (2) draws either 600 or 6,000 participants per gene, and (3) writes two genotype matrices per gene: the 1 Mb window (scenarios 2 & 4) and the 1,000-closest-SNP panel (scenarios 1 & 3). Every matrix starts with `participant_ID` followed by `SNP0001`, `SNP0002`, ... plus a matching manifest that maps those column labels back to the original SNP ID and coordinates.
+
+## Setup
+
+```{r setup, message=FALSE}
+library(dplyr)
+library(glue)
+library(purrr)
+library(readr)
+library(stringr)
+library(snpStats)
+library(tibble)
+library(tidyr)
+
+set.seed(20251115L)
+n_genes <- 150L
+n_participants_small <- 600L
+n_participants_large <- 6000L
+window_bp <- 1e6
+n_closest <- 1000L
+maf_threshold <- 0.01
+
+project_dir <- normalizePath("..", winslash = "/", mustWork = TRUE)
+geno_dir <- file.path(project_dir, "data", "full_simulated_genotypes")
+bed_dir <- file.path(geno_dir, "Genotypes")
+scenario1_dir <- file.path(project_dir, "data", "sampled_simulated_genotypes", "scenario_1")
+scenario2_dir <- file.path(project_dir, "data", "sampled_simulated_genotypes", "scenario_2")
+scenario3_dir <- file.path(project_dir, "data", "sampled_simulated_genotypes", "scenario_3")
+scenario4_dir <- file.path(project_dir, "data", "sampled_simulated_genotypes", "scenario_4")
+annotation_path <- file.path(geno_dir, "Gene_annotations.bed")
+fam_path <- file.path(geno_dir, "EUR_chr1.fam")
+
+purrr::walk(
+  c(scenario1_dir, scenario2_dir, scenario3_dir, scenario4_dir),
+  ~ dir.create(.x, recursive = TRUE, showWarnings = FALSE)
+)
+
+scenario_specs <- tibble::tribble(
+  ~scenario,    ~snp_set, ~participant_count, ~target_dir,  ~stem_label,
+  "scenario_1", "closest", n_participants_small, scenario1_dir, "closest1000",
+  "scenario_2", "window",  n_participants_small, scenario2_dir, "window1Mb",
+  "scenario_3", "closest", n_participants_large, scenario3_dir, "closest1000",
+  "scenario_4", "window",  n_participants_large, scenario4_dir, "window1Mb"
+) %>%
+  mutate(stem_suffix = glue("{stem_label}_n{participant_count}"))
+
+# Scenarios 1 & 2 mimic the SuSiE paper's ~600-sample eQTL setting, while
+# scenarios 3 & 4 explore a larger (6,000-sample) cohort that is still
+# realistic for modern multi-study meta-analyses.
+
+stopifnot(
+  file.exists(annotation_path),
+  file.exists(fam_path),
+  dir.exists(geno_dir),
+  dir.exists(bed_dir)
+)
+
+participants <- readr::read_table2(
+  file = fam_path,
+  col_names = c("fid", "iid", "pid", "mid", "sex", "pheno"),
+  col_types = readr::cols(
+    fid = readr::col_character(),
+    iid = readr::col_character(),
+    pid = readr::col_character(),
+    mid = readr::col_character(),
+    sex = readr::col_integer(),
+    pheno = readr::col_double()
+  )
+) %>%
+  mutate(
+    participant_ID = paste(fid, iid, sep = "_"),
+    row_index = row_number()
+  )
+
+stopifnot(nrow(participants) >= n_participants_large)
+
+annotations <- readr::read_tsv(
+  file = annotation_path,
+  col_names = c("chrom", "tss_start0", "tss_end1", "annotation_blob"),
+  col_types = readr::cols(
+    chrom = readr::col_character(),
+    tss_start0 = readr::col_integer(),
+    tss_end1 = readr::col_integer(),
+    annotation_blob = readr::col_character()
+  )
+) %>%
+  mutate(
+    chrom_num = readr::parse_number(chrom),
+    tss_bp = tss_start0 + 1L
+  ) %>%
+  filter(chrom_num %in% 1:22) %>%
+  separate(annotation_blob,
+           into = c("gene_symbol", "strand", "transcript_id"),
+           sep = "\\|",
+           fill = "right",
+           extra = "drop") %>%
+  mutate(
+    gene_symbol = coalesce(gene_symbol, "NA"),
+    transcript_id = coalesce(transcript_id, "NA")
+  )
+
+sampled_genes <- annotations %>%
+  slice_sample(n = min(n_genes, nrow(annotations))) %>%
+  mutate(sample_rank = row_number())
+total_genes <- nrow(sampled_genes)
+```
+
+## Helper functions
+
+```{r helpers}
+bim_cache <- new.env(parent = emptyenv())
+
+load_bim <- function(chr_num) {
+  key <- as.character(chr_num)
+  if (!exists(key, envir = bim_cache, inherits = FALSE)) {
+    path <- file.path(geno_dir, sprintf("EUR_chr%d.bim", chr_num))
+    if (!file.exists(path)) {
+      stop("Missing BIM file: ", path)
+    }
+    bim_tbl <- readr::read_tsv(
+      file = path,
+      col_names = c("chrom", "snp_id", "cm", "bp", "allele_ref", "allele_alt"),
+      col_types = readr::cols(
+        chrom = readr::col_integer(),
+        snp_id = readr::col_character(),
+        cm = readr::col_double(),
+        bp = readr::col_integer(),
+        allele_ref = readr::col_character(),
+        allele_alt = readr::col_character()
+      )
+    )
+    assign(key, bim_tbl, envir = bim_cache)
+  }
+  get(key, envir = bim_cache, inherits = FALSE)
+}
+
+select_window_snps <- function(chr_num, center_bp) {
+  load_bim(chr_num) %>%
+    filter(bp >= center_bp - window_bp, bp <= center_bp + window_bp) %>%
+    arrange(bp)
+}
+
+select_closest_snps <- function(chr_num, center_bp) {
+  load_bim(chr_num) %>%
+    mutate(distance = abs(bp - center_bp)) %>%
+    arrange(distance, bp) %>%
+    slice_head(n = n_closest) %>%
+    select(-distance)
+}
+
+read_union_genotypes <- function(chr_num, snp_ids, participant_rows) {
+  snp_ids <- unique(snp_ids)
+  fam_chr_path <- file.path(geno_dir, sprintf("EUR_chr%d.fam", chr_num))
+  if (!file.exists(fam_chr_path)) {
+    fam_chr_path <- fam_path
+  }
+  plink <- snpStats::read.plink(
+    bed = file.path(bed_dir, sprintf("EUR_chr%d.bed", chr_num)),
+    bim = file.path(geno_dir, sprintf("EUR_chr%d.bim", chr_num)),
+    fam = fam_chr_path,
+    select.snp = snp_ids
+  )
+  geno <- as(plink$genotypes, "numeric")
+  colnames(geno) <- plink$map$snp.name
+  plink_ids <- paste(plink$fam$ped, plink$fam$member, sep = "_")
+  desired_ids <- participants$participant_ID[participant_rows]
+  keep_idx <- match(desired_ids, plink_ids)
+  if (anyNA(keep_idx)) {
+    stop("Some sampled participants are missing from chr", chr_num, " genotype data.")
+  }
+  geno <- geno[keep_idx, , drop = FALSE]
+  list(
+    matrix = geno,
+    participant_ids = desired_ids
+  )
+}
+
+format_bundle <- function(geno_list, snp_table, prefix = "SNP") {
+  if (!nrow(snp_table)) {
+    stop("No SNPs available for this gene/criterion.")
+  }
+  sub_mat <- geno_list$matrix[, snp_table$snp_id, drop = FALSE]
+  col_labels <- sprintf("%s%04d", prefix, seq_len(ncol(sub_mat)))
+  colnames(sub_mat) <- col_labels
+  matrix_df <- tibble(participant_ID = geno_list$participant_ids) %>%
+    bind_cols(as_tibble(sub_mat))
+  manifest_df <- tibble(
+    column_label = col_labels,
+    snp_id = snp_table$snp_id,
+    bp = snp_table$bp,
+    allele_ref = snp_table$allele_ref,
+    allele_alt = snp_table$allele_alt
+  )
+  if ("maf" %in% names(snp_table)) {
+    manifest_df$maf <- snp_table$maf
+  }
+  list(matrix = matrix_df, manifest = manifest_df)
+}
+
+filter_snps_by_maf <- function(geno_mat, snp_table, threshold = 0.01) {
+  sub_mat <- geno_mat[, snp_table$snp_id, drop = FALSE]
+  allele_means <- colMeans(sub_mat, na.rm = TRUE) / 2
+  maf <- pmin(allele_means, 1 - allele_means)
+  maf[!is.finite(maf)] <- 0
+  keep <- maf >= threshold
+  filtered_table <- snp_table[keep, , drop = FALSE]
+  if (nrow(filtered_table)) {
+    filtered_table$maf <- maf[keep]
+  }
+  list(
+    snp_table = filtered_table,
+    pre = ncol(sub_mat),
+    post = sum(keep)
+  )
+}
+
+write_bundle <- function(bundle, stem_path) {
+  matrix_path <- paste0(stem_path, ".tsv.gz")
+  manifest_path <- paste0(stem_path, "_manifest.tsv.gz")
+  readr::write_tsv(bundle$matrix, matrix_path)
+  readr::write_tsv(bundle$manifest, manifest_path)
+  list(matrix = matrix_path, manifest = manifest_path)
+}
+
+clean_tag <- function(gene_symbol, transcript_id, chr_num, tss_bp) {
+  raw <- glue("{gene_symbol}_{transcript_id}_chr{chr_num}_bp{tss_bp}")
+  str_replace_all(raw, "[^A-Za-z0-9_]+", "_")
+}
+```
+
+## Sampling run
+
+```{r run, message=TRUE, warning=FALSE}
+progress <- purrr::map_dfr(seq_len(total_genes), function(idx) {
+  gene <- sampled_genes[idx, ]
+  chr_num <- gene$chrom_num
+  tss_bp <- gene$tss_bp
+  gene_tag <- clean_tag(gene$gene_symbol, gene$transcript_id, chr_num, tss_bp)
+
+  if (idx == 1 || idx %% 10 == 0 || idx == total_genes) {
+    message(sprintf("[Gene %03d/%03d] %s (chr%s, TSS %s)", idx, total_genes, gene_tag, chr_num, format(tss_bp, big.mark = ",")))
+  }
+
+  window_snps <- select_window_snps(chr_num, tss_bp)
+  closest_snps <- select_closest_snps(chr_num, tss_bp)
+  if (!nrow(window_snps) || !nrow(closest_snps)) {
+    message(sprintf("  -> Skipping %s (insufficient SNPs).", gene_tag))
+    return(NULL)
+  }
+  union_snps <- unique(c(window_snps$snp_id, closest_snps$snp_id))
+  sample_defs <- scenario_specs %>%
+    distinct(participant_count) %>%
+    mutate(
+      sample_rows = purrr::map(participant_count, ~ sample(participants$row_index, size = .x, replace = FALSE)),
+      geno = purrr::map(sample_rows, ~ read_union_genotypes(chr_num, union_snps, .x))
+    )
+  geno_by_count <- setNames(sample_defs$geno, sample_defs$participant_count)
+
+  scenario_rows <- purrr::map_dfr(seq_len(nrow(scenario_specs)), function(s_idx) {
+    spec <- scenario_specs[s_idx, ]
+    geno_obj <- geno_by_count[[as.character(spec$participant_count)]]
+    snp_table <- if (spec$snp_set == "window") window_snps else closest_snps
+    filtered <- filter_snps_by_maf(geno_obj$matrix, snp_table, maf_threshold)
+    if (!filtered$post) {
+      message(sprintf("  -> Skipping %s (%s, MAF >= %.2f removed all SNPs).", gene_tag, spec$scenario, maf_threshold))
+      return(NULL)
+    }
+    bundle <- format_bundle(geno_obj, filtered$snp_table, prefix = "SNP")
+    paths <- write_bundle(bundle, file.path(spec$target_dir, glue("{gene_tag}_{spec$stem_suffix}")))
+    tibble(
+      gene = gene_tag,
+      chromosome = chr_num,
+      tss_bp = tss_bp,
+      scenario = spec$scenario,
+      snp_set = spec$snp_set,
+      participant_count = spec$participant_count,
+      snps_pre = filtered$pre,
+      snps_post = filtered$post,
+      matrix_path = paths$matrix,
+      manifest_path = paths$manifest
+    )
+  })
+
+  if (!nrow(scenario_rows)) {
+    return(NULL)
+  }
+
+  scenario_rows
+})
+
+if (nrow(progress) == 0) {
+  stop("No genes were processed successfully. Check the MAF threshold or input data.")
+}
+
+summary_path <- file.path(project_dir, "data", "sampled_simulated_genotypes", "scenario_sampling_summary.csv")
+readr::write_csv(progress, summary_path)
+message("Saved sampling summary to: ", summary_path)
+```
+
+## Output snapshot
+
+```{r results}
+progress
+```
+
+## Quick load check
+
+```{r check}
+matrix_candidates <- sort(list.files(
+  scenario1_dir,
+  pattern = "_closest1000_n600\\.tsv\\.gz$",
+  full.names = TRUE
+))
+
+stopifnot(length(matrix_candidates) > 0)
+
+example_matrix_path <- matrix_candidates[1]
+example_manifest_path <- sub("\\.tsv\\.gz$", "_manifest.tsv.gz", example_matrix_path)
+stopifnot(file.exists(example_manifest_path))
+
+example_matrix <- readr::read_tsv(example_matrix_path)
+example_manifest <- readr::read_tsv(example_manifest_path)
+
+example_matrix
+example_manifest
+```
+```{r}
+cor(example_matrix[2:1001])
+#plot a red/blue heatmap of the correlations, with no dendrograms on the sides
+heatmap(cor(example_matrix[2:1001]), col = colorRampPalette(c("blue", "white", "red"))(100), scale = "none", Rowv = NA, Colv = NA)
+```

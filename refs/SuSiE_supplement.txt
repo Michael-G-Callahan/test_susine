@@ -1,0 +1,1190 @@
+Supplementary material for “A simple new approach to variable selection in regression, with application to genetic fine-mapping”
+Gao Wang, Abhishek Sarkar, Peter Carbonetto and Matthew Stephens
+University of Chicago, Chicago, IL, USA
+
+A.
+
+Details of posterior computations for the SER model
+
+A.1. Bayesian simple linear regression
+To derive posterior computations for the SER model (2.4–2.8), it helps to start with an even simpler
+(univariate) linear regression model:
+y “ xb ` e
+e „ Nn p0, σ 2 In q
+b „ N1 p0, σ02 q.
+Here, y is an n-vector of response data (centered to have mean zero), x is an n-vector containing values
+of a single explanatory variable (similarly centered), e is an n-vector of independent error terms with
+variance σ 2 , b is the scalar regression coefficient to be estimated, σ02 is the prior variance of b, and In
+is the n ˆ n identity matrix.
+Given σ 2 and σ02 , the posterior computations for this model are very simple; they can be conveniently
+2
+written in terms of the usual least-squares estimate of b, b̂ – pxTxq´1 xTy, its variance s2 – xσTx , and
+the corresponding z score, z – b̂{s. The posterior distribution for b is
+b | y, σ 2 , σ02 „ N1 pµ1 , σ12 q,
+where
+σ12 px, y; σ 2 , σ02 q –
+
+1
+
+1{s2 ` 1{σ02
+σ2
+µ1 px, y; σ 2 , σ02 q – 21 ˆ b̂,
+s
+
+(A.1)
+(A.2)
+
+and the Bayes Factor (BF) for comparing this model with the null model (b “ 0) is
+ppy | x, σ 2 , σ02 q
+ppy | x; σ 2 , b “ 0q
+d
+ˆ 2
+˙
+z
+σ02
+s2
+exp
+“
+ˆ
+.
+2
+σ02 ` s2
+σ02 ` s2
+
+BFpx, y; σ 2 , σ02 q –
+
+(A.3)
+
+This expression matches the “asymptotic BF” of Wakefield (2009), but here, because we consider linear
+regression given σ 2 , it is an exact expression for the BF, not just asymptotic.
+
+A.2. The single effect regression model
+Under the SER model (2.4–2.8), the posterior distribution of pb1 , . . . , bp q “ pbγ1 , . . . , bγp q conditioned
+on σ 2 , σ02 , π is given in the main text (eqs. 2.9 and 2.10), and is reproduced here for convenience:
+γ | X, y, σ 2 , σ02 „ Multp1, αq
+2
+b | X, y, σ 2 , σ02 , γj “ 1 „ N1 pµ1j , σ1j
+q,
+
+2
+
+G. Wang, A. Sarkar, P. Carbonetto and M. Stephens
+
+where the vector of posterior inclusion probabilities (PIPs), α “ pα1 , . . . , αp q, can be expressed in
+terms of the simple linear regression BFs (A.3),
+πj BFpxj , y; σ 2 , σ02 q
+2 ,
+2
+j 1 “1 πj 1 BFpxj 1 , y; σ , σ0 q
+
+αj “ Prpγj “ 1 | X, y, σ 2 , σ02 q “ řp
+
+2 are the posterior mean (A.2) and variance (A.1) from the simple regression model
+where µ1j and σ1j
+of y on xj :
+
+µ1j “ µ1 pxj , y; σ 2 , σ02 q
+σ1j “ σ1 pxj , y; σ 2 , σ02 q.
+Our algorithm requires the first and second moments of this posterior distribution, which are
+Erbj | X, y, σ 2 , σ02 s “ αj µ1j
+2
+Erb2j | X, y, σ 2 , σ02 s “ αj pσ1j
+` µ21j q.
+
+A.3. Computing Credible Sets
+As noted in the main text, under the SER model it is straightforward to compute a level-ρ CS (Definition 1), CS pα; ρq. The procedure is given in Maller et al. (2012), and for convenience we describe it
+here as well.
+Given α, let r “ pr1 , . . . , rp q denote the indices of the variables ranked in order of decreasing αj , so
+that αr1 ą αr2 ą ¨ ¨ ¨ ą αrp , and let Sk denote the cumulative sum of the k largest PIPs:
+Sk –
+
+k
+ÿ
+
+αrj .
+
+j“1
+
+Now take
+(A.4)
+
+CSpα; ρq – tr1 , . . . , rk0 u,
+
+where k0 “ mintk : Sk ě ρu. This choice of k0 ensures that the CS is as small as possible while
+satisfying the requirement that it is a level-ρ CS.
+
+A.4. Estimating hyperparameters
+As noted in the main text, it is possible to take an empirical Bayes approach to estimating the
+hyperparameters σ 2 , σ02 . The likelihood is
+`SER py; σ02 , σ 2 q – ppy | X, σ02 , σ 2 q “ p0 py | σ 2 q
+
+p
+ÿ
+
+πj BFpxj , y; σ 2 , σ02 q,
+
+(A.5)
+
+j“1
+
+where p0 denotes the distribution of y under the “null” that b “ 0 (i.e. Nn p0, σ 2 In q), and BFpx, y; σ 2 , σ02 q
+is given in eq. A.3. The likelihood (A.5) can be maximized over one or both parameters using available
+numerical algorithms.
+
+B.
+
+Derivation of variational algorithms
+
+B.1. Background: Empirical Bayes and variational approximation
+Here we introduce some notation and elementary results which are later applied to our specific application.
+
+Supplement to “A simple new approach to variable selection in regression”
+
+3
+
+B.1.1. Empirical Bayes as a single optimization problem
+Consider the following generic model:
+y „ ppy | b, θq
+b „ gpbq,
+where y represents a vector of observed data, b represents a vector of unobserved (latent) variables of
+interest, g P G represents a prior distribution for b (which in the empirical Bayes paradigm is treated
+as an unknown to be estimated), and θ P Θ represents an additional set of parameters to be estimated.
+This formulation also includes as a special case situations where g is pre-specified rather than estimated
+simply by making G contain a single distribution.
+Fitting this model by empirical Bayes typically involves the following two steps:
+(a) Obtain estimates pĝ, θ̂q of pg, θq by maximizing the log-likelihood:
+pĝ, θ̂q – argmax `pg, θ; yq,
+g P G, θ P Θ
+
+where
+ş
+`py; g, θq – log ppy | b, θq gpbq db.
+(b) Given these estimates, ĝ and θ̂, compute the posterior distribution for b,
+p̂post pbq – ppost pb; y, g, θq “ ppb | y, g, θq 9 ppy | b, θq gpbq.
+This two-step procedure can be conveniently expressed as a single optimization problem:
+pp̂post , ĝ, θ̂q “ argmax F pq, g, θ; yq,
+
+(B.1)
+
+g P G, θ P Θ, q
+
+with
+F pq, g, θ; yq – `pg, θ; yq ´ DKL pq } p̂post q,
+and where
+
+ż
+DKL pq || pq –
+
+qpbq log
+
+(B.2)
+
+qpbq
+db
+ppbq
+
+is the Kullback-Leibler (KL) divergence from q to p, and the optimization of q in (B.1) is over all
+possible distributions on b. The function F (B.2) is often called the “evidence lower bound”, or ELBO,
+because it is a lower bound for the “evidence” (the marginal log-likelihood). (This follows from the
+fact that KL divergence is always non-negative.)
+This optimization problem (B.1) is equivalent to the usual two-step EB procedure. This equivalence
+follows from two observations:
+(a) Since the marginal log-likelihood, `, does not depend on q, we have
+argmax F pq, g, θ; yq “ argmin DKL pq } p̂post q “ p̂post .
+q
+
+q
+
+(b) Since the minimum of DKL with respect to q is zero for any pθ, gq, we have that maxq F pq, g, θ; yq “
+`py; g, θq, and as a result
+pĝ, θ̂q “ argmax `py; g, θq “ argmax max F pq, g, θ; yq.
+g P G, θ P Θ
+
+g P G, θ P Θ,q
+
+q
+
+B.1.2. Variational approximation
+The optimization problem (B.1) is often intractable. The idea of variational approximation is to adjust
+the problem to make it tractable, simply by restricting the optimization over all possible distributions
+
+4
+
+G. Wang, A. Sarkar, P. Carbonetto and M. Stephens
+
+on b to q P Q, where Q denotes a suitably chosen class of distributions. Therefore, we seek to solve
+B.1 subject to the additional constraint that q P Q:
+pp̂post , ĝ, θ̂q “
+
+argmax
+
+F pq, g, θ; yq.
+
+(B.3)
+
+g P G, θ P Θ, q P Q
+
+From the definition of F , it follows that optimizing F over q P Q (for a given g and θ) corresponds to
+minimizing the KL divergence from q to the posterior distribution, and so can be interpreted as finding
+the “best” approximation to the posterior distribution for b among distributions in the class Q. And
+the optimization of F over pg, θq can be thought of as replacing the optimization of the log-likelihood
+with optimization of a lower bound to the log-likelihood (the ELBO).
+We refer to solutions of the general problem (B.1), in which q is unrestricted, as “empirical Bayes
+(EB) solutions,” and we refer to solutions of the restricted problem (B.3) as “variational empirical
+Bayes (VEB) solutions.”
+B.1.3. Form of ELBO
+It is helpful to note that, by simple algebraic manipulations, the ELBO (B.2) can be decomposed as
+
+„
+ppy, b | g, θq
+F pq, g, θ; yq “ Eq log
+qpbq
+„
+
+gpbq
+“ Eq rlog ppy | b, θqs ` Eq log
+.
+(B.4)
+qpbq
+
+B.2. The additive effects model
+We now apply the above results to fitting an additive model, M, that includes the SuSiE model
+(3.1–3.6) as a special case:
+y“
+
+L
+ÿ
+
+µl ` e
+
+l“1
+
+e „ Nn p0, σ 2 In q
+µl „ gl ,
+
+independently for l “ 1, . . . , L,
+
+where y “ py1 , . . . , yn q, e “ pe1 , . . . , en q, µl “ pµl1 , . . . , µln q P Rn . We let Ml denote the simpler model
+that is derived from M by setting µl1 “ 0 for all l1 ‰ l (i.e., Ml is the model that includes only the
+lth additive term), and we use `l to denote the marginal log-likelihood for this simpler model:
+`l py; gl , σ 2 q – log ppy | Ml , gl , σ 2 q.
+
+(B.5)
+
+The SuSiE model corresponds to the special case of M where µl “ Xbl , for l “ 1, . . . , L, and each gl is
+the “single effect prior” in (2.6–2.8). Further, in this special case each Ml is a “single effect regression”
+(SER) model (2.4–2.8).
+The key idea introduced in this section is that we can fit M by variational empirical Bayes (VEB)
+provided we can fit each simpler model Ml by EB. To expand on this, consider fitting the model M
+by VEB, where the restricted family Q is the class of distributions on pµ1 , . . . , µL q that factorize over
+µ1 , . . . , µL ; that is, for any q P Q,
+qpµ1 , . . . , µL q “
+
+L
+ź
+
+ql pµl q.
+
+l“1
+
+For q P Q, using expression (B.4), we obtain the following expression for the ELBO, F :
+„
+
+L
+“
+‰ ÿ
+řL
+1
+gl pµl q
+n
+2
+2
+Eql log
+,
+F pq, g, σ ; yq “ ´ logp2πσ q ´ 2 Eq ky ´ l“1 µl k `
+2
+2σ
+ql pµl q
+l“1
+2
+
+(B.6)
+
+Supplement to “A simple new approach to variable selection in regression”
+
+5
+
+Algorithm 2 Coordinate ascent for fitting additive model M by VEB (outline)
+1: for t in 0, 1, 2, . . . do
+2:
+for l in 1, . . . , L do
+3:
+pql , gl q Ð argmaxql ,gl F pq, g, σ 2 ; yq
+4:
+
+σ 2 Ð argmaxσ2 F pq, g, σ 2 ; yq
+
+Algorithm 3 Coordinate ascent for fitting additive model M by VEB
+Require: Initial settings of σ 2 and gl , µ̄l , for l “ 1, . . . , L.
+1: for t in 0, 1, ř
+2, . . . do
+2:
+r̄ Ð y ´ L
+Ź Compute expected residuals.
+l“1 µl
+3:
+for l in 1, . . . , L do
+4:
+r̄l Ð r̄ ` µ̄l
+Ź Disregard lth effect in residuals.
+5:
+gl Ð argmax `l pr̄l ; gl , σ 2 q
+Ź EB update of gl (optional).
+6:
+Compute posterior distribution ql pµl q “ ppµl | r̄l , Ml , gl , σ 2 q.
+7:
+µ̄l Ð Eql rµl s
+Ď2 Ð E rµ2 s
+8:
+µ
+ql
+l
+l
+9:
+r̄ Ð r̄l ´ µ̄l
+Ź Update expected residuals.
+2
+Ď
+2
+10:
+σ Ð ERSSpy, µ̄, µ q{n
+Ź Update σ 2 (optional); see (B.9).
+
+in which k ¨ k denotes the Euclidean norm, and g denotes the collection of priors pg1 , . . . , gL q. The
+expected value in the second term of (B.6) is the expected residual sum of squares (ERSS) under the
+variational approximation q, and depends on q only through its first and second moments. Indeed, if
+we denote the posterior first and second moments by
+µ̄li – Eql rµli s
+Ď2 – E “µ2 ‰,
+µ
+li
+
+ql
+
+(B.7)
+(B.8)
+
+li
+
+Ď2 – pµĎ
+Ď
+Ď2 , . . . , µ
+Ď2 q, then we
+2 ,...,µ
+2 q, µ̄ – pµ̄ , . . . , µ̄ q, µ
+Ď2 – pµ
+and we define µ̄l – pµ̄l1 , . . . , µ̄ln q, µ
+1
+L
+1
+L
+l
+l1
+ln
+have that
+L ÿ
+n
+ÿ
+Ď2 q “ Eq “ky ´ řL µl k2 ‰ “ ky ´ řL µ̄l k2 `
+Varrµli s,
+(B.9)
+ERSSpy, µ̄, µ
+l“1
+l“1
+l“1 i“1
+
+Ď2 ´ µ̄2 . This expression follows from the definition of the expected residual sum
+where Varrµli s “ µ
+li
+li
+of squares, and from independence across l “ 1, . . . , L, after some algebraic manipulation; see Section
+B.7.
+Fitting M by VEB involves optimizing F in (B.6) over q, g, σ 2 . Our strategy is to update each pql , gl q
+for l “ 1, . . . , L while keeping σ 2 and other elements of q, g fixed, and with a separate optimization
+step for σ 2 with q, g fixed. This strategy is summarized in Algorithm 2.
+The update for σ 2 in Algorithm 2 is easily obtained by taking partial derivative of (B.6), setting to
+zero, and solving for σ 2 , giving
+Ď2 q
+ERSSpy, µ̄, µ
+.
+(B.10)
+σ̂ 2 –
+n
+The update for ql , gl corresponds to finding the EB solution for the simpler (single effect) model
+Ml in which the data y are replaced with the expected residuals,
+“
+‰
+ř
+ř
+r̄l – Eq rrl s – Eq y ´ l1 ‰l µl1 “ y ´ l1 ‰l µ̄l1 .
+The proof of this result is given below in Proposition A1.
+Substituting these ideas into Algorithm 2 yields Algorithm 3, which generalizes the IBSS algorithm
+(Algorithm 1) given in the main text.
+
+6
+
+G. Wang, A. Sarkar, P. Carbonetto and M. Stephens
+
+Algorithm 4 Iterative Bayesian stepwise selection (extended version)
+Require: Data X, y.
+Require: Number of effects, L; initial estimates of hyperparameters σ 2 , σ02 .
+Require: A function SERpX, y; σ 2 , σ02 q Ñ pα, µ1 , σ12 q that computes the posterior distribution for bl
+under the SER model; see (2.11).
+Require: Initial setting of b̄l , an estimate of the posterior mean of bl , for l “ 1, . . . , L.
+1: repeat
+ř
+Ź Compute expected residuals.
+2:
+r̄ Ð y ´ X L
+l“1 b̄l .
+3:
+for l in 1, . . . , L do
+4:
+r̄l Ð r̄ ` X b̄l
+Ź Disregard lth single effect in residuals.
+2
+2
+2
+2 (optional); see (A.5).
+5:
+σ0l Ð argmax `SER pr̄l ; σ0l , σ q
+Ź EB update of σ0l
+2
+2
+2
+6:
+pαl , µ1l , σ1l q Ð SERpX, r̄l ; σ , σ0l q
+Ź Fit SER to residuals.
+7:
+b̄l Ð αl ˝ µ1l
+Ź “ ˝ ” denotes elementwise multiplication.
+2 ` µ2 q
+8:
+bs2l Ð αl ˝ pσ1l
+Ź Compute posterior second moments.
+1l
+9:
+r̄ Ð r̄l ´ X b̄l
+Ź Update expected residuals.
+10:
+σ 2 Ð ERSSpy, b̄, bs2 q{n.
+Ź Update σ 2 (optional).
+11: until convergence criterion satisfied
+2 , . . . , α , µ , σ2 .
+return σ 2 , σ02 , α1 , µ11 , σ11
+L
+1L
+1L
+
+B.3. Special case of SuSiE model
+The SuSiE model is a special case of the above additive effects model when µl “ Xbl . In this case, Ml
+is the SER model, and the first and second moments of µl are easily found from the first and second
+moments of bl :
+“ř
+‰ ř
+Erµli s “ E pj“1 xij blj “ pj“1 xij Erblj s
+“ř
+‰ ř
+Erµ2li s “ E p pj“1 xij blj q2 “ pj“1 x2ij Erb2lj s.
+The expression for the second moment simplifies because only one element of bl is non-zero under the
+Ď2 q
+SER model, and so blj blj 1 “ 0 for any j ‰ j 1 . Because of this, we can easily formulate ERSSpy, µ̄, µ
+s
+2
+as a function of the first and second moments of bl — denoting this as ERSSpy, b̄, b q — and Algorithm
+3 can be implemented using posterior distributions of b instead of posterior distributions of µ.
+For completeness, we give this algorithm, which is Algorithm 4. This algorithm is the same as the
+IBSS algorithm in the main text (Algorithm 1), with additional steps for fitting the hyperparameters
+2 is a
+σ 2 and σ02 . This is the algorithm implemented in the susieR software. The step to update σ0l
+one-dimensional optimization problem; we implemented this step using the R function optim, which
+2 . The algorithm terminates when
+finds a stationary point of the likelihood surface with respect to σ0l
+the increase in the ELBO between successive iterations is smaller than a small non-negative number,
+δ (set to 0.001 unless otherwise stated). This is a commonly used stopping criterion in algorithms for
+fitting variational approximations.
+
+B.4. Update for ql , gl in additive effects model is EB solution for simpler model, Ml
+Here we establish that the update to ql , gl in Algorithm 2 can be implemented as the EB solution
+for Ml (Steps 5 and 6 in Algorithm 3). This result is formalized in the following proposition, which
+generalizes Proposition 1 in the main text.
+Proposition A1. The ql , gl that maximizes F in (B.6), the ELBO for the additive model, M, can
+be found by maximizing the ELBO for the simpler model, Ml , in which the observed responses y are
+replaced by the expected residuals, r̄l :
+argmax F pq, g, σ 2 ; yq “ argmax Fl pql , gl , σ 2 ; r̄l q,
+ql ,gl
+
+ql ,gl
+
+Supplement to “A simple new approach to variable selection in regression”
+
+where µ̄l is the vector of posterior mean effects defined above (see eq. B.7), and we define
+„
+
+“
+‰
+gl pµl q
+1
+n
+2
+2
+2
+.
+Fl pql , gl , σ ; yq “ ´ logp2πσ q ´ 2 Eql ky ´ µl k ` Eql log
+2
+2σ
+ql pµl q
+
+7
+
+(B.11)
+
+Proof. Omitting terms in the expression for F (from eq. B.6) that do not depend on ql , gl (these
+terms are captured by “const”), we have
+„
+
+“
+‰
+1
+gl pµl q
+2
+T
+F pq, g, σ ; yq “ ´ 2 Eq prl ´ µl q prl ´ µl q ` Eql log
+` const
+2σ
+ql pµl q
+
+„
+“
+‰
+1
+gl pµl q
+T
+T
+“ ´ 2 Eq ´2rl µl ` µl µl ` Eql log
+` const
+2σ
+ql pµl q
+
+„
+“
+‰
+1
+gl pµl q
+“ ´ 2 Eql ´2r̄lT µl ` µTl µl ` Eql log
+` const
+2σ
+ql pµl q
+“ Fl pql , gl , σ 2 ; r̄l q ` const.
+Further note that the optimization of Fl does not restrict ql , so the maximum yields the exact EB
+solution for Ml (refer to Section B.1.1); that is, ql pµl q “ ppµl | r̄l , Ml , gl , σ 2 q 9 ppr̄l | Ml , gl , σ 2 q gl pµl q
+at the maximum.
+
+B.5. Convergence of IBSS algorithm
+B.5.1. Proof of Corollary 1
+Proof. Step 5 of Algorithm 1 is simply computing the right-hand side of (3.9), in which the
+2 . Therefore, by Proposition 1, it is a coposterior distribution is determined by parameters αl , µ1l , σ1l
+ordinate ascent step for optimizing the lth coordinate of F pq1 , . . . , qL ; σ 2 , σ02 q in which ql is determined
+2.
+by the parameters αl , µ1l , σ1l
+B.5.2. Proof of Proposition 2
+Proof. By Proposition 2.7.1 of Bertsekas (1999), the sequence of iterates q converges to a stationary point of F provided that argmaxql ,gl Fl pql , gl , σ 2 ; r̄l q is uniquely attained for each l. When Ml is
+the SER model and µl “ Xbl , the lower bound Fl (B.11) is
+p
+n
+ky ´ X b̄k2 kX b̄k2
+1 ÿ T
+2
+Fl pql , gl , σ 2 ; yq “ ´ logp2πσ 2 q ´
+`
+´
+x xj αj pµ21j ` σ1j
+q
+2
+2σ 2
+2σ 2
+2σ 2 j“1 j
+«
+ff
+p
+p
+2
+2
+ÿ
+ÿ
+σ1j
+µ21j ` σ1j
+αj
+πj
+1 ` log 2 ´
+`
+αj log ,
+`
+2
+2
+αj
+σ0
+σ0
+j“1
+j“1
+
+To lighten notation in the above expression, the l subscript was omitted from the quantities α “
+2 , . . . , σ 2 q specifying the SER approximate posterior,
+pα1 , . . . , αp q, µ1 “ pµ11 , . . . , µ1p q and σ12 “ pσ11
+1p
+ql , and likewise for the vector of posterior means, b̄ – b̄l with elements b̄j “ αj µ1j . Taking partial
+derivatives of this expression with respect to the parameters α, µ1 and σ12 , the maximum can be
+expressed as the solution to the following system of equations:
+«
+˜
+¸ff
+xTjxj
+1
+1
+αj
+` 2
+“0
+(B.12)
+2 ´
+σ2
+σ1j
+σ0
+«
+ff
+µ1j
+pX T yq
+αj
+“0
+(B.13)
+2 ´
+σ2
+σ1j
+log
+
+µ21j
+αj
+σ1j
+´ log
+´ 2 ` λ “ 0,
+πj
+σ0
+2σ1j
+
+(B.14)
+
+where λ P R is an additional unknown, set so that α1 ` ¨ ¨ ¨ ` αp “ 1 is satisfied. The solution to this
+set of equations is finite and unique if 0 ă σ, σ0 ă 8 and πj ą 0 for all j “ 1, . . . , p. Also note that
+the solution to (B.12–B.14) recovers the posterior expressions for the SER model.
+
+8
+
+G. Wang, A. Sarkar, P. Carbonetto and M. Stephens
+
+B.6. Computing the evidence lower bound
+Although not strictly needed to implement Algorithms 3 and 4, it can be helpful to compute the
+objective function, F (e.g., to monitor the algorithm’s progress, or to compare solutions). Here we
+outline a practical approach to computing F for the SuSiE model.
+Refer to the expression for the ELBO, F , given in (B.6). Computing the first term is straightforward.
+The second term is the ERSS (B.9). The third term can be computed from the marginal log-likelihoods
+`l in (B.5), and computing this is straightforward for the SER model, involving a sum over the p possible
+single effects (see eq. A.5). This is shown by the following lemma:
+Lemma A1. Let q̂l – argmaxq Fl pql , gl , σ 2 ; r̄l q. Then
+
+„
+n
+gl pµl q
+1
+“ `l pr̄l ; gl , σ 2 q ` logp2πσ 2 q ` 2 Eq̂l kr̄l ´ µl k2 .
+Eq̂l log
+q̂l pµl q
+2
+2σ
+Proof. Rearranging (B.11), and replacing y with r̄l , we have
+„
+
+gl pµl q
+n
+1
+“ Fl pql , gl , σ 2 ; r̄l q ` logp2πσ 2 q ` 2 Eql kr̄l ´ µl k2 .
+Eql log
+ql pµl q
+2
+2σ
+
+(B.15)
+
+(B.16)
+
+The result then follows from observing that Fl is equal to `l at the maximum, ql “ q̂l ; that is,
+Fl pq̂l , gl , σ 2 ; r̄l q “ `l pr̄l ; gl , σ 2 q.
+
+B.7. Expression for the expected residual sum of squares (ERSS)
+The expression (B.9) is derived as follows:
+Ď2 q “ Eq “ky ´ řL µl k2 ‰
+ERSSpy, µ̄, µ
+l“1
+“ y T y ´ 2y T
+
+L
+ÿ
+
+µ̄l `
+
+l“1
+
+“ ky ´
+
+řL
+
+2
+l“1 µ̄l k `
+
+L ÿ
+L
+ÿ
+
+µ̄Tl µ̄l1 ´
+
+l“1 l1 “1
+L
+n
+ÿÿ
+
+L
+ÿ
+l“1
+
+µ̄Tl µ̄l `
+
+L
+ÿ
+
+Eql rµTl µl s
+
+l“1
+
+Varrµli s,
+
+l“1 i“1
+
+Ď2 ´ µ̄2 .
+where Varrµli s “ µ
+li
+li
+
+C.
+
+Connecting SuSiE to standard BVSR
+
+When L ! p, the SuSiE model (3.1–3.6) is closely related to a standard BVSR model in which a subset
+of L regression coefficients are randomly chosen to have non-zero effects.
+To make this precise, consider the following regression model:
+y “ Xb ` e
+e „ Nn p0, σ 2 In q
+with n observations and p variables, so that b is a p-vector. Let Πstandard
+p ¨ ; σ02 q denote the prior
+L,p
+` ˘
+distribution on b that first randomly selects a subset S Ă t1, . . . , pu uniformly among all Lp subsets of
+cardinality |S| “ L, and then randomly samples the non-zero values bS – tbj : j P Su independently
+from N1 p0, σ02 q, setting the other values bS̄ :“ tbj : j R Su to 0. (This is a version of the prior considered
+2
+by Castillo et al. 2015, with |S| “ L.) Further, let Πsusie
+L,p p ¨ ; σ0 q denote the prior distribution on b
+2 “ σ 2 , for all l “ 1, . . . , L.
+induced by the SuSiE model (3.1–3.6) with identical prior variances, σl0
+0
+Proposition A2. With L fixed, letting p Ñ 8, the SuSiE prior is equivalent to the standard prior.
+Specifically, for any event A,
+´
+¯
+2
+standard
+2
+lim Πsusie
+pA;
+σ
+q
+´
+Π
+pA;
+σ
+q
+“ 0.
+L,p
+0
+L,p
+0
+pÑ8
+
+Supplement to “A simple new approach to variable selection in regression”
+
+9
+
+Proof. Fix L and p, and let B denote the event that the L vectors γ1 , . . . , γL in the SuSiE model
+are distinct from one another. Conditional on B, it is clear from symmetry that the SuSiE prior exactly
+standard pAq, dropping notational dependence on
+matches the standard prior; that is, Πsusie
+L,p pA | Bq “ ΠL,p
+σ02 for simplicity. Thus,
+standard
+susie
+Πsusie
+pAq “ Πsusie
+L,p pAq ´ ΠL,p
+L,p pAq ´ ΠL,p pA | Bq
+susie
+susie
+“ Πsusie
+L,p pA | BqPrL,p pBq ` ΠL,p pA | B̄qPrL,p pB̄q ´ ΠL,p pA | Bq,
+
+where the last line follows from the law of total probability. The result then follows from the fact that
+the probability PrL,p pBq Ñ 1 as p Ñ 8:
+PrL,p pBq “ rp{psrpp ´ 1q{psrpp ´ 2q{ps ¨ ¨ ¨ rpp ´ L ` 1q{ps Ñ 1 as p Ñ 8.
+
+D.
+
+Simulation details
+
+D.1. Simulated data
+For the numerical simulations of eQTL fine mapping in Section 4, we used n “ 574 human genotypes collected as part of the Genotype-Tissue Expression (GTEx) project (GTEx Consortium, 2017).
+Specifically, we obtained genotype data from whole-genome sequencing, with imputed genotypes, under dbGaP accession phs000424.v7.p2. In our analyses, we only included SNPs with minor allele
+frequencies 1% or greater. All reported SNP base-pair positions were based on Genome Reference
+Consortium (GRC) human genome assembly 38.
+To select SNPs nearby each gene, we considered two SNP selection schemes in our simulations: (i)
+in the first scheme, we included all SNPs within 1 Megabase (Mb) of the gene’s transcription start
+site (TSS); (ii) in the second, we used the p “ 1, 000 SNPs closest to the TSS. Since the GTEx data
+contain a very large number of SNPs, the 1,000 closest SNPs are never more than 0.4 Mb away from
+the TSS. Selection scheme (i) yields genotype matrices X with at least p “ 3,022 SNPs and at most
+p “ 11,999 SNPs, and an average of 7,217 SNPs.
+For illustration, correlations among the SNPs for one of the data sets are shown in Fig. A1 (see also
+Fig. 1).
+Correlation matrix
+for variables 100 to 200
+
+Correlation matrix
+for variables 350 to 450
+
+R2 Color Key
+
+0
+
+0.2
+
+0.4
+
+0.6
+
+R2 Color Key
+
+0.8
+
+1
+
+0
+
+0.2
+
+0.4
+
+0.6
+
+0.8
+
+1
+
+Fig. A1. Correlations among variables (SNPs) in an example data set used in the fine mapping comparisons. Left-hand panel shows correlations among variables shown at positions 100–200 in Fig. 1; right-hand
+panel shows correlations among variables shown at positions 350–450. For more details on this example data
+set, see Section 4.1 in the main text.
+
+D.2. Software and hardware specifications for numerical comparisons study
+In CAVIAR, we set all prior inclusion probabilities to 1{p to match the default settings used in other
+methods. In CAVIAR and FINEMAP, we set the maximum number of effect variables to the value of S
+
+10
+
+G. Wang, A. Sarkar, P. Carbonetto and M. Stephens
+
+that was used to simulate the gene expression data. The maximum number of iterations in FINEMAP
+was set to 100,000 (this is the FINEMAP default). We estimate σ 2 in SuSiE for all simulations.
+All computations were performed on Linux systems with Intel Xeon E5-2680 v4 (2.40 GHz) processors. We ran SuSiE in R 3.5.1, with optimized matrix operations provided by the dynamically
+linked OpenBLAS libraries (version 0.3.5). DAP-G and CAVIAR were compiled from source using
+GCC 4.9.2, and pre-compiled binary executables, available from the author’s website, were used to run
+FINEMAP.
+
+E.
+
+Functional enrichment of splice QTL fine mapping
+
+To strengthen results of Section 5, here we provide evidence that splice QTLs identified by SuSiE
+are enriched in functional genomic regions, thus likely to contain true causal effects. To perform this
+analysis, we labelled one CS at each intron the “primary CS.” We chose the CS with highest purity at
+each intron as the primary CS; any additional CSs at each intron were labelled as “secondary CSs.”
+We then tested both primary and secondary CSs for enrichment of biological annotations by comparing
+the SNPs inside these CSs (those with PIP ą 0.2) against random “control” SNPs outside all primary
+and secondary CSs.
+We tested for enrichment of the same generic variant annotations used in Li et al. (2016). These include LCL-specific histone marks (H3K27ac, H3K27me3, H3K36me3, H3K4me1, H3K4me2, H3K4me3,
+H3K79me2, H3K9ac, H3K9me3, H4K20me1), DNase I hypersensitive sites, transcriptional repressor
+CTCF binding sites, RNA polymerase II (PolII) binding sites, extended splice sites (defined as 5 basepairs upstream and downstream of an intron start site, and 15 base-pairs upstream and downstream
+of an intron end site), as well as intron and coding annotations. In total, 16 variant annotations were
+tested for enrichment.
+Fig. A2 shows the enrichments in both primary and secondary CSs for the 12 out of 16 annotations
+that were significant at p-value ă 10´4 in the primary signals (Fisher’s exact test, two-sided, no pvalue adjustment for multiple comparisons). The strongest enrichment in both primary and secondary
+signals was for extended splice sites (odds ratio « 5 in primary signals), which is reassuring given that
+these results are for splice QTLs. Other significantly enriched annotations in primary signals include
+PolII binding, several histone marks, and coding regions. The only annotation showing a significant
+depletion was introns. Results for secondary signals were qualitatively similar to those for primary,
+though all enrichments are less significant, which is most likely explained by the much smaller number
+of secondary CSs.
+
+Supplement to “A simple new approach to variable selection in regression”
+
+11
+
+Fig. A2. Splicing QTL enrichment analysis results. Estimated odds ratios, and ˘ 2 standard errors, for each
+variant annotation, obtained by comparing the annotations of SNPs inside primary/secondary CSs against
+random “control” SNPs outside CSs. The p-values are from two-sided Fisher’s exact test, without multiple
+testing correction. The vertical line in each plot is posited at odds ratio = 1.
+
+12
+
+G. Wang, A. Sarkar, P. Carbonetto and M. Stephens
+
+Supplementary Figures
+
+Fig. S1. Assessment of PIP calibration. Variables across all simulations were grouped into bins according to
+their reported PIP (using 20 equally spaced bins, from 0 to 1). The plots show the average PIP for each bin
+against the proportion of effect variables in that bin. A well calibrated method should produce points near the
+x “ y line (the diagonal red lines). Gray error bars show ˘2 standard errors.
+
+Fig. S2. Distribution of purity for 95% credible sets for different numbers of effect variables. Histograms for 1–5
+effect variables are obtained from all 95% credible sets produced by SuSiE in the first simulation scenario, with
+S “ 1, . . . , 5, as described in Section 4 of the main text, and the 10 effect variables histogram is obtained from
+all 95% credible sets produced by SuSiE in the second simulation scenario, with S “ 10.
+
+Supplement to “A simple new approach to variable selection in regression”
+
+13
+
+Fig. S3. Additional assessment of SuSiE CS coverage. These three plots show coverage of SuSiE credible
+sets as ρ (the probability that the credible set contains at least one effect variable; see Definition 1 in the main
+text) is varied from 75% to 99%. Proportions shown in the vertical axis are based on all credible sets generated
+by SuSiE in simulations from simulation scenario 1, with different simulation settings for S, the number of effect
+variables. Consistent with Fig. 3, coverage decreases with the inclusion of weaker signals.
+
+Fig. S4. Comparison of posterior inclusion probabilities (PIPs) computed by SuSiE, in which the prior variances
+σ 2 are estimated rather than fixed to 0.1, against PIPs computed by DAP-G, and by other methods. The results
+shown here from methods other than SuSiE are the same as the results in Fig. 2. For an explanation of the
+individual plots, see Fig. 2.
+
+14
+
+G. Wang, A. Sarkar, P. Carbonetto and M. Stephens
+
+A. coverage
+
+B. power
+
+1.0
+
+●
+●
+
+0.96
+
+10
+
+●
+
+●
+
+0.8
+●
+●
+
+●
+
+●
+●
+
+8
+●
+●
+
+0.6
+0.4
+
+●
+
+2
+
+3
+
+4
+
+5
+
+10
+
+number of effect variables
+
+4
+
+●
+●
+
+2
+
+3
+
+4
+
+5
+
+●●
+
+10
+
+1
+
+number of effect variables
+●
+
+SuSiE
+
+●
+●
+
+●
+●
+
+●
+
+●
+
+●
+
+0.95
+
+●
+
+●
+●
+
+2
+
+3
+
+4
+
+5
+
+10
+
+number of effect variables
+●
+
+●
+
+0.96
+
+●
+
+●●
+
+●
+
+0.97
+
+●
+
+●
+
+●●
+
+1
+
+●
+●
+
+0.99
+0.98
+
+●
+
+6
+
+●
+
+0.2
+
+●
+
+●
+●●
+
+●
+
+0.88
+1
+
+●
+
+●
+●
+
+0.92
+
+C. median number of variables D. average r2
+
+●
+
+1
+
+2
+
+3
+
+4
+
+5
+
+10
+
+number of effect variables
+
+DAP−G
+
+Fig. S5. Comparison of 95% credible sets (CS) from SuSiE, in which the prior variances σ 2 are estimated rather
+than fixed to 0.1, and DAP-G: (A) coverage, (B) power, (C) median size, and (D) average squared correlation
+among variables in each credible set. The DAP-G results shown here are the same as the DAP-G results
+shown in Fig. 3. For an explanation of the individual plots, see Fig. 3.
+
+Supplement to “A simple new approach to variable selection in regression”
+
+15
+
+References
+Bertsekas, D. P. (1999). Nonlinear programming (2nd ed.). Belmont, MA: Athena Scientific.
+Castillo, I., Schmidt-Hieber, J., and van der Vaart, A. (2015). Bayesian linear regression with sparse
+priors. Annals of Statistics 43 (5), 1986–2018.
+GTEx Consortium (2017). Genetic effects on gene expression across human tissues. Nature 550 (7675),
+204–213.
+Li, Y. I., van de Geijn, B., Raj, A., et al. (2016). RNA splicing is a primary link between genetic
+variation and disease. Science 352 (6285), 600–604.
+Maller, J. B., McVean, G., Byrnes, J., et al. (2012). Bayesian refinement of association signals for 14
+loci in 3 common diseases. Nature Genetics 44 (12), 1294–1301.
+Wakefield, J. (2009). Bayes factors for genome-wide association studies: comparison with P-values.
+Genetic Epidemiology 33 (1), 79–86.
+
+

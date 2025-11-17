@@ -85,15 +85,20 @@ job_inputs <- list(
   inflate_match = c(0, 0.5, 1),
   gamma_shrink = c(0.4, 0.8),
 
-  # Seeds applied to every scenario/use-case combination
-  seeds = 1:100,
+  # Seeds per design matrix (each sampled X receives these many phenotype draws)
+  seeds = 1:5,
 
   # Number of runs to assign to each SLURM array task
   # (~2112 total runs / 150 per task = ~14 tasks, well under SLURM QoS limits)
   runs_per_task = 300,
 
-  # Data scenarios to include (currently "simulation_n3" only)
+  # Data scenarios: "simulation_n3" for the built-in toy data, or scenario_{1-4}
+  # for the sampled genotype panels (see vignette for details)
   data_scenarios = c("simulation_n3"),
+
+  # Repository root + sampled scenario manifest (used for scenario_1-4 matrices)
+  repo_root = here(),
+  sampled_scenario_summary = here("data", "sampled_simulated_genotypes", "scenario_sampling_summary.csv"),
 
   # Credible-set evaluation knobs
   credible_set_rho = 0.95,
@@ -105,8 +110,21 @@ Set `pair_L_p_star = TRUE` to lock `L_grid` and `p_star_grid` together (only ide
 values are paired when the full grid is built); flip it to `FALSE` if you want the
 complete Cartesian product again.
 
-Double-check that `job_name` is meaningful and unique – it determines
+Double-check that `job_name` is meaningful and unique — it determines
 where the job history and outputs are stored.
+
+When you choose one of the sampled data scenarios (`scenario_1`–`scenario_4`),
+the grid will automatically include every available design matrix (one per
+gene) from `data/sampled_simulated_genotypes/…`. The `seeds` vector now
+controls **phenotype replicates per matrix** rather than per scenario, so
+in the example above we will simulate five phenotypes for each extracted
+`X`. The legacy `simulation_n3` scenario still behaves as before with a
+single built-in matrix.
+
+If you request any of the sampled scenarios, make sure the
+`sampled_scenario_summary` path points to the CSV written by the genotype
+sampling workbook; it enumerates every matrix/manifest pair we just
+generated.
 
 # 2. Build the Run Tables
 
@@ -129,6 +147,8 @@ job_config <- make_job_config(
   p_star_grid = job_inputs$p_star_grid,
   seeds = job_inputs$seeds,
   data_scenarios = job_inputs$data_scenarios,
+  repo_root = job_inputs$repo_root,
+  sampled_scenario_summary = job_inputs$sampled_scenario_summary,
   runs_per_task = job_inputs$runs_per_task,
   email = job_inputs$email,
   output_root = job_inputs$output_root,
@@ -159,6 +179,29 @@ and model selection).
 job_config$tables$scenarios %>%
   select(scenario_id, data_scenario, L, y_noise, p_star,
          annotation_r2, inflate_match, gamma_shrink) %>%
+  kable()
+```
+
+## Data Matrices Per Scenario
+
+```{r preview-matrices}
+matrix_summary <- job_config$tables$data_matrices %>%
+  group_by(data_scenario) %>%
+  summarise(
+    n_matrices = dplyr::n(),
+    participant_counts = paste(sort(unique(participant_count[!is.na(participant_count)])), collapse = ", "),
+    snp_range = if (all(is.na(snps_post))) "n/a" else {
+      rng <- range(snps_post, na.rm = TRUE)
+      if (rng[1] == rng[2]) as.character(rng[1]) else paste(rng, collapse = " - ")
+    },
+    .groups = "drop"
+  )
+matrix_summary %>% kable()
+
+job_config$tables$data_matrices %>%
+  select(matrix_id, data_scenario, dataset_label, participant_count, snps_post, snp_set) %>%
+  arrange(data_scenario, matrix_id) %>%
+  slice_head(n = 10) %>%
   kable()
 ```
 

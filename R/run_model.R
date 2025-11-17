@@ -131,7 +131,26 @@ generate_data_for_run <- function(run_row, job_config) {
     return(generate_simulation_data(spec))
   }
 
-  stop(sprintf("Unsupported data_scenario '%s'.", scenario))
+  matrix_row <- dplyr::filter(
+    job_config$tables$data_matrices,
+    .data$matrix_id == !!run_row$matrix_id,
+    .data$data_scenario == !!scenario
+  )
+  if (!nrow(matrix_row)) {
+    stop("No matrix metadata found for scenario '", scenario, "' (matrix_id=", run_row$matrix_id, ").")
+  }
+  repo_root <- job_config$paths$repo_root %||% getwd()
+  X_mat <- load_sampled_matrix(matrix_row, repo_root = repo_root)
+  spec <- list(
+    seed = as.integer(run_row$seed),
+    p_star = as.integer(run_row$p_star),
+    y_noise = as.numeric(run_row$y_noise),
+    annotation_r2 = as.numeric(run_row$annotation_r2),
+    inflate_match = as.numeric(run_row$inflate_match),
+    gamma_shrink = as.numeric(run_row$gamma_shrink),
+    effect_sd = run_row[["effect_sd"]] %||% 1
+  )
+  generate_simulation_data(spec, base_X = X_mat)
 }
 
 #' Fit a use case with the susine backend, handling optional annealing/model averaging.
@@ -318,4 +337,34 @@ write_run_outputs <- function(run_row,
   if (!is.null(model_result$extra)) {
     saveRDS(model_result$extra, file.path(run_dir, "subfits.rds"))
   }
+}
+
+resolve_matrix_absolute_path <- function(path, repo_root) {
+  if (is.null(path) || is.na(path) || !nzchar(path)) {
+    return(NA_character_)
+  }
+  repo_norm <- normalizePath(repo_root, winslash = "/", mustWork = TRUE)
+  candidate <- normalizePath(path, winslash = "/", mustWork = FALSE)
+  if (startsWith(candidate, "/") || grepl("^[A-Za-z]:/", candidate)) {
+    normalizePath(candidate, winslash = "/", mustWork = TRUE)
+  } else {
+    normalizePath(file.path(repo_norm, candidate), winslash = "/", mustWork = TRUE)
+  }
+}
+
+load_sampled_matrix <- function(matrix_row, repo_root) {
+  matrix_path <- matrix_row$matrix_path[[1]]
+  abs_matrix <- resolve_matrix_absolute_path(matrix_path, repo_root)
+  if (is.na(abs_matrix)) {
+    stop("Matrix path is missing for scenario ", matrix_row$data_scenario[[1]])
+  }
+  col_spec <- readr::cols(.default = readr::col_double())
+  col_spec$cols$participant_ID <- readr::col_character()
+  tbl <- readr::read_tsv(abs_matrix, col_types = col_spec, progress = FALSE)
+  if ("participant_ID" %in% names(tbl)) {
+    tbl <- dplyr::select(tbl, -participant_ID)
+  }
+  X <- as.matrix(tbl)
+  storage.mode(X) <- "numeric"
+  X
 }

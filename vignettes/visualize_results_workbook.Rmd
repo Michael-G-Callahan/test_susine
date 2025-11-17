@@ -38,8 +38,8 @@ knitr::opts_chunk$set(
 
 ```{r load-data, message=FALSE}
 # INPUTS
-job_name = "susine_sim_grid_demo"
-job_id = "46054709"
+job_name = "susine_sim_informed_grid"
+job_id = "46208799"
 
 # Load necessary libraries
 library(dplyr)
@@ -134,7 +134,7 @@ ggplot(compute_metrics_summary, aes(x = y_noise, y = AUPRC, color = label)) +
 # Filter and summarise informed models (and baseline a_i) for L = p_star = 5
 eps <- 1e-12
 informed_metrics_raw <- model_metrics_full %>%
-  filter(use_case_id %in% c("a_i", "b_i", "b_ii")) %>%
+  filter(use_case_id %in% c("a_i", "b_i", "b_ii", "b_iii", "b_iv")) %>%
   filter(L == 5, p_star == 5)
 
 informed_metrics_summary <- informed_metrics_raw %>%
@@ -184,47 +184,71 @@ ggplot(combined_metrics, aes(x = y_noise, y = AUPRC, color = label, linetype = g
 ```
 
 ```{r informed-model-annotation-quality-grid, fig.width=10, fig.height=6}
-# Filter for a specific noise level to replicate the structure of the example plot
-# Let's choose y_noise = 0.7 as a representative example
-informed_metrics_fixed_noise_raw <- informed_metrics_raw %>%
-  filter(y_noise == 0.5)
+# Focus on a representative noise level
+target_noise <- 0.9
+plot_title <- sprintf("AUPRC vs. Annotation R^2 (at y_noise = %.2f)", target_noise)
 
-# Extract the baseline AUPRC to use as a reference line
-# We'll use the summarized data for a stable baseline
+informed_metrics_fixed_noise_raw <- informed_metrics_raw %>%
+  filter(y_noise == target_noise)
+
+# Baseline (a_i) averaged over seeds to keep a single horizontal reference
 baseline_auprc <- informed_metrics_summary %>%
-  filter(y_noise == 0.5, use_case_id == "a_i") %>%
-  pull(AUPRC) %>%
-  unique()
+  filter(y_noise == target_noise, use_case_id == "a_i") %>%
+  summarise(AUPRC = mean(AUPRC, na.rm = TRUE), .groups = "drop") %>%
+  pull(AUPRC)
+
+# Helper to summarise mean AUPRC per annotation/prior setting
+summarise_annotations <- function(df) {
+  df %>%
+    group_by(label, annotation_r2, inflate_match, gamma_shrink) %>%
+    summarise(AUPRC = mean(AUPRC, na.rm = TRUE), .groups = "drop")
+}
 
 # Data for main facets (models with defined gamma_shrink)
-plot_data <- informed_metrics_fixed_noise_raw %>%
-  filter(!is.na(gamma_shrink))
+plot_summary <- informed_metrics_fixed_noise_raw %>%
+  filter(!is.na(gamma_shrink)) %>%
+  summarise_annotations()
 
-# Data to overlay on all facets (model with NA gamma_shrink)
+# Replicate the NA-gamma model across each facet so its line is drawn everywhere
+overlay_summary <- tibble()
 overlay_data <- informed_metrics_fixed_noise_raw %>%
   filter(is.na(gamma_shrink) & use_case_id != "a_i")
 
-# Get the gamma levels from the main plot data to duplicate the overlay data
-gamma_levels <- unique(plot_data$gamma_shrink)
-
-# Duplicate overlay_data for each level of gamma_shrink
-overlay_data_expanded <- do.call(rbind, lapply(gamma_levels, function(gamma) {
-  overlay_data$gamma_shrink <- gamma
-  overlay_data
-}))
+if (nrow(overlay_data) && length(unique(plot_summary$gamma_shrink))) {
+  overlay_summary <- purrr::map_df(unique(plot_summary$gamma_shrink), function(gamma) {
+    overlay_data %>%
+      mutate(gamma_shrink = gamma)
+  }) %>%
+    summarise_annotations()
+}
 
 # Plot AUPRC vs annotation_r2, faceted by inflate_match and gamma_shrink
-ggplot(plot_data, aes(x = factor(annotation_r2), y = AUPRC, color = label)) +
-  geom_hline(aes(yintercept = baseline_auprc, linetype = "Baseline (Uninformed)"), color = "red") +
-  # geom_boxplot(width = 0.2, position = position_dodge(0.8)) +
-  stat_summary(fun = mean, geom = "line", aes(group = label), position = position_dodge(0.8)) +
-  # Add the overlay layer for the 'sigma naive' model
-  # geom_boxplot(data = overlay_data_expanded, width = 0.2, position = position_dodge(0.8)) +
-  stat_summary(data = overlay_data_expanded, fun = mean, geom = "line", aes(group = label), position = position_dodge(0.8)) +
-  facet_grid(gamma_shrink ~ inflate_match, labeller = label_bquote(rows = gamma == .(gamma_shrink), cols = inflate == .(inflate_match))) +
+annotation_breaks <- sort(unique(plot_summary$annotation_r2))
+
+plot_obj <- ggplot(plot_summary, aes(x = annotation_r2, y = AUPRC, color = label, group = label)) +
+  geom_hline(
+    data = tibble(baseline_auprc = baseline_auprc),
+    aes(yintercept = baseline_auprc, linetype = "Baseline (Uninformed)"),
+    color = "red"
+  ) +
+  geom_line() +
+  geom_point()
+
+if (nrow(overlay_summary)) {
+  plot_obj <- plot_obj +
+    geom_line(data = overlay_summary, aes(group = label), linetype = "solid", alpha = 0.8) +
+    geom_point(data = overlay_summary, alpha = 0.8)
+}
+
+plot_obj +
+  facet_grid(
+    gamma_shrink ~ inflate_match,
+    labeller = label_bquote(rows = gamma == .(gamma_shrink), cols = inflate == .(inflate_match))
+  ) +
+  scale_x_continuous(breaks = annotation_breaks, labels = scales::number_format(accuracy = 0.01)) +
   labs(
-    title = "AUPRC vs. Annotation R^2 (at y_noise=0.7)",
-    subtitle = "Faceted by annotation noise parameters. Boxplots show distribution over seeds.",
+    title = plot_title,
+    subtitle = "Faceted by annotation noise parameters; lines show mean over seeds.",
     x = "Annotation R^2 (Causal Variance Explained)",
     y = "AUPRC",
     color = "Model",
