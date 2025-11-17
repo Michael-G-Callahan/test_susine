@@ -417,24 +417,42 @@ assign_task_ids <- function(runs,
   } else {
     shard_size_output <- as.integer(shard_size_output %||% n_runs)
     shard_ids <- ((runs$run_id - 1L) %/% shard_size_output)
-    n_tasks <- max(1L, ceiling(n_runs / runs_per_task))
-    shard_levels <- sort(unique(shard_ids))
-    shards_per_task <- ceiling(length(shard_levels) / n_tasks)
-    shard_groups <- ceiling(seq_along(shard_levels) / shards_per_task)
-    shard_task_map <- tibble::tibble(
-      shard_idx = shard_levels,
-      task_id = shard_groups
-    )
+    shard_summary <- tibble::tibble(
+      shard_idx = shard_ids,
+      run_id = runs$run_id
+    ) %>%
+      dplyr::group_by(shard_idx) %>%
+      dplyr::summarise(run_count = dplyr::n(), .groups = "drop") %>%
+      dplyr::arrange(shard_idx)
+
+    shard_task_map <- shard_summary %>%
+      dplyr::mutate(
+        task_id = {
+          task_ids <- integer(n())
+          current_task <- 1L
+          current_count <- 0L
+          for (i in seq_len(n())) {
+            shard_runs <- run_count[i]
+            if (current_count > 0L && (current_count + shard_runs) > runs_per_task) {
+              current_task <- current_task + 1L
+              current_count <- 0L
+            }
+            task_ids[i] <- current_task
+            current_count <- current_count + shard_runs
+          }
+          task_ids
+        }
+      ) %>%
+      dplyr::select(shard_idx, task_id)
+
     runs_shuffled <- runs %>%
       dplyr::mutate(
         shard_idx = shard_ids,
         shuffled_order = seq_len(n_runs)
       ) %>%
       dplyr::left_join(shard_task_map, by = "shard_idx") %>%
-      dplyr::mutate(
-        task_id = ifelse(is.na(task_id), max(shard_task_map$task_id), task_id)
-      ) %>%
-      dplyr::select(-shard_idx)
+      dplyr::select(-shard_idx) %>%
+      dplyr::arrange(run_id)
   }
 
   tasks_summary <- runs_shuffled %>%
