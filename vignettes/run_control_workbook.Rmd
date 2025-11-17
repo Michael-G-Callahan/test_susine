@@ -47,6 +47,10 @@ work off a single artifact. Flip `write_legacy_snp_csv = TRUE` inside
 `job_inputs` if you still need the historical `pip.csv`/`truth.csv`
 pairs for ad hoc debugging.
 
+Set `verbose_file_output = FALSE` to suppress the per-run directories and
+stream metrics directly into shard-level CSV/Parquet files during the
+simulation (recommended for large sweeps with strict filesystem quotas).
+
 
 # 1. Specify the Job
 
@@ -109,6 +113,7 @@ job_inputs <- list(
   # Credible-set evaluation knobs
   credible_set_rho = 0.95,
   purity_threshold = 0.50,
+  verbose_file_output = FALSE,
   write_legacy_snp_csv = FALSE
 )
 ```
@@ -161,6 +166,7 @@ job_config <- make_job_config(
   output_root = job_inputs$output_root,
   credible_set_rho = job_inputs$credible_set_rho,
   purity_threshold = job_inputs$purity_threshold,
+  verbose_file_output = job_inputs$verbose_file_output,
   write_legacy_snp_csv = job_inputs$write_legacy_snp_csv,
   grid_mode = job_inputs$grid_mode,
   pair_L_p_star = job_inputs$pair_L_p_star

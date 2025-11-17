@@ -388,28 +388,54 @@ make_run_tables <- function(use_case_ids,
 #'
 #' @param runs Run tibble from [make_run_tables()].
 #' @param runs_per_task Integer number of runs assigned to each SLURM task.
+#' @param shard_size_output Integer shard size used when grouping runs.
 #' @param shuffle_seed Optional seed for reproducible shuffling (default: NULL for random).
+#' @param shuffle Logical; when FALSE, assign runs to tasks in run_id order (no shuffling).
 #' @return Tibble with `task_id` and `shuffled_order` columns added, and supporting task summary.
 #' @keywords internal
-assign_task_ids <- function(runs, runs_per_task, shuffle_seed = NULL) {
+assign_task_ids <- function(runs,
+                            runs_per_task,
+                            shard_size_output = 1000L,
+                            shuffle_seed = NULL,
+                            shuffle = TRUE) {
   if (runs_per_task < 1) {
     stop("runs_per_task must be >= 1")
   }
 
   n_runs <- nrow(runs)
 
-  # Create shuffled order
-  if (!is.null(shuffle_seed)) {
-    set.seed(shuffle_seed)
+  if (isTRUE(shuffle)) {
+    if (!is.null(shuffle_seed)) {
+      set.seed(shuffle_seed)
+    }
+    shuffled_idx <- sample(n_runs)
+    runs_shuffled <- runs %>%
+      dplyr::mutate(shuffled_order = shuffled_idx) %>%
+      dplyr::arrange(shuffled_order) %>%
+      dplyr::mutate(task_id = ((dplyr::row_number() - 1L) %/% as.integer(runs_per_task)) + 1L) %>%
+      dplyr::arrange(run_id)
+  } else {
+    shard_size_output <- as.integer(shard_size_output %||% n_runs)
+    shard_ids <- ((runs$run_id - 1L) %/% shard_size_output)
+    n_tasks <- max(1L, ceiling(n_runs / runs_per_task))
+    shard_levels <- sort(unique(shard_ids))
+    shards_per_task <- ceiling(length(shard_levels) / n_tasks)
+    shard_groups <- ceiling(seq_along(shard_levels) / shards_per_task)
+    shard_task_map <- tibble::tibble(
+      shard_idx = shard_levels,
+      task_id = shard_groups
+    )
+    runs_shuffled <- runs %>%
+      dplyr::mutate(
+        shard_idx = shard_ids,
+        shuffled_order = seq_len(n_runs)
+      ) %>%
+      dplyr::left_join(shard_task_map, by = "shard_idx") %>%
+      dplyr::mutate(
+        task_id = ifelse(is.na(task_id), max(shard_task_map$task_id), task_id)
+      ) %>%
+      dplyr::select(-shard_idx)
   }
-  shuffled_idx <- sample(n_runs)
-
-  # Assign task_ids based on shuffled order
-  runs_shuffled <- runs %>%
-    dplyr::mutate(shuffled_order = shuffled_idx) %>%
-    dplyr::arrange(shuffled_order) %>%
-    dplyr::mutate(task_id = ((dplyr::row_number() - 1L) %/% as.integer(runs_per_task)) + 1L) %>%
-    dplyr::arrange(run_id)  # unshuffle back to original run_id order
 
   tasks_summary <- runs_shuffled %>%
     dplyr::group_by(task_id) %>%
@@ -434,6 +460,8 @@ assign_task_ids <- function(runs, runs_per_task, shuffle_seed = NULL) {
 #' @param output_root Root directory for outputs (default `output`).
 #' @param credible_set_rho Credible set cumulative PIP threshold.
 #' @param purity_threshold Minimum purity to keep CS in filtered summary.
+#' @param verbose_file_output When FALSE, avoid writing per-run artifacts and
+#'   stream metrics directly into shard-level files (reduces filesystem load).
 #' @param write_legacy_snp_csv Logical; when TRUE, retain the legacy per-run
 #'   `pip.csv` and `truth.csv` files alongside the new compact SNP table.
 #' @param anneal_settings Named list for tempering runs.
@@ -463,6 +491,7 @@ make_job_config <- function(job_name,
                             credible_set_rho = 0.95,
                             purity_threshold = 0.5,
                             write_legacy_snp_csv = FALSE,
+                            verbose_file_output = TRUE,
                             grid_mode = c("full", "minimal"),
                             pair_L_p_star = FALSE,
                             # NEW: sharding + padding controls (can be overridden per call)
@@ -503,7 +532,14 @@ make_job_config <- function(job_name,
     data_matrix_catalog = data_matrix_catalog
   )
 
-  runs_tasks <- assign_task_ids(tables$runs, runs_per_task = runs_per_task)
+  shuffle_runs <- isTRUE(verbose_file_output)
+  runs_tasks <- assign_task_ids(
+    tables$runs,
+    runs_per_task = runs_per_task,
+    shard_size_output = shard_size_output,
+    shuffle_seed = NULL,
+    shuffle = shuffle_runs
+  )
 
   list(
     job = list(
@@ -514,6 +550,7 @@ make_job_config <- function(job_name,
       runs_per_task = runs_per_task,
       credible_set_rho = credible_set_rho,
       purity_threshold = purity_threshold,
+      verbose_file_output = isTRUE(verbose_file_output),
       write_legacy_snp_csv = isTRUE(write_legacy_snp_csv),
       compute = list(
         anneal = anneal_settings,

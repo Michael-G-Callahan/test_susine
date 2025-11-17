@@ -296,6 +296,11 @@ collect_shard_metrics <- function(job_name,
   if (!dir.exists(results_dir)) {
     stop("Results directory not found: ", results_dir)
   }
+  job_config_path <- file.path(run_history_dir, "job_config.json")
+  if (!file.exists(job_config_path)) {
+    stop("Job configuration not found: ", job_config_path)
+  }
+  job_config <- load_job_config(job_config_path)
 
   shard_size <- shard_size %||% infer_job_shard_size(job_name, parent_job_id, output_root)
   if (!is.finite(shard_size) || shard_size <= 0L) {
@@ -349,6 +354,21 @@ collect_shard_metrics <- function(job_name,
       model_path = model_path,
       effect_path = effect_path,
       snps_path = snps_path
+    )))
+  }
+
+  verbose_output <- isTRUE(job_config$job$verbose_file_output)
+  if (!verbose_output) {
+    if (!quiet) {
+      message(sprintf("Shard %03d already aggregated during run (verbose_file_output = FALSE).", shard_index))
+    }
+    return(invisible(list(
+      shard_index = shard_index,
+      skipped = TRUE,
+      validation_path = NA_character_,
+      model_path = NA_character_,
+      effect_path = NA_character_,
+      snps_path = NA_character_
     )))
   }
 

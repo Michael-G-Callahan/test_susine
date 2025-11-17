@@ -96,9 +96,11 @@ shard_size <- job_config$job$slurm$shard_size_output
 if (is.null(shard_size) || shard_size <= 0) {
   shard_size <- 1000L
 }
+verbose_file_output <- isTRUE(job_config$job$verbose_file_output)
 
 cat("Loaded run_table with", nrow(run_table), "runs\n")
 cat("Shard size (results sharding):", shard_size, "\n")
+cat("Verbose file output:", verbose_file_output, "\n")
 ```
 
 # 3. Build the Shard Manifest
@@ -129,7 +131,15 @@ Each shard can be validated and combined in parallel via the new
 SLURM script, then submit it (either manually or by setting `auto_launch <- TRUE`
 on an HPC login node with `sbatch` available).
 
-```{r shard-collection-job}
+```{r shard-collection-note, echo=FALSE, results='asis'}
+if (!verbose_file_output) {
+  cat("**Note:** `verbose_file_output = FALSE`, so shard CSVs/Parquet files were\n",
+      "materialised during the run. You can skip submitting the shard collection job\n",
+      "unless you want to re-run validation manually.\n")
+}
+```
+
+```{r shard-collection-job, eval=verbose_file_output}
 collection_job <- list(
   job_label = paste0(job_inputs$job_name, "_collect"),
   time = "00:30:00",
@@ -185,9 +195,12 @@ Each shard task writes three files inside `combined/shards/`:
 - `snps_shard-XXX.parquet` (merged SNP-level table for that shard)
 
 Use the table below to verify progress before aggregating.
+When `verbose_file_output = FALSE`, these files should already be present
+without running the shard collection job.
 
 ```{r shard-status}
 shards_dir <- file.path(results_dir, "combined", "shards")
+dir.create(shards_dir, showWarnings = FALSE, recursive = TRUE)
 shard_status <- shard_manifest %>%
   mutate(
     validation_file = file.path(shards_dir, sprintf("validation_%s.csv", shard_dir)),

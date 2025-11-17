@@ -16,6 +16,7 @@ BugReports: https://github.com/Michael-G-Callahan/test.susine/issues
 Imports:
     susine,
     arrow,
+    filelock,
     dplyr,
     magrittr,
     tidyr,
