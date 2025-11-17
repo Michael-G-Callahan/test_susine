@@ -45,18 +45,26 @@ job_id = "46208799"
 library(dplyr)
 library(readr)
 library(ggplot2)
+library(arrow)
 
 # Define file paths
 run_table_path <- file.path(here(), "output", "run_history", job_name, job_id, "run_table.csv")
 use_cases_path <- file.path(here(), "output", "run_history", job_name, job_id, "use_cases.csv")
 effect_metrics_path <- file.path(here(), "output", "slurm_output", job_name, job_id, "combined", "effect_metrics_combined.csv")
 model_metrics_path <- file.path(here(), "output", "slurm_output", job_name, job_id, "combined", "model_metrics_combined.csv")
+snps_metrics_path <- file.path(here(), "output", "slurm_output", job_name, job_id, "combined", "snps_combined.parquet")
 
 # Load the data
 run_table <- read_csv(run_table_path)
 use_cases <- read_csv(use_cases_path)
 effect_metrics <- read_csv(effect_metrics_path)
 model_metrics <- read_csv(model_metrics_path)
+snps_metrics <- if (file.exists(snps_metrics_path)) {
+  arrow::read_parquet(snps_metrics_path)
+} else {
+  warning("snps_combined.parquet not found; SNP-level plots unavailable.")
+  tibble::tibble()
+}
 
 # Create full_run_settings
 full_run_settings <- left_join(run_table, use_cases, by = "use_case_id")
@@ -74,7 +82,15 @@ effect_metrics_full <- left_join(effect_metrics_renamed, full_run_settings, by =
 # Display the first few rows of the joined tables
 head(model_metrics_full)
 head(effect_metrics_full)
+if (nrow(snps_metrics)) {
+  head(snps_metrics)
+}
 ```
+
+The `snps_metrics` tibble now exposes every SNP’s PIP, truth label, and
+per-run metadata, making it straightforward to rebuild the Fig. 2 power
+versus FDR curves or the Fig. 3 credible-set summaries directly from a
+single source.
 
 ## Compared amongst uninformed models
 

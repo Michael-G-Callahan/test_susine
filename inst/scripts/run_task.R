@@ -1,7 +1,27 @@
 #!/usr/bin/env Rscript
 
-library(devtools)
-devtools::load_all(".")
+suppressPackageStartupMessages(library(devtools))
+
+find_repo_root <- function() {
+  cmd <- commandArgs(trailingOnly = FALSE)
+  file_arg <- "--file="
+  file_idx <- grep(file_arg, cmd)
+  script_dir <- NULL
+  if (length(file_idx)) {
+    script_path <- sub(file_arg, "", cmd[file_idx[1]])
+    script_dir <- dirname(normalizePath(script_path, winslash = "/", mustWork = TRUE))
+  } else if (!is.null(sys.frames()[[1]]$ofile)) {
+    script_dir <- dirname(normalizePath(sys.frames()[[1]]$ofile, winslash = "/", mustWork = TRUE))
+  }
+  if (is.null(script_dir)) {
+    script_dir <- getwd()
+  }
+  normalizePath(file.path(script_dir, "..", ".."), winslash = "/", mustWork = TRUE)
+}
+
+repo_root <- find_repo_root()
+setwd(repo_root)
+devtools::load_all(repo_root)
 
 parse_args <- function(args) {
   out <- list()

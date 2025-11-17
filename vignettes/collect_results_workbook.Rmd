@@ -24,6 +24,7 @@ library(readr)
 library(knitr)
 library(purrr)
 library(fs)
+library(arrow)
 ```
 
 # Results Collection Workflow
@@ -181,6 +182,7 @@ Each shard task writes three files inside `combined/shards/`:
 - `validation_shard-XXX.csv`
 - `model_metrics_shard-XXX.csv`
 - `effect_metrics_shard-XXX.csv` (optional when no effects were detected)
+- `snps_shard-XXX.parquet` (merged SNP-level table for that shard)
 
 Use the table below to verify progress before aggregating.
 
@@ -191,14 +193,16 @@ shard_status <- shard_manifest %>%
     validation_file = file.path(shards_dir, sprintf("validation_%s.csv", shard_dir)),
     model_file = file.path(shards_dir, sprintf("model_metrics_%s.csv", shard_dir)),
     effect_file = file.path(shards_dir, sprintf("effect_metrics_%s.csv", shard_dir)),
+    snps_file = file.path(shards_dir, sprintf("snps_%s.parquet", shard_dir)),
     validation_ready = file.exists(validation_file),
     model_ready = file.exists(model_file),
-    effect_ready = file.exists(effect_file)
+    effect_ready = file.exists(effect_file),
+    snps_ready = file.exists(snps_file)
   )
 
 kable(
   shard_status %>%
-    select(shard_idx, run_count, validation_ready, model_ready, effect_ready),
+    select(shard_idx, run_count, validation_ready, model_ready, effect_ready, snps_ready),
   caption = "Shard completion status"
 )
 ```
@@ -264,13 +268,30 @@ if (length(effect_files)) {
   write_csv(effect_metrics_combined, effect_output_path)
 } else {
   effect_metrics_combined <- tibble::tibble()
-  cat("No effect metrics detected across shards; skipping effect CSV output.\n")
+cat("No effect metrics detected across shards; skipping effect CSV output.\n")
 }
 
 cat("\nSaved combined tables to:", combined_dir, "\n")
 ```
 
-# 8. Basic Diagnostics
+# 8. Combine SNP-Level Tables
+
+```{r combine-snps}
+if (!all(shard_status$snps_ready)) {
+  pending <- shard_status$shard_dir[!shard_status$snps_ready]
+  stop("Missing SNP shard files for: ", paste(pending, collapse = ", "))
+}
+
+snps_files <- shard_status$snps_file[shard_status$snps_ready]
+snps_combined <- purrr::map_dfr(snps_files, ~arrow::read_parquet(.x))
+cat("Combined", nrow(snps_combined), "SNP rows\n")
+
+snps_output_path <- file.path(combined_dir, "snps_combined.parquet")
+arrow::write_parquet(snps_combined, snps_output_path, compression = "zstd")
+cat("Saved SNP table to:", snps_output_path, "\n")
+```
+
+# 9. Basic Diagnostics
 
 Check for missing values and anomalies in aggregated results.
 
@@ -312,9 +333,13 @@ cat("  Overall NA%:",
 cat("\n  Effect metrics rows:", nrow(effect_metrics_combined), "\n")
 cat("  Effect metrics columns:", ncol(effect_metrics_combined), "\n")
 cat("  Total NAs:", sum(is.na(effect_metrics_combined)), "\n")
+
+cat("\n  SNP rows:", nrow(snps_combined), "\n")
+cat("  SNP columns:", ncol(snps_combined), "\n")
+cat("  SNP-level NAs:", sum(is.na(snps_combined)), "\n")
 ```
 
-# 9. Visual Summary
+# 10. Visual Summary
 
 Display NA percentages by seed in a table.
 
@@ -333,7 +358,7 @@ na_summary <- model_metrics_combined %>%
 kable(na_summary, caption = "NA Percentage by Seed")
 ```
 
-# 10. Delete Shard Folders (Optional)
+# 11. Delete Shard Folders (Optional)
 
 Once you've confirmed the data looks good, set `delete_shards <- TRUE` to
 clean up the original per-run shard folders while keeping the combined and
@@ -361,15 +386,16 @@ if (delete_shards) {
 }
 ```
 
-# 11. Summary
+# 12. Summary
 
 Results collection complete! 
 
 **Combined tables saved to:**
 - `effect_metrics_combined.csv`
 - `model_metrics_combined.csv`
+- `snps_combined.parquet`
 
 **Original shard folders:** `slurm_output/<job_name>/<parent_job_id>/shard-*/`
-(Delete by setting `delete_shards <- TRUE` in step 10)
+(Delete by setting `delete_shards <- TRUE` in step 11)
 
 You can now proceed to the summary and visualization workbook.

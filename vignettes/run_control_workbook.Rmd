@@ -41,6 +41,13 @@ The generated artifacts follow the repository layout:
 -   During execution, results land in `output/slurm_output/<job_name>/<parent_job_id>/…`.
 -   SLURM stdout/stderr are re-homed to `output/slurm_prints/<job_name>/<parent_job_id>/…`.
 
+Each completed run now writes a compact `snps.parquet` file that merges
+the combined PIPs with the causal truth table so downstream routines can
+work off a single artifact. Flip `write_legacy_snp_csv = TRUE` inside
+`job_inputs` if you still need the historical `pip.csv`/`truth.csv`
+pairs for ad hoc debugging.
+
+
 # 1. Specify the Job
 
 Edit the list below to reflect the sweep you want to perform. Every
@@ -67,18 +74,17 @@ job_inputs <- list(
   output_root = here("output"),
 
   # Grid mode: "full" for Cartesian product, "minimal" for lightweight smoke tests
-  grid_mode = "full",
+  grid_mode = "minimal",
 
   # Which predefined model variants to include (see use_case_catalog())
-  use_cases = c("a_i", "a_ii", "a_iii", "a_iv",
-                "b_i", "b_ii", "b_iii",
-                "c_i", "c_ii"),
+  use_cases = c("a_i", "a_ii",
+                "b_i", "b_ii", "b_iii"),
 
   # Simulation settings (vectorised; full factorial is taken)
-  L_grid = c(1, 5, 10, 20),
-  y_noise = c(0.50, 0.7, 0.9, 0.95),
-  p_star_grid = c(1, 5, 10, 20),
-  pair_L_p_star = TRUE,
+  L_grid = c(10),
+  y_noise = c(0.6, 0.8, 0.9, 0.95),
+  p_star_grid = c(1, 2, 3, 4, 5),
+  pair_L_p_star = FALSE,
 
   # Prior quality grid parameters
   annotation_r2 = c(0.25, 0.50, 0.75, 0.9),
@@ -90,11 +96,11 @@ job_inputs <- list(
 
   # Number of runs to assign to each SLURM array task
   # (~2112 total runs / 150 per task = ~14 tasks, well under SLURM QoS limits)
-  runs_per_task = 300,
+  runs_per_task = 3751,
 
   # Data scenarios: "simulation_n3" for the built-in toy data, or scenario_{1-4}
   # for the sampled genotype panels (see vignette for details)
-  data_scenarios = c("simulation_n3"),
+  data_scenarios = c("scenario_1"),
 
   # Repository root + sampled scenario manifest (used for scenario_1-4 matrices)
   repo_root = here(),
@@ -102,7 +108,8 @@ job_inputs <- list(
 
   # Credible-set evaluation knobs
   credible_set_rho = 0.95,
-  purity_threshold = 0.50
+  purity_threshold = 0.50,
+  write_legacy_snp_csv = FALSE
 )
 ```
 
@@ -154,6 +161,7 @@ job_config <- make_job_config(
   output_root = job_inputs$output_root,
   credible_set_rho = job_inputs$credible_set_rho,
   purity_threshold = job_inputs$purity_threshold,
+  write_legacy_snp_csv = job_inputs$write_legacy_snp_csv,
   grid_mode = job_inputs$grid_mode,
   pair_L_p_star = job_inputs$pair_L_p_star
 )
@@ -208,15 +216,30 @@ job_config$tables$data_matrices %>%
 ## Run Counts and Tasks
 
 ```{r preview-runs}
-summarise_job_config(job_config) %>%
-  arrange(use_case_id, L, y_noise, p_star) %>%
+table_limit <- 100
+run_summary <- summarise_job_config(job_config) %>%
+  arrange(use_case_id, L, y_noise, p_star)
+
+run_summary %>%
+  slice_head(n = table_limit) %>%
   kable()
+
+if (nrow(run_summary) > table_limit) {
+  cat("\nShowing", table_limit, "of", nrow(run_summary), "rows (set a smaller grid or inspect the CSV for full details).\n")
+}
 ```
 
 ```{r preview-tasks}
-job_config$tables$tasks %>%
-  arrange(task_id) %>%
+task_preview <- job_config$tables$tasks %>%
+  arrange(task_id)
+
+task_preview %>%
+  slice_head(n = table_limit) %>%
   kable()
+
+if (nrow(task_preview) > table_limit) {
+  cat("\nShowing", table_limit, "of", nrow(task_preview), "rows.\n")
+}
 ```
 
 Verify that the number of runs and tasks aligns with expectations. The

@@ -40,7 +40,18 @@ run_task <- function(job_name,
 #' @keywords internal
 load_job_config <- function(path) {
   cfg <- jsonlite::read_json(path, simplifyVector = TRUE)
-  cfg$tables$runs <- tibble::as_tibble(cfg$tables$runs)
+  runs_tbl <- tibble::as_tibble(cfg$tables$runs)
+  if (!"matrix_id" %in% names(runs_tbl)) {
+    alt_cols <- c("matrix_id.x", "matrix_id.y")
+    for (nm in alt_cols) {
+      if (nm %in% names(runs_tbl)) {
+        runs_tbl$matrix_id <- runs_tbl[[nm]]
+        break
+      }
+    }
+  }
+  runs_tbl <- dplyr::select(runs_tbl, -dplyr::any_of(c("matrix_id.x", "matrix_id.y")))
+  cfg$tables$runs <- runs_tbl
   cfg$tables$scenarios <- tibble::as_tibble(cfg$tables$scenarios)
   cfg$tables$tasks <- tibble::as_tibble(cfg$tables$tasks)
   cfg$tables$use_cases <- tibble::as_tibble(cfg$tables$use_cases)
@@ -313,30 +324,99 @@ write_run_outputs <- function(run_row,
     readr::write_csv(effect_metrics, file.path(run_dir, "effect_metrics.csv"))
   }
 
-  pip_tbl <- tibble::tibble(
-    snp_index = seq_along(evaluation$combined_pip),
-    pip = evaluation$combined_pip,
-    run_id = run_row$run_id,
-    task_id = run_row$task_id,
-    use_case_id = run_row$use_case_id,
-    seed = run_row$seed
+  snp_tbl <- build_snp_table(
+    run_row = run_row,
+    data_bundle = data_bundle,
+    evaluation = evaluation
   )
-  readr::write_csv(pip_tbl, file.path(run_dir, "pip.csv"))
+  write_snps_parquet(run_dir, snp_tbl)
 
-  truth_tbl <- tibble::tibble(
-    snp_index = seq_along(data_bundle$beta),
-    beta = data_bundle$beta,
-    mu_0 = data_bundle$mu_0,
-    sigma_0_2 = data_bundle$sigma_0_2,
-    prior_weight = data_bundle$prior_inclusion_weights,
-    causal = as.integer(seq_along(data_bundle$beta) %in% data_bundle$causal_idx)
-  )
-  readr::write_csv(truth_tbl, file.path(run_dir, "truth.csv"))
+  if (should_write_legacy_snp_csv(job_config)) {
+    pip_tbl <- tibble::tibble(
+      snp_index = seq_along(evaluation$combined_pip),
+      pip = evaluation$combined_pip,
+      run_id = run_row$run_id,
+      task_id = run_row$task_id,
+      use_case_id = run_row$use_case_id,
+      seed = run_row$seed
+    )
+    readr::write_csv(pip_tbl, file.path(run_dir, "pip.csv"))
+
+    truth_tbl <- tibble::tibble(
+      snp_index = seq_along(data_bundle$beta),
+      beta = data_bundle$beta,
+      mu_0 = data_bundle$mu_0,
+      sigma_0_2 = data_bundle$sigma_0_2,
+      prior_weight = data_bundle$prior_inclusion_weights,
+      causal = as.integer(seq_along(data_bundle$beta) %in% data_bundle$causal_idx)
+    )
+    readr::write_csv(truth_tbl, file.path(run_dir, "truth.csv"))
+  }
 
   saveRDS(model_result$fit, file.path(run_dir, "fit.rds"))
   if (!is.null(model_result$extra)) {
     saveRDS(model_result$extra, file.path(run_dir, "subfits.rds"))
   }
+}
+
+build_snp_table <- function(run_row,
+                            data_bundle,
+                            evaluation) {
+  pip <- evaluation$combined_pip
+  beta <- data_bundle$beta
+  n <- length(pip)
+  if (length(beta) != n) {
+    stop("combined PIP length does not match beta length for run ", run_row$run_id)
+  }
+
+  safe_vec <- function(x, fill = NA_real_) {
+    if (is.null(x)) {
+      rep(fill, n)
+    } else {
+      x
+    }
+  }
+
+  base_tbl <- tibble::tibble(
+    snp_index = seq_len(n),
+    pip = pip,
+    beta = beta,
+    mu_0 = safe_vec(data_bundle$mu_0),
+    sigma_0_2 = safe_vec(data_bundle$sigma_0_2),
+    prior_weight = safe_vec(data_bundle$prior_inclusion_weights),
+    causal = as.integer(seq_len(n) %in% data_bundle$causal_idx)
+  )
+
+  metadata_cols <- c(
+    "run_id",
+    "task_id",
+    "use_case_id",
+    "seed",
+    "data_scenario",
+    "matrix_id",
+    "L",
+    "p_star",
+    "y_noise",
+    "annotation_r2",
+    "inflate_match",
+    "gamma_shrink"
+  )
+  present <- intersect(metadata_cols, names(run_row))
+  if (!length(present)) {
+    return(base_tbl)
+  }
+  meta_row <- tibble::as_tibble(run_row[, present, drop = FALSE])
+  meta_rep <- meta_row[rep(1, n), , drop = FALSE]
+  dplyr::bind_cols(meta_rep, base_tbl)
+}
+
+write_snps_parquet <- function(run_dir, snp_tbl) {
+  snp_path <- file.path(run_dir, "snps.parquet")
+  arrow::write_parquet(snp_tbl, snp_path, compression = "zstd")
+}
+
+should_write_legacy_snp_csv <- function(job_config) {
+  isTRUE(job_config$job$write_legacy_snp_csv)
 }
 
 resolve_matrix_absolute_path <- function(path, repo_root) {

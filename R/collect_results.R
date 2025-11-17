@@ -169,9 +169,17 @@ validate_single_run <- function(run_row,
     }
   }
 
-  # pip, truth, fit files
-  expect_file(file.path(run_dir, "pip.csv"), "pip.csv")
-  expect_file(file.path(run_dir, "truth.csv"), "truth.csv")
+  # snp-level outputs (prefer Parquet; allow legacy CSV pair)
+  snps_path <- file.path(run_dir, "snps.parquet")
+  if (!file.exists(snps_path)) {
+    pip_ok <- expect_file(file.path(run_dir, "pip.csv"), "pip.csv")
+    truth_ok <- expect_file(file.path(run_dir, "truth.csv"), "truth.csv")
+    if (!pip_ok || !truth_ok) {
+      issues <- c(issues, "Missing snps.parquet and/or legacy pip/truth CSV outputs")
+    }
+  }
+
+  # fit file
   expect_file(file.path(run_dir, "fit.rds"), "fit.rds")
 
   tibble::tibble(
@@ -219,6 +227,43 @@ read_run_model_metrics <- function(run_id,
       NULL
     }
   )
+}
+
+#' Read SNP-level outputs, preferring the compact Parquet artifact.
+#' @keywords internal
+read_run_snp_metrics <- function(run_id,
+                                 results_dir,
+                                 shard_size) {
+  run_dir <- run_output_dir(run_id, results_dir, shard_size)
+  snp_path <- file.path(run_dir, "snps.parquet")
+  if (file.exists(snp_path)) {
+    return(arrow::read_parquet(snp_path))
+  }
+
+  pip_path <- file.path(run_dir, "pip.csv")
+  truth_path <- file.path(run_dir, "truth.csv")
+  if (!file.exists(pip_path) || !file.exists(truth_path)) {
+    return(NULL)
+  }
+
+  pip_tbl <- tryCatch(
+    readr::read_csv(pip_path, show_col_types = FALSE),
+    error = function(e) {
+      warning(sprintf("Failed to read pip.csv for run %s: %s", run_id, conditionMessage(e)))
+      NULL
+    }
+  )
+  truth_tbl <- tryCatch(
+    readr::read_csv(truth_path, show_col_types = FALSE),
+    error = function(e) {
+      warning(sprintf("Failed to read truth.csv for run %s: %s", run_id, conditionMessage(e)))
+      NULL
+    }
+  )
+  if (is.null(pip_tbl) || is.null(truth_tbl)) {
+    return(NULL)
+  }
+  dplyr::left_join(pip_tbl, truth_tbl, by = "snp_index")
 }
 
 #' Collect validation + metrics for a single shard into consolidated CSV files.
@@ -291,8 +336,9 @@ collect_shard_metrics <- function(job_name,
   validation_path <- file.path(shards_combined_dir, sprintf("validation_%s.csv", shard_dir_name))
   model_path <- file.path(shards_combined_dir, sprintf("model_metrics_%s.csv", shard_dir_name))
   effect_path <- file.path(shards_combined_dir, sprintf("effect_metrics_%s.csv", shard_dir_name))
+  snps_path <- file.path(shards_combined_dir, sprintf("snps_%s.parquet", shard_dir_name))
 
-  if (!force && file.exists(validation_path) && file.exists(model_path)) {
+  if (!force && file.exists(validation_path) && file.exists(model_path) && file.exists(snps_path)) {
     if (!quiet) {
       message(sprintf("Shard %03d already collected; skipping (force = FALSE).", shard_index))
     }
@@ -301,20 +347,23 @@ collect_shard_metrics <- function(job_name,
       skipped = TRUE,
       validation_path = validation_path,
       model_path = model_path,
-      effect_path = effect_path
+      effect_path = effect_path,
+      snps_path = snps_path
     )))
   }
 
   validation_list <- vector("list", nrow(shard_runs))
   model_list <- vector("list", nrow(shard_runs))
   effect_list <- vector("list", nrow(shard_runs))
+  snps_list <- vector("list", nrow(shard_runs))
 
   for (i in seq_len(nrow(shard_runs))) {
     run_row <- shard_runs[i, , drop = FALSE]
-    validation_list[[i]] <- validate_single_run(run_row, results_dir, shard_size)
-    model_list[[i]] <- read_run_model_metrics(run_row$run_id, results_dir, shard_size)
-    effect_list[[i]] <- read_run_effect_metrics(run_row$run_id, results_dir, shard_size)
-  }
+      validation_list[[i]] <- validate_single_run(run_row, results_dir, shard_size)
+      model_list[[i]] <- read_run_model_metrics(run_row$run_id, results_dir, shard_size)
+      effect_list[[i]] <- read_run_effect_metrics(run_row$run_id, results_dir, shard_size)
+      snps_list[[i]] <- read_run_snp_metrics(run_row$run_id, results_dir, shard_size)
+    }
 
   validation_df <- dplyr::bind_rows(validation_list)
   readr::write_csv(validation_df, validation_path)
@@ -334,6 +383,13 @@ collect_shard_metrics <- function(job_name,
     unlink(effect_path)
   }
 
+  compact_snps <- purrr::compact(snps_list)
+  if (!length(compact_snps)) {
+    stop(sprintf("Shard %03d has no readable SNP-level outputs.", shard_index))
+  }
+  snps_df <- dplyr::bind_rows(compact_snps)
+  arrow::write_parquet(snps_df, snps_path, compression = "zstd")
+
   if (!quiet) {
     issues <- sum(validation_df$has_issues)
     message(sprintf(
@@ -349,7 +405,8 @@ collect_shard_metrics <- function(job_name,
     skipped = FALSE,
     validation_path = validation_path,
     model_path = model_path,
-    effect_path = if (length(compact_effects)) effect_path else NA_character_
+    effect_path = if (length(compact_effects)) effect_path else NA_character_,
+    snps_path = snps_path
   ))
 }
 

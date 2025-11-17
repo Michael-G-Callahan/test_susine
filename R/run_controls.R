@@ -28,17 +28,22 @@ prior_quality_grid <- function(annotation_r2_levels = c(0.25, 0.5, 0.75),
 #' Convert an absolute path to one relative to the repository root.
 #' @keywords internal
 relativize_path <- function(path, root) {
-  if (is.null(path) || is.na(path) || !nzchar(path)) {
+  if (is.null(path)) {
     return(NA_character_)
   }
   root_norm <- normalizePath(root, winslash = "/", mustWork = TRUE)
-  path_norm <- normalizePath(path, winslash = "/", mustWork = FALSE)
-  prefix <- paste0(root_norm, "/")
-  if (startsWith(path_norm, prefix)) {
-    substring(path_norm, nchar(prefix) + 1L)
-  } else {
-    path_norm
-  }
+  purrr::map_chr(path, function(p) {
+    if (is.na(p) || !nzchar(p)) {
+      return(NA_character_)
+    }
+    path_norm <- normalizePath(p, winslash = "/", mustWork = FALSE)
+    prefix <- paste0(root_norm, "/")
+    if (startsWith(path_norm, prefix)) {
+      substring(path_norm, nchar(prefix) + 1L)
+    } else {
+      path_norm
+    }
+  })
 }
 
 #' Build a catalog of available design matrices for the requested scenarios.
@@ -106,6 +111,21 @@ build_data_matrix_catalog <- function(requested_scenarios,
     dplyr::mutate(matrix_id = dplyr::row_number())
 
   catalog
+}
+
+ensure_repo_root <- function(path) {
+  current <- normalizePath(path, winslash = "/", mustWork = TRUE)
+  sentinels <- c(".here", "DESCRIPTION")
+  repeat {
+    if (any(file.exists(file.path(current, sentinels)))) {
+      return(current)
+    }
+    parent <- dirname(current)
+    if (identical(parent, current)) {
+      return(current)
+    }
+    current <- parent
+  }
 }
 
 #' Construct the full run table for a job.
@@ -179,15 +199,18 @@ make_run_tables <- function(use_case_ids,
     ann_vals <- unique(prior_quality$annotation_r2)
     inflate_vals <- unique(prior_quality$inflate_match)
     gamma_vals <- unique(prior_quality$gamma_shrink)
-    if (!length(ann_vals)) {
-      ann_vals <- NA_real_
+    if (!length(ann_vals)) ann_vals <- NA_real_
+    if (!length(inflate_vals)) inflate_vals <- NA_real_
+    if (!length(gamma_vals)) gamma_vals <- NA_real_
+
+    candidate_matrices <- data_matrix_catalog %>%
+      dplyr::filter(.data$data_scenario %in% unique(data_scenarios)) %>%
+      dplyr::arrange(.data$data_scenario, .data$matrix_id) %>%
+      dplyr::pull(.data$matrix_id)
+    if (!length(candidate_matrices)) {
+      stop("No matrix metadata found for the requested scenarios.")
     }
-    if (!length(inflate_vals)) {
-      inflate_vals <- NA_real_
-    }
-    if (!length(gamma_vals)) {
-      gamma_vals <- NA_real_
-    }
+
     values <- list(
       data_scenario = unique(data_scenarios),
       L = unique(L_grid),
@@ -195,10 +218,12 @@ make_run_tables <- function(use_case_ids,
       p_star = unique(p_star_grid),
       annotation_r2 = ann_vals,
       inflate_match = inflate_vals,
-      gamma_shrink = gamma_vals
+      gamma_shrink = gamma_vals,
+      matrix_id = unique(candidate_matrices)
     )
     lengths <- vapply(values, length, integer(1))
-    n_rows <- max(lengths)
+    n_rows <- max(c(lengths, length(candidate_matrices)))
+
     tibble::tibble(
       data_scenario = rep_len(values$data_scenario, n_rows),
       L = rep_len(values$L, n_rows),
@@ -207,6 +232,7 @@ make_run_tables <- function(use_case_ids,
       annotation_r2 = rep_len(values$annotation_r2, n_rows),
       inflate_match = rep_len(values$inflate_match, n_rows),
       gamma_shrink = rep_len(values$gamma_shrink, n_rows),
+      matrix_id = rep_len(candidate_matrices, n_rows),
       prior_quality_id = seq_len(n_rows)
     ) %>%
       dplyr::mutate(scenario_id = seq_along(data_scenario))
@@ -218,12 +244,23 @@ make_run_tables <- function(use_case_ids,
     build_full_grid()
   }
 
-  scenario_matrix_map <- scenarios %>%
-    dplyr::select(scenario_id, data_scenario) %>%
-    dplyr::inner_join(
-      dplyr::filter(data_matrix_catalog, .data$data_scenario %in% unique(data_scenarios)),
-      by = "data_scenario"
-    )
+  matrix_catalog_subset <- dplyr::filter(data_matrix_catalog, .data$data_scenario %in% unique(data_scenarios))
+
+  scenario_matrix_map <- if ("matrix_id" %in% names(scenarios)) {
+    scenarios %>%
+      dplyr::select(scenario_id, data_scenario, matrix_id) %>%
+      dplyr::inner_join(
+        matrix_catalog_subset,
+        by = c("data_scenario", "matrix_id")
+      )
+  } else {
+    scenarios %>%
+      dplyr::select(scenario_id, data_scenario) %>%
+      dplyr::inner_join(
+        matrix_catalog_subset,
+        by = "data_scenario"
+      )
+  }
 
   if (!nrow(scenario_matrix_map)) {
     stop("No matrix metadata found for the requested scenarios.")
@@ -233,22 +270,35 @@ make_run_tables <- function(use_case_ids,
   if (!length(seed_values)) {
     stop("At least one seed must be supplied.")
   }
-  if (grid_mode == "minimal") {
-    seed_values <- seed_values[1]
+  seed_first <- seed_values[1]
+
+  runs <- if (grid_mode == "minimal") {
+    scenario_matrix_map %>%
+      dplyr::mutate(
+        use_case_id = rep_len(use_cases$use_case_id, dplyr::n()),
+        seed = seed_first
+      )
+  } else {
+    tidyr::expand_grid(
+      scenario_matrix_index = seq_len(nrow(scenario_matrix_map)),
+      use_case_id = use_cases$use_case_id,
+      seed = seed_values
+    ) %>%
+      dplyr::left_join(
+        scenario_matrix_map %>%
+          dplyr::mutate(scenario_matrix_index = dplyr::row_number()),
+        by = "scenario_matrix_index"
+      ) %>%
+      dplyr::select(-scenario_matrix_index)
   }
 
-  runs <- tidyr::expand_grid(
-    scenario_matrix_index = seq_len(nrow(scenario_matrix_map)),
-    use_case_id = use_cases$use_case_id,
-    seed = seed_values
-  ) %>%
-    dplyr::left_join(
-      scenario_matrix_map %>%
-        dplyr::mutate(scenario_matrix_index = dplyr::row_number()),
-      by = "scenario_matrix_index"
-    ) %>%
-    dplyr::select(-scenario_matrix_index) %>%
-    dplyr::left_join(scenarios, by = "scenario_id") %>%
+  scenario_join <- dplyr::select(
+    scenarios,
+    dplyr::all_of(setdiff(names(scenarios), c("data_scenario", "matrix_id")))
+  )
+
+  runs <- runs %>%
+    dplyr::left_join(scenario_join, by = "scenario_id") %>%
     dplyr::left_join(
       dplyr::select(use_cases, use_case_id, requires_prior_quality, mu_strategy, sigma_strategy),
       by = "use_case_id"
@@ -259,6 +309,25 @@ make_run_tables <- function(use_case_ids,
       needs_annotation = requires_prior_quality,
       needs_gamma = requires_prior_quality & sigma_strategy == "functional"
     ) %>%
+    {\(df) {
+      if (grid_mode == "minimal") {
+        gamma_pool <- prior_quality$gamma_shrink
+        gamma_pool <- gamma_pool[!is.na(gamma_pool)]
+        gamma_default <- if (length(gamma_pool)) gamma_pool[1] else 0
+        df %>%
+          dplyr::mutate(
+            annotation_r2 = dplyr::if_else(needs_annotation, annotation_r2, NA_real_),
+            inflate_match = dplyr::if_else(needs_annotation, inflate_match, NA_real_),
+            gamma_shrink = dplyr::case_when(
+              needs_gamma ~ dplyr::coalesce(gamma_shrink, gamma_default),
+              needs_annotation & !needs_gamma ~ NA_real_,
+              TRUE ~ NA_real_
+            )
+          )
+      } else {
+        df
+      }
+    }}() %>%
     dplyr::filter(
       !needs_annotation |
         (needs_gamma & !is.na(gamma_shrink)) |
@@ -365,6 +434,8 @@ assign_task_ids <- function(runs, runs_per_task, shuffle_seed = NULL) {
 #' @param output_root Root directory for outputs (default `output`).
 #' @param credible_set_rho Credible set cumulative PIP threshold.
 #' @param purity_threshold Minimum purity to keep CS in filtered summary.
+#' @param write_legacy_snp_csv Logical; when TRUE, retain the legacy per-run
+#'   `pip.csv` and `truth.csv` files alongside the new compact SNP table.
 #' @param anneal_settings Named list for tempering runs.
 #' @param model_average_settings Named list for model averaging runs.
 #' @param pair_L_p_star Logical; when TRUE, the full grid pairs `L` and `p_star` values 1-1
@@ -391,6 +462,7 @@ make_job_config <- function(job_name,
                             output_root = "output",
                             credible_set_rho = 0.95,
                             purity_threshold = 0.5,
+                            write_legacy_snp_csv = FALSE,
                             grid_mode = c("full", "minimal"),
                             pair_L_p_star = FALSE,
                             # NEW: sharding + padding controls (can be overridden per call)
@@ -409,6 +481,7 @@ make_job_config <- function(job_name,
 
   grid_mode <- match.arg(grid_mode)
   repo_root <- normalizePath(repo_root, winslash = "/", mustWork = TRUE)
+  repo_root <- ensure_repo_root(repo_root)
   if (is.null(data_matrix_catalog)) {
     data_matrix_catalog <- build_data_matrix_catalog(
       requested_scenarios = unique(data_scenarios),
@@ -441,6 +514,7 @@ make_job_config <- function(job_name,
       runs_per_task = runs_per_task,
       credible_set_rho = credible_set_rho,
       purity_threshold = purity_threshold,
+      write_legacy_snp_csv = isTRUE(write_legacy_snp_csv),
       compute = list(
         anneal = anneal_settings,
         model_average = model_average_settings
@@ -660,17 +734,21 @@ render_slurm_script <- function(job_config, run_task_script) {
 #' @export
 summarise_job_config <- function(job_config) {
   runs <- job_config$tables$runs
+  group_cols <- intersect(
+    c(
+      "data_scenario",
+      "matrix_id",
+      "use_case_id",
+      "L",
+      "y_noise",
+      "p_star",
+      "annotation_r2",
+      "inflate_match",
+      "gamma_shrink"
+    ),
+    names(runs)
+  )
   runs %>%
-    dplyr::group_by(
-      data_scenario,
-      matrix_id,
-      use_case_id,
-      L,
-      y_noise,
-      p_star,
-      annotation_r2,
-      inflate_match,
-      gamma_shrink
-    ) %>%
+    dplyr::group_by(dplyr::across(dplyr::all_of(group_cols))) %>%
     dplyr::summarise(n_runs = dplyr::n(), .groups = "drop")
 }
