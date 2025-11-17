@@ -24,10 +24,11 @@ run_task <- function(job_name,
     stop(sprintf("Task %s not found in job config.", task_id))
   }
   verbose_output <- isTRUE(job_config$job$verbose_file_output)
+  buffer_ctx <- NULL
   if (!verbose_output) {
-    job_config$.__shard_buffers__ <- new.env(parent = emptyenv())
-    job_config$.__buffer_base__ <- NULL
-    on.exit(flush_shard_buffers(job_config), add = TRUE)
+    buffer_ctx <- new.env(parent = emptyenv())
+    buffer_ctx$buffers <- new.env(parent = emptyenv())
+    buffer_ctx$base_output <- determine_base_output(job_config)
   }
 
   if (!quiet) {
@@ -36,8 +37,12 @@ run_task <- function(job_name,
 
   results <- purrr::map_dfr(seq_len(nrow(task_runs)), function(i) {
     run_row <- task_runs[i, , drop = FALSE]
-    execute_single_run(run_row, job_config, quiet = quiet)
+    execute_single_run(run_row, job_config, quiet = quiet, buffer_ctx = buffer_ctx)
   })
+
+  if (!is.null(buffer_ctx)) {
+    flush_shard_buffers(buffer_ctx)
+  }
 
   invisible(results)
 }
@@ -83,7 +88,7 @@ lookup_use_case <- function(job_config, use_case_id) {
 
 #' Execute a single run row: simulate data, fit model, and persist outputs.
 #' @keywords internal
-execute_single_run <- function(run_row, job_config, quiet = FALSE) {
+execute_single_run <- function(run_row, job_config, quiet = FALSE, buffer_ctx = NULL) {
   run_row <- tibble::as_tibble(run_row)
   use_case <- lookup_use_case(job_config, run_row$use_case_id)
   if (!nrow(use_case)) {
@@ -114,7 +119,8 @@ execute_single_run <- function(run_row, job_config, quiet = FALSE) {
     job_config = job_config,
     evaluation = eval_res,
     data_bundle = data_bundle,
-    model_result = model_result
+    model_result = model_result,
+    buffer_ctx = buffer_ctx
   )
 
   if (!quiet) {
@@ -274,7 +280,8 @@ write_run_outputs <- function(run_row,
                               job_config,
                               evaluation,
                               data_bundle,
-                              model_result) {
+                              model_result,
+                              buffer_ctx = NULL) {
 
   # Compute run-based output directory with sharding by run_id
   run_id_val <- as.integer(run_row$run_id)
@@ -282,20 +289,7 @@ write_run_outputs <- function(run_row,
   verbose_output <- isTRUE(job_config$job$verbose_file_output)
   
   # Construct base directory: slurm_output/<job_name>/<parent_id>
-  env_parent_id <- Sys.getenv("SUSINE_PARENT_ID", unset = "")
-  env_job_name <- Sys.getenv("SUSINE_JOB_NAME", unset = "")
-  
-  if (nzchar(env_parent_id) && nzchar(env_job_name)) {
-    # SLURM environment available
-    base_output <- file.path(
-      job_config$paths$slurm_output_dir,
-      env_job_name,
-      env_parent_id
-    )
-  } else {
-    # Fallback for local testing
-    base_output <- file.path(job_config$paths$slurm_output_dir, "local_test")
-  }
+  base_output <- determine_base_output(job_config)
   
   # Compute shard directory
   if (shard_size > 0) {
@@ -386,12 +380,10 @@ write_run_outputs <- function(run_row,
       saveRDS(model_result$extra, file.path(run_dir, "subfits.rds"))
     }
   } else {
-    if (is.null(job_config$.__buffer_base__)) {
-      job_config$.__buffer_base__ <- base_output
-    }
+    shard_label <- sprintf("shard-%03d", shard_idx)
     buffer_shard_outputs(
-      job_config = job_config,
-      shard_label = sprintf("shard-%03d", shard_idx),
+      buffer_ctx = buffer_ctx,
+      shard_label = shard_label,
       model_metrics = model_metrics,
       effect_metrics = effect_metrics,
       snp_tbl = snp_tbl,
@@ -456,6 +448,20 @@ write_snps_parquet <- function(run_dir, snp_tbl) {
   arrow::write_parquet(snp_tbl, snp_path, compression = "zstd")
 }
 
+determine_base_output <- function(job_config) {
+  env_parent_id <- Sys.getenv("SUSINE_PARENT_ID", unset = "")
+  env_job_name <- Sys.getenv("SUSINE_JOB_NAME", unset = "")
+  if (nzchar(env_parent_id) && nzchar(env_job_name)) {
+    file.path(
+      job_config$paths$slurm_output_dir,
+      env_job_name,
+      env_parent_id
+    )
+  } else {
+    file.path(job_config$paths$slurm_output_dir, "local_test")
+  }
+}
+
 build_validation_row <- function(run_row, shard_idx) {
   tibble::tibble(
     run_id = run_row$run_id,
@@ -465,17 +471,16 @@ build_validation_row <- function(run_row, shard_idx) {
   )
 }
 
-buffer_shard_outputs <- function(job_config,
+buffer_shard_outputs <- function(buffer_ctx,
                                  shard_label,
                                  model_metrics,
                                  effect_metrics,
                                  snp_tbl,
                                  validation_row) {
-  buf_env <- job_config$.__shard_buffers__
-  if (is.null(buf_env)) {
-    buf_env <- new.env(parent = emptyenv())
-    job_config$.__shard_buffers__ <- buf_env
+  if (is.null(buffer_ctx)) {
+    stop("Buffer context is missing for streamed shard outputs.")
   }
+  buf_env <- buffer_ctx$buffers
   buf <- buf_env[[shard_label]]
   if (is.null(buf)) {
     buf <- list(
@@ -500,12 +505,12 @@ buffer_shard_outputs <- function(job_config,
   buf_env[[shard_label]] <- buf
 }
 
-flush_shard_buffers <- function(job_config) {
-  buf_env <- job_config$.__shard_buffers__
+flush_shard_buffers <- function(buffer_ctx) {
+  buf_env <- buffer_ctx$buffers
   if (is.null(buf_env) || !length(ls(buf_env))) {
     return(invisible(NULL))
   }
-  base_output <- job_config$.__buffer_base__
+  base_output <- buffer_ctx$base_output
   if (is.null(base_output)) {
     warning("Buffered shard outputs found but base output directory is missing.")
     return(invisible(NULL))
@@ -527,8 +532,7 @@ flush_shard_buffers <- function(job_config) {
     )
     rm(list = label, envir = buf_env)
   }
-  job_config$.__shard_buffers__ <- NULL
-  job_config$.__buffer_base__ <- NULL
+  buffer_ctx$buffers <- new.env(parent = emptyenv())
 }
 
 write_shard_outputs <- function(base_output,
