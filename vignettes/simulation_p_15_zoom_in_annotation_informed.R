@@ -31,7 +31,7 @@ get_sigma_2_from_output = function(susine_output){
   return(output_sigma_2)
 }
 
-add_row_to_vary_p_df = function(results_df, i, L, X, y, oracle_inclusion_weights, beta){
+add_row_to_vary_p_df = function(results_df, i, L, X, y, beta){
   p = dim(X)[2]
   mu_0_inf = rep(0,p)
 
@@ -51,18 +51,12 @@ add_row_to_vary_p_df = function(results_df, i, L, X, y, oracle_inclusion_weights
                            prior_update_method = "none",
                            mu_0 = mu_0_inf,
                            max_iter = 1000)
-  susine_fit_oracle = susine(L, X, y,
-                             prior_update_method = "none",
-                             prior_inclusion_weights = oracle_inclusion_weights,
-                             mu_0 = mu_0_inf,
-                             max_iter = 1000)
 
   #Evaluation
   results_df = add_susine_diagnostics(results_df, X, i, susine_fit_var, "var", beta)
   results_df = add_susine_diagnostics(results_df, X, i, susine_fit_mean, "mean", beta)
   results_df = add_susine_diagnostics(results_df, X, i, susine_fit_both, "both", beta)
   results_df = add_susine_diagnostics(results_df, X, i, susine_fit_none, "naive", beta)
-  results_df = add_susine_diagnostics(results_df, X, i, susine_fit_oracle, "full-oracle", beta)
 
   #Run susine random
   susine_output <- susine(
@@ -255,8 +249,7 @@ n =  nrow(X)
 ############# Main - loop #######################################################
 
 metric_list = c("L2_", "R2_", "auc_", "pr_auc_", "sigma_2_", "mu_0_", "sigma_0_2_")
-model_list = c("var", "both", "naive", "inform", "inform-EB","full-oracle",
-               "random")
+model_list = c("var", "both", "naive", "inform", "inform-EB", "random")
 
 metric_model_list <- expand.grid(metric_list, model_list)
 metric_model_list <- apply(metric_model_list, 1, paste0, collapse = "")
@@ -279,13 +272,7 @@ for (k in 1:nrow(loop_df)){
   beta = get_beta(v,p,p_star,beta_noise)
   y = simulate_y_noise(X, beta, noise, seed+1)
 
-  #Model settings -- not dependent on L
-  active_betas = 1*(beta!=0)
-  oracle_inclusion_weights = matrix(active_betas / sum(active_betas),nrow = 1,ncol = p)
-  mu_0_inf = v
-  mu_0_oracle = beta
-
-  results_df = add_row_to_vary_p_df(results_df, i, L, X, y, oracle_inclusion_weights, beta)
+  results_df = add_row_to_vary_p_df(results_df, i, L, X, y, beta)
 }
 
 ############## Output ######################################################
@@ -307,4 +294,3 @@ if (experiment_ID == nrow(experiment_df)){
 }
 
 print("Completed.")
-

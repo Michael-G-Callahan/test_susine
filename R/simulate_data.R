@@ -62,7 +62,7 @@ simulate_effect_sizes <- function(p,
 #' @param base_sigma2 Optional baseline prior variance.
 #' @param effect_sd Nominal standard deviation used for causal effects (fallback when beta variance is zero).
 #'
-#' @return List with `mu_0`, `sigma_0_2`, `prior_inclusion_weights`, and `observed_r2`.
+#' @return List with `mu_0`, `sigma_0_2`, and `observed_r2`.
 #' @keywords internal
 simulate_priors <- function(beta,
                             annotation_r2,
@@ -119,13 +119,9 @@ simulate_priors <- function(beta,
     sigma_0_2 <- rep(base_sigma2, p)
   }
 
-  scores <- abs(mu_0) + 1e-6
-  prior_weights <- scores / sum(scores)
-
   list(
     mu_0 = mu_0,
     sigma_0_2 = sigma_0_2,
-    prior_inclusion_weights = prior_weights,
     observed_r2 = observed_r2
   )
 }
@@ -211,7 +207,6 @@ generate_simulation_data <- function(spec,
     sigma2 = phenotype$sigma2,
     mu_0 = priors$mu_0,
     sigma_0_2 = priors$sigma_0_2,
-    prior_inclusion_weights = priors$prior_inclusion_weights,
     causal_idx = effects$causal_idx,
     annotation_r2_observed = priors$observed_r2,
     annotation_r2_target = spec$annotation_r2 %||% NA_real_,

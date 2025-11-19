@@ -29,6 +29,10 @@ run_task <- function(job_name,
     buffer_ctx <- new.env(parent = emptyenv())
     buffer_ctx$buffers <- new.env(parent = emptyenv())
     buffer_ctx$base_output <- determine_base_output(job_config)
+    buffer_ctx$flush_every <- job_config$job$buffer_flush_interval %||% 100L
+    if (is.null(buffer_ctx$flush_every) || buffer_ctx$flush_every <= 0) {
+      buffer_ctx$flush_every <- Inf
+    }
   }
 
   if (!quiet) {
@@ -37,7 +41,11 @@ run_task <- function(job_name,
 
   results <- purrr::map_dfr(seq_len(nrow(task_runs)), function(i) {
     run_row <- task_runs[i, , drop = FALSE]
-    execute_single_run(run_row, job_config, quiet = quiet, buffer_ctx = buffer_ctx)
+    res <- execute_single_run(run_row, job_config, quiet = quiet, buffer_ctx = buffer_ctx)
+    if (!is.null(buffer_ctx) && (i %% buffer_ctx$flush_every == 0)) {
+      flush_shard_buffers(buffer_ctx)
+    }
+    res
   })
 
   if (!is.null(buffer_ctx)) {
@@ -196,7 +204,6 @@ run_use_case <- function(use_case, run_row, data_bundle, job_config) {
 
   mu_0 <- if (mu_strategy %in% c("functional", "eb_mu")) data_bundle$mu_0 else 0
   sigma_0_2 <- if (sigma_strategy %in% c("functional", "eb_sigma")) data_bundle$sigma_0_2 else NULL
-  pi_weights <- NULL
 
   extra <- use_case$extra_compute[[1]]
   if (length(extra) && is.na(extra)) {
@@ -211,7 +218,6 @@ run_use_case <- function(use_case, run_row, data_bundle, job_config) {
     y = data_bundle$y,
     mu_0 = mu_0,
     sigma_0_2 = sigma_0_2,
-    prior_inclusion_weights = pi_weights,
     prior_update_method = use_case$prior_update_method[[1]],
     verbose = FALSE
   )
@@ -302,9 +308,6 @@ write_run_outputs <- function(run_row,
   
   if (verbose_output) {
     ensure_dir(run_dir)
-  } else {
-    shard_dir <- dirname(run_dir)
-    ensure_dir(shard_dir)
   }
 
   model_metrics <- dplyr::mutate(
@@ -323,10 +326,8 @@ write_run_outputs <- function(run_row,
 
   format_effects <- function(effects_df, label) {
     if (is.null(effects_df) || !nrow(effects_df)) return(NULL)
-    indices <- vapply(effects_df$indices, function(idx) paste(idx, collapse = " "), character(1))
     dplyr::mutate(
-      dplyr::select(effects_df, -indices),
-      indices = indices,
+      dplyr::select(effects_df, -dplyr::any_of("indices")),
       filtering = label,
       run_id = run_row$run_id,
       task_id = run_row$task_id,
@@ -368,7 +369,6 @@ write_run_outputs <- function(run_row,
       beta = data_bundle$beta,
       mu_0 = data_bundle$mu_0,
       sigma_0_2 = data_bundle$sigma_0_2,
-      prior_weight = data_bundle$prior_inclusion_weights,
       causal = as.integer(seq_along(data_bundle$beta) %in% data_bundle$causal_idx)
     )
     readr::write_csv(truth_tbl, file.path(run_dir, "truth.csv"))
@@ -410,42 +410,20 @@ build_snp_table <- function(run_row,
     }
   }
 
-  base_tbl <- tibble::tibble(
+  tibble::tibble(
+    run_id = run_row$run_id,
     snp_index = seq_len(n),
     pip = pip,
     beta = beta,
     mu_0 = safe_vec(data_bundle$mu_0),
     sigma_0_2 = safe_vec(data_bundle$sigma_0_2),
-    prior_weight = safe_vec(data_bundle$prior_inclusion_weights),
     causal = as.integer(seq_len(n) %in% data_bundle$causal_idx)
   )
-
-  metadata_cols <- c(
-    "run_id",
-    "task_id",
-    "use_case_id",
-    "seed",
-    "data_scenario",
-    "matrix_id",
-    "L",
-    "p_star",
-    "y_noise",
-    "annotation_r2",
-    "inflate_match",
-    "gamma_shrink"
-  )
-  present <- intersect(metadata_cols, names(run_row))
-  if (!length(present)) {
-    return(base_tbl)
-  }
-  meta_row <- tibble::as_tibble(run_row[, present, drop = FALSE])
-  meta_rep <- meta_row[rep(1, n), , drop = FALSE]
-  dplyr::bind_cols(meta_rep, base_tbl)
 }
 
 write_snps_parquet <- function(run_dir, snp_tbl) {
   snp_path <- file.path(run_dir, "snps.parquet")
-  arrow::write_parquet(snp_tbl, snp_path, compression = "zstd")
+  write_compact_snp_parquet(snp_tbl, snp_path)
 }
 
 determine_base_output <- function(job_config) {
@@ -583,7 +561,10 @@ append_shard_csv <- function(dir, shard_label, prefix, data) {
   shard_file <- file.path(dir, sprintf("%s_%s.csv", prefix, shard_label))
   lock_file <- paste0(shard_file, ".lock")
   lock <- filelock::lock(lock_file, exclusive = TRUE, timeout = 60000)
-  on.exit(filelock::unlock(lock), add = TRUE)
+  on.exit({
+    filelock::unlock(lock)
+    if (file.exists(lock_file)) unlink(lock_file)
+  }, add = TRUE)
   exists <- file.exists(shard_file)
   readr::write_csv(
     data,
@@ -598,12 +579,44 @@ append_shard_parquet <- function(dir, shard_label, prefix, data) {
   shard_file <- file.path(dir, sprintf("%s_%s.parquet", prefix, shard_label))
   lock_file <- paste0(shard_file, ".lock")
   lock <- filelock::lock(lock_file, exclusive = TRUE, timeout = 60000)
-  on.exit(filelock::unlock(lock), add = TRUE)
+  on.exit({
+    filelock::unlock(lock)
+    if (file.exists(lock_file)) unlink(lock_file)
+  }, add = TRUE)
   if (file.exists(shard_file)) {
     existing <- arrow::read_parquet(shard_file)
     data <- dplyr::bind_rows(existing, data)
   }
-  arrow::write_parquet(data, shard_file, compression = "zstd")
+  if (identical(prefix, "snps")) {
+    write_compact_snp_parquet(data, shard_file)
+  } else {
+    arrow::write_parquet(data, shard_file, compression = "zstd")
+  }
+}
+
+# Write SNP parquet with reduced precision for numeric columns to cut size.
+write_compact_snp_parquet <- function(snp_tbl, path) {
+  snp_tbl <- dplyr::mutate(
+    snp_tbl,
+    run_id = as.integer(run_id),
+    snp_index = as.integer(snp_index),
+    pip = as.numeric(pip),
+    beta = as.numeric(beta),
+    mu_0 = as.numeric(mu_0),
+    sigma_0_2 = as.numeric(sigma_0_2),
+    causal = as.integer(causal)
+  )
+  snp_schema <- arrow::schema(
+    run_id = arrow::int32(),
+    snp_index = arrow::int32(),
+    pip = arrow::float32(),
+    beta = arrow::float32(),
+    mu_0 = arrow::float32(),
+    sigma_0_2 = arrow::float32(),
+    causal = arrow::int8()
+  )
+  snp_table <- arrow::Table$create(snp_tbl, schema = snp_schema)
+  arrow::write_parquet(snp_table, path, compression = "zstd")
 }
 
 should_write_legacy_snp_csv <- function(job_config) {
