@@ -64,12 +64,12 @@ mode).
 ```{r job-inputs}
 job_inputs <- list(
   # REQUIRED: unique slug for this run
-  job_name = "susine_sim_grid_demo",
+  job_name = "susie_scen_1_recreation",
   
   HPC = TRUE,
   
   mem = "2G",
-  time = "02:59:59",
+  time = "23:59:59",
 
   # Email used for SLURM notifications
   email = "mgc5166@psu.edu",
@@ -78,7 +78,7 @@ job_inputs <- list(
   output_root = here("output"),
 
   # Grid mode: "full" for Cartesian product, "minimal" for lightweight smoke tests
-  grid_mode = "minimal",
+  grid_mode = "full",
 
   # Which predefined model variants to include (see use_case_catalog())
   use_cases = c("a_i", "a_ii",
@@ -91,7 +91,7 @@ job_inputs <- list(
   pair_L_p_star = FALSE,
 
   # Prior quality grid parameters
-  annotation_r2 = c(0.25, 0.50, 0.75, 0.9),
+  annotation_r2 = c(0.2, 0.4, 0.6, 0.8),
   inflate_match = c(0, 0.5, 1),
   gamma_shrink = c(0.4, 0.8),
 
@@ -100,7 +100,7 @@ job_inputs <- list(
 
   # Number of runs to assign to each SLURM array task
   # (~2112 total runs / 150 per task = ~14 tasks, well under SLURM QoS limits)
-  runs_per_task = 3751,
+  runs_per_task = 3751, #5,
 
   # Data scenarios: "simulation_n3" for the built-in toy data, or scenario_{1-4}
   # for the sampled genotype panels (see vignette for details)
@@ -283,7 +283,7 @@ if (commit_artifacts) {
 ```{r test the first run locally}
 # Define paths and arguments
 run_task_script <- here("inst", "scripts", "run_task.R")
-job_name <- "susie_paper_scenario_1_recreation"
+job_name <- "susie_scen_1_recreation"
 task_id <- "1" # Using the first task for testing
 job_root <- here("output")
 # Note: config_path now points to temp folder, not run_history
@@ -307,7 +307,7 @@ system(command)
 ```
 
 ```{r debug run_task function}
-job_name   <- "susie_paper_scenario_1_recreation"
+job_name   <- "susie_scen_1_recreation"
 task_id    <- 1L
 job_root   <- here("output")
 config_path <- here("output", "temp", job_name, "job_config.json")
@@ -316,7 +316,7 @@ quiet      <- FALSE
 options(error = quote(browser(skipCalls = 1)))  # drop into the debugger on error
 on.exit(options(error = NULL), add = TRUE)
 
-# debugonce(run_task)
+debugonce(run_task)
 
 test_susine::run_task(
   job_name   = job_name,
@@ -330,7 +330,7 @@ test_susine::run_task(
 
 ```{r run-all-tasks-locally}
 run_task_script <- here("inst", "scripts", "run_task.R")
-job_name <- "susine_sim_grid_demo"
+job_name <- "susie_scen_1_recreation"
 job_root <- here("output")
 config_path <- file.path(job_root, "temp", job_name, "job_config.json")
 
