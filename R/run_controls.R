@@ -483,6 +483,7 @@ make_job_config <- function(job_name,
                             purity_threshold = 0.5,
                             write_legacy_snp_csv = FALSE,
                             verbose_file_output = TRUE,
+                            buffer_flush_interval = 100L,
                             grid_mode = c("full", "minimal"),
                             pair_L_p_star = FALSE,
                             # NEW: sharding + padding controls (can be overridden per call)
@@ -542,6 +543,7 @@ make_job_config <- function(job_name,
       purity_threshold = purity_threshold,
       verbose_file_output = isTRUE(verbose_file_output),
       write_legacy_snp_csv = isTRUE(write_legacy_snp_csv),
+      buffer_flush_interval = as.integer(buffer_flush_interval),
       compute = list(
         anneal = anneal_settings,
         model_average = model_average_settings
@@ -594,8 +596,10 @@ write_job_artifacts <- function(job_config,
   ensure_dir(paths$temp_dir)
 
   job_json_path <- file.path(paths$temp_dir, "job_config.json")
+  job_config_json <- job_config
+  job_config_json$tables$runs <- NULL
   jsonlite::write_json(
-    job_config,
+    job_config_json,
     path = job_json_path,
     auto_unbox = TRUE,
     digits = NA,
@@ -731,8 +735,13 @@ render_slurm_script <- function(job_config, run_task_script) {
     '  # Pre-create all shard directories to avoid race conditions',
     '  SLURM_OUTPUT_JOB_DIR="${SLURM_OUTPUT_BASE}/${JOBNAME}/${PARENT_ID}"',
     '  if [ "${SHARD_SIZE_OUTPUT}" -gt 0 ]; then',
-    '    # Read max run_id from run_table.csv (header + data)',
-    '    MAX_RUN_ID=$(tail -1 "${FINAL_HISTORY_DIR}/run_table.csv" | cut -d, -f1)',
+    '    # Read max run_id from run_table.csv (do not assume sorted)',
+    '    RUN_TABLE="${FINAL_HISTORY_DIR}/run_table.csv"',
+    '    if [ -f "${RUN_TABLE}" ]; then',
+    '      MAX_RUN_ID=$(awk -F, \'NR==1 {for(i=1;i<=NF;i++){if($i=="run_id"){col=i;break}} next} col && $col ~ /^[0-9]+$/ {if($col>max) max=$col} END {print (max+0)}\' "${RUN_TABLE}")',
+    '    else',
+    '      MAX_RUN_ID=0',
+    '    fi',
     '    MAX_SHARD=$(( (MAX_RUN_ID - 1) / SHARD_SIZE_OUTPUT ))',
     '    for ((i=0; i<=MAX_SHARD; i++)); do',
     '      SHARD_DIR="$(printf "shard-%03d" "$i")"',

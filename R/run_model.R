@@ -16,7 +16,7 @@ run_task <- function(job_name,
                      config_path = NULL,
                      quiet = FALSE) {
   cfg_path <- config_path %||% file.path(job_root, "run_history", job_name, "job_config.json")
-  job_config <- load_job_config(cfg_path)
+  job_config <- load_job_config(cfg_path, task_id_filter = as.integer(task_id))
   runs_tbl <- job_config$tables$runs
   task_id <- as.integer(task_id)
   task_runs <- dplyr::filter(runs_tbl, task_id == !!task_id)
@@ -56,10 +56,28 @@ run_task <- function(job_name,
 }
 
 #' Load a job configuration JSON file and coerce tibbles.
+#' When task_id_filter is provided, the runs table is filtered to that task,
+#' using the on-disk run_table.csv alongside the config when available.
 #' @keywords internal
-load_job_config <- function(path) {
+load_job_config <- function(path, task_id_filter = NULL) {
   cfg <- jsonlite::read_json(path, simplifyVector = TRUE)
-  runs_tbl <- tibble::as_tibble(cfg$tables$runs)
+
+  runs_tbl <- cfg$tables$runs
+
+  if (is.null(runs_tbl)) {
+    run_tbl_path <- file.path(dirname(path), "run_table.csv")
+    if (!file.exists(run_tbl_path)) {
+      stop("Run table not found: ", run_tbl_path)
+    }
+    runs_tbl <- readr::read_csv(run_tbl_path, show_col_types = FALSE)
+  } else {
+    runs_tbl <- tibble::as_tibble(runs_tbl)
+  }
+
+  if (!is.null(task_id_filter)) {
+    runs_tbl <- dplyr::filter(runs_tbl, task_id == !!as.integer(task_id_filter))
+  }
+
   if (!"matrix_id" %in% names(runs_tbl)) {
     alt_cols <- c("matrix_id.x", "matrix_id.y")
     for (nm in alt_cols) {
