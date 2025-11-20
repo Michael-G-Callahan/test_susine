@@ -152,6 +152,8 @@ prior_quality <- prior_quality_grid(
 job_config <- make_job_config(
   job_name = job_inputs$job_name,
   HPC = job_inputs$HPC,
+  time = job_inputs$time,
+  mem = job_inputs$mem,
   use_case_ids = job_inputs$use_cases,
   L_grid = job_inputs$L_grid,
   y_noise_grid = job_inputs$y_noise,
