@@ -5,8 +5,8 @@ output:
     toc: true
     toc_depth: 2
     number_sections: true
-editor_options: 
-  markdown: 
+editor_options:
+  markdown:
     wrap: 72
 ---
 
@@ -29,8 +29,8 @@ library(arrow)
 
 # Results Collection Workflow
 
-This workbook validates simulation outputs, combines metrics into master
-tables, and performs basic diagnostics on collected results.
+This workbook validates task-level staging outputs, then aggregates them
+into job-level tables outside of the staging folder.
 
 # 1. Specify the Job
 
@@ -39,7 +39,7 @@ Provide the job name and parent array ID from your completed run.
 ```{r job-inputs}
 job_inputs <- list(
   # Job identifier (from run_history folder name)
-  job_name = "susine_sim_grid_demo",
+  job_name = "susie_sim_grid_demo",
   
   # Parent SLURM array job ID (from run_history/job_name/[PARENT_ID]/)
   parent_job_id = "45832058",
@@ -51,7 +51,8 @@ job_inputs <- list(
 
 # 2. Load Run Table and Paths
 
-Read the run configuration and establish paths to input/output.
+Read the run configuration, establish paths, and confirm that staging
+exists.
 
 ```{r setup-paths}
 run_history_dir <- file.path(
@@ -68,20 +69,21 @@ results_dir <- file.path(
   job_inputs$parent_job_id
 )
 
-combined_dir <- file.path(results_dir, "combined")
+staging_dir <- file.path(results_dir, "combined", "staging")
+combined_dir <- file.path(results_dir, "combined", "aggregated")
 
-# Verify paths exist
+dir.create(combined_dir, showWarnings = FALSE, recursive = TRUE)
+
 if (!dir.exists(run_history_dir)) {
   stop("Run history directory not found: ", run_history_dir)
 }
 if (!dir.exists(results_dir)) {
   stop("Results directory not found: ", results_dir)
 }
+if (!dir.exists(staging_dir)) {
+  stop("Staging directory not found: ", staging_dir)
+}
 
-# Create combined output directory
-dir.create(combined_dir, showWarnings = FALSE, recursive = TRUE)
-
-# Load run table
 run_table <- read_csv(
   file.path(run_history_dir, "run_table.csv"),
   show_col_types = FALSE
@@ -92,323 +94,74 @@ if (!file.exists(job_config_path)) {
   stop("Job configuration not found: ", job_config_path)
 }
 job_config <- test_susine:::load_job_config(job_config_path)
-shard_size <- job_config$job$slurm$shard_size_output
-if (is.null(shard_size) || shard_size <= 0) {
-  shard_size <- 1000L
-}
 verbose_file_output <- isTRUE(job_config$job$verbose_file_output)
 
 cat("Loaded run_table with", nrow(run_table), "runs\n")
-cat("Shard size (results sharding):", shard_size, "\n")
 cat("Verbose file output:", verbose_file_output, "\n")
+cat("Staging dir:", staging_dir, "\n")
 ```
 
-# 3. Build the Shard Manifest
+# 3. Index Task/Flush Outputs
 
-Each shard holds up to `shard_size` runs. Summarise the run distribution up
-front so we can launch one collection task per shard instead of looping over
-every run inside this workbook.
+List every file written by each task/flush and get a quick glimpse at the
+coverage.
 
-```{r shard-manifest}
-shard_manifest <- test_susine::build_shard_manifest(
+```{r index-staging}
+staging_index <- test_susine::index_staging_outputs(
+  job_name = job_inputs$job_name,
+  parent_job_id = job_inputs$parent_job_id,
+  output_root = job_inputs$output_root
+)
+
+cat("Discovered", nrow(staging_index), "staging files across",
+    length(unique(staging_index$task_id)), "tasks\n")
+
+kable(head(staging_index, 10), caption = "Sample of staging files")
+```
+
+# 4. Validate Staging Files
+
+Ensure each CSV/Parquet is readable before aggregation.
+
+```{r validate-staging}
+validation <- test_susine::validate_staging_outputs(staging_index)
+
+if (nrow(validation)) {
+  fail_count <- sum(!validation$ok, na.rm = TRUE)
+  cat("Validation failures:", fail_count, "\n")
+  if (fail_count > 0) {
+    print(dplyr::filter(validation, !ok))
+    stop("Fix unreadable staging files before aggregating.")
+  }
+} else {
+  cat("No staging files found to validate.\n")
+}
+```
+
+# 5. Aggregate to Job-Level Outputs
+
+Combine all task/flush artifacts into consolidated tables outside of
+the staging directory.
+
+```{r aggregate}
+agg <- test_susine::aggregate_staging_outputs(
   job_name = job_inputs$job_name,
   parent_job_id = job_inputs$parent_job_id,
   output_root = job_inputs$output_root,
-  shard_size = shard_size
+  validate = FALSE,  # already validated above
+  output_dir = combined_dir
 )
 
-manifest_path <- file.path(combined_dir, "shard_manifest.csv")
-write_csv(shard_manifest, manifest_path)
+cat("Aggregated outputs written to:", agg$output_dir, "\n")
 
-cat("Detected", nrow(shard_manifest), "shards (up to", shard_size, "runs each)\n")
-kable(shard_manifest, caption = "Shard manifest")
-```
 
-# 4. Kick Off Shard Collection
-
-Each shard can be validated and combined in parallel via the new
-`collect_shard.R` helper. Adjust the settings below, knit the chunk to write a
-SLURM script, then submit it (either manually or by setting `auto_launch <- TRUE`
-on an HPC login node with `sbatch` available).
-
-```{r shard-collection-note, echo=FALSE, results='asis'}
-if (!verbose_file_output) {
-  cat("**Note:** `verbose_file_output = FALSE`, so shard CSVs/Parquet files were\n",
-      "materialised during the run. You can skip submitting the shard collection job\n",
-      "unless you want to re-run validation manually.\n")
-}
-```
-
-```{r shard-collection-job, eval=verbose_file_output}
-collection_job <- list(
-  job_label = paste0(job_inputs$job_name, "_collect"),
-  time = "00:30:00",
-  mem = "4G",
-  cpus = 1,
-  partition = NULL,
-  email = if (!is.null(job_config$job$email)) job_config$job$email else NA_character_,
-  HPC = isTRUE(job_config$job$HPC),
-  quiet = TRUE,
-  force = FALSE,
-  auto_launch = FALSE
-)
-
-collect_script_path <- here("inst", "scripts", "collect_shard.R")
-
-collection_script <- test_susine::write_shard_collection_job(
-  job_name = job_inputs$job_name,
-  parent_job_id = job_inputs$parent_job_id,
-  shard_indices = shard_manifest$shard_idx,
-  output_root = job_inputs$output_root,
-  collect_script = collect_script_path,
-  job_label = collection_job$job_label,
-  time = collection_job$time,
-  mem = collection_job$mem,
-  cpus_per_task = collection_job$cpus,
-  partition = collection_job$partition,
-  email = collection_job$email,
-  HPC = collection_job$HPC,
-  quiet = collection_job$quiet,
-  force = collection_job$force
-)
-
-cat("Shard collection script written to:", collection_script, "\n")
-
-if (isTRUE(collection_job$auto_launch)) {
-  sbatch_bin <- Sys.which("sbatch")
-  if (!nzchar(sbatch_bin)) {
-    stop("auto_launch is TRUE but sbatch was not found on this system.")
-  }
-  system2(sbatch_bin, collection_script)
-} else {
-  cat("Submit via: sbatch", collection_script, "\n")
-}
-```
-
-# 5. Monitor Shard Outputs
-
-Each shard task writes three files inside `combined/shards/`:
-
-- `validation_shard-XXX.csv`
-- `model_metrics_shard-XXX.csv`
-- `effect_metrics_shard-XXX.csv` (optional when no effects were detected)
-- `snps_shard-XXX.parquet` (merged SNP-level table for that shard)
-
-Use the table below to verify progress before aggregating.
-When `verbose_file_output = FALSE`, these files should already be present
-without running the shard collection job.
-
-```{r shard-status}
-shards_dir <- file.path(results_dir, "combined", "shards")
-dir.create(shards_dir, showWarnings = FALSE, recursive = TRUE)
-shard_status <- shard_manifest %>%
-  mutate(
-    validation_file = file.path(shards_dir, sprintf("validation_%s.csv", shard_dir)),
-    model_file = file.path(shards_dir, sprintf("model_metrics_%s.csv", shard_dir)),
-    effect_file = file.path(shards_dir, sprintf("effect_metrics_%s.csv", shard_dir)),
-    snps_file = file.path(shards_dir, sprintf("snps_%s.parquet", shard_dir)),
-    validation_ready = file.exists(validation_file),
-    model_ready = file.exists(model_file),
-    effect_ready = file.exists(effect_file),
-    snps_ready = file.exists(snps_file)
-  )
-
-kable(
-  shard_status %>%
-    select(shard_idx, run_count, validation_ready, model_ready, effect_ready, snps_ready),
-  caption = "Shard completion status"
-)
-```
-
-# 6. Aggregate Validation Results
-
-Once every shard has produced a validation CSV we can combine them quickly.
-
-```{r aggregate-validation}
-if (!all(shard_status$validation_ready)) {
-  pending <- shard_status$shard_dir[!shard_status$validation_ready]
-  stop(
-    "Shard collection still in flight. Missing validation files for: ",
-    paste(pending, collapse = ", ")
-  )
+if (dir.exists(file.path(agg$output_dir, "snps_dataset"))) {
+  snp_files <- list.files(file.path(agg$output_dir, "snps_dataset"), pattern = "\\.parquet$", recursive = TRUE)
+  cat("SNP dataset fragments:", length(snp_files), "\n")
 }
 
-validation_results <- purrr::map_dfr(
-  shard_status$validation_file,
-  ~read_csv(.x, show_col_types = FALSE)
-)
+# 6. Next Steps
 
-n_missing <- sum(validation_results$has_issues)
-cat("\nValidation Summary:\n")
-cat("  Total runs:", nrow(validation_results), "\n")
-cat("  Valid runs:", nrow(validation_results) - n_missing, "\n")
-cat("  Runs with issues:", n_missing, "\n")
-
-if (n_missing > 0) {
-  cat("\nRuns with issues:\n")
-  print(filter(validation_results, has_issues))
-}
-```
-
-# 7. Combine Effect and Model Metrics
-
-Bind one CSV per shard instead of one per run. This keeps the workbook fast
-while retaining the familiar combined outputs.
-
-```{r combine-metrics}
-if (!all(shard_status$model_ready)) {
-  pending <- shard_status$shard_dir[!shard_status$model_ready]
-  stop("Missing model metrics shard files for: ", paste(pending, collapse = ", "))
-}
-
-model_metrics_combined <- purrr::map_dfr(
-  shard_status$model_file,
-  ~read_csv(.x, show_col_types = FALSE)
-)
-cat("Combined", nrow(model_metrics_combined), "model metric rows\n")
-
-model_output_path <- file.path(combined_dir, "model_metrics_combined.csv")
-write_csv(model_metrics_combined, model_output_path)
-
-effect_files <- shard_status$effect_file[shard_status$effect_ready]
-if (length(effect_files)) {
-  effect_metrics_combined <- purrr::map_dfr(
-    effect_files,
-    ~read_csv(.x, show_col_types = FALSE)
-  )
-  cat("Combined", nrow(effect_metrics_combined), "effect metric rows\n")
-  effect_output_path <- file.path(combined_dir, "effect_metrics_combined.csv")
-  write_csv(effect_metrics_combined, effect_output_path)
-} else {
-  effect_metrics_combined <- tibble::tibble()
-cat("No effect metrics detected across shards; skipping effect CSV output.\n")
-}
-
-cat("\nSaved combined tables to:", combined_dir, "\n")
-```
-
-# 8. Combine SNP-Level Tables
-
-```{r combine-snps}
-if (!all(shard_status$snps_ready)) {
-  pending <- shard_status$shard_dir[!shard_status$snps_ready]
-  stop("Missing SNP shard files for: ", paste(pending, collapse = ", "))
-}
-
-snps_files <- shard_status$snps_file[shard_status$snps_ready]
-snps_combined <- purrr::map_dfr(snps_files, ~arrow::read_parquet(.x))
-cat("Combined", nrow(snps_combined), "SNP rows\n")
-
-snps_output_path <- file.path(combined_dir, "snps_combined.parquet")
-arrow::write_parquet(snps_combined, snps_output_path, compression = "zstd")
-cat("Saved SNP table to:", snps_output_path, "\n")
-```
-
-# 9. Basic Diagnostics
-
-Check for missing values and anomalies in aggregated results.
-
-```{r diagnostics}
-# Calculate NA percentage per seed for model metrics
-na_by_seed <- model_metrics_combined %>%
-  group_by(seed) %>%
-  summarise(
-    across(everything(), ~sum(is.na(.)) / n() * 100, .names = "{.col}_na_pct"),
-    n_rows = n(),
-    .groups = "drop"
-  ) %>%
-  pivot_longer(
-    cols = ends_with("_na_pct"),
-    names_to = "column",
-    values_to = "na_pct"
-  ) %>%
-  filter(na_pct > 0) %>%
-  arrange(desc(na_pct))
-
-cat("\nNA Percentage by Seed and Column (only showing columns with NAs):\n")
-if (nrow(na_by_seed) > 0) {
-  print(na_by_seed)
-} else {
-  cat("  No missing values detected!\n")
-}
-
-# Overall summary
-cat("\n\nOverall Data Quality:\n")
-cat("  Model metrics rows:", nrow(model_metrics_combined), "\n")
-cat("  Model metrics columns:", ncol(model_metrics_combined), "\n")
-cat("  Total cells:", nrow(model_metrics_combined) * ncol(model_metrics_combined), "\n")
-cat("  Total NAs:", sum(is.na(model_metrics_combined)), "\n")
-cat("  Overall NA%:", 
-    round(sum(is.na(model_metrics_combined)) / 
-            (nrow(model_metrics_combined) * ncol(model_metrics_combined)) * 100, 2), 
-    "%\n")
-
-cat("\n  Effect metrics rows:", nrow(effect_metrics_combined), "\n")
-cat("  Effect metrics columns:", ncol(effect_metrics_combined), "\n")
-cat("  Total NAs:", sum(is.na(effect_metrics_combined)), "\n")
-
-cat("\n  SNP rows:", nrow(snps_combined), "\n")
-cat("  SNP columns:", ncol(snps_combined), "\n")
-cat("  SNP-level NAs:", sum(is.na(snps_combined)), "\n")
-```
-
-# 10. Visual Summary
-
-Display NA percentages by seed in a table.
-
-```{r na-summary-table}
-na_summary <- model_metrics_combined %>%
-  group_by(seed) %>%
-  summarise(
-    n_rows = n(),
-    total_cells = n() * ncol(model_metrics_combined),
-    total_nas = sum(is.na(across(everything()))),
-    na_pct = round(total_nas / total_cells * 100, 2),
-    .groups = "drop"
-  ) %>%
-  arrange(desc(na_pct))
-
-kable(na_summary, caption = "NA Percentage by Seed")
-```
-
-# 11. Delete Shard Folders (Optional)
-
-Once you've confirmed the data looks good, set `delete_shards <- TRUE` to
-clean up the original per-run shard folders while keeping the combined and
-per-shard CSVs under `combined/`.
-
-```{r delete-shards}
-delete_shards <- FALSE  # flip to TRUE when ready to delete
-
-if (delete_shards) {
-  cat("Deleting shard folders...\n")
-  
-  # List all shard directories
-  shard_dirs <- list.dirs(results_dir, full.names = TRUE, recursive = FALSE)
-  shard_dirs <- shard_dirs[grepl("^shard-", basename(shard_dirs))]
-  
-  for (shard_dir in shard_dirs) {
-    unlink(shard_dir, recursive = TRUE)
-    cat("  Deleted:", basename(shard_dir), "\n")
-  }
-  
-  cat("Deletion complete. Combined results saved in:", combined_dir, "\n")
-} else {
-  cat("Shards not deleted (delete_shards is FALSE).\n")
-  cat("To delete shards and keep only combined results, set delete_shards <- TRUE\n")
-}
-```
-
-# 12. Summary
-
-Results collection complete! 
-
-**Combined tables saved to:**
-- `effect_metrics_combined.csv`
-- `model_metrics_combined.csv`
-- `snps_combined.parquet`
-
-**Original shard folders:** `slurm_output/<job_name>/<parent_job_id>/shard-*/`
-(Delete by setting `delete_shards <- TRUE` in step 11)
-
-You can now proceed to the summary and visualization workbook.
+Use the aggregated outputs in downstream analysis or dashboards. The
+staging folder remains untouched; you can delete it after confirming the
+aggregated files if storage is tight.

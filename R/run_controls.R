@@ -451,8 +451,8 @@ assign_task_ids <- function(runs,
 #' @param output_root Root directory for outputs (default `output`).
 #' @param credible_set_rho Credible set cumulative PIP threshold.
 #' @param purity_threshold Minimum purity to keep CS in filtered summary.
-#' @param verbose_file_output When FALSE, avoid writing per-run artifacts and
-#'   stream metrics directly into shard-level files (reduces filesystem load).
+#' @param verbose_file_output When FALSE, avoid per-run artifacts and stream
+#'   metrics into task/flush staging files (reduces filesystem load).
 #' @param write_legacy_snp_csv Logical; when TRUE, retain the legacy per-run
 #'   `pip.csv` and `truth.csv` files alongside the new compact SNP table.
 #' @param anneal_settings Named list for tempering runs.
@@ -483,13 +483,9 @@ make_job_config <- function(job_name,
                             purity_threshold = 0.5,
                             write_legacy_snp_csv = FALSE,
                             verbose_file_output = TRUE,
-                            buffer_flush_interval = 100L,
+                            buffer_flush_interval = 300L,
                             grid_mode = c("full", "minimal"),
                             pair_L_p_star = FALSE,
-                            # NEW: sharding + padding controls (can be overridden per call)
-                            shard_size_output = 1000L,  # 0 disables sharding for slurm_output
-                            shard_size_prints = 1000L,  # 0 disables sharding for slurm_prints
-                            pad_width = NULL,           # NULL => renderer auto-computes from n_tasks
                             anneal_settings = list(
                               anneal_start_T = 5,
                               anneal_schedule_type = "geometric",
@@ -552,11 +548,7 @@ make_job_config <- function(job_name,
         time = time,
         mem = mem,
         cpus_per_task = 1,
-        partition = NULL,
-        # NEW: plumbed through for render_slurm_script()
-        shard_size_output = as.integer(shard_size_output),
-        shard_size_prints = as.integer(shard_size_prints),
-        pad_width = if (is.null(pad_width)) NULL else as.integer(pad_width)
+        partition = NULL
       )
     ),
     paths = list(
@@ -667,11 +659,6 @@ render_slurm_script <- function(job_config, run_task_script) {
     NULL
   }
 
-  # ---- padding & sharding config ----
-  pad_width <- max(4L, ceiling(log10(max(1L, n_tasks))))  # e.g., 120000 -> 6
-  shard_size_output <- job$slurm$shard_size_output %||% 1000L  # for slurm_output
-  shard_size_prints <- job$slurm$shard_size_prints %||% 1000L  # for slurm_prints
-
   script <- c(
     "#!/bin/bash",
     sprintf("#SBATCH --job-name=%s", job$name),
@@ -700,22 +687,10 @@ render_slurm_script <- function(job_config, run_task_script) {
     'JOBNAME="${SLURM_JOB_NAME}"',
     'PARENT_ID="${SLURM_ARRAY_JOB_ID:-$SLURM_JOB_ID}"   # parent array ID if array, else job id',
     'TASK_ID="${SLURM_ARRAY_TASK_ID:-0}"',
-    sprintf('PAD=%d', as.integer(pad_width)),
-    sprintf('SHARD_SIZE_OUTPUT=%d', as.integer(shard_size_output)),
-    sprintf('SHARD_SIZE_PRINTS=%d', as.integer(shard_size_prints)),
-    "",
-    "# --- compute shard dir for PRINTS ---",
-    'if [ "${SHARD_SIZE_PRINTS}" -gt 0 ]; then',
-    '  TI="${TASK_ID}"; if [ "${TI}" -le 0 ]; then TI=1; fi',
-    '  SHARD_IDX_PRINTS=$(( (TI - 1) / SHARD_SIZE_PRINTS ))',
-    '  SHARD_DIR_PRINTS="$(printf "shard-%03d" "${SHARD_IDX_PRINTS}")"',
-    '  PRINTS_DIR="${SLURM_PRINTS_BASE}/${JOBNAME}/${PARENT_ID}/${SHARD_DIR_PRINTS}"',
-    'else',
-    '  PRINTS_DIR="${SLURM_PRINTS_BASE}/${JOBNAME}/${PARENT_ID}"',
-    'fi',
+    'PRINTS_DIR="${SLURM_PRINTS_BASE}/${JOBNAME}/${PARENT_ID}"',
     'mkdir -p "${PRINTS_DIR}"',
     "",
-    "# Redirect logs (after dirs exist) — one file per task",
+    "# Redirect logs (after dirs exist) -- one file per task",
     'exec >"${PRINTS_DIR}/${TASK_ID}.out" 2>"${PRINTS_DIR}/${TASK_ID}.err"',
     'echo "[$(date -Is)] Starting task ${TASK_ID} for job ${JOBNAME} (parent ${PARENT_ID})"',
     "",
@@ -725,30 +700,12 @@ render_slurm_script <- function(job_config, run_task_script) {
     "# --- site/module setup ---",
     hpc_setup,
     "",
-    "# --- task 1 pre-creates all shard directories and copies run_history ---",
+    "# --- task 1 copies run_history ---",
     'if [ "${TASK_ID}" = "1" ]; then',
     '  FINAL_HISTORY_DIR="${RUN_HISTORY_BASE}/${JOBNAME}/${PARENT_ID}"',
     '  mkdir -p "${FINAL_HISTORY_DIR}"',
     '  cp "${TEMP_DIR}"/* "${FINAL_HISTORY_DIR}/"',
     '  echo "[$(date -Is)] Task 1: copied run_history from temp to ${FINAL_HISTORY_DIR}"',
-    '  ',
-    '  # Pre-create all shard directories to avoid race conditions',
-    '  SLURM_OUTPUT_JOB_DIR="${SLURM_OUTPUT_BASE}/${JOBNAME}/${PARENT_ID}"',
-    '  if [ "${SHARD_SIZE_OUTPUT}" -gt 0 ]; then',
-    '    # Read max run_id from run_table.csv (do not assume sorted)',
-    '    RUN_TABLE="${FINAL_HISTORY_DIR}/run_table.csv"',
-    '    if [ -f "${RUN_TABLE}" ]; then',
-    '      MAX_RUN_ID=$(awk -F, \'NR==1 {for(i=1;i<=NF;i++){if($i=="run_id"){col=i;break}} next} col && $col ~ /^[0-9]+$/ {if($col>max) max=$col} END {print (max+0)}\' "${RUN_TABLE}")',
-    '    else',
-    '      MAX_RUN_ID=0',
-    '    fi',
-    '    MAX_SHARD=$(( (MAX_RUN_ID - 1) / SHARD_SIZE_OUTPUT ))',
-    '    for ((i=0; i<=MAX_SHARD; i++)); do',
-    '      SHARD_DIR="$(printf "shard-%03d" "$i")"',
-    '      mkdir -p "${SLURM_OUTPUT_JOB_DIR}/${SHARD_DIR}"',
-    '    done',
-    '    echo "[$(date -Is)] Task 1: pre-created shards 0-${MAX_SHARD} for ${MAX_RUN_ID} runs"',
-    '  fi',
     'fi',
     "",
     "# --- run task ---",

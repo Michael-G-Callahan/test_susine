@@ -27,12 +27,19 @@ run_task <- function(job_name,
   buffer_ctx <- NULL
   if (!verbose_output) {
     buffer_ctx <- new.env(parent = emptyenv())
-    buffer_ctx$buffers <- new.env(parent = emptyenv())
+    buffer_ctx$buffers <- list(
+      model = list(),
+      effect = list(),
+      snps = list(),
+      validation = list()
+    )
     buffer_ctx$base_output <- determine_base_output(job_config)
-    buffer_ctx$flush_every <- job_config$job$buffer_flush_interval %||% 100L
+    buffer_ctx$flush_every <- job_config$job$buffer_flush_interval %||% 300L
     if (is.null(buffer_ctx$flush_every) || buffer_ctx$flush_every <= 0) {
       buffer_ctx$flush_every <- Inf
     }
+    buffer_ctx$task_id <- task_id
+    buffer_ctx$flush_index <- 0L
   }
 
   if (!quiet) {
@@ -43,13 +50,13 @@ run_task <- function(job_name,
     run_row <- task_runs[i, , drop = FALSE]
     res <- execute_single_run(run_row, job_config, quiet = quiet, buffer_ctx = buffer_ctx)
     if (!is.null(buffer_ctx) && (i %% buffer_ctx$flush_every == 0)) {
-      flush_shard_buffers(buffer_ctx)
+      flush_task_buffers(buffer_ctx)
     }
     res
   })
 
   if (!is.null(buffer_ctx)) {
-    flush_shard_buffers(buffer_ctx)
+    flush_task_buffers(buffer_ctx)
   }
 
   invisible(results)
@@ -307,23 +314,10 @@ write_run_outputs <- function(run_row,
                               model_result,
                               buffer_ctx = NULL) {
 
-  # Compute run-based output directory with sharding by run_id
-  run_id_val <- as.integer(run_row$run_id)
-  shard_size <- job_config$job$slurm$shard_size_output %||% 1000L
   verbose_output <- isTRUE(job_config$job$verbose_file_output)
-  
-  # Construct base directory: slurm_output/<job_name>/<parent_id>
   base_output <- determine_base_output(job_config)
-  
-  # Compute shard directory
-  if (shard_size > 0) {
-    shard_idx <- (run_id_val - 1L) %/% as.integer(shard_size)
-    shard_dir <- sprintf("shard-%03d", shard_idx)
-    run_dir <- file.path(base_output, shard_dir, sprintf("run-%05d", run_id_val))
-  } else {
-    run_dir <- file.path(base_output, sprintf("run-%05d", run_id_val))
-  }
-  
+  run_id_val <- as.integer(run_row$run_id)
+  run_dir <- file.path(base_output, sprintf("run-%05d", run_id_val))
   if (verbose_output) {
     ensure_dir(run_dir)
   }
@@ -398,14 +392,12 @@ write_run_outputs <- function(run_row,
       saveRDS(model_result$extra, file.path(run_dir, "subfits.rds"))
     }
   } else {
-    shard_label <- sprintf("shard-%03d", shard_idx)
-    buffer_shard_outputs(
+    buffer_task_outputs(
       buffer_ctx = buffer_ctx,
-      shard_label = shard_label,
       model_metrics = model_metrics,
       effect_metrics = effect_metrics,
       snp_tbl = snp_tbl,
-      validation_row = build_validation_row(run_row, shard_idx)
+      validation_row = build_validation_row(run_row)
     )
   }
 }
@@ -458,157 +450,92 @@ determine_base_output <- function(job_config) {
   }
 }
 
-build_validation_row <- function(run_row, shard_idx) {
+build_validation_row <- function(run_row) {
   tibble::tibble(
     run_id = run_row$run_id,
-    shard_idx = shard_idx,
+    task_id = run_row$task_id,
     has_issues = FALSE,
     issues = NA_character_
   )
 }
 
-buffer_shard_outputs <- function(buffer_ctx,
-                                 shard_label,
-                                 model_metrics,
-                                 effect_metrics,
-                                 snp_tbl,
-                                 validation_row) {
-  if (is.null(buffer_ctx)) {
-    stop("Buffer context is missing for streamed shard outputs.")
-  }
-  buf_env <- buffer_ctx$buffers
-  buf <- buf_env[[shard_label]]
-  if (is.null(buf)) {
-    buf <- list(
-      model = list(),
-      effect = list(),
-      snps = list(),
-      validation = list()
-    )
-  }
-  if (!is.null(model_metrics) && nrow(model_metrics)) {
-    buf$model[[length(buf$model) + 1L]] <- model_metrics
-  }
-  if (!is.null(effect_metrics) && nrow(effect_metrics)) {
-    buf$effect[[length(buf$effect) + 1L]] <- effect_metrics
-  }
-  if (!is.null(snp_tbl) && nrow(snp_tbl)) {
-    buf$snps[[length(buf$snps) + 1L]] <- snp_tbl
-  }
-  if (!is.null(validation_row) && nrow(validation_row)) {
-    buf$validation[[length(buf$validation) + 1L]] <- validation_row
-  }
-  buf_env[[shard_label]] <- buf
-}
-
-flush_shard_buffers <- function(buffer_ctx) {
-  buf_env <- buffer_ctx$buffers
-  if (is.null(buf_env) || !length(ls(buf_env))) {
-    return(invisible(NULL))
-  }
-  base_output <- buffer_ctx$base_output
-  if (is.null(base_output)) {
-    warning("Buffered shard outputs found but base output directory is missing.")
-    return(invisible(NULL))
-  }
-  shard_labels <- ls(buf_env, all.names = TRUE)
-  for (label in shard_labels) {
-    buf <- buf_env[[label]]
-    model_df <- if (length(buf$model)) dplyr::bind_rows(buf$model) else NULL
-    effect_df <- if (length(buf$effect)) dplyr::bind_rows(buf$effect) else NULL
-    snp_df <- if (length(buf$snps)) dplyr::bind_rows(buf$snps) else NULL
-    validation_df <- if (length(buf$validation)) dplyr::bind_rows(buf$validation) else NULL
-    write_shard_outputs(
-      base_output = base_output,
-      shard_label = label,
-      model_metrics = model_df,
-      effect_metrics = effect_df,
-      snp_tbl = snp_df,
-      validation_row = validation_df
-    )
-    rm(list = label, envir = buf_env)
-  }
-  buffer_ctx$buffers <- new.env(parent = emptyenv())
-}
-
-write_shard_outputs <- function(base_output,
-                                shard_label,
+buffer_task_outputs <- function(buffer_ctx,
                                 model_metrics,
                                 effect_metrics,
                                 snp_tbl,
                                 validation_row) {
-  combined_dir <- file.path(base_output, "combined", "shards")
-  ensure_dir(combined_dir)
+  if (is.null(buffer_ctx)) {
+    stop("Buffer context is missing for streamed outputs.")
+  }
   if (!is.null(model_metrics) && nrow(model_metrics)) {
-    append_shard_csv(
-      combined_dir,
-      shard_label,
-      "model_metrics",
-      model_metrics
-    )
+    buffer_ctx$buffers$model[[length(buffer_ctx$buffers$model) + 1L]] <- model_metrics
   }
   if (!is.null(effect_metrics) && nrow(effect_metrics)) {
-    append_shard_csv(
-      combined_dir,
-      shard_label,
-      "effect_metrics",
-      effect_metrics
-    )
+    buffer_ctx$buffers$effect[[length(buffer_ctx$buffers$effect) + 1L]] <- effect_metrics
   }
   if (!is.null(snp_tbl) && nrow(snp_tbl)) {
-    append_shard_parquet(
-      combined_dir,
-      shard_label,
-      "snps",
-      snp_tbl
-    )
+    buffer_ctx$buffers$snps[[length(buffer_ctx$buffers$snps) + 1L]] <- snp_tbl
   }
   if (!is.null(validation_row) && nrow(validation_row)) {
-    append_shard_csv(
-      combined_dir,
-      shard_label,
-      "validation",
-      validation_row
-    )
+    buffer_ctx$buffers$validation[[length(buffer_ctx$buffers$validation) + 1L]] <- validation_row
   }
 }
 
-append_shard_csv <- function(dir, shard_label, prefix, data) {
-  if (!nrow(data)) return()
-  ensure_dir(dir)
-  shard_file <- file.path(dir, sprintf("%s_%s.csv", prefix, shard_label))
-  lock_file <- paste0(shard_file, ".lock")
-  lock <- filelock::lock(lock_file, exclusive = TRUE, timeout = 60000)
-  on.exit({
-    filelock::unlock(lock)
-    if (file.exists(lock_file)) unlink(lock_file)
-  }, add = TRUE)
-  exists <- file.exists(shard_file)
-  readr::write_csv(
-    data,
-    shard_file,
-    append = exists,
-    col_names = !exists
+flush_task_buffers <- function(buffer_ctx) {
+  buf <- buffer_ctx$buffers
+  if (is.null(buf) || !length(buf$model) && !length(buf$effect) && !length(buf$snps) && !length(buf$validation)) {
+    return(invisible(NULL))
+  }
+  base_output <- buffer_ctx$base_output
+  if (is.null(base_output)) {
+    warning("Buffered outputs found but base output directory is missing.")
+    return(invisible(NULL))
+  }
+  staging_dir <- file.path(
+    base_output,
+    "combined",
+    "staging",
+    sprintf("task-%03d", as.integer(buffer_ctx$task_id))
   )
+  ensure_dir(staging_dir)
+  flush_label <- sprintf("flush-%03d", as.integer(buffer_ctx$flush_index))
+
+  write_flush_outputs(
+    staging_dir = staging_dir,
+    flush_label = flush_label,
+    task_id = buffer_ctx$task_id,
+    model_metrics = if (length(buf$model)) dplyr::bind_rows(buf$model) else NULL,
+    effect_metrics = if (length(buf$effect)) dplyr::bind_rows(buf$effect) else NULL,
+    snp_tbl = if (length(buf$snps)) dplyr::bind_rows(buf$snps) else NULL,
+    validation_row = if (length(buf$validation)) dplyr::bind_rows(buf$validation) else NULL
+  )
+
+  buffer_ctx$buffers <- list(model = list(), effect = list(), snps = list(), validation = list())
+  buffer_ctx$flush_index <- buffer_ctx$flush_index + 1L
 }
 
-append_shard_parquet <- function(dir, shard_label, prefix, data) {
-  ensure_dir(dir)
-  shard_file <- file.path(dir, sprintf("%s_%s.parquet", prefix, shard_label))
-  lock_file <- paste0(shard_file, ".lock")
-  lock <- filelock::lock(lock_file, exclusive = TRUE, timeout = 60000)
-  on.exit({
-    filelock::unlock(lock)
-    if (file.exists(lock_file)) unlink(lock_file)
-  }, add = TRUE)
-  if (file.exists(shard_file)) {
-    existing <- arrow::read_parquet(shard_file)
-    data <- dplyr::bind_rows(existing, data)
+write_flush_outputs <- function(staging_dir,
+                                flush_label,
+                                task_id,
+                                model_metrics,
+                                effect_metrics,
+                                snp_tbl,
+                                validation_row) {
+  if (!is.null(model_metrics) && nrow(model_metrics)) {
+    model_metrics <- dplyr::mutate(model_metrics, task_id = task_id, flush_id = flush_label)
+    readr::write_csv(model_metrics, file.path(staging_dir, sprintf("%s_model_metrics.csv", flush_label)))
   }
-  if (identical(prefix, "snps")) {
-    write_compact_snp_parquet(data, shard_file)
-  } else {
-    arrow::write_parquet(data, shard_file, compression = "zstd")
+  if (!is.null(effect_metrics) && nrow(effect_metrics)) {
+    effect_metrics <- dplyr::mutate(effect_metrics, task_id = task_id, flush_id = flush_label)
+    readr::write_csv(effect_metrics, file.path(staging_dir, sprintf("%s_effect_metrics.csv", flush_label)))
+  }
+  if (!is.null(snp_tbl) && nrow(snp_tbl)) {
+    snp_tbl <- dplyr::mutate(snp_tbl, task_id = task_id, flush_id = flush_label)
+    write_compact_snp_parquet(snp_tbl, file.path(staging_dir, sprintf("%s_snps.parquet", flush_label)))
+  }
+  if (!is.null(validation_row) && nrow(validation_row)) {
+    validation_row <- dplyr::mutate(validation_row, task_id = task_id, flush_id = flush_label)
+    readr::write_csv(validation_row, file.path(staging_dir, sprintf("%s_validation.csv", flush_label)))
   }
 }
 

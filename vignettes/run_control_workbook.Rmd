@@ -34,12 +34,12 @@ array script, and helper R script.
 
 The generated artifacts follow the repository layout:
 
--   `output/temp/<job_name>` – temporary staging for run configuration (cleared each write).
--   `output/run_history/<job_name>/<parent_job_id>` – permanent immutable record copied from temp after first SLURM task.
--   `output/slurm_scripts/<job_name>.slurm` – submission script.
--   `inst/scripts/run_task.R` – task runner referenced by each SLURM array task.
--   During execution, results land in `output/slurm_output/<job_name>/<parent_job_id>/…`.
--   SLURM stdout/stderr are re-homed to `output/slurm_prints/<job_name>/<parent_job_id>/…`.
+-   output/temp/<job_name> - temporary staging for run configuration (cleared each write).
+-   output/run_history/<job_name>/<parent_job_id> - permanent immutable record copied from temp after first SLURM task.
+-   output/slurm_scripts/<job_name>.slurm - submission script.
+-   inst/scripts/run_task.R - task runner referenced by each SLURM array task.
+-   During execution, results land in task-local staging files at output/slurm_output/<job_name>/<parent_job_id>/combined/staging/task-*/flush-*_*.
+-   SLURM stdout/stderr are re-homed to output/slurm_prints/<job_name>/<parent_job_id>/....
 
 Each completed run now writes a compact `snps.parquet` file that merges
 the combined PIPs with the causal truth table so downstream routines can
@@ -48,7 +48,7 @@ work off a single artifact. Flip `write_legacy_snp_csv = TRUE` inside
 pairs for ad hoc debugging.
 
 Set `verbose_file_output = FALSE` to suppress the per-run directories and
-stream metrics directly into shard-level CSV/Parquet files during the
+stream metrics into task-local CSV/Parquet flush files during the
 simulation (recommended for large sweeps with strict filesystem quotas).
 
 
@@ -101,6 +101,8 @@ job_inputs <- list(
   # Number of runs to assign to each SLURM array task
   # (~2112 total runs / 150 per task = ~14 tasks, well under SLURM QoS limits)
   runs_per_task = 3751, #5,
+  # Number of runs to accumulate before flushing task-local outputs
+  buffer_flush_interval = 300,
 
   # Data scenarios: "simulation_n3" for the built-in toy data, or scenario_{1-4}
   # for the sampled genotype panels (see vignette for details)
@@ -164,6 +166,7 @@ job_config <- make_job_config(
   repo_root = job_inputs$repo_root,
   sampled_scenario_summary = job_inputs$sampled_scenario_summary,
   runs_per_task = job_inputs$runs_per_task,
+  buffer_flush_interval = job_inputs$buffer_flush_interval,
   email = job_inputs$email,
   output_root = job_inputs$output_root,
   credible_set_rho = job_inputs$credible_set_rho,
