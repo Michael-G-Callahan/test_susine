@@ -165,3 +165,13 @@ if (dir.exists(file.path(agg$output_dir, "snps_dataset"))) {
 Use the aggregated outputs in downstream analysis or dashboards. The
 staging folder remains untouched; you can delete it after confirming the
 aggregated files if storage is tight.
+
+# 7. (Optional) Clean Up Staging
+
+Once you trust the aggregated outputs, remove the task/flush staging folders
+to reclaim space. **Run only after verifying aggregation.**
+
+```{r cleanup-staging, eval=FALSE}
+unlink(staging_dir, recursive = TRUE)
+cat("Deleted staging directory:", staging_dir, "\n")
+```
