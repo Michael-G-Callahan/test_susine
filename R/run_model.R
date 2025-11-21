@@ -541,25 +541,39 @@ write_flush_outputs <- function(staging_dir,
 
 # Write SNP parquet with reduced precision for numeric columns to cut size.
 write_compact_snp_parquet <- function(snp_tbl, path) {
+  # Ensure task/flush metadata exist even if caller did not add them.
+  if (!"task_id" %in% names(snp_tbl)) {
+    snp_tbl$task_id <- NA_integer_
+  }
+  if (!"flush_id" %in% names(snp_tbl)) {
+    snp_tbl$flush_id <- NA_character_
+  }
   snp_tbl <- dplyr::mutate(
     snp_tbl,
     run_id = as.integer(run_id),
+    task_id = as.integer(task_id),
     snp_index = as.integer(snp_index),
     pip = as.numeric(pip),
     beta = as.numeric(beta),
     mu_0 = as.numeric(mu_0),
     sigma_0_2 = as.numeric(sigma_0_2),
-    causal = as.integer(causal)
+    causal = as.integer(causal),
+    flush_id = as.character(flush_id)
   )
+  # Fixed schema that includes task/flush metadata and keeps floats compact.
   snp_schema <- arrow::schema(
     run_id = arrow::int32(),
+    task_id = arrow::int32(),
     snp_index = arrow::int32(),
     pip = arrow::float32(),
     beta = arrow::float32(),
     mu_0 = arrow::float32(),
     sigma_0_2 = arrow::float32(),
-    causal = arrow::int8()
+    causal = arrow::int8(),
+    flush_id = arrow::utf8()
   )
+  # Align columns to schema order; drop any extras to avoid schema mismatch.
+  snp_tbl <- snp_tbl[, names(snp_schema), drop = FALSE]
   snp_table <- arrow::Table$create(snp_tbl, schema = snp_schema)
   arrow::write_parquet(snp_table, path, compression = "zstd")
 }
