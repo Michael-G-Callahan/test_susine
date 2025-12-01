@@ -42,8 +42,7 @@ index_staging_outputs <- function(job_name,
       task_id = task_id,
       flush_id = sub("^flush-([0-9]+)_.*", "\\1", basename(files)),
       type = vapply(basename(files), parse_type, character(1)),
-      path = files,
-      stringsAsFactors = FALSE
+      path = files
     ) %>%
       dplyr::filter(!is.na(.data$type))
   }) %>%
@@ -59,6 +58,7 @@ validate_staging_outputs <- function(file_index) {
   if (is.null(file_index) || !nrow(file_index)) {
     return(tibble::tibble(task_id = integer(), flush_id = character(), type = character(), path = character(), ok = logical(), error = character()))
   }
+  file_index <- dplyr::select(file_index, "task_id", "flush_id", "type", "path")
   purrr::pmap_dfr(file_index, function(task_id, flush_id, type, path) {
     reader <- switch(
       type,
