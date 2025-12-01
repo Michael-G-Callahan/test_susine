@@ -114,7 +114,32 @@ aggregate_staging_outputs <- function(job_name,
   }
   ensure_dir(output_dir)
 
+  current_mem_gb <- function() {
+    rss_gb <- NA_real_
+    if (.Platform$OS.type != "windows") {
+      rss <- suppressWarnings(tryCatch(
+        system("ps -o rss= -p $$", intern = TRUE),
+        error = function(e) NA
+      ))
+      if (length(rss) && !is.na(rss[1])) {
+        rss_gb <- as.numeric(rss[1]) / 1024 / 1024
+      }
+    } else if ("memory.size" %in% ls("package:utils")) {
+      rss_gb <- tryCatch(utils::memory.size() / 1024, error = function(e) NA_real_)
+    }
+    rss_gb
+  }
+  log_progress <- function(msg) {
+    mem <- current_mem_gb()
+    if (is.finite(mem)) {
+      message(sprintf("%s | mem=%.2f GB", msg, mem))
+    } else {
+      message(msg)
+    }
+  }
+
   read_csv_safe <- function(paths, idx_tbl) {
+    log_progress(sprintf("Reading %d CSV file(s)...", length(paths)))
     purrr::map_dfr(paths, function(p) {
       df <- readr::read_csv(p, show_col_types = FALSE)
       meta <- dplyr::filter(idx_tbl, .data$path == !!p)
@@ -132,22 +157,27 @@ aggregate_staging_outputs <- function(job_name,
   if (length(model_files)) {
     model_tbl <- read_csv_safe(model_files, idx)
     readr::write_csv(model_tbl, file.path(output_dir, "model_metrics.csv"))
+    log_progress("Wrote model_metrics.csv")
   }
   if (length(effect_files)) {
     effect_tbl <- read_csv_safe(effect_files, idx)
     readr::write_csv(effect_tbl, file.path(output_dir, "effect_metrics.csv"))
+    log_progress("Wrote effect_metrics.csv")
   }
   if (length(validation_files)) {
     validation_tbl <- read_csv_safe(validation_files, idx)
     readr::write_csv(validation_tbl, file.path(output_dir, "validation.csv"))
+    log_progress("Wrote validation.csv")
   }
   if (length(snp_files)) {
+    log_progress(sprintf("Writing SNP dataset from %d parquet fragment(s)...", length(snp_files)))
     snp_dataset <- arrow::open_dataset(snp_files, format = "parquet")
     snp_out_dir <- file.path(output_dir, "snps_dataset")
     if (dir.exists(snp_out_dir)) {
       unlink(snp_out_dir, recursive = TRUE)
     }
     arrow::write_dataset(snp_dataset, path = snp_out_dir, format = "parquet")
+    log_progress("Finished writing snps_dataset")
   }
 
   list(
