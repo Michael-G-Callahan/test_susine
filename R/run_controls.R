@@ -288,11 +288,18 @@ make_run_tables <- function(use_case_ids,
         seed = seed_first
       )
   } else {
+    n_matrices <- nrow(scenario_matrix_map)
+    n_seed_slots <- length(seed_values)
+
     tidyr::expand_grid(
-      scenario_matrix_index = seq_len(nrow(scenario_matrix_map)),
+      scenario_matrix_index = seq_len(n_matrices),
       use_case_id = use_cases$use_case_id,
-      seed = seed_values
+      seed_slot = seq_len(n_seed_slots)
     ) %>%
+      dplyr::mutate(
+        seed = seed_values[seed_slot] + (scenario_matrix_index - 1L) * n_seed_slots
+      ) %>%
+      dplyr::select(-seed_slot) %>%
       dplyr::left_join(
         scenario_matrix_map %>%
           dplyr::mutate(scenario_matrix_index = dplyr::row_number()),
