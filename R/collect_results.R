@@ -176,8 +176,13 @@ aggregate_staging_outputs <- function(job_name,
     if (dir.exists(snp_out_dir)) {
       unlink(snp_out_dir, recursive = TRUE)
     }
-    arrow::write_dataset(snp_dataset, path = snp_out_dir, format = "parquet")
-    log_progress("Finished writing snps_dataset")
+    arrow::write_dataset(
+      snp_dataset,
+      path = snp_out_dir,
+      format = "parquet",
+      partitioning = "use_case_id"
+    )
+    log_progress("Finished writing snps_dataset (partitioned by use_case_id)")
   }
 
   list(

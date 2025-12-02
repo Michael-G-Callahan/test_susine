@@ -1,0 +1,239 @@
+---
+title: "SuSiNE SNPs Dataset Preview"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    toc_float: true
+    number_sections: false
+---
+
+# Overview
+
+Quick peek at the Parquet-based `snps_dataset` without loading the full table.
+
+## Setup
+
+```{r setup, message=FALSE}
+library(here)
+library(ggplot2)
+here::i_am("vignettes/snps_dataset_preview.Rmd")
+here()
+
+knitr::opts_chunk$set(
+  fig.width = 10,
+  fig.height = 6,
+  dpi = 300,
+  fig.retina = 2,
+  out.width = "100%"
+)
+```
+
+## Load a small sample
+
+```{r load-snps-sample, message=FALSE}
+# Adjust these to point at the desired run
+job_name <- "susie_scen_1_recreation_task_split"
+job_id <- "46473445"
+
+snps_path <- file.path(
+  here(),
+  "output", "slurm_output",
+  job_name, job_id,
+  "combined", "aggregated",
+  "snps_dataset"
+)
+
+stopifnot(dir.exists(snps_path))
+
+library(dplyr)
+library(arrow)
+
+# Read only the first few rows; arrow will push the slice down so it does not scan the whole dataset
+snps_preview <- arrow::open_dataset(snps_path) %>%
+  slice_head(n = 20) %>%
+  collect()
+
+snps_preview
+```
+
+# Temporarily repartition existing dataset by use_case_id
+
+```{r repartition-snps-dataset, message=FALSE}
+# This writes a partitioned copy alongside the original without loading everything into memory.
+# Remove or disable after use; future runs should emit partitioned data natively.
+partitioned_path <- file.path(dirname(snps_path), "snps_dataset_by_use_case")
+
+if (!dir.exists(partitioned_path)) {
+  # Map run_id -> use_case_id (small table) then join in-arrow and write partitioned
+  run_table_path <- file.path(here(), "output", "run_history", job_name, job_id, "run_table.csv")
+  run_map <- readr::read_csv(
+    run_table_path,
+    show_col_types = FALSE,
+    col_select = c(run_id, use_case_id),
+    col_types = readr::cols(
+      run_id = readr::col_integer(),
+      use_case_id = readr::col_character()
+    )
+  ) %>%
+    dplyr::mutate(run_id = as.integer(run_id))
+
+  snps_ds <- arrow::open_dataset(snps_path)
+  run_map_ds <- arrow::InMemoryDataset$create(run_map)
+
+  snps_with_uc <- snps_ds %>%
+    dplyr::left_join(run_map_ds, by = "run_id") %>%
+    dplyr::select(use_case_id, dplyr::everything())
+
+  arrow::write_dataset(
+    snps_with_uc,
+    path = partitioned_path,
+    format = "parquet",
+    partitioning = "use_case_id"
+  )
+
+  rm(run_map, run_map_ds, snps_ds, snps_with_uc)
+}
+
+partitioned_path
+```
+
+# Power vs. FDR (Fig. 2D/E style) from SNP PIPs
+
+```{r power-fdr-setup}
+# User inputs
+split_by_var_list <- c("use_case_id") # options: use_case_id, p_star, L, y_noise, annotation_r2, inflate_match, gamma_shrink
+filter_p_star <- 5                   # set to 5 to focus on p_star = 5, or NA to include all
+filter_annotation_r2 <- NA            # set to 0.8 to focus on high-quality annotations (includes NA), or NA to include all
+pip_bucket_width <- 0.01               # bucket width for PIP sweeping; smaller = finer curves
+```
+
+```{r power-fdr-curves, message=FALSE}
+split_cols <- c("run_id", "use_case_id", "p_star", "L", "y_noise", "annotation_r2", "inflate_match", "gamma_shrink")
+
+run_table_path <- file.path(here(), "output", "run_history", job_name, job_id, "run_table.csv")
+use_cases_path <- file.path(here(), "output", "run_history", job_name, job_id, "use_cases.csv")
+
+run_map <- readr::read_csv(
+  run_table_path,
+  show_col_types = FALSE,
+  col_select = split_cols,
+  col_types = readr::cols(
+    run_id = readr::col_integer(),
+    use_case_id = readr::col_character(),
+    p_star = readr::col_integer(),
+    L = readr::col_integer(),
+    y_noise = readr::col_double(),
+    annotation_r2 = readr::col_double(),
+    inflate_match = readr::col_double(),
+    gamma_shrink = readr::col_double()
+  )
+) %>%
+  dplyr::mutate(run_id = as.integer(run_id))
+
+use_case_labels <- readr::read_csv(
+  use_cases_path,
+  show_col_types = FALSE,
+  col_select = c(use_case_id, label),
+  col_types = readr::cols(
+    use_case_id = readr::col_character(),
+    label = readr::col_character()
+  )
+)
+
+run_map <- dplyr::left_join(run_map, use_case_labels, by = "use_case_id")
+
+# Guard split vars
+group_vars <- split_by_var_list
+stopifnot(length(group_vars) >= 1)
+if (!all(group_vars %in% colnames(run_map))) {
+  stop("split_by_var_list contains unsupported columns.")
+}
+
+# Join SNPs with run-level metadata lazily in Arrow
+snps_ds <- arrow::open_dataset(snps_path)
+run_map_ds <- arrow::InMemoryDataset$create(run_map)
+
+snps_joined <- snps_ds %>%
+  dplyr::left_join(run_map_ds, by = "run_id")
+
+if (!is.na(filter_p_star)) {
+  snps_joined <- snps_joined %>% dplyr::filter(p_star == filter_p_star)
+}
+if (!is.na(filter_annotation_r2)) {
+  snps_joined <- snps_joined %>% dplyr::filter(annotation_r2 == filter_annotation_r2 | is.na(annotation_r2))
+}
+
+# Include label in grouping when we split by use_case_id so legends show names
+label_group <- if ("use_case_id" %in% group_vars) "label" else character(0)
+
+# Bucket PIPs once, then accumulate to build Power vs. FDR curves
+pip_counts <- snps_joined %>%
+  dplyr::mutate(
+    pip_bucket = pmax(0, pmin(1, floor(pip / pip_bucket_width) * pip_bucket_width))
+  ) %>%
+  dplyr::group_by(dplyr::across(all_of(c(group_vars, label_group))), pip_bucket) %>%
+  dplyr::summarise(
+    n = dplyr::n(),
+    pos = sum(causal == 1, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  dplyr::collect()
+
+pip_curve_data <- pip_counts %>%
+  dplyr::group_by(dplyr::across(all_of(c(group_vars, label_group)))) %>%
+  dplyr::arrange(dplyr::desc(pip_bucket), .by_group = TRUE) %>%
+  dplyr::mutate(
+    total_pos = sum(pos, na.rm = TRUE),
+    cum_tp = cumsum(pos),
+    cum_pred = cumsum(n),
+    precision = if_else(cum_pred > 0, cum_tp / cum_pred, NA_real_),
+    recall = if_else(total_pos > 0, cum_tp / total_pos, NA_real_),
+    fdr = 1 - precision
+  ) %>%
+  dplyr::filter(total_pos > 0, !is.na(precision), !is.na(recall)) %>%
+  dplyr::ungroup()
+
+# Build human-friendly labels: prefer use_case label when available; append other group fields
+extra_vars <- setdiff(group_vars, "use_case_id")
+pip_curve_data <- pip_curve_data %>%
+  dplyr::mutate(
+    base_label = dplyr::coalesce(label, use_case_id),
+    extra_label = if (length(extra_vars)) {
+      interaction(dplyr::across(all_of(extra_vars)), drop = TRUE, lex.order = TRUE)
+    } else {
+      NA_character_
+    },
+    curve_label = ifelse(is.na(extra_label), base_label, paste0(base_label, " [", extra_label, "]"))
+  )
+
+# Persist the curve data for reuse
+pip_curve_data_path <- file.path(dirname(snps_path), "pip_power_fdr.csv")
+readr::write_csv(pip_curve_data, pip_curve_data_path)
+
+pip_curve_data_path
+```
+
+```{r power-fdr-plot, fig.width=15, fig.height=7, message=FALSE}
+ggplot(pip_curve_data, aes(x = fdr, y = recall, color = curve_label)) +
+  geom_line() +
+  geom_point(size = 0.8) +
+  labs(
+    title = "Power vs. FDR (PIP sweep)",
+    subtitle = paste0(
+      "Grouped by: ", paste(split_by_var_list, collapse = ", "),
+      if (!is.na(filter_p_star)) paste0("; p_star = ", filter_p_star) else "",
+      if (!is.na(filter_annotation_r2)) paste0("; annotation_r2 = ", filter_annotation_r2, " (including NA)") else ""
+    ),
+    x = "False Discovery Rate (1 - Precision)",
+    y = "Power (Recall)",
+    color = "Group"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+# Notes
+
+- The preview uses `slice_head()` on the Arrow dataset, so it avoids loading the full Parquet collection.
+- Bump `n` in `slice_head()` if you want to see more rows; keep it small to stay memory-light.

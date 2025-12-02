@@ -38,59 +38,43 @@ knitr::opts_chunk$set(
 
 ```{r load-data, message=FALSE}
 # INPUTS
-job_name = "susine_sim_informed_grid"
-job_id = "46208799"
+job_name = "susie_scen_1_recreation_task_split"
+job_id = "46473445"
 
 # Load necessary libraries
 library(dplyr)
 library(readr)
 library(ggplot2)
-library(arrow)
 
 # Define file paths
 run_table_path <- file.path(here(), "output", "run_history", job_name, job_id, "run_table.csv")
 use_cases_path <- file.path(here(), "output", "run_history", job_name, job_id, "use_cases.csv")
-effect_metrics_path <- file.path(here(), "output", "slurm_output", job_name, job_id, "combined", "effect_metrics_combined.csv")
-model_metrics_path <- file.path(here(), "output", "slurm_output", job_name, job_id, "combined", "model_metrics_combined.csv")
-snps_metrics_path <- file.path(here(), "output", "slurm_output", job_name, job_id, "combined", "snps_combined.parquet")
+agg_dir <- file.path(here(), "output", "slurm_output", job_name, job_id, "combined", "aggregated")
+effect_metrics_path <- file.path(agg_dir, "effect_metrics.csv")
+model_metrics_path <- file.path(agg_dir, "model_metrics.csv")
 
 # Load the data
-run_table <- read_csv(run_table_path)
-use_cases <- read_csv(use_cases_path)
-effect_metrics <- read_csv(effect_metrics_path)
-model_metrics <- read_csv(model_metrics_path)
-snps_metrics <- if (file.exists(snps_metrics_path)) {
-  arrow::read_parquet(snps_metrics_path)
-} else {
-  warning("snps_combined.parquet not found; SNP-level plots unavailable.")
-  tibble::tibble()
-}
+run_table <- read_csv(run_table_path, show_col_types = FALSE)
+use_cases <- read_csv(use_cases_path, show_col_types = FALSE)
 
-# Create full_run_settings
+# Combine settings once, then join into metric tables; strip duplicate keys first so we keep clean column names
 full_run_settings <- left_join(run_table, use_cases, by = "use_case_id")
 
-# Join metrics with run settings
-# Rename use_case_id in model_metrics to avoid conflict
-model_metrics_renamed <- model_metrics %>%
-  rename(use_case_id_metric = use_case_id)
-model_metrics_full <- left_join(model_metrics_renamed, full_run_settings, by = "run_id")
+model_metrics_full <- read_csv(model_metrics_path, show_col_types = FALSE) %>%
+  select(-any_of(c("use_case_id", "seed", "task_id"))) %>%
+  left_join(full_run_settings, by = "run_id")
 
-effect_metrics_renamed <- effect_metrics %>%
-    rename(use_case_id_metric = use_case_id)
-effect_metrics_full <- left_join(effect_metrics_renamed, full_run_settings, by = "run_id")
+effect_metrics_full <- read_csv(effect_metrics_path, show_col_types = FALSE) %>%
+  select(-any_of(c("use_case_id", "seed", "task_id"))) %>%
+  left_join(full_run_settings, by = "run_id")
+
+# Drop intermediates to reduce memory footprint
+rm(run_table, use_cases, full_run_settings)
 
 # Display the first few rows of the joined tables
 head(model_metrics_full)
 head(effect_metrics_full)
-if (nrow(snps_metrics)) {
-  head(snps_metrics)
-}
 ```
-
-The `snps_metrics` tibble now exposes every SNP’s PIP, truth label, and
-per-run metadata, making it straightforward to rebuild the Fig. 2 power
-versus FDR curves or the Fig. 3 credible-set summaries directly from a
-single source.
 
 ## Compared amongst uninformed models
 
@@ -99,7 +83,7 @@ single source.
 # compute the average AUPRC and the average log cross-entropy (mean of log of each seed's cross_entropy)
 eps <- 1e-12
 uninformed_metrics_summary <- model_metrics_full %>%
-  filter(use_case_id %in% c("a_i", "a_ii", "a_iii", "a_iv")) %>%
+  filter(use_case_id %in% c("a_i", "a_ii")) %>%
   group_by(use_case_id, label, p_star, y_noise, L) %>%
   summarise(
     AUPRC = mean(AUPRC, na.rm = TRUE),
@@ -120,41 +104,15 @@ ggplot(uninformed_metrics_summary, aes(x = y_noise, y = AUPRC, color = label)) +
   theme(legend.position = "bottom")
 ```
 
-This grid also lets us isolate the gains from the heavier-compute variants.
-
-```{r compute-scaled-comparison}
-compute_metrics_summary <- model_metrics_full %>%
-  filter(use_case_id %in% c("a_i", "c_i", "c_ii")) %>%
-  group_by(use_case_id, label, p_star, y_noise, L) %>%
-  summarise(
-    AUPRC = mean(AUPRC, na.rm = TRUE),
-    .groups = 'drop'
-  )
-
-ggplot(compute_metrics_summary, aes(x = y_noise, y = AUPRC, color = label)) +
-  geom_line() +
-  geom_point() +
-  facet_grid(L ~ p_star, labeller = label_bquote(rows = L: .(L), cols = p_star: .(p_star))) +
-  labs(
-    title = "AUPRC for Baseline vs. Compute-Heavy Models",
-    subtitle = "Faceted by L (rows) and prior size p_star (columns); averaged over seeds",
-    x = "y_noise (Noise Level)",
-    y = "Average AUPRC",
-    color = "Use Case"
-  ) +
-  theme_minimal() +
-  theme(legend.position = "bottom")
-```
-
-```{r informed-model-comparison}
-# Filter and summarise informed models (and baseline a_i) for L = p_star = 5
+```{r informed-model-comparison, fig.width=14, fig.height=9}
+# Filter and summarise informed models (and baseline a_i) across all L and p_star
 eps <- 1e-12
 informed_metrics_raw <- model_metrics_full %>%
-  filter(use_case_id %in% c("a_i", "b_i", "b_ii", "b_iii", "b_iv")) %>%
-  filter(L == 5, p_star == 5)
+  filter(use_case_id %in% c("a_i", "b_i", "b_ii", "b_iii")) %>%
+  filter(p_star == 1)
 
 informed_metrics_summary <- informed_metrics_raw %>%
-  group_by(use_case_id, label, p_star, y_noise, L, annotation_r2, inflate_match, gamma_shrink) %>%
+  group_by(use_case_id, label, y_noise, annotation_r2, inflate_match, gamma_shrink) %>%
   summarise(
     AUPRC = mean(AUPRC, na.rm = TRUE),
     log_cross_entropy = mean(log(cross_entropy + eps), na.rm = TRUE),
@@ -186,91 +144,20 @@ if(nrow(baseline_rows) > 0 & nrow(priors_grid) > 0) {
 }
 
 # Plot AUPRC vs y_noise, faceted by prior noise settings (rows = noncausal, cols = causal)
-ggplot(combined_metrics, aes(x = y_noise, y = AUPRC, color = label, linetype = gamma_label)) +
-  geom_line() +
-  geom_point() +
-  facet_grid(inflate_match ~ annotation_r2, labeller = label_bquote(rows = inflate: .(inflate_match), cols = annotation_r2: .(annotation_r2))) +
-  labs(title = "AUPRC for Informed Models (L = p_star = 5, Averaged over seeds)",
-       x = "y_noise (Noise Level)",
-       y = "Average AUPRC",
-       color = "Use Case",
-       linetype = "Variance shrinkage") +
-  theme_minimal() +
-  theme(legend.position = "right")
-```
-
-```{r informed-model-annotation-quality-grid, fig.width=10, fig.height=6}
-# Focus on a representative noise level
-target_noise <- 0.9
-plot_title <- sprintf("AUPRC vs. Annotation R^2 (at y_noise = %.2f)", target_noise)
-
-informed_metrics_fixed_noise_raw <- informed_metrics_raw %>%
-  filter(y_noise == target_noise)
-
-# Baseline (a_i) averaged over seeds to keep a single horizontal reference
-baseline_auprc <- informed_metrics_summary %>%
-  filter(y_noise == target_noise, use_case_id == "a_i") %>%
-  summarise(AUPRC = mean(AUPRC, na.rm = TRUE), .groups = "drop") %>%
-  pull(AUPRC)
-
-# Helper to summarise mean AUPRC per annotation/prior setting
-summarise_annotations <- function(df) {
-  df %>%
-    group_by(label, annotation_r2, inflate_match, gamma_shrink) %>%
-    summarise(AUPRC = mean(AUPRC, na.rm = TRUE), .groups = "drop")
+if (!nrow(combined_metrics) ||
+    !any(stats::complete.cases(combined_metrics[c("annotation_r2", "inflate_match")]))) {
+  warning("No annotated informed-model rows to plot; skipping informed-model comparison facet.")
+} else {
+  ggplot(combined_metrics, aes(x = y_noise, y = AUPRC, color = label, linetype = gamma_label)) +
+    geom_line() +
+    geom_point() +
+    facet_grid(inflate_match ~ annotation_r2, labeller = label_bquote(rows = inflate: .(inflate_match), cols = annotation_r2: .(annotation_r2))) +
+    labs(title = "AUPRC for Informed Models: p_star = 5",
+         x = "y_noise (Noise Level)",
+         y = "Average AUPRC",
+         color = "Use Case",
+         linetype = "Variance shrinkage") +
+    theme_minimal() +
+    theme(legend.position = "right")
 }
-
-# Data for main facets (models with defined gamma_shrink)
-plot_summary <- informed_metrics_fixed_noise_raw %>%
-  filter(!is.na(gamma_shrink)) %>%
-  summarise_annotations()
-
-# Replicate the NA-gamma model across each facet so its line is drawn everywhere
-overlay_summary <- tibble()
-overlay_data <- informed_metrics_fixed_noise_raw %>%
-  filter(is.na(gamma_shrink) & use_case_id != "a_i")
-
-if (nrow(overlay_data) && length(unique(plot_summary$gamma_shrink))) {
-  overlay_summary <- purrr::map_df(unique(plot_summary$gamma_shrink), function(gamma) {
-    overlay_data %>%
-      mutate(gamma_shrink = gamma)
-  }) %>%
-    summarise_annotations()
-}
-
-# Plot AUPRC vs annotation_r2, faceted by inflate_match and gamma_shrink
-annotation_breaks <- sort(unique(plot_summary$annotation_r2))
-
-plot_obj <- ggplot(plot_summary, aes(x = annotation_r2, y = AUPRC, color = label, group = label)) +
-  geom_hline(
-    data = tibble(baseline_auprc = baseline_auprc),
-    aes(yintercept = baseline_auprc, linetype = "Baseline (Uninformed)"),
-    color = "red"
-  ) +
-  geom_line() +
-  geom_point()
-
-if (nrow(overlay_summary)) {
-  plot_obj <- plot_obj +
-    geom_line(data = overlay_summary, aes(group = label), linetype = "solid", alpha = 0.8) +
-    geom_point(data = overlay_summary, alpha = 0.8)
-}
-
-plot_obj +
-  facet_grid(
-    gamma_shrink ~ inflate_match,
-    labeller = label_bquote(rows = gamma == .(gamma_shrink), cols = inflate == .(inflate_match))
-  ) +
-  scale_x_continuous(breaks = annotation_breaks, labels = scales::number_format(accuracy = 0.01)) +
-  labs(
-    title = plot_title,
-    subtitle = "Faceted by annotation noise parameters; lines show mean over seeds.",
-    x = "Annotation R^2 (Causal Variance Explained)",
-    y = "AUPRC",
-    color = "Model",
-    linetype = ""
-  ) +
-  scale_linetype_manual(values = c("Baseline (Uninformed)" = "dashed")) +
-  theme_minimal() +
-  theme(legend.position = "bottom")
 ```
