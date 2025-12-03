@@ -155,8 +155,9 @@ snps_ds <- arrow::open_dataset(snps_path)
 snps_cols <- names(snps_ds)
 
 # If use_case_id is already in the SNPs dataset (from partitioning or embedded),
-# exclude it from run_map to avoid column collision during join
-join_cols_to_exclude <- intersect(setdiff(names(run_map), "run_id"), snps_cols)
+# exclude it from run_map to avoid column collision during join.
+# But keep 'label' since it's not in snps and we need it for plotting.
+join_cols_to_exclude <- intersect(setdiff(names(run_map), c("run_id", "label")), snps_cols)
 if (length(join_cols_to_exclude)) {
   message("SNPs dataset already has columns: ", paste(join_cols_to_exclude, collapse = ", "),
           " — excluding from join to avoid collision.")
@@ -169,13 +170,6 @@ run_map_ds <- arrow::InMemoryDataset$create(run_map_for_join)
 
 snps_joined <- snps_ds %>%
   dplyr::left_join(run_map_ds, by = "run_id")
-
-# Now re-join label if use_case_id was already in SNPs (we still need the label mapping)
-if ("use_case_id" %in% join_cols_to_exclude && "label" %in% names(use_case_labels)) {
-  label_map_ds <- arrow::InMemoryDataset$create(use_case_labels)
-  snps_joined <- snps_joined %>%
-    dplyr::left_join(label_map_ds, by = "use_case_id")
-}
 
 if (!is.na(filter_p_star)) {
   snps_joined <- snps_joined %>% dplyr::filter(p_star == filter_p_star)
