@@ -260,3 +260,345 @@ message("Saved: power_vs_fdr.png")
 
 - The preview uses `slice_head()` on the Arrow dataset, so it avoids loading the full Parquet collection.
 - Bump `n` in `slice_head()` if you want to see more rows; keep it small to stay memory-light.
+
+# Pre-aggregated Confusion Matrix Table
+
+This section creates a compact summary table with TP/FP/TN/FN counts at each PIP threshold,
+stratified by all grouping variables. This allows flexible downstream analysis without
+loading the full SNP-level data.
+
+```{r estimate-preagg-size, message=FALSE}
+# Estimate size of pre-aggregated confusion matrix table
+# --------------------------------------------------------
+
+# Count unique values for each potential grouping variable
+run_table_path <- file.path(here(), "output", "run_history", job_name, job_id, "run_table.csv")
+run_map_full <- readr::read_csv(run_table_path, show_col_types = FALSE)
+
+grouping_vars <- c("use_case_id", "p_star", "L", "y_noise", 
+                   "annotation_r2", "inflate_match", "gamma_shrink")
+
+# Count unique combinations (some will be NA for uninformed models)
+unique_combos <- run_map_full %>%
+  dplyr::select(all_of(grouping_vars)) %>%
+  dplyr::distinct() %>%
+  nrow()
+
+# PIP thresholds (0.00, 0.01, 0.02, ..., 1.00)
+pip_bucket_width <- 0.01
+n_pip_thresholds <- ceiling(1 / pip_bucket_width) + 1  # 101 thresholds
+
+# Estimated rows
+n_rows <- unique_combos * n_pip_thresholds
+
+# Columns: grouping vars + label + pip_threshold + TP + FP + TN + FN + n_runs
+n_cols <- length(grouping_vars) + 1 + 1 + 4 + 1  # +1 for label, +1 for pip_threshold, +4 for counts, +1 for n_runs
+
+# Estimate memory (rough: 8 bytes per numeric, ~50 bytes per string on average)
+# Assume ~100 bytes per row as upper bound
+estimated_bytes <- n_rows * 100
+estimated_mb <- estimated_bytes / 1024 / 1024
+
+cat("Grouping variables:", paste(grouping_vars, collapse = ", "), "\n")
+cat("Unique setting combinations:", unique_combos, "\n")
+cat("PIP thresholds:", n_pip_thresholds, "\n")
+cat("Estimated rows:", format(n_rows, big.mark = ","), "\n")
+cat("Estimated columns:", n_cols, "\n")
+cat("Estimated memory:", round(estimated_mb, 2), "MB\n")
+```
+
+```{r build-preagg-confusion-matrix, message=FALSE}
+# Build the pre-aggregated confusion matrix table
+# ------------------------------------------------
+
+grouping_vars <- c("use_case_id", "p_star", "L", "y_noise", 
+                   "annotation_r2", "inflate_match", "gamma_shrink")
+pip_bucket_width <- 0.01
+
+# Load run metadata
+run_table_path <- file.path(here(), "output", "run_history", job_name, job_id, "run_table.csv")
+use_cases_path <- file.path(here(), "output", "run_history", job_name, job_id, "use_cases.csv")
+
+run_map <- readr::read_csv(
+  run_table_path,
+  show_col_types = FALSE,
+  col_select = c("run_id", all_of(grouping_vars)),
+  col_types = readr::cols(
+    run_id = readr::col_integer(),
+    use_case_id = readr::col_character(),
+    p_star = readr::col_integer(),
+    L = readr::col_integer(),
+    y_noise = readr::col_double(),
+    annotation_r2 = readr::col_double(),
+    inflate_match = readr::col_double(),
+    gamma_shrink = readr::col_double()
+  )
+) %>%
+  dplyr::mutate(run_id = as.integer(run_id))
+
+use_case_labels <- readr::read_csv(
+  use_cases_path,
+  show_col_types = FALSE,
+  col_select = c(use_case_id, label),
+  col_types = readr::cols(
+    use_case_id = readr::col_character(),
+    label = readr::col_character()
+  )
+)
+
+run_map <- dplyr::left_join(run_map, use_case_labels, by = "use_case_id")
+
+# Count runs per grouping combination (for later averaging)
+n_runs_per_group <- run_map %>%
+  dplyr::group_by(across(all_of(grouping_vars))) %>%
+  dplyr::summarise(n_runs = dplyr::n(), .groups = "drop")
+
+# Open SNPs dataset
+snps_ds <- arrow::open_dataset(snps_path)
+snps_cols <- names(snps_ds)
+
+# Prepare join table (exclude columns already in snps to avoid collision)
+join_cols_to_exclude <- intersect(setdiff(names(run_map), c("run_id", "label")), snps_cols)
+if (length(join_cols_to_exclude)) {
+  run_map_for_join <- dplyr::select(run_map, -all_of(join_cols_to_exclude))
+} else {
+  run_map_for_join <- run_map
+}
+run_map_ds <- arrow::InMemoryDataset$create(run_map_for_join)
+
+# Join and aggregate: count TP, FP, TN, FN at each pip_bucket for each grouping combo
+# For each SNP: if pip >= threshold, it's "predicted positive"
+# causal == 1 means actually positive
+
+message("Aggregating confusion matrix counts (this may take a while)...")
+
+confusion_agg <- snps_ds %>%
+
+  dplyr::left_join(run_map_ds, by = "run_id") %>%
+  dplyr::mutate(
+    pip_bucket = pmax(0, pmin(1, floor(pip / pip_bucket_width) * pip_bucket_width))
+  ) %>%
+  dplyr::group_by(across(all_of(c(grouping_vars, "label"))), pip_bucket) %>%
+  dplyr::summarise(
+    n_snps = dplyr::n(),
+    n_causal = sum(causal == 1, na.rm = TRUE),
+    n_noncausal = sum(causal == 0, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  dplyr::collect()
+
+message("Collected ", nrow(confusion_agg), " rows from Arrow")
+
+# Now compute cumulative TP/FP/TN/FN for each threshold (descending pip)
+# At threshold t: predict positive if pip >= t
+# TP = causal SNPs with pip >= t, FP = non-causal SNPs with pip >= t
+# TN = non-causal SNPs with pip < t, FN = causal SNPs with pip < t
+
+confusion_matrix_table <- confusion_agg %>%
+  dplyr::group_by(across(all_of(c(grouping_vars, "label")))) %>%
+  dplyr::arrange(dplyr::desc(pip_bucket), .by_group = TRUE) %>%
+  dplyr::mutate(
+    # Cumulative counts from high pip down (predicted positive at threshold = pip_bucket)
+    TP = cumsum(n_causal),
+    FP = cumsum(n_noncausal),
+    # Total positives and negatives in this group
+    total_causal = sum(n_causal),
+    total_noncausal = sum(n_noncausal),
+    # FN and TN are the remainder
+    FN = total_causal - TP,
+    TN = total_noncausal - FP
+  ) %>%
+  dplyr::ungroup() %>%
+  # Join n_runs
+  dplyr::left_join(n_runs_per_group, by = grouping_vars) %>%
+  # Select final columns
+  dplyr::select(
+    all_of(grouping_vars), label, pip_threshold = pip_bucket,
+    TP, FP, TN, FN, n_runs, total_causal, total_noncausal
+  )
+
+# Save to file
+confusion_matrix_path <- file.path(dirname(snps_path), "confusion_matrix_by_threshold.csv")
+readr::write_csv(confusion_matrix_table, confusion_matrix_path)
+message("Saved pre-aggregated confusion matrix to: ", confusion_matrix_path)
+
+# Show summary
+cat("\nConfusion matrix table:\n")
+cat("  Rows:", format(nrow(confusion_matrix_table), big.mark = ","), "\n")
+cat("  Columns:", ncol(confusion_matrix_table), "\n")
+cat("  Size in memory:", format(object.size(confusion_matrix_table), units = "MB"), "\n")
+head(confusion_matrix_table)
+```
+
+```{r load-and-plot-power-fdr-from-preagg, message=FALSE}
+# Load the pre-aggregated confusion matrix and create Power vs FDR plot
+# ----------------------------------------------------------------------
+
+# Read the saved file (simulating loading from disk)
+confusion_matrix_path <- file.path(dirname(snps_path), "confusion_matrix_by_threshold.csv")
+cm_table <- readr::read_csv(confusion_matrix_path, show_col_types = FALSE)
+
+# --- USER FILTERS (adjust as needed) ---
+filter_p_star_val <- 5        # NA to include all
+filter_y_noise_val <- NA      # NA to include all
+filter_annotation_r2_val <- NA # NA to include all (includes NA annotation runs)
+filter_L_val <- NA            # NA to include all
+# ----------------------------------------
+
+# Apply filters
+cm_filtered <- cm_table
+if (!is.na(filter_p_star_val)) {
+  cm_filtered <- cm_filtered %>% dplyr::filter(p_star == filter_p_star_val)
+}
+if (!is.na(filter_y_noise_val)) {
+  cm_filtered <- cm_filtered %>% dplyr::filter(y_noise == filter_y_noise_val)
+}
+if (!is.na(filter_annotation_r2_val)) {
+  cm_filtered <- cm_filtered %>% dplyr::filter(annotation_r2 == filter_annotation_r2_val | is.na(annotation_r2))
+}
+if (!is.na(filter_L_val)) {
+  cm_filtered <- cm_filtered %>% dplyr::filter(L == filter_L_val)
+}
+
+# Aggregate across any remaining grouping vars to get one curve per use_case_id
+# (sum the counts, then recompute metrics)
+power_fdr_data <- cm_filtered %>%
+  dplyr::group_by(use_case_id, label, pip_threshold) %>%
+  dplyr::summarise(
+    TP = sum(TP, na.rm = TRUE),
+    FP = sum(FP, na.rm = TRUE),
+    TN = sum(TN, na.rm = TRUE),
+    FN = sum(FN, na.rm = TRUE),
+    n_runs = sum(n_runs, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  dplyr::mutate(
+    precision = dplyr::if_else(TP + FP > 0, TP / (TP + FP), NA_real_),
+    recall = dplyr::if_else(TP + FN > 0, TP / (TP + FN), NA_real_),
+    fdr = 1 - precision,
+    # Average credible set size at this threshold (predicted positives per run)
+    avg_cs_size = (TP + FP) / n_runs
+  ) %>%
+  dplyr::filter(!is.na(precision), !is.na(recall))
+
+# Build subtitle
+subtitle_parts <- c()
+if (!is.na(filter_p_star_val)) subtitle_parts <- c(subtitle_parts, paste0("p* = ", filter_p_star_val))
+if (!is.na(filter_y_noise_val)) subtitle_parts <- c(subtitle_parts, paste0("y_noise = ", filter_y_noise_val))
+if (!is.na(filter_annotation_r2_val)) subtitle_parts <- c(subtitle_parts, paste0("annotation_r2 = ", filter_annotation_r2_val))
+if (!is.na(filter_L_val)) subtitle_parts <- c(subtitle_parts, paste0("L = ", filter_L_val))
+subtitle_str <- if (length(subtitle_parts)) paste(subtitle_parts, collapse = ", ") else "All settings"
+
+# Plot Power vs FDR, colored by use_case_id (label)
+p_preagg_fdr <- ggplot(power_fdr_data, aes(x = fdr, y = recall, color = label)) +
+  geom_line() +
+  geom_point(size = 0.8) +
+  labs(
+    title = "Power vs. FDR (from pre-aggregated confusion matrix)",
+    subtitle = subtitle_str,
+    x = "False Discovery Rate (1 - Precision)",
+    y = "Power (Recall)",
+    color = "Model"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+ggsave(file.path(plot_dir, "power_vs_fdr_from_preagg.png"), p_preagg_fdr, width = 12, height = 7, dpi = 300)
+message("Saved: power_vs_fdr_from_preagg.png")
+# p_preagg_fdr  # Uncomment to display
+```
+
+```{r preagg-informed-model-comparison, fig.width=14, fig.height=9, message=FALSE}
+# Replicate the informed model comparison plot from visualize_results_workbook
+# using the pre-aggregated confusion matrix instead of model_metrics
+# -----------------------------------------------------------------------------
+
+# Read the saved file
+confusion_matrix_path <- file.path(dirname(snps_path), "confusion_matrix_by_threshold.csv")
+cm_table <- readr::read_csv(confusion_matrix_path, show_col_types = FALSE)
+
+# Filter to informed models + baseline (a_i)
+# Focus on p_star = 1 to match the visualization workbook
+informed_cm <- cm_table %>%
+  dplyr::filter(use_case_id %in% c("a_i", "b_i", "b_ii", "b_iii")) %>%
+  dplyr::filter(p_star == 1)
+
+# For AUPRC calculation, we need to integrate precision over recall
+# We'll compute AUPRC per (use_case_id, y_noise, annotation_r2, inflate_match, gamma_shrink)
+
+compute_auprc <- function(df) {
+  # Sort by recall ascending, then integrate (trapezoidal rule)
+  df <- df %>% dplyr::arrange(recall)
+  if (nrow(df) < 2) return(NA_real_)
+  # Remove NAs
+
+  df <- df %>% dplyr::filter(!is.na(recall), !is.na(precision))
+  if (nrow(df) < 2) return(NA_real_)
+  # Trapezoidal integration
+  auprc <- sum(diff(df$recall) * (head(df$precision, -1) + tail(df$precision, -1)) / 2)
+  auprc
+}
+
+# Compute precision/recall at each threshold, then AUPRC per group
+informed_metrics <- informed_cm %>%
+  dplyr::mutate(
+    precision = dplyr::if_else(TP + FP > 0, TP / (TP + FP), NA_real_),
+    recall = dplyr::if_else(TP + FN > 0, TP / (TP + FN), NA_real_)
+  ) %>%
+  dplyr::filter(!is.na(precision), !is.na(recall))
+
+# Group and compute AUPRC
+informed_auprc <- informed_metrics %>%
+  dplyr::group_by(use_case_id, label, y_noise, annotation_r2, inflate_match, gamma_shrink) %>%
+  dplyr::summarise(
+    AUPRC = compute_auprc(dplyr::cur_data()),
+    .groups = "drop"
+  ) %>%
+  dplyr::mutate(
+    gamma_label = dplyr::if_else(is.na(gamma_shrink), "none", sprintf("gamma=%.2f", gamma_shrink))
+  )
+
+# Expand baseline (a_i) across all annotation combinations so it appears in each facet
+priors_grid <- informed_auprc %>%
+  dplyr::filter(!is.na(annotation_r2) & !is.na(inflate_match)) %>%
+  dplyr::distinct(annotation_r2, inflate_match)
+
+baseline_rows <- informed_auprc %>% dplyr::filter(use_case_id == "a_i")
+
+if (nrow(baseline_rows) > 0 & nrow(priors_grid) > 0) {
+  baseline_expanded <- baseline_rows %>%
+    dplyr::select(-annotation_r2, -inflate_match) %>%
+    tidyr::crossing(priors_grid)
+  
+  combined_auprc <- dplyr::bind_rows(
+    informed_auprc %>% dplyr::filter(use_case_id != "a_i"),
+    baseline_expanded
+  )
+} else {
+  combined_auprc <- informed_auprc
+}
+
+# Plot AUPRC vs y_noise, faceted by prior settings
+if (!nrow(combined_auprc) ||
+    !any(stats::complete.cases(combined_auprc[c("annotation_r2", "inflate_match")]))) {
+  warning("No annotated informed-model rows to plot; skipping.")
+} else {
+  p_informed_preagg <- ggplot(combined_auprc, aes(x = y_noise, y = AUPRC, color = label, linetype = gamma_label)) +
+    geom_line() +
+    geom_point() +
+    facet_grid(inflate_match ~ annotation_r2, 
+               labeller = label_bquote(rows = inflate: .(inflate_match), cols = annotation_r2: .(annotation_r2))) +
+    labs(title = "AUPRC for Informed Models (from pre-aggregated SNPs): p* = 1",
+         subtitle = "Computed by integrating precision-recall curve from confusion matrix",
+         x = "y_noise (Noise Level)",
+         y = "AUPRC",
+         color = "Model",
+         linetype = "Variance shrinkage") +
+    theme_minimal() +
+    theme(legend.position = "right")
+  
+  ggsave(file.path(plot_dir, "auprc_informed_from_preagg.png"), p_informed_preagg, width = 14, height = 9, dpi = 300)
+  message("Saved: auprc_informed_from_preagg.png")
+  # p_informed_preagg  # Uncomment to display
+}
+```
