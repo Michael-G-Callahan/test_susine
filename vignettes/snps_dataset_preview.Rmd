@@ -122,7 +122,7 @@ use_cases_path <- file.path(here(), "output", "run_history", job_name, job_id, "
 run_map <- readr::read_csv(
   run_table_path,
   show_col_types = FALSE,
-  col_select = split_cols,
+  col_select = all_of(split_cols),
   col_types = readr::cols(
     run_id = readr::col_integer(),
     use_case_id = readr::col_character(),
@@ -569,7 +569,7 @@ informed_metrics <- informed_cm %>%
 informed_auprc <- informed_metrics %>%
   dplyr::group_by(use_case_id, label, y_noise, annotation_r2, inflate_match, gamma_shrink) %>%
   dplyr::summarise(
-    AUPRC = compute_auprc(dplyr::cur_data()),
+    AUPRC = compute_auprc(dplyr::pick(precision, recall)),
     .groups = "drop"
   ) %>%
   dplyr::mutate(
