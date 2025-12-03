@@ -27,6 +27,7 @@ This workbook visualizes performance comparisons across the full suite of SuSiNE
 library(here)
 here::i_am("vignettes/visualize_results_workbook.Rmd")
 here()
+
 knitr::opts_chunk$set(
   fig.width = 12,   # width in inches (increase if your plots are wide)
   fig.height = 8,   # height in inches
@@ -71,6 +72,11 @@ effect_metrics_full <- read_csv(effect_metrics_path, show_col_types = FALSE) %>%
 # Drop intermediates to reduce memory footprint
 rm(run_table, use_cases, full_run_settings)
 
+# Create output directory for plots (HPC-friendly: save to file instead of display)
+plot_dir <- file.path(agg_dir, "plots")
+dir.create(plot_dir, showWarnings = FALSE, recursive = TRUE)
+message("Plots will be saved to: ", plot_dir)
+
 # Display the first few rows of the joined tables
 head(model_metrics_full)
 head(effect_metrics_full)
@@ -92,7 +98,7 @@ uninformed_metrics_summary <- model_metrics_full %>%
   )
 
 # Plot AUPRC vs y_noise, faceted by L and p_star
-ggplot(uninformed_metrics_summary, aes(x = y_noise, y = AUPRC, color = label)) +
+p_uninformed <- ggplot(uninformed_metrics_summary, aes(x = y_noise, y = AUPRC, color = label)) +
   geom_line() +
   geom_point() +
   facet_grid(L ~ p_star, labeller = label_bquote(rows = L: .(L), cols = p_star: .(p_star))) +
@@ -102,6 +108,9 @@ ggplot(uninformed_metrics_summary, aes(x = y_noise, y = AUPRC, color = label)) +
        color = "Use Case") +
   theme_minimal() +
   theme(legend.position = "bottom")
+
+ggsave(file.path(plot_dir, "auprc_uninformed_models.png"), p_uninformed, width = 12, height = 8, dpi = 300)
+p_uninformed
 ```
 
 ```{r informed-model-comparison, fig.width=14, fig.height=9}
@@ -148,7 +157,7 @@ if (!nrow(combined_metrics) ||
     !any(stats::complete.cases(combined_metrics[c("annotation_r2", "inflate_match")]))) {
   warning("No annotated informed-model rows to plot; skipping informed-model comparison facet.")
 } else {
-  ggplot(combined_metrics, aes(x = y_noise, y = AUPRC, color = label, linetype = gamma_label)) +
+  p_informed <- ggplot(combined_metrics, aes(x = y_noise, y = AUPRC, color = label, linetype = gamma_label)) +
     geom_line() +
     geom_point() +
     facet_grid(inflate_match ~ annotation_r2, labeller = label_bquote(rows = inflate: .(inflate_match), cols = annotation_r2: .(annotation_r2))) +
@@ -159,5 +168,8 @@ if (!nrow(combined_metrics) ||
          linetype = "Variance shrinkage") +
     theme_minimal() +
     theme(legend.position = "right")
+  
+  ggsave(file.path(plot_dir, "auprc_informed_models.png"), p_informed, width = 14, height = 9, dpi = 300)
+  p_informed
 }
 ```
