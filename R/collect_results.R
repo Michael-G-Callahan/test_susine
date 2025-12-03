@@ -200,6 +200,7 @@ if (is.null(run_table_path)) {
       log_progress("Joining use_case_id from run_table...")
       run_lookup <- readr::read_csv(run_table_path, show_col_types = FALSE) %>%
         dplyr::select(run_id, use_case_id) %>%
+        dplyr::mutate(run_id = as.integer(run_id)) %>%
         dplyr::distinct()
       # Convert to Arrow Table for efficient join
       run_lookup_arrow <- arrow::Table$create(run_lookup)
