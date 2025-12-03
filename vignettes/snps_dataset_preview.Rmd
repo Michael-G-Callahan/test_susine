@@ -389,32 +389,17 @@ confusion_agg <- snps_ds %>%
 
 message("Collected ", nrow(confusion_agg), " rows from Arrow")
 
-# Now compute cumulative TP/FP/TN/FN for each threshold (descending pip)
-# At threshold t: predict positive if pip >= t
-# TP = causal SNPs with pip >= t, FP = non-causal SNPs with pip >= t
-# TN = non-causal SNPs with pip < t, FN = causal SNPs with pip < t
-
+# Store the per-bucket counts (NOT cumulative) - cumulative will be computed at query time
+# This allows correct aggregation across any grouping of variables later
 confusion_matrix_table <- confusion_agg %>%
-  dplyr::group_by(across(all_of(c(grouping_vars, "label")))) %>%
-  dplyr::arrange(dplyr::desc(pip_bucket), .by_group = TRUE) %>%
-  dplyr::mutate(
-    # Cumulative counts from high pip down (predicted positive at threshold = pip_bucket)
-    TP = cumsum(n_causal),
-    FP = cumsum(n_noncausal),
-    # Total positives and negatives in this group
-    total_causal = sum(n_causal),
-    total_noncausal = sum(n_noncausal),
-    # FN and TN are the remainder
-    FN = total_causal - TP,
-    TN = total_noncausal - FP
-  ) %>%
-  dplyr::ungroup() %>%
-  # Join n_runs
   dplyr::left_join(n_runs_per_group, by = grouping_vars) %>%
-  # Select final columns
+  dplyr::rename(
+    n_causal_at_bucket = n_causal,
+    n_noncausal_at_bucket = n_noncausal
+  ) %>%
   dplyr::select(
     all_of(grouping_vars), label, pip_threshold = pip_bucket,
-    TP, FP, TN, FN, n_runs, total_causal, total_noncausal
+    n_causal_at_bucket, n_noncausal_at_bucket, n_runs
   )
 
 # Save to file
@@ -460,18 +445,28 @@ if (!is.na(filter_L_val)) {
   cm_filtered <- cm_filtered %>% dplyr::filter(L == filter_L_val)
 }
 
-# Aggregate across any remaining grouping vars to get one curve per use_case_id
-# (sum the counts, then recompute metrics)
+# First aggregate the per-bucket counts across the filtered groups,
+# THEN compute cumulative TP/FP (this is the key fix!)
 power_fdr_data <- cm_filtered %>%
   dplyr::group_by(use_case_id, label, pip_threshold) %>%
   dplyr::summarise(
-    TP = sum(TP, na.rm = TRUE),
-    FP = sum(FP, na.rm = TRUE),
-    TN = sum(TN, na.rm = TRUE),
-    FN = sum(FN, na.rm = TRUE),
+    n_causal_at_bucket = sum(n_causal_at_bucket, na.rm = TRUE),
+    n_noncausal_at_bucket = sum(n_noncausal_at_bucket, na.rm = TRUE),
     n_runs = sum(n_runs, na.rm = TRUE),
     .groups = "drop"
   ) %>%
+  # Now compute cumulative values per use_case_id (descending pip)
+  dplyr::group_by(use_case_id, label) %>%
+  dplyr::arrange(dplyr::desc(pip_threshold), .by_group = TRUE) %>%
+  dplyr::mutate(
+    TP = cumsum(n_causal_at_bucket),
+    FP = cumsum(n_noncausal_at_bucket),
+    total_causal = sum(n_causal_at_bucket),
+    total_noncausal = sum(n_noncausal_at_bucket),
+    FN = total_causal - TP,
+    TN = total_noncausal - FP
+  ) %>%
+  dplyr::ungroup() %>%
   dplyr::mutate(
     precision = dplyr::if_else(TP + FP > 0, TP / (TP + FP), NA_real_),
     recall = dplyr::if_else(TP + FN > 0, TP / (TP + FN), NA_real_),
@@ -531,7 +526,6 @@ compute_auprc <- function(df) {
   df <- df %>% dplyr::arrange(recall)
   if (nrow(df) < 2) return(NA_real_)
   # Remove NAs
-
   df <- df %>% dplyr::filter(!is.na(recall), !is.na(precision))
   if (nrow(df) < 2) return(NA_real_)
   # Trapezoidal integration
@@ -539,12 +533,26 @@ compute_auprc <- function(df) {
   auprc
 }
 
-# Compute precision/recall at each threshold, then AUPRC per group
+# First aggregate per-bucket counts within each grouping, then compute cumulative TP/FP
 informed_metrics <- informed_cm %>%
+  dplyr::group_by(use_case_id, label, y_noise, annotation_r2, inflate_match, gamma_shrink, pip_threshold) %>%
+  dplyr::summarise(
+    n_causal_at_bucket = sum(n_causal_at_bucket, na.rm = TRUE),
+    n_noncausal_at_bucket = sum(n_noncausal_at_bucket, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  # Compute cumulative values per group (descending pip)
+  dplyr::group_by(use_case_id, label, y_noise, annotation_r2, inflate_match, gamma_shrink) %>%
+  dplyr::arrange(dplyr::desc(pip_threshold), .by_group = TRUE) %>%
   dplyr::mutate(
+    TP = cumsum(n_causal_at_bucket),
+    FP = cumsum(n_noncausal_at_bucket),
+    total_causal = sum(n_causal_at_bucket),
+    FN = total_causal - TP,
     precision = dplyr::if_else(TP + FP > 0, TP / (TP + FP), NA_real_),
     recall = dplyr::if_else(TP + FN > 0, TP / (TP + FN), NA_real_)
   ) %>%
+  dplyr::ungroup() %>%
   dplyr::filter(!is.na(precision), !is.na(recall))
 
 # Group and compute AUPRC
