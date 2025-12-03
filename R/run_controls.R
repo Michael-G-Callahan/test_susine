@@ -279,33 +279,39 @@ make_run_tables <- function(use_case_ids,
   if (!length(seed_values)) {
     stop("At least one seed must be supplied.")
   }
+
+  # Offset seeds by matrix_id so each dataset has its own unique seed set.
+
+  # E.g., if seeds = 1:5, matrix_id 1 gets seeds 1-5, matrix_id 2 gets 6-10, etc.
+  n_seeds <- length(seed_values)
+  offset_seeds_for_matrix <- function(base_seeds, mat_id) {
+    base_seeds + (mat_id - 1L) * n_seeds
+  }
+
   seed_first <- seed_values[1]
 
   runs <- if (grid_mode == "minimal") {
     scenario_matrix_map %>%
       dplyr::mutate(
         use_case_id = rep_len(use_cases$use_case_id, dplyr::n()),
-        seed = seed_first
+        seed = offset_seeds_for_matrix(seed_first, matrix_id)
       )
   } else {
-    n_matrices <- nrow(scenario_matrix_map)
-    n_seed_slots <- length(seed_values)
-
+    # Expand grid per scenario_matrix_index, then compute offset seeds per matrix_id
     tidyr::expand_grid(
-      scenario_matrix_index = seq_len(n_matrices),
+      scenario_matrix_index = seq_len(nrow(scenario_matrix_map)),
       use_case_id = use_cases$use_case_id,
-      seed_slot = seq_len(n_seed_slots)
+      seed_base = seed_values
     ) %>%
-      dplyr::mutate(
-        seed = seed_values[seed_slot] + (scenario_matrix_index - 1L) * n_seed_slots
-      ) %>%
-      dplyr::select(-seed_slot) %>%
       dplyr::left_join(
         scenario_matrix_map %>%
           dplyr::mutate(scenario_matrix_index = dplyr::row_number()),
         by = "scenario_matrix_index"
       ) %>%
-      dplyr::select(-scenario_matrix_index)
+      dplyr::mutate(
+        seed = offset_seeds_for_matrix(seed_base, matrix_id)
+      ) %>%
+      dplyr::select(-scenario_matrix_index, -seed_base)
   }
 
   scenario_join <- dplyr::select(
