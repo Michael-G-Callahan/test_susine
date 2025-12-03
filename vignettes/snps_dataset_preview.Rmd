@@ -46,6 +46,11 @@ snps_path <- file.path(
 
 stopifnot(dir.exists(snps_path))
 
+# Create output directory for plots
+plot_dir <- file.path(dirname(snps_path), "plots")
+dir.create(plot_dir, showWarnings = FALSE, recursive = TRUE)
+message("Plots will be saved to: ", plot_dir)
+
 library(dplyr)
 library(arrow)
 
@@ -229,7 +234,7 @@ pip_curve_data_path
 ```
 
 ```{r power-fdr-plot, fig.width=15, fig.height=7, message=FALSE}
-ggplot(pip_curve_data, aes(x = fdr, y = recall, color = curve_label)) +
+p_power_fdr <- ggplot(pip_curve_data, aes(x = fdr, y = recall, color = curve_label)) +
   geom_line() +
   geom_point(size = 0.8) +
   labs(
@@ -245,6 +250,10 @@ ggplot(pip_curve_data, aes(x = fdr, y = recall, color = curve_label)) +
   ) +
   theme_minimal() +
   theme(legend.position = "bottom")
+
+ggsave(file.path(plot_dir, "power_vs_fdr.png"), p_power_fdr, width = 15, height = 7, dpi = 300)
+message("Saved: power_vs_fdr.png")
+# p_power_fdr  # Uncomment to display in viewer
 ```
 
 # Notes
