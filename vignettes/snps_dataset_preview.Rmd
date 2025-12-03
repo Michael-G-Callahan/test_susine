@@ -528,6 +528,16 @@ compute_auprc <- function(df) {
   # Remove NAs
   df <- df %>% dplyr::filter(!is.na(recall), !is.na(precision))
   if (nrow(df) < 2) return(NA_real_)
+  
+  # Anchor at recall=0 with precision=1 (standard AUPRC convention)
+  # This ensures curves that start at high recall (confident models) are properly credited
+  if (min(df$recall) > 0) {
+    df <- dplyr::bind_rows(
+      tibble::tibble(recall = 0, precision = 1),
+      df
+    )
+  }
+  
   # Trapezoidal integration
   auprc <- sum(diff(df$recall) * (head(df$precision, -1) + tail(df$precision, -1)) / 2)
   auprc
