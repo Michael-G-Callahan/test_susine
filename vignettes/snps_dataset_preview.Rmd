@@ -33,8 +33,8 @@ knitr::opts_chunk$set(
 
 ```{r load-snps-sample, message=FALSE}
 # Adjust these to point at the desired run
-job_name <- "susie_scen_1_recreation_task_split"
-job_id <- "46473445"
+job_name <- "susie_scen_1_recreation"
+job_id <- "46880273"
 
 snps_path <- file.path(
   here(),
@@ -60,42 +60,42 @@ snps_preview
 # Temporarily repartition existing dataset by use_case_id
 
 ```{r repartition-snps-dataset, message=FALSE}
-# This writes a partitioned copy alongside the original without loading everything into memory.
-# Remove or disable after use; future runs should emit partitioned data natively.
-partitioned_path <- file.path(dirname(snps_path), "snps_dataset_by_use_case")
-
-if (!dir.exists(partitioned_path)) {
-  # Map run_id -> use_case_id (small table) then join in-arrow and write partitioned
-  run_table_path <- file.path(here(), "output", "run_history", job_name, job_id, "run_table.csv")
-  run_map <- readr::read_csv(
-    run_table_path,
-    show_col_types = FALSE,
-    col_select = c(run_id, use_case_id),
-    col_types = readr::cols(
-      run_id = readr::col_integer(),
-      use_case_id = readr::col_character()
-    )
-  ) %>%
-    dplyr::mutate(run_id = as.integer(run_id))
-
-  snps_ds <- arrow::open_dataset(snps_path)
-  run_map_ds <- arrow::InMemoryDataset$create(run_map)
-
-  snps_with_uc <- snps_ds %>%
-    dplyr::left_join(run_map_ds, by = "run_id") %>%
-    dplyr::select(use_case_id, dplyr::everything())
-
-  arrow::write_dataset(
-    snps_with_uc,
-    path = partitioned_path,
-    format = "parquet",
-    partitioning = "use_case_id"
-  )
-
-  rm(run_map, run_map_ds, snps_ds, snps_with_uc)
-}
-
-partitioned_path
+# # This writes a partitioned copy alongside the original without loading everything into memory.
+# # Remove or disable after use; future runs should emit partitioned data natively.
+# partitioned_path <- file.path(dirname(snps_path), "snps_dataset_by_use_case")
+# 
+# if (!dir.exists(partitioned_path)) {
+#   # Map run_id -> use_case_id (small table) then join in-arrow and write partitioned
+#   run_table_path <- file.path(here(), "output", "run_history", job_name, job_id, "run_table.csv")
+#   run_map <- readr::read_csv(
+#     run_table_path,
+#     show_col_types = FALSE,
+#     col_select = c(run_id, use_case_id),
+#     col_types = readr::cols(
+#       run_id = readr::col_integer(),
+#       use_case_id = readr::col_character()
+#     )
+#   ) %>%
+#     dplyr::mutate(run_id = as.integer(run_id))
+# 
+#   snps_ds <- arrow::open_dataset(snps_path)
+#   run_map_ds <- arrow::InMemoryDataset$create(run_map)
+# 
+#   snps_with_uc <- snps_ds %>%
+#     dplyr::left_join(run_map_ds, by = "run_id") %>%
+#     dplyr::select(use_case_id, dplyr::everything())
+# 
+#   arrow::write_dataset(
+#     snps_with_uc,
+#     path = partitioned_path,
+#     format = "parquet",
+#     partitioning = "use_case_id"
+#   )
+# 
+#   rm(run_map, run_map_ds, snps_ds, snps_with_uc)
+# }
+# 
+# partitioned_path
 ```
 
 # Power vs. FDR (Fig. 2D/E style) from SNP PIPs

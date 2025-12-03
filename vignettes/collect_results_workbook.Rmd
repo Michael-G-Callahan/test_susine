@@ -39,10 +39,10 @@ Provide the job name and parent array ID from your completed run.
 ```{r job-inputs}
 job_inputs <- list(
   # Job identifier (from run_history folder name)
-  job_name = "susie_sim_grid_demo",
+  job_name = "susie_scen_1_recreation",
   
   # Parent SLURM array job ID (from run_history/job_name/[PARENT_ID]/)
-  parent_job_id = "45832058",
+  parent_job_id = "46880273",
   
   # Root output directory
   output_root = here("output")
@@ -160,6 +160,9 @@ if (dir.exists(file.path(agg$output_dir, "snps_dataset"))) {
   cat("SNP dataset fragments:", length(snp_files), "\n")
 }
 
+#read the snp parquet
+
+```
 # 6. Next Steps
 
 Use the aggregated outputs in downstream analysis or dashboards. The

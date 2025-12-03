@@ -68,7 +68,7 @@ job_inputs <- list(
   
   HPC = TRUE,
   
-  mem = "2G",
+  mem = "8G",
   time = "23:59:59",
 
   # Email used for SLURM notifications
@@ -87,20 +87,20 @@ job_inputs <- list(
   # Simulation settings (vectorised; full factorial is taken)
   L_grid = c(10),
   y_noise = c(0.6, 0.8, 0.9, 0.95),
-  p_star_grid = c(1, 2, 3, 4, 5),
+  p_star_grid = c(1, 2, 3, 4, 5, 10, 20),
   pair_L_p_star = FALSE,
-
+ 
   # Prior quality grid parameters
   annotation_r2 = c(0.2, 0.4, 0.6, 0.8),
   inflate_match = c(0, 0.5, 1),
   gamma_shrink = c(0.4, 0.8),
 
   # Seeds per design matrix (each sampled X receives these many phenotype draws)
-  seeds = 1:5,
+  seeds = 1:4,
 
   # Number of runs to assign to each SLURM array task
   # (~2112 total runs / 150 per task = ~14 tasks, well under SLURM QoS limits)
-  runs_per_task = 3751, #5,
+  runs_per_task = 4201, #5,
   # Number of runs to accumulate before flushing task-local outputs
   buffer_flush_interval = 300,
 
