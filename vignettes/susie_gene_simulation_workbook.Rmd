@@ -27,6 +27,7 @@ n_participants_small <- 600L
 n_participants_large <- 6000L
 window_bp <- 1e6
 n_closest <- 1000L
+n_closest_prefetch <- 1100L # Fetch extra SNPs before MAF filter to ensure n_closest remain
 maf_threshold <- 0.01
 
 project_dir <- normalizePath("..", winslash = "/", mustWork = TRUE)
@@ -150,10 +151,11 @@ select_window_snps <- function(chr_num, center_bp) {
 }
 
 select_closest_snps <- function(chr_num, center_bp) {
+  # Fetch n_closest_prefetch SNPs; MAF filtering + final trim to n_closest happens later.
   load_bim(chr_num) %>%
     mutate(distance = abs(bp - center_bp)) %>%
     arrange(distance, bp) %>%
-    slice_head(n = n_closest) %>%
+    slice_head(n = n_closest_prefetch) %>%
     select(-distance)
 }
 
@@ -206,20 +208,30 @@ format_bundle <- function(geno_list, snp_table, prefix = "SNP") {
   list(matrix = matrix_df, manifest = manifest_df)
 }
 
-filter_snps_by_maf <- function(geno_mat, snp_table, threshold = 0.01) {
+filter_snps_by_maf <- function(geno_mat, snp_table, threshold = 0.01, 
+                               snp_set = "window", target_n = n_closest) {
+  # For "closest" snp_set: filter by MAF first, then take top target_n closest SNPs.
+  # For "window" snp_set: just filter by MAF (keep all that pass).
   sub_mat <- geno_mat[, snp_table$snp_id, drop = FALSE]
   allele_means <- colMeans(sub_mat, na.rm = TRUE) / 2
   maf <- pmin(allele_means, 1 - allele_means)
   maf[!is.finite(maf)] <- 0
   keep <- maf >= threshold
   filtered_table <- snp_table[keep, , drop = FALSE]
+  
   if (nrow(filtered_table)) {
     filtered_table$maf <- maf[keep]
+    
+    # For "closest" mode, take only the first target_n SNPs (already sorted by distance)
+    if (snp_set == "closest" && nrow(filtered_table) > target_n) {
+      filtered_table <- filtered_table %>% slice_head(n = target_n)
+    }
   }
+  
   list(
     snp_table = filtered_table,
     pre = ncol(sub_mat),
-    post = sum(keep)
+    post = nrow(filtered_table)
   )
 }
 
@@ -269,7 +281,8 @@ progress <- purrr::map_dfr(seq_len(total_genes), function(idx) {
     spec <- scenario_specs[s_idx, ]
     geno_obj <- geno_by_count[[as.character(spec$participant_count)]]
     snp_table <- if (spec$snp_set == "window") window_snps else closest_snps
-    filtered <- filter_snps_by_maf(geno_obj$matrix, snp_table, maf_threshold)
+    filtered <- filter_snps_by_maf(geno_obj$matrix, snp_table, maf_threshold,
+                                   snp_set = spec$snp_set, target_n = n_closest)
     if (!filtered$post) {
       message(sprintf("  -> Skipping %s (%s, MAF >= %.2f removed all SNPs).", gene_tag, spec$scenario, maf_threshold))
       return(NULL)

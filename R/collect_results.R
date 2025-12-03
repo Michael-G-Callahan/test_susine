@@ -98,7 +98,8 @@ aggregate_staging_outputs <- function(job_name,
                                       parent_job_id,
                                       output_root = "output",
                                       validate = TRUE,
-                                      output_dir = NULL) {
+                                      output_dir = NULL,
+                                      run_table_path = NULL) {
   idx <- index_staging_outputs(job_name, parent_job_id, output_root)
   validation <- NULL
   if (validate) {
@@ -113,6 +114,18 @@ aggregate_staging_outputs <- function(job_name,
     output_dir <- file.path(results_dir, "combined", "aggregated")
   }
   ensure_dir(output_dir)
+
+  # Resolve run_table_path: check temp first, then run_history
+
+if (is.null(run_table_path)) {
+    temp_path <- file.path(output_root, "temp", job_name, "run_table.csv")
+    history_path <- file.path(output_root, "run_history", job_name, parent_job_id, "run_table.csv")
+    if (file.exists(temp_path)) {
+      run_table_path <- temp_path
+    } else if (file.exists(history_path)) {
+      run_table_path <- history_path
+    }
+  }
 
   current_mem_gb <- function() {
     rss_gb <- NA_real_
@@ -172,6 +185,29 @@ aggregate_staging_outputs <- function(job_name,
   if (length(snp_files)) {
     log_progress(sprintf("Writing SNP dataset from %d parquet fragment(s)...", length(snp_files)))
     snp_dataset <- arrow::open_dataset(snp_files, format = "parquet")
+
+    # Check if use_case_id is already in the dataset
+    has_use_case_id <- "use_case_id" %in% names(snp_dataset)
+
+    if (!has_use_case_id) {
+      # Join with run_table to get use_case_id from run_id
+      if (is.null(run_table_path) || !file.exists(run_table_path)) {
+        stop(
+          "SNP parquet files lack 'use_case_id' and no run_table found to map it. ",
+          "Provide run_table_path or ensure run_table.csv exists in temp/ or run_history/."
+        )
+      }
+      log_progress("Joining use_case_id from run_table...")
+      run_lookup <- readr::read_csv(run_table_path, show_col_types = FALSE) %>%
+        dplyr::select(run_id, use_case_id) %>%
+        dplyr::distinct()
+      # Convert to Arrow Table for efficient join
+      run_lookup_arrow <- arrow::Table$create(run_lookup)
+      # Perform the join lazily via dplyr
+      snp_dataset <- snp_dataset %>%
+        dplyr::left_join(run_lookup_arrow, by = "run_id")
+    }
+
     snp_out_dir <- file.path(output_dir, "snps_dataset")
     if (dir.exists(snp_out_dir)) {
       unlink(snp_out_dir, recursive = TRUE)
