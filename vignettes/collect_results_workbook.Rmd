@@ -42,7 +42,7 @@ output_root <- here("output")
 
 ## 1.2 Resolve Paths and Load Run Table
 
-```{r setup-paths}
+```{r load-paths-and-run-table}
 # Resolve all standard paths
 paths <- test_susine::resolve_job_paths(
   job_name = job_name,
