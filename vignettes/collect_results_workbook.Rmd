@@ -220,14 +220,14 @@ detailed_grouping_vars <- c(
   "annotation_r2", "inflate_match", "gamma_shrink"
 )
 
-# Grouping variable for the dataset-level confusion matrix
-dataset_grouping_vars <- c("matrix_id")
+# Grouping variables for the dataset-level confusion matrix
+dataset_grouping_vars <- c("matrix_id", "use_case_id")
 ```
 
 ## 3.3 Build Detailed Confusion Matrix (by Use Case + Parameters)
 
 ```{r build-confusion-detailed, message=FALSE}
-detailed_output_path <- file.path(paths$aggregated_dir, "confusion_matrix_by_use_case.csv")
+detailed_output_path <- file.path(paths$aggregated_dir, "confusion_matrix_detailed.csv")
 
 confusion_detailed <- test_susine::build_confusion_matrix(
   snps_dataset_path = paths$snps_dataset_dir,
