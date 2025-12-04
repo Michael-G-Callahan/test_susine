@@ -230,7 +230,7 @@ pip_curve_data <- pip_curve_data %>%
 pip_curve_data_path <- file.path(dirname(snps_path), "pip_power_fdr.csv")
 readr::write_csv(pip_curve_data, pip_curve_data_path)
 
-pip_curve_data_path
+# pip_curve_data_path
 ```
 
 ```{r power-fdr-plot, fig.width=15, fig.height=7, message=FALSE}

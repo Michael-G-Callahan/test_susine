@@ -1,5 +1,31 @@
 # Task/flush staging collection helpers -----------------------------------
 
+#' Resolve standard directory paths for a completed job.
+#'
+#' @param job_name Job identifier.
+#' @param parent_job_id Parent SLURM array/job id.
+#' @param output_root Root directory for outputs.
+#' @return Named list with paths: run_history_dir, results_dir, staging_dir, aggregated_dir, snps_dataset_dir
+#' @export
+resolve_job_paths <- function(job_name,
+                              parent_job_id,
+                              output_root = "output") {
+
+  run_history_dir <- file.path(output_root, "run_history", job_name, parent_job_id)
+  results_dir <- file.path(output_root, "slurm_output", job_name, parent_job_id)
+  staging_dir <- file.path(results_dir, "combined", "staging")
+  aggregated_dir <- file.path(results_dir, "combined", "aggregated")
+  snps_dataset_dir <- file.path(aggregated_dir, "snps_dataset")
+
+list(
+    run_history_dir = run_history_dir,
+    results_dir = results_dir,
+    staging_dir = staging_dir,
+    aggregated_dir = aggregated_dir,
+    snps_dataset_dir = snps_dataset_dir
+  )
+}
+
 #' Return the staging directory used by task-level flush outputs.
 #' @keywords internal
 staging_base_dir <- function(job_name,
@@ -227,4 +253,149 @@ if (is.null(run_table_path)) {
     validation = validation,
     file_index = idx
   )
+}
+
+#' Build pre-aggregated confusion matrix from SNPs dataset.
+#'
+#' Creates a compact summary table with per-bucket causal/non-causal counts
+#' at each PIP threshold, grouped by the specified variables. Stores per-bucket
+#' counts (NOT cumulative) to allow flexible downstream aggregation.
+#'
+#' @param snps_dataset_path Path to the aggregated snps_dataset folder (partitioned parquet).
+#' @param run_table Data frame with run metadata (must contain run_id and grouping columns).
+#' @param grouping_vars Character vector of column names to group by.
+#' @param pip_bucket_width Numeric bucket width for PIP binning (default 0.01).
+#' @param use_cases_path Optional path to use_cases.csv for label lookup.
+#' @param output_path Path where the CSV will be written.
+#' @return The confusion matrix tibble (invisibly).
+#' @export
+build_confusion_matrix <- function(snps_dataset_path,
+                                   run_table,
+                                   grouping_vars,
+                                   pip_bucket_width = 0.01,
+                                   use_cases_path = NULL,
+                                   output_path) {
+
+  if (!dir.exists(snps_dataset_path)) {
+    stop("SNPs dataset not found: ", snps_dataset_path)
+  }
+
+  # Open SNPs dataset
+snps_ds <- arrow::open_dataset(snps_dataset_path)
+  snps_cols <- names(snps_ds)
+
+  # Determine use_case_id source
+  has_use_case_id <- "use_case_id" %in% snps_cols
+
+  if (has_use_case_id) {
+    message("use_case_id found in SNPs dataset (from parquet or partition folders)")
+    snps_ds_with_ucid <- snps_ds
+  } else {
+    # Check for Hive-style partitions
+    subfolders <- list.dirs(snps_dataset_path, recursive = FALSE, full.names = FALSE)
+    hive_partitions <- grep("^use_case_id=", subfolders, value = TRUE)
+
+    if (length(hive_partitions) > 0) {
+      message("Detected Hive-style use_case_id partitions; re-opening with partitioning schema...")
+      snps_ds_with_ucid <- arrow::open_dataset(snps_dataset_path, partitioning = "use_case_id")
+    } else {
+      # Fall back to run_table join
+      message("No use_case_id in dataset; joining from run_table...")
+      run_lookup <- run_table %>%
+        dplyr::select(run_id, use_case_id) %>%
+        dplyr::mutate(run_id = as.integer(run_id)) %>%
+        dplyr::distinct()
+      run_lookup_ds <- arrow::InMemoryDataset$create(run_lookup)
+      snps_ds_with_ucid <- snps_ds %>%
+        dplyr::left_join(run_lookup_ds, by = "run_id")
+    }
+  }
+
+  # Refresh column list
+  snps_cols <- names(snps_ds_with_ucid)
+
+  # Prepare run metadata for grouping
+  available_grouping <- intersect(grouping_vars, names(run_table))
+  if (length(available_grouping) == 0) {
+    stop("None of the specified grouping_vars found in run_table")
+  }
+
+  run_map <- run_table %>%
+    dplyr::select(run_id, dplyr::all_of(available_grouping)) %>%
+    dplyr::mutate(run_id = as.integer(run_id))
+
+  # Optionally add labels
+  include_label <- FALSE
+  if (!is.null(use_cases_path) && file.exists(use_cases_path) && "use_case_id" %in% available_grouping) {
+    use_case_labels <- readr::read_csv(
+      use_cases_path,
+      show_col_types = FALSE,
+      col_select = c(use_case_id, label),
+      col_types = readr::cols(
+        use_case_id = readr::col_character(),
+        label = readr::col_character()
+      )
+    )
+    run_map <- dplyr::left_join(run_map, use_case_labels, by = "use_case_id")
+    include_label <- TRUE
+  }
+
+  # Count runs per grouping combination
+  n_runs_per_group <- run_map %>%
+    dplyr::group_by(dplyr::across(dplyr::all_of(available_grouping))) %>%
+    dplyr::summarise(n_runs = dplyr::n(), .groups = "drop")
+
+  # Prepare join table (exclude columns already in snps to avoid collision)
+  join_keep_cols <- c("run_id", if (include_label) "label" else NULL)
+  join_cols_to_exclude <- intersect(setdiff(names(run_map), join_keep_cols), snps_cols)
+  if (length(join_cols_to_exclude)) {
+    run_map_for_join <- dplyr::select(run_map, -dplyr::all_of(join_cols_to_exclude))
+  } else {
+    run_map_for_join <- run_map
+  }
+  run_map_ds <- arrow::InMemoryDataset$create(run_map_for_join)
+
+  # Build aggregation grouping
+  agg_group_vars <- available_grouping
+  if (include_label) agg_group_vars <- c(agg_group_vars, "label")
+
+  message("Aggregating confusion matrix counts from SNPs dataset...")
+  message("  Grouping by: ", paste(agg_group_vars, collapse = ", "))
+
+  confusion_agg <- snps_ds_with_ucid %>%
+    dplyr::left_join(run_map_ds, by = "run_id") %>%
+    dplyr::mutate(
+      pip_bucket = pmax(0, pmin(1, floor(pip / pip_bucket_width) * pip_bucket_width))
+    ) %>%
+    dplyr::group_by(dplyr::across(dplyr::all_of(agg_group_vars)), pip_bucket) %>%
+    dplyr::summarise(
+      n_snps = dplyr::n(),
+      n_causal = sum(causal == 1, na.rm = TRUE),
+      n_noncausal = sum(causal == 0, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    dplyr::collect()
+
+  message("Collected ", nrow(confusion_agg), " rows from Arrow")
+
+  # Build final table with n_runs
+  confusion_matrix_table <- confusion_agg %>%
+    dplyr::left_join(n_runs_per_group, by = available_grouping) %>%
+    dplyr::rename(
+      n_causal_at_bucket = n_causal,
+      n_noncausal_at_bucket = n_noncausal,
+      pip_threshold = pip_bucket
+    )
+
+  # Reorder columns nicely
+  final_cols <- c(available_grouping,
+                  if (include_label) "label" else NULL,
+                  "pip_threshold", "n_causal_at_bucket", "n_noncausal_at_bucket", "n_runs")
+  confusion_matrix_table <- dplyr::select(confusion_matrix_table, dplyr::all_of(final_cols))
+
+  # Save
+  readr::write_csv(confusion_matrix_table, output_path)
+  message("Saved confusion matrix to: ", output_path)
+
+  invisible(confusion_matrix_table)
 }

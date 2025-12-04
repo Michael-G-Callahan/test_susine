@@ -10,6 +10,11 @@ editor_options:
     wrap: 72
 ---
 
+# Section 1: Setup (Always Run First)
+ 
+Load libraries, specify job identifiers, and establish paths. This section
+must be run before either Section 2 or Section 3.
+
 ```{r setup, message=FALSE}
 here::i_am("vignettes/collect_results_workbook.Rmd")
 library(here)
@@ -27,337 +32,253 @@ library(fs)
 library(arrow)
 ```
 
-# Results Collection Workflow
-
-This workbook validates task-level staging outputs, then aggregates them
-into job-level tables outside of the staging folder.
-
-# 1. Specify the Job
-
-Provide the job name and parent array ID from your completed run.
+## 1.1 Specify the Job
 
 ```{r job-inputs}
-job_inputs <- list(
-  # Job identifier (from run_history folder name)
-  job_name = "susie_scen_1_recreation",
-  
-  # Parent SLURM array job ID (from run_history/job_name/[PARENT_ID]/)
-  parent_job_id = "46880273",
-  
-  # Root output directory
-  output_root = here("output")
-)
+job_name <- "susie_scen_1_recreation"
+parent_job_id <- "46880273"
+output_root <- here("output")
 ```
 
-# 2. Load Run Table and Paths
-
-Read the run configuration, establish paths, and confirm that staging
-exists.
+## 1.2 Resolve Paths and Load Run Table
 
 ```{r setup-paths}
-run_history_dir <- file.path(
-  job_inputs$output_root,
-  "run_history",
-  job_inputs$job_name,
-  job_inputs$parent_job_id
+# Resolve all standard paths
+paths <- test_susine::resolve_job_paths(
+  job_name = job_name,
+  parent_job_id = parent_job_id,
+  output_root = output_root
 )
 
-results_dir <- file.path(
-  job_inputs$output_root,
-  "slurm_output",
-  job_inputs$job_name,
-  job_inputs$parent_job_id
-)
-
-staging_dir <- file.path(results_dir, "combined", "staging")
-combined_dir <- file.path(results_dir, "combined", "aggregated")
-
-dir.create(combined_dir, showWarnings = FALSE, recursive = TRUE)
-
-if (!dir.exists(run_history_dir)) {
-  stop("Run history directory not found: ", run_history_dir)
-}
-if (!dir.exists(results_dir)) {
-  stop("Results directory not found: ", results_dir)
-}
-if (!dir.exists(staging_dir)) {
-  stop("Staging directory not found: ", staging_dir)
+# Validate that run_history exists (required for all workflows)
+if (!dir.exists(paths$run_history_dir)) {
+  stop("Run history directory not found: ", paths$run_history_dir)
 }
 
-run_table <- read_csv(
-  file.path(run_history_dir, "run_table.csv"),
+# Load run table (needed by both Section 2 and Section 3)
+run_table <- readr::read_csv(
+  file.path(paths$run_history_dir, "run_table.csv"),
   show_col_types = FALSE
 )
 
-job_config_path <- file.path(run_history_dir, "job_config.json")
-if (!file.exists(job_config_path)) {
-  stop("Job configuration not found: ", job_config_path)
-}
-job_config <- test_susine:::load_job_config(job_config_path)
-verbose_file_output <- isTRUE(job_config$job$verbose_file_output)
+# Use cases path (for labels in confusion matrices)
+use_cases_path <- file.path(paths$run_history_dir, "use_cases.csv")
 
+cat("Job:", job_name, "/", parent_job_id, "\n")
+cat("Run history dir:", paths$run_history_dir, "\n")
+cat("Aggregated dir:", paths$aggregated_dir, "\n")
+cat("SNPs dataset dir:", paths$snps_dataset_dir, "\n")
 cat("Loaded run_table with", nrow(run_table), "runs\n")
-cat("Verbose file output:", verbose_file_output, "\n")
-cat("Staging dir:", staging_dir, "\n")
 ```
 
-# 3. Index Task/Flush Outputs
+---
+---
 
-List every file written by each task/flush and get a quick glimpse at the
-coverage.
+# Section 2: Staging → Aggregated (Auto-skip if already done)
+
+This section processes raw staging outputs into aggregated files.
+It will **automatically skip** if aggregated outputs already exist.
+
+```{r check-aggregation-status}
+staging_exists <- dir.exists(paths$staging_dir)
+aggregated_exists <- dir.exists(paths$snps_dataset_dir) && 
+                     length(list.files(paths$snps_dataset_dir, recursive = TRUE)) > 0
+
+cat("Staging directory exists:", staging_exists, "\n")
+cat("Aggregated SNPs dataset exists:", aggregated_exists, "\n")
+
+# Determine whether to run aggregation
+run_aggregation <- staging_exists && !aggregated_exists
+
+if (aggregated_exists) {
+  message("✓ Aggregated outputs already exist. Skipping Section 2.")
+} else if (!staging_exists) {
+  stop("Neither staging nor aggregated outputs found. Cannot proceed.")
+} else {
+  message("→ Staging found but not yet aggregated. Will run aggregation.")
+}
+```
+
+## 2.1 Index Staging Files
 
 ```{r index-staging}
-staging_index <- test_susine::index_staging_outputs(
-  job_name = job_inputs$job_name,
-  parent_job_id = job_inputs$parent_job_id,
-  output_root = job_inputs$output_root
-)
-
-cat("Discovered", nrow(staging_index), "staging files across",
-    length(unique(staging_index$task_id)), "tasks\n")
-
-kable(head(staging_index, 10), caption = "Sample of staging files")
-```
-
-# 4. Validate Staging Files
-
-Ensure each CSV/Parquet is readable before aggregation.
-
-```{r validate-staging}
-validation <- test_susine::validate_staging_outputs(staging_index)
-
-if (nrow(validation)) {
-  fail_count <- sum(!validation$ok, na.rm = TRUE)
-  cat("Validation failures:", fail_count, "\n")
-  if (fail_count > 0) {
-    print(dplyr::filter(validation, !ok))
-    stop("Fix unreadable staging files before aggregating.")
-  }
-} else {
-  cat("No staging files found to validate.\n")
-}
-```
-
-# 5. Aggregate to Job-Level Outputs
-
-Combine all task/flush artifacts into consolidated tables outside of
-the staging directory.
-
-```{r aggregate}
-agg <- test_susine::aggregate_staging_outputs(
-  job_name = job_inputs$job_name,
-  parent_job_id = job_inputs$parent_job_id,
-  output_root = job_inputs$output_root,
-  validate = FALSE,  # already validated above
-  output_dir = combined_dir
-)
-
-cat("Aggregated outputs written to:", agg$output_dir, "\n")
-
-
-if (dir.exists(file.path(agg$output_dir, "snps_dataset"))) {
-  snp_files <- list.files(file.path(agg$output_dir, "snps_dataset"), pattern = "\\.parquet$", recursive = TRUE)
-  cat("SNP dataset fragments:", length(snp_files), "\n")
-}
-
-#read the snp parquet
-
-```
-# 6. Build Pre-aggregated Confusion Matrix
-
-Create a compact summary table with per-bucket causal/non-causal counts at each PIP threshold,
-stratified by all grouping variables. This enables flexible downstream Power/FDR/AUPRC analysis
-without loading the full SNP-level parquet.
-
-```{r build-confusion-matrix, message=FALSE}
-snps_path <- file.path(agg$output_dir, "snps_dataset")
-
-if (!dir.exists(snps_path)) {
-  warning("SNPs dataset not found; skipping confusion matrix aggregation.")
-} else {
-  grouping_vars <- c("use_case_id", "p_star", "L", "y_noise", 
-                     "annotation_r2", "inflate_match", "gamma_shrink")
-  pip_bucket_width <- 0.01
-  
-  # Open SNPs dataset
-  snps_ds <- arrow::open_dataset(snps_path)
-  snps_cols <- names(snps_ds)
-  
-  # Determine use_case_id source (in priority order):
-  # 1. Already a column in parquet files
-  # 2. Extracted from Hive-style partition folders (use_case_id=xxx/)
-
-  # 3. Fall back to run_table join
-  has_use_case_id <- "use_case_id" %in% snps_cols
-  
-  if (has_use_case_id) {
-    message("use_case_id found in SNPs dataset (from parquet or partition folders)")
-    snps_ds_with_ucid <- snps_ds
-  } else {
-    # Check if there's partition-style subfolder structure
-    subfolders <- list.dirs(snps_path, recursive = FALSE, full.names = FALSE)
-    hive_partitions <- grep("^use_case_id=", subfolders, value = TRUE)
-    
-    if (length(hive_partitions) > 0) {
-      # Arrow should have picked this up, but re-open with explicit partitioning
-      message("Detected Hive-style use_case_id partitions; re-opening with partitioning schema...")
-      snps_ds_with_ucid <- arrow::open_dataset(snps_path, partitioning = "use_case_id")
-    } else {
-      # Fall back to run_table join
-      message("No use_case_id in dataset; joining from run_table...")
-      run_lookup <- run_table %>%
-        dplyr::select(run_id, use_case_id) %>%
-        dplyr::mutate(run_id = as.integer(run_id)) %>%
-        dplyr::distinct()
-      run_lookup_ds <- arrow::InMemoryDataset$create(run_lookup)
-      snps_ds_with_ucid <- snps_ds %>%
-        dplyr::left_join(run_lookup_ds, by = "run_id")
-    }
-  }
-  
-  # Refresh column list after potential join
-
-  snps_cols <- names(snps_ds_with_ucid)
-  
-  # Load run metadata for other grouping vars and labels
-  use_cases_path <- file.path(run_history_dir, "use_cases.csv")
-  
-  run_map <- run_table %>%
-    dplyr::select(run_id, all_of(grouping_vars)) %>%
-    dplyr::mutate(run_id = as.integer(run_id))
-  
-  use_case_labels <- readr::read_csv(
-    use_cases_path,
-    show_col_types = FALSE,
-    col_select = c(use_case_id, label),
-    col_types = readr::cols(
-      use_case_id = readr::col_character(),
-      label = readr::col_character()
-    )
+if (run_aggregation) {
+  staging_index <- test_susine::index_staging_outputs(
+    job_name = job_name,
+    parent_job_id = parent_job_id,
+    output_root = output_root
   )
   
-  run_map <- dplyr::left_join(run_map, use_case_labels, by = "use_case_id")
-  
-  # Count runs per grouping combination
-  n_runs_per_group <- run_map %>%
-    dplyr::group_by(across(all_of(grouping_vars))) %>%
-    dplyr::summarise(n_runs = dplyr::n(), .groups = "drop")
-  
-  # Prepare join table (exclude columns already in snps to avoid collision)
-  join_cols_to_exclude <- intersect(setdiff(names(run_map), c("run_id", "label")), snps_cols)
-  if (length(join_cols_to_exclude)) {
-    run_map_for_join <- dplyr::select(run_map, -all_of(join_cols_to_exclude))
-  } else {
-    run_map_for_join <- run_map
-  }
-  run_map_ds <- arrow::InMemoryDataset$create(run_map_for_join)
-  
-  message("Aggregating confusion matrix counts from SNPs dataset...")
-  
-  confusion_agg <- snps_ds_with_ucid %>%
-    dplyr::left_join(run_map_ds, by = "run_id") %>%
-    dplyr::mutate(
-      pip_bucket = pmax(0, pmin(1, floor(pip / pip_bucket_width) * pip_bucket_width))
-    ) %>%
-    dplyr::group_by(across(all_of(c(grouping_vars, "label"))), pip_bucket) %>%
-    dplyr::summarise(
-      n_snps = dplyr::n(),
-      n_causal = sum(causal == 1, na.rm = TRUE),
-      n_noncausal = sum(causal == 0, na.rm = TRUE),
-      .groups = "drop"
-    ) %>%
-    dplyr::collect()
-  
-  message("Collected ", nrow(confusion_agg), " rows from Arrow")
-  
-  # Store per-bucket counts (NOT cumulative) - cumulative computed at query time
-  confusion_matrix_table <- confusion_agg %>%
-    dplyr::left_join(n_runs_per_group, by = grouping_vars) %>%
-    dplyr::rename(
-      n_causal_at_bucket = n_causal,
-      n_noncausal_at_bucket = n_noncausal
-    ) %>%
-    dplyr::select(
-      all_of(grouping_vars), label, pip_threshold = pip_bucket,
-      n_causal_at_bucket, n_noncausal_at_bucket, n_runs
-    )
-  
-  # Save to file
-  confusion_matrix_path <- file.path(agg$output_dir, "confusion_matrix_by_threshold.csv")
-  readr::write_csv(confusion_matrix_table, confusion_matrix_path)
-  message("Saved pre-aggregated confusion matrix to: ", confusion_matrix_path)
-  
-  cat("\nConfusion matrix table:\n")
-  cat("  Rows:", format(nrow(confusion_matrix_table), big.mark = ","), "\n")
-  cat("  Columns:", ncol(confusion_matrix_table), "\n")
-  cat("  Size in memory:", format(object.size(confusion_matrix_table), units = "MB"), "\n")
-  
-  # ---- Build confusion matrix grouped by X dataset (matrix_id) only ----
-  message("\nBuilding confusion matrix by X dataset (matrix_id)...")
-  
-  # Get matrix_id mapping from run_table
-  run_map_matrix <- run_table %>%
-    dplyr::select(run_id, matrix_id) %>%
-    dplyr::mutate(run_id = as.integer(run_id))
-  
-  # Count runs per matrix
-  n_runs_per_matrix <- run_map_matrix %>%
-    dplyr::group_by(matrix_id) %>%
-    dplyr::summarise(n_runs = dplyr::n(), .groups = "drop")
-  
-  run_map_matrix_ds <- arrow::InMemoryDataset$create(run_map_matrix)
-  
-  confusion_by_matrix <- snps_ds_with_ucid %>%
-    dplyr::left_join(run_map_matrix_ds, by = "run_id") %>%
-    dplyr::mutate(
-      pip_bucket = pmax(0, pmin(1, floor(pip / pip_bucket_width) * pip_bucket_width))
-    ) %>%
-    dplyr::group_by(matrix_id, pip_bucket) %>%
-    dplyr::summarise(
-      n_snps = dplyr::n(),
-      n_causal = sum(causal == 1, na.rm = TRUE),
-      n_noncausal = sum(causal == 0, na.rm = TRUE),
-      .groups = "drop"
-    ) %>%
-    dplyr::collect()
-  
-  message("Collected ", nrow(confusion_by_matrix), " rows for matrix-level aggregation")
-  
-  confusion_matrix_by_dataset <- confusion_by_matrix %>%
-    dplyr::left_join(n_runs_per_matrix, by = "matrix_id") %>%
-    dplyr::rename(
-      n_causal_at_bucket = n_causal,
-      n_noncausal_at_bucket = n_noncausal
-    ) %>%
-    dplyr::select(
-      matrix_id, pip_threshold = pip_bucket,
-      n_causal_at_bucket, n_noncausal_at_bucket, n_runs
-    )
-  
-  # Save to file
-  confusion_by_dataset_path <- file.path(agg$output_dir, "confusion_matrix_by_dataset.csv")
-  readr::write_csv(confusion_matrix_by_dataset, confusion_by_dataset_path)
-  message("Saved dataset-level confusion matrix to: ", confusion_by_dataset_path)
-  
-  cat("\nConfusion matrix by dataset:\n")
-  cat("  Rows:", format(nrow(confusion_matrix_by_dataset), big.mark = ","), "\n")
-  cat("  Unique matrix_ids:", dplyr::n_distinct(confusion_matrix_by_dataset$matrix_id), "\n")
-  cat("  Size in memory:", format(object.size(confusion_matrix_by_dataset), units = "KB"), "\n")
+  cat("Discovered", nrow(staging_index), "staging files across",
+      length(unique(staging_index$task_id)), "tasks\n")
+} else {
+  message("Skipped: aggregation not needed.")
 }
 ```
 
-# 7. Next Steps
+## 2.2 Validate Staging Files
 
-Use the aggregated outputs in downstream analysis or dashboards. The
-staging folder remains untouched; you can delete it after confirming the
-aggregated files if storage is tight.
+```{r validate-staging}
+if (run_aggregation) {
+  validation <- test_susine::validate_staging_outputs(staging_index)
+  
+  if (nrow(validation)) {
+    fail_count <- sum(!validation$ok, na.rm = TRUE)
+    cat("Validation failures:", fail_count, "\n")
+    if (fail_count > 0) {
+      print(dplyr::filter(validation, !ok))
+      stop("Fix unreadable staging files before aggregating.")
+    }
+  } else {
+    cat("No staging files found to validate.\n")
+  }
+} else {
+  message("Skipped: aggregation not needed.")
+}
+```
 
-# 8. (Optional) Clean Up Staging
+## 2.3 Aggregate to Job-Level Outputs
 
-Once you trust the aggregated outputs, remove the task/flush staging folders
-to reclaim space. **Run only after verifying aggregation.**
+```{r aggregate}
+if (run_aggregation) {
+  dir.create(paths$aggregated_dir, showWarnings = FALSE, recursive = TRUE)
+  
+  agg <- test_susine::aggregate_staging_outputs(
+    job_name = job_name,
+    parent_job_id = parent_job_id,
+    output_root = output_root,
+    validate = FALSE,  # already validated above
+    output_dir = paths$aggregated_dir
+  )
+  
+  cat("Aggregated outputs written to:", agg$output_dir, "\n")
+  
+  if (dir.exists(paths$snps_dataset_dir)) {
+    snp_files <- list.files(paths$snps_dataset_dir, pattern = "\\.parquet$", recursive = TRUE)
+    cat("SNP dataset fragments:", length(snp_files), "\n")
+  }
+} else {
+  message("Skipped: aggregation not needed.")
+}
+```
+
+## 2.4 (Optional) Delete Staging - MANUAL ONLY
+
+**This chunk is disabled by default for safety.** Set `eval=TRUE` manually
+if you want to delete staging files after confirming aggregation.
 
 ```{r cleanup-staging, eval=FALSE}
-unlink(staging_dir, recursive = TRUE)
-cat("Deleted staging directory:", staging_dir, "\n")
+# DANGER: Set eval=TRUE only after verifying aggregation is complete
+if (dir.exists(paths$staging_dir)) {
+  unlink(paths$staging_dir, recursive = TRUE)
+  cat("Deleted staging directory:", paths$staging_dir, "\n")
+} else {
+  cat("Staging directory already deleted.\n")
+}
+```
+
+---
+---
+
+# Section 3: Build Pre-aggregated Confusion Matrices
+
+Create compact summary tables for Power/FDR/AUPRC analysis. This section
+requires only the aggregated SNPs dataset (not staging files).
+
+**Prerequisites:** 
+- Section 1 must have been run (to load paths and run_table)
+- SNPs dataset must exist at `paths$snps_dataset_dir`
+
+## 3.1 Check SNPs Dataset Exists
+
+```{r check-snps-dataset}
+snps_exists <- dir.exists(paths$snps_dataset_dir)
+cat("SNPs dataset exists:", snps_exists, "\n")
+if (!snps_exists) {
+  stop("SNPs dataset not found at: ", paths$snps_dataset_dir,
+       "\nRun Section 2 first to aggregate staging outputs.")
+}
+
+# Show partitions
+partitions <- list.dirs(paths$snps_dataset_dir, recursive = FALSE, full.names = FALSE)
+cat("Partitions found:", length(partitions), "\n")
+if (length(partitions) <= 10) {
+  cat(paste(" ", partitions, collapse = "\n"), "\n")
+}
+```
+
+## 3.2 Configure Confusion Matrix Parameters
+
+```{r confusion-config}
+# PIP bucket width (0.01 = 100 buckets from 0 to 1)
+pip_bucket_width <- 0.01
+
+# Grouping variables for the detailed confusion matrix
+# This will create one row per (grouping combo × pip_threshold)
+detailed_grouping_vars <- c(
+  "use_case_id", "p_star", "L", "y_noise",
+  "annotation_r2", "inflate_match", "gamma_shrink"
+)
+
+# Grouping variable for the dataset-level confusion matrix
+dataset_grouping_vars <- c("matrix_id")
+```
+
+## 3.3 Build Detailed Confusion Matrix (by Use Case + Parameters)
+
+```{r build-confusion-detailed, message=FALSE}
+detailed_output_path <- file.path(paths$aggregated_dir, "confusion_matrix_by_use_case.csv")
+
+confusion_detailed <- test_susine::build_confusion_matrix(
+  snps_dataset_path = paths$snps_dataset_dir,
+  run_table = run_table,
+  grouping_vars = detailed_grouping_vars,
+  pip_bucket_width = pip_bucket_width,
+  use_cases_path = use_cases_path,
+  output_path = detailed_output_path
+)
+
+cat("\nDetailed confusion matrix:\n")
+cat("  Rows:", format(nrow(confusion_detailed), big.mark = ","), "\n")
+cat("  Columns:", ncol(confusion_detailed), "\n")
+cat("  Size in memory:", format(object.size(confusion_detailed), units = "MB"), "\n")
+cat("  Saved to:", detailed_output_path, "\n")
+```
+
+## 3.4 Build Dataset-Level Confusion Matrix (by matrix_id only)
+
+```{r build-confusion-dataset, message=FALSE}
+dataset_output_path <- file.path(paths$aggregated_dir, "confusion_matrix_by_dataset.csv")
+
+confusion_by_dataset <- test_susine::build_confusion_matrix(
+  snps_dataset_path = paths$snps_dataset_dir,
+  run_table = run_table,
+  grouping_vars = dataset_grouping_vars,
+  pip_bucket_width = pip_bucket_width,
+  use_cases_path = NULL,  
+  output_path = dataset_output_path
+)
+
+cat("\nDataset-level confusion matrix:\n")
+cat("  Rows:", format(nrow(confusion_by_dataset), big.mark = ","), "\n")
+cat("  Unique matrix_ids:", dplyr::n_distinct(confusion_by_dataset$matrix_id), "\n")
+cat("  Size in memory:", format(object.size(confusion_by_dataset), units = "KB"), "\n")
+cat("  Saved to:", dataset_output_path, "\n")
+```
+
+## 3.5 Summary
+
+```{r summary}
+cat("\n=== Output Files ===\n")
+output_files <- list.files(paths$aggregated_dir, pattern = "\\.(csv|parquet)$", recursive = FALSE)
+for (f in output_files) {
+  fpath <- file.path(paths$aggregated_dir, f)
+  fsize <- file.size(fpath)
+  cat(sprintf("  %s (%s)\n", f, format(structure(fsize, class = "object_size"), units = "auto")))
+}
+
+if (dir.exists(paths$snps_dataset_dir)) {
+  snp_size <- sum(file.size(list.files(paths$snps_dataset_dir, recursive = TRUE, full.names = TRUE)))
+  cat(sprintf("  snps_dataset/ (%s total)\n", format(structure(snp_size, class = "object_size"), units = "auto")))
+}
 ```
