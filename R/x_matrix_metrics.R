@@ -143,6 +143,168 @@ toeplitz_fit_error <- function(R) {
   )
 }
 
+# ==============================================================================
+# SECTION 1b: Axis A metrics - Basin Size / Resolution Difficulty
+# "How big are the LD neighborhoods that SuSiE will find?"
+# ==============================================================================
+
+#' Compute Effective Cluster Size (ECS)
+#'
+#' Measures average effective neighborhood size using Herfindahl inverse.
+#' Uses alpha=2 weighting to emphasize strong correlations.
+#' High ECS = big/strong clusters = IBSS finds them but CSs are large.
+#'
+#' @param R Correlation matrix
+#' @param alpha Weighting exponent (default 2, emphasizes strong correlations)
+#' @return Scalar ECS value (median across SNPs)
+#' @keywords internal
+effective_cluster_size <- function(R, alpha = 2) {
+  A <- abs(R)
+  diag(A) <- 0
+  
+  # Compute row-wise weights: w_ij = A_ij^alpha / sum_k A_ik^alpha
+  A_alpha <- A^alpha
+  row_sums <- rowSums(A_alpha)
+  row_sums <- pmax(row_sums, .Machine$double.eps)
+  W <- A_alpha / row_sums
+  
+  # ECS_i = 1 / sum_j w_ij^2 (inverse Herfindahl)
+  ecs_i <- 1 / rowSums(W^2)
+  
+  # Return median (robust to outliers)
+  median(ecs_i)
+}
+
+#' Compute High-LD Mass
+#'
+#' Measures mass in strong-LD pairs using gamma=2 to emphasize tail.
+#' High value = big tight blocks.
+#'
+#' @param R Correlation matrix
+#' @param gamma Exponent for emphasizing strong correlations (default 2)
+#' @return Scalar high-LD mass value
+#' @keywords internal
+high_ld_mass <- function(R, gamma = 2) {
+  A2 <- R * R  # r^2
+  A2g <- A2^gamma  # (r^2)^gamma
+  diag(A2g) <- 0
+  
+  # Mean over upper triangle
+  mean(A2g[upper.tri(A2g)]) * 2
+}
+
+#' Compute top-k eigenvalue fraction
+#'
+#' Fraction of variance captured by top k eigenvalues.
+#' High value = few dominant directions = block structure.
+#'
+#' @param R Correlation matrix
+#' @param k Number of top eigenvalues (default 5)
+#' @return Scalar fraction
+#' @keywords internal
+top_k_ev_frac <- function(R, k = 5) {
+  ev <- eigen(R, symmetric = TRUE, only.values = TRUE)$values
+  ev <- pmax(ev, 0)  # numerical stability
+  ev_sorted <- sort(ev, decreasing = TRUE)
+  k <- min(k, length(ev))
+  
+  sum(ev_sorted[1:k]) / sum(ev)
+}
+
+#' Compute block structure metrics via thresholded connected components
+#'
+#' Thresholds R at tau, finds connected components, returns block statistics.
+#' Directly measures "how blocky" the LD structure is.
+#'
+#' @param R Correlation matrix
+#' @param tau Threshold for |r| to define edges
+#' @param suffix Suffix for column names (e.g., "_tau50" or "_tau80")
+#' @return Tibble with number of blocks, average/max block size, block entropy
+#' @keywords internal
+block_structure_metrics <- function(R, tau, suffix) {
+  p <- ncol(R)
+  
+  # Create adjacency matrix at threshold tau
+  A <- abs(R) >= tau
+  diag(A) <- FALSE
+  
+  # Find connected components via simple BFS
+  visited <- rep(FALSE, p)
+  block_sizes <- integer(0)
+  
+  for (start in 1:p) {
+    if (visited[start]) next
+    
+    # BFS from this node
+    queue <- start
+    component_size <- 0
+    while (length(queue) > 0) {
+      node <- queue[1]
+      queue <- queue[-1]
+      if (visited[node]) next
+      visited[node] <- TRUE
+      component_size <- component_size + 1
+      neighbors <- which(A[node, ] & !visited)
+      queue <- c(queue, neighbors)
+    }
+    block_sizes <- c(block_sizes, component_size)
+  }
+  
+  n_blocks <- length(block_sizes)
+  avg_block_size <- mean(block_sizes)
+  max_block_size <- max(block_sizes)
+  
+  # Block entropy: high = many similarly-sized blocks; low = one dominant block
+  block_probs <- block_sizes / sum(block_sizes)
+  block_entropy <- -sum(block_probs * log(block_probs + 1e-10))
+  # Normalize by max possible entropy (uniform blocks)
+  max_entropy <- log(n_blocks + 1e-10)
+  block_entropy_norm <- if (max_entropy > 0) block_entropy / max_entropy else 1
+  
+  # Build tibble with suffixed names
+  tbl <- tibble::tibble(
+    a = n_blocks,
+    b = avg_block_size,
+    c = max_block_size,
+    d = max_block_size / p,
+    e = block_entropy_norm
+  )
+  names(tbl) <- paste0(c("n_blocks", "avg_block_size", "max_block_size", 
+                         "max_block_frac", "block_entropy_norm"), suffix)
+  tbl
+}
+
+# ==============================================================================
+# SECTION 1c: Axis B metrics - Identifiability / Factorization Mismatch
+# "How interchangeable are different SNP neighborhoods?"
+# ==============================================================================
+
+#' Compute Neighborhood Similarity Index (NSI)
+#'
+#' Measures how similar LD "fingerprints" are across SNPs.
+#' L2-normalizes rows of |R|, then computes max cosine similarity per row.
+#' High NSI = many SNPs have similar correlation neighborhoods = blur problem.
+#'
+#' @param R Correlation matrix
+#' @return Scalar NSI value (mean of max cosine similarities)
+#' @keywords internal
+neighborhood_similarity_index <- function(R) {
+  A <- abs(R)
+  diag(A) <- 0
+  
+  # L2-normalize rows
+  row_norms <- sqrt(rowSums(A^2))
+  row_norms[row_norms == 0] <- 1  # avoid division by zero
+  B <- A / row_norms
+  
+  # Compute cosine similarity matrix
+  S <- B %*% t(B)
+  diag(S) <- -Inf  # exclude self-similarity
+  
+  # Mean of max similarity per row
+  mean(apply(S, 1, max))
+}
+
 #' Compute off-diagonal means
 #' @param R Correlation matrix
 #' @return Tibble with mean |r| and mean r^2
@@ -200,6 +362,11 @@ submodularity_bounds <- function(R, k, n_samples = 300, seed = 1L) {
 
 #' Compute all X-matrix metrics for a single correlation matrix
 #'
+#' Computes metrics organized by theoretical axes:
+#' - Axis A (Basin Size): ecs, high_ld_mass, top5_ev_frac, block structure
+#' - Axis B (Identifiability): nsi, M1, M2, M1_dist, lambda_min_2k_mc
+#' - Plus spectral and structural descriptors
+#'
 #' @param R Correlation matrix (p x p)
 #' @param k_ref Reference number of causal effects for submodularity bounds
 #' @param n_samples Number of MC samples for sparse eigenvalue estimation
@@ -210,6 +377,7 @@ compute_x_metrics_from_R <- function(R, k_ref = 3, n_samples = 200) {
   R[is.na(R)] <- 0
   diag(R) <- 1
   
+  # Base metrics (Axis B: mid-energy / blur)
   base_tbl <- tibble::tibble(
     M1 = mid_energy_M1(R),
     M2 = mid_energy_M2(R),
@@ -220,10 +388,24 @@ compute_x_metrics_from_R <- function(R, k_ref = 3, n_samples = 200) {
     dplyr::bind_cols(row_concentration(R)) %>%
     dplyr::bind_cols(toeplitz_fit_error(R))
   
-  # Add submodularity bounds
+  # Axis A metrics: Basin size / resolution difficulty
+  axis_a_tbl <- tibble::tibble(
+    ecs = effective_cluster_size(R, alpha = 2),
+    high_ld_mass = high_ld_mass(R, gamma = 2),
+    top5_ev_frac = top_k_ev_frac(R, k = 5)
+  ) %>%
+    dplyr::bind_cols(block_structure_metrics(R, tau = 0.5, suffix = "_tau50")) %>%
+    dplyr::bind_cols(block_structure_metrics(R, tau = 0.8, suffix = "_tau80"))
+  
+  # Axis B metrics: Identifiability / factorization mismatch
+  axis_b_tbl <- tibble::tibble(
+    nsi = neighborhood_similarity_index(R)
+  )
+  
+  # Submodularity bounds (Axis B: theoretical identifiability limit)
   subm_tbl <- submodularity_bounds(R, k = k_ref, n_samples = n_samples)
   
-  dplyr::bind_cols(base_tbl, subm_tbl)
+  dplyr::bind_cols(base_tbl, axis_a_tbl, axis_b_tbl, subm_tbl)
 }
 
 #' Compute X-matrix metrics from a genotype matrix file
@@ -654,17 +836,58 @@ generate_x_metric_plots <- function(df_joined,
 #' @export
 get_x_metric_names <- function() {
   c(
-    # Mid-energy metrics
-    "M1", "M2", "M1_dist",
-    # Spectral metrics
+    # Axis A: Basin size / resolution difficulty
+    "ecs", "high_ld_mass", "top5_ev_frac",
+    "n_blocks_tau50", "avg_block_size_tau50", "max_block_size_tau50",
+    "max_block_frac_tau50", "block_entropy_norm_tau50",
+    "n_blocks_tau80", "avg_block_size_tau80", "max_block_size_tau80",
+    "max_block_frac_tau80", "block_entropy_norm_tau80",
+    # Axis B: Identifiability / blur
+    "nsi", "M1", "M2", "M1_dist",
+    # Spectral metrics (mixed)
     "lambda_max_frac", "participation_ratio", "spectral_entropy_norm",
     "stable_rank", "spectral_gap",
     # Simple summaries
     "mean_abs_r", "mean_r2", "row_conc_mean", "row_conc_q90",
     # Structure metrics
     "ar1_rho_hat", "toeplitz_rel_F_error",
-    # Submodularity/coherence
+    # Submodularity/coherence (Axis B theoretical)
     "mu", "lambda_min_2k_mc", "gamma_lb_mc", "gamma_lb_gersh"
+  )
+}
+
+#' Get Axis A metric names (Basin Size / Resolution Difficulty)
+#' 
+#' Returns metrics that measure how big/strong LD neighborhoods are.
+#' High Axis A = SuSiE finds right basin but CS is large.
+#' 
+#' @return Character vector of Axis A metric names
+#' @export
+get_axis_a_metrics <- function() {
+  c(
+    "ecs", "high_ld_mass", "top5_ev_frac",
+    "n_blocks_tau50", "avg_block_size_tau50", "max_block_size_tau50",
+    "max_block_frac_tau50", "block_entropy_norm_tau50",
+    "n_blocks_tau80", "avg_block_size_tau80", "max_block_size_tau80",
+    "max_block_frac_tau80", "block_entropy_norm_tau80",
+    # These also relate to block structure
+    "row_conc_mean", "row_conc_q90", "lambda_max_frac"
+  )
+}
+
+#' Get Axis B metric names (Identifiability / Factorization Mismatch)
+#' 
+#' Returns metrics that measure how interchangeable SNP neighborhoods are.
+#' High Axis B = many SNPs look alike, SuSiE's factorization may be wrong shape.
+#' 
+#' @return Character vector of Axis B metric names
+#' @export
+get_axis_b_metrics <- function() {
+  c(
+    "nsi", "M1", "M2", "M1_dist",
+    "spectral_entropy_norm", "participation_ratio",
+    "lambda_min_2k_mc", "gamma_lb_mc",
+    "toeplitz_rel_F_error", "mean_r2"
   )
 }
 
@@ -778,13 +1001,17 @@ validate_x_metrics <- function(x_metrics) {
 #' @param auprc_var AUPRC column name (can be raw, residualized, or ranked)
 #' @param out_path Optional path to save CSV results
 #' @param k_smooth Basis dimension for smooth terms (default 5)
+#' @param cross_axis_only If TRUE, only test 2-way models where one metric is
+#'   from Axis A (basin size) and one from Axis B (identifiability). This is
+#'   much more efficient and theoretically motivated than all pairs.
 #' @return Tibble with model diagnostics for all combinations
 #' @export
 test_gam_combinations <- function(df_joined,
                                    metric_names = NULL,
                                    auprc_var = "AUPRC",
                                    out_path = NULL,
-                                   k_smooth = 5) {
+                                   k_smooth = 5,
+                                   cross_axis_only = FALSE) {
   
   if (is.null(metric_names)) {
     metric_names <- get_x_metric_names()
@@ -800,9 +1027,29 @@ test_gam_combinations <- function(df_joined,
   })
   metric_names <- metric_names[valid_metrics]
   
-  message("Testing ", length(metric_names), " metrics with sufficient variance")
-  message("Fitting 1-way GAMs: ", length(metric_names), " models")
-  message("Fitting 2-way GAMs: ", choose(length(metric_names), 2), " models")
+  # For cross-axis mode, determine which metrics belong to which axis
+  if (cross_axis_only) {
+    axis_a <- get_axis_a_metrics()
+    axis_b <- get_axis_b_metrics()
+    metrics_a <- intersect(metric_names, axis_a)
+    metrics_b <- intersect(metric_names, axis_b)
+    
+    # Generate only cross-axis pairs
+    pairs <- expand.grid(m1 = metrics_a, m2 = metrics_b, stringsAsFactors = FALSE)
+    pairs <- lapply(seq_len(nrow(pairs)), function(i) c(pairs$m1[i], pairs$m2[i]))
+    
+    message("Testing ", length(metric_names), " metrics with sufficient variance")
+    message("  Axis A metrics: ", length(metrics_a))
+    message("  Axis B metrics: ", length(metrics_b))
+    message("Fitting 1-way GAMs: ", length(metric_names), " models")
+    message("Fitting 2-way GAMs (cross-axis only): ", length(pairs), " pairs")
+  } else {
+    pairs <- utils::combn(metric_names, 2, simplify = FALSE)
+    
+    message("Testing ", length(metric_names), " metrics with sufficient variance")
+    message("Fitting 1-way GAMs: ", length(metric_names), " models")
+    message("Fitting 2-way GAMs (all pairs): ", length(pairs), " pairs")
+  }
   
   # Prepare clean data
   df_clean <- df_joined %>%
@@ -830,9 +1077,11 @@ test_gam_combinations <- function(df_joined,
   }
   
   # ===== 2-WAY MODELS (additive: s(m1) + s(m2)) =====
-  message("\n--- Fitting 2-way additive GAMs ---")
-  
-  pairs <- utils::combn(metric_names, 2, simplify = FALSE)
+  if (cross_axis_only) {
+    message("\n--- Fitting 2-way additive GAMs (cross-axis) ---")
+  } else {
+    message("\n--- Fitting 2-way additive GAMs ---")
+  }
   
   for (pair in pairs) {
     m1 <- pair[1]
@@ -844,7 +1093,11 @@ test_gam_combinations <- function(df_joined,
   }
   
   # ===== 2-WAY MODELS WITH INTERACTION: s(m1, m2) =====
-  message("\n--- Fitting 2-way interaction GAMs ---")
+  if (cross_axis_only) {
+    message("\n--- Fitting 2-way interaction GAMs (cross-axis) ---")
+  } else {
+    message("\n--- Fitting 2-way interaction GAMs ---")
+  }
   
   for (pair in pairs) {
     m1 <- pair[1]

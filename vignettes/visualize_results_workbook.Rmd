@@ -628,7 +628,7 @@ if (!is.null(data_matrices_map)) {
     matrix_paths_df = data_matrices_map %>% 
       dplyr::select(matrix_id, matrix_path) %>% 
       dplyr::distinct(),
-    k_ref = 3,         # typical number of causal effects
+    k_ref = 5,         # typical number of causal effects
     n_samples = 200,   # MC samples for sparse eigenvalue
     base_dir = here()  # prepend project root to relative paths
   )
@@ -816,19 +816,32 @@ if (length(r2_tables) > 0) {
 
 ## 6.10 GAM Model Combinations & Interactions
 
-Test all 1-way and 2-way GAM models to find which metrics (and metric pairs) best predict AUPRC.
+Test all 1-way and cross-axis 2-way GAM models to find which metrics best predict AUPRC.
+We restrict 2-way models to cross-axis pairs (Axis A × Axis B) since:
+- Axis A (basin size): Measures how big/strong LD neighborhoods are
+- Axis B (identifiability): Measures how interchangeable SNP neighborhoods are
+
+This is more efficient and theoretically motivated than testing all pairs.
 
 ```{r gam-combinations}
 if (!is.null(auprc_with_x) && nrow(auprc_with_x) > 20 && exists("metric_names")) {
-  cat("Testing all 1-way and 2-way GAM combinations...\n\n")
+  cat("Testing 1-way and cross-axis 2-way GAM combinations...\n\n")
   
-  # Test all combinations
+  # Show which metrics are available in each axis
+  axis_a_available <- intersect(metric_names, test_susine::get_axis_a_metrics())
+  axis_b_available <- intersect(metric_names, test_susine::get_axis_b_metrics())
+  cat("Axis A metrics available:", length(axis_a_available), "\n")
+  cat("Axis B metrics available:", length(axis_b_available), "\n")
+  cat("Cross-axis pairs to test:", length(axis_a_available) * length(axis_b_available), "\n\n")
+  
+  # Test combinations with cross-axis only for 2-way models
   gam_results <- test_susine::test_gam_combinations(
     df_joined = auprc_with_x,
     metric_names = metric_names,
     auprc_var = "AUPRC",
     out_path = file.path(paths$aggregated_dir, "gam_combinations_diagnostics.csv"),
-    k_smooth = 5
+    k_smooth = 5,
+    cross_axis_only = TRUE
   )
   
   # Show top 10 models overall by AIC (lower = better)
@@ -848,8 +861,8 @@ if (!is.null(auprc_with_x) && nrow(auprc_with_x) > 20 && exists("metric_names"))
     head(10) %>%
     print()
   
-  # Show top 2-way additive models by AIC
-  cat("\n=== Top 10 Two-Metric Additive Models (by AIC) ===\n")
+  # Show top cross-axis 2-way additive models by AIC
+  cat("\n=== Top 10 Cross-Axis Additive Models (Axis A + Axis B) ===\n")
   gam_results %>%
     dplyr::filter(model_type == "2-way_additive") %>%
     dplyr::select(metric1, metric2, r2_adj, dev_expl, aic) %>%
