@@ -468,6 +468,12 @@ assign_task_ids <- function(runs,
 #'   metrics into task/flush staging files (reduces filesystem load).
 #' @param write_legacy_snp_csv Logical; when TRUE, retain the legacy per-run
 #'   `pip.csv` and `truth.csv` files alongside the new compact SNP table.
+#' @param sigma_0_2_scalars Character or numeric vector of sigma_0_2 prior variance
+#'   scalars to test. Only applies to use cases with `sigma_strategy == "naive"`.
+#'   Supported formats:
+#'   - Numeric values (e.g., 0.1, 0.2, 0.4): multiplier of var(y)
+#'   - Strings with /L suffix (e.g., "1/L", "0.5/L", "2/L"): multiplier/L of var(y)
+#'   When NULL (default), uses susine's internal default (1/L * var_y).
 #' @param anneal_settings Named list for tempering runs.
 #' @param model_average_settings Named list for model averaging runs.
 #' @param pair_L_p_star Logical; when TRUE, the full grid pairs `L` and `p_star` values 1-1
@@ -499,6 +505,7 @@ make_job_config <- function(job_name,
                             buffer_flush_interval = 300L,
                             grid_mode = c("full", "minimal"),
                             pair_L_p_star = FALSE,
+                            sigma_0_2_scalars = NULL,
                             anneal_settings = list(
                               anneal_start_T = 5,
                               anneal_schedule_type = "geometric",
@@ -532,6 +539,36 @@ make_job_config <- function(job_name,
     pair_L_p_star = pair_L_p_star,
     data_matrix_catalog = data_matrix_catalog
   )
+
+  # Expand sigma_0_2_scalars across runs with naive sigma strategy
+  # Only applies to use cases with sigma_strategy == "naive"
+  if (!is.null(sigma_0_2_scalars) && length(sigma_0_2_scalars) > 0) {
+    use_cases <- tables$use_cases
+    naive_sigma_ids <- use_cases$use_case_id[use_cases$sigma_strategy == "naive"]
+    
+    # Split runs into those that need expansion and those that don't
+    runs_to_expand <- tables$runs %>%
+      dplyr::filter(.data$use_case_id %in% naive_sigma_ids)
+    runs_no_expand <- tables$runs %>%
+      dplyr::filter(!(.data$use_case_id %in% naive_sigma_ids)) %>%
+      dplyr::mutate(sigma_0_2_scalar = NA_character_)
+    
+    if (nrow(runs_to_expand) > 0) {
+      # Expand runs with each sigma_0_2_scalar value
+      runs_expanded <- runs_to_expand %>%
+        tidyr::crossing(sigma_0_2_scalar = as.character(sigma_0_2_scalars))
+      
+      tables$runs <- dplyr::bind_rows(runs_expanded, runs_no_expand) %>%
+        dplyr::arrange(.data$scenario_id, .data$use_case_id, .data$seed, .data$sigma_0_2_scalar) %>%
+        dplyr::mutate(run_id = dplyr::row_number())
+    } else {
+      tables$runs <- runs_no_expand
+    }
+  } else {
+    # No sigma_0_2_scalars specified - add column with NA
+    tables$runs <- tables$runs %>%
+      dplyr::mutate(sigma_0_2_scalar = NA_character_)
+  }
 
   shuffle_runs <- TRUE
   runs_tasks <- assign_task_ids(
@@ -750,7 +787,8 @@ summarise_job_config <- function(job_config) {
       "p_star",
       "annotation_r2",
       "inflate_match",
-      "gamma_shrink"
+      "gamma_shrink",
+      "sigma_0_2_scalar"
     ),
     names(runs)
   )

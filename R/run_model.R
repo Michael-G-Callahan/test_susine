@@ -220,6 +220,45 @@ generate_data_for_run <- function(run_row, job_config) {
   generate_simulation_data(spec, base_X = X_mat)
 }
 
+#' Parse sigma_0_2_scalar string and compute the actual value.
+#'
+#' Supported formats:
+#' - Numeric (e.g., 0.1, 0.2, 0.4): interpreted as multiplier of var_y
+#' - String with /L suffix (e.g., "1/L", "0.5/L", "2/L"): interpreted as multiplier/L of var_y
+#' - NA or NULL: returns NULL (use susine default)
+#'
+#' @param scalar_spec The sigma_0_2_scalar value from run_row (character or numeric)
+#' @param var_y Variance of y
+#' @param L Number of effects
+#' @return Scalar value to pass to susine, or NULL for default behavior
+#' @keywords internal
+parse_sigma_0_2_scalar <- function(scalar_spec, var_y, L) {
+  if (is.null(scalar_spec) || (length(scalar_spec) == 1 && is.na(scalar_spec))) {
+    return(NULL)
+  }
+  
+  spec_str <- as.character(scalar_spec)
+  
+  # Check for /L suffix
+  if (grepl("/L$", spec_str, ignore.case = TRUE)) {
+    # Extract the multiplier before /L
+    multiplier <- as.numeric(sub("/L$", "", spec_str, ignore.case = TRUE))
+    if (is.na(multiplier)) {
+      warning("Could not parse sigma_0_2_scalar: ", scalar_spec, ". Using default.")
+      return(NULL)
+    }
+    return(multiplier / L)
+  }
+  
+  # Plain numeric multiplier
+  multiplier <- as.numeric(spec_str)
+  if (is.na(multiplier)) {
+    warning("Could not parse sigma_0_2_scalar: ", scalar_spec, ". Using default.")
+    return(NULL)
+  }
+  return(multiplier)
+}
+
 #' Fit a use case with the susine backend, handling optional annealing/model averaging.
 #' @keywords internal
 run_use_case <- function(use_case, run_row, data_bundle, job_config) {
@@ -228,7 +267,17 @@ run_use_case <- function(use_case, run_row, data_bundle, job_config) {
   sigma_strategy <- use_case$sigma_strategy[[1]]
 
   mu_0 <- if (mu_strategy %in% c("functional", "eb_mu")) data_bundle$mu_0 else 0
-  sigma_0_2 <- if (sigma_strategy %in% c("functional", "eb_sigma")) data_bundle$sigma_0_2 else NULL
+  
+  # Determine sigma_0_2 based on strategy and optional scalar override
+  if (sigma_strategy %in% c("functional", "eb_sigma")) {
+    sigma_0_2 <- data_bundle$sigma_0_2
+  } else if (sigma_strategy == "naive" && !is.null(run_row[["sigma_0_2_scalar"]])) {
+    # Parse custom sigma_0_2 scalar (e.g., "0.1", "0.2", "1/L", "2/L")
+    var_y <- var(data_bundle$y)
+    sigma_0_2 <- parse_sigma_0_2_scalar(run_row[["sigma_0_2_scalar"]], var_y, L)
+  } else {
+    sigma_0_2 <- NULL
+  }
 
   extra <- use_case$extra_compute[[1]]
   if (length(extra) && is.na(extra)) {

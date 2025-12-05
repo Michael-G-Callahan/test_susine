@@ -77,8 +77,11 @@ simulate_priors <- function(beta,
   if (is.null(effect_sd) || !is.finite(effect_sd) || effect_sd <= 0) {
     effect_sd <- sqrt(max(stats::var(beta[causal_idx]), stats::var(beta), 1))
   }
-  annotation_r2 <- pmin(pmax(annotation_r2 %||% 0, 0), 1)
-  inflate_match <- max(inflate_match %||% 0, 0)
+  # Handle NULL and NA for annotation_r2 and inflate_match
+  if (is.null(annotation_r2) || is.na(annotation_r2)) annotation_r2 <- 0
+  if (is.null(inflate_match) || is.na(inflate_match)) inflate_match <- 0
+  annotation_r2 <- pmin(pmax(annotation_r2, 0), 1)
+  inflate_match <- max(inflate_match, 0)
 
   causal_var <- stats::var(beta[causal_idx])
   if (is.na(causal_var) || causal_var == 0) {
