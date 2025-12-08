@@ -177,14 +177,28 @@ plot_auprc_informed <- function(auprc_data,
 
   # Format linetype variable
   if (!is.null(linetype_var) && linetype_var %in% names(auprc_data)) {
-    auprc_data <- auprc_data %>%
-      dplyr::mutate(
-        linetype_label = dplyr::if_else(
-          is.na(.data[[linetype_var]]),
-          "none",
-          sprintf("%.2f", .data[[linetype_var]])
+    lt_values <- auprc_data[[linetype_var]]
+    # Check if values are numeric or can be coerced to numeric
+    if (is.numeric(lt_values)) {
+      auprc_data <- auprc_data %>%
+        dplyr::mutate(
+          linetype_label = dplyr::if_else(
+            is.na(.data[[linetype_var]]),
+            "none",
+            sprintf("%.2f", .data[[linetype_var]])
+          )
         )
-      )
+    } else {
+      # Character values - use as-is
+      auprc_data <- auprc_data %>%
+        dplyr::mutate(
+          linetype_label = dplyr::if_else(
+            is.na(.data[[linetype_var]]) | .data[[linetype_var]] == "",
+            "default",
+            as.character(.data[[linetype_var]])
+          )
+        )
+    }
     lt_aes <- "linetype_label"
   } else {
     lt_aes <- NULL
