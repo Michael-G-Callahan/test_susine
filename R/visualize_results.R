@@ -148,8 +148,9 @@ plot_power_fdr <- function(curve_data,
 #' @param auprc_data Data frame with AUPRC and grouping columns
 #' @param color_var Column for color aesthetic
 #' @param color_labels Named vector for color labels
-#' @param linetype_var Column for linetype aesthetic (e.g., gamma_shrink)
-#' @param facet_row Column for facet rows (e.g., inflate_match
+#' @param linetype_var Column for secondary grouping aesthetic (uses shape + linetype)
+#' @param linetype_label Legend title for the secondary grouping variable
+#' @param facet_row Column for facet rows (e.g., inflate_match)
 #' @param facet_col Column for facet columns (e.g., annotation_r2)
 #' @param title Plot title
 #' @param subtitle Plot subtitle
@@ -159,10 +160,19 @@ plot_auprc_informed <- function(auprc_data,
                                 color_var = "use_case_id",
                                 color_labels = NULL,
                                 linetype_var = "gamma_shrink",
+                                linetype_label = NULL,
                                 facet_row = "inflate_match",
                                 facet_col = "annotation_r2",
                                 title = "AUPRC by Noise Level",
                                 subtitle = NULL) {
+
+  # Auto-generate legend title from variable name if not provided
+
+if (is.null(linetype_label) && !is.null(linetype_var)) {
+    # Convert snake_case to Title Case
+    linetype_label <- gsub("_", " ", linetype_var)
+    linetype_label <- tools::toTitleCase(linetype_label)
+  }
 
   # Apply labels if provided
   if (!is.null(color_labels)) {
@@ -175,16 +185,16 @@ plot_auprc_informed <- function(auprc_data,
     color_aes <- color_var
   }
 
-  # Format linetype variable
+  # Format secondary grouping variable (for shape/linetype)
   if (!is.null(linetype_var) && linetype_var %in% names(auprc_data)) {
     lt_values <- auprc_data[[linetype_var]]
     # Check if values are numeric or can be coerced to numeric
     if (is.numeric(lt_values)) {
       auprc_data <- auprc_data %>%
         dplyr::mutate(
-          linetype_label = dplyr::if_else(
+          group_label = dplyr::if_else(
             is.na(.data[[linetype_var]]),
-            "none",
+            "default",
             sprintf("%.2f", .data[[linetype_var]])
           )
         )
@@ -192,37 +202,41 @@ plot_auprc_informed <- function(auprc_data,
       # Character values - use as-is
       auprc_data <- auprc_data %>%
         dplyr::mutate(
-          linetype_label = dplyr::if_else(
+          group_label = dplyr::if_else(
             is.na(.data[[linetype_var]]) | .data[[linetype_var]] == "",
             "default",
             as.character(.data[[linetype_var]])
           )
         )
     }
-    lt_aes <- "linetype_label"
+    group_aes <- "group_label"
   } else {
-    lt_aes <- NULL
+    group_aes <- NULL
   }
 
   p <- ggplot2::ggplot(auprc_data, ggplot2::aes(x = y_noise, y = AUPRC, color = .data[[color_aes]]))
 
-  if (!is.null(lt_aes)) {
-    p <- p + ggplot2::aes(linetype = .data[[lt_aes]])
+  if (!is.null(group_aes)) {
+    # Use both shape and linetype for better visual distinction
+    p <- p + ggplot2::aes(shape = .data[[group_aes]], linetype = .data[[group_aes]])
   }
 
   p <- p +
     ggplot2::geom_line(linewidth = 0.8) +
-    ggplot2::geom_point(size = 2) +
+    ggplot2::geom_point(size = 2.5) +
     ggplot2::labs(
       title = title,
       subtitle = subtitle,
       x = "y_noise (Noise Level)",
       y = "AUPRC",
       color = "Model",
-      linetype = "Gamma Shrink"
+      shape = linetype_label,
+      linetype = linetype_label
     ) +
     ggplot2::theme_minimal() +
-    ggplot2::theme(legend.position = "right")
+    ggplot2::theme(legend.position = "right") +
+    # Use manual scales for more distinct shapes
+    ggplot2::scale_shape_manual(values = c(16, 17, 15, 3, 4, 8, 1, 2, 0, 5, 6, 7))
 
   # Add facets if columns exist and have non-NA values
   if (!is.null(facet_row) && !is.null(facet_col) &&
