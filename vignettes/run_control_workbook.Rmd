@@ -81,7 +81,7 @@ job_inputs <- list(
   grid_mode = "full",
 
   # Which predefined model variants to include (see use_case_catalog())
-  use_cases = c("a_i", "b_ii"),
+  use_cases = c("a_i", "b_i", "b_ii"),
 
   # Simulation settings (vectorised; full factorial is taken)
   L_grid = c(10),
@@ -91,27 +91,24 @@ job_inputs <- list(
  
   # Prior quality grid parameters
   annotation_r2 = c(0.2, 0.4, 0.6, 0.8),
-  inflate_match = c(0, 0.5, 1),
-  # gamma_shrink = c(0.4, 0.8),
+  inflate_match = c(0.5, 1, 1.5),
+  gamma_shrink = c(0.4, 0.8),
   
   # sigma_0_2 prior variance scalars to test (only for naive sigma use cases)
   # Formats: "X" = X * var(y), "X/L" = X/L * var(y)
   # Set to NULL to use default (1/L * var_y)
   sigma_0_2_scalars = c(
-    "1/L",    # Current susine default
-    "0.5/L",  # Smaller per-effect variance
-    "2/L",    # Larger per-effect variance
     "0.1",    # 0.1 * var_y (small, susieR-like)
     "0.2",    # 0.2 * var_y (susieR default)
     "0.4"     # 0.4 * var_y (larger)
   ),
 
   # Seeds per design matrix (each sampled X receives these many phenotype draws)
-  seeds = 1:2,
+  seeds = 1:3,
 
   # Number of runs to assign to each SLURM array task
   # (~2112 total runs / 150 per task = ~14 tasks, well under SLURM QoS limits)
-  runs_per_task = 3500, #5,
+  runs_per_task = 3969, #5,
   # Number of runs to accumulate before flushing task-local outputs
   buffer_flush_interval = 300,
 

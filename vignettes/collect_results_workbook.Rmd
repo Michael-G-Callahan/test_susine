@@ -35,8 +35,8 @@ library(arrow)
 ## 1.1 Specify the Job
 
 ```{r job-inputs}
-job_name <- "susie_scen_1_recreation"
-parent_job_id <- "46880273"
+job_name <- "prior_default_testing"
+parent_job_id <- "47128217"
 output_root <- here("output")
 ```
 
@@ -217,7 +217,7 @@ pip_bucket_width <- 0.01
 # This will create one row per (grouping combo × pip_threshold)
 detailed_grouping_vars <- c(
   "use_case_id", "p_star", "L", "y_noise",
-  "annotation_r2", "inflate_match", "gamma_shrink"
+  "annotation_r2", "inflate_match", "gamma_shrink", "sigma_0_2_scalar"
 )
 
 # Grouping variables for the dataset-level confusion matrix
