@@ -1,0 +1,613 @@
+---
+title: "Inflate Match Parameter Analysis"
+author: "test_susine"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.show = "hold")
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+```
+
+# Overview
+
+This workbook analyzes the `inflate_match` parameter in `simulate_data.R` to verify it works as intended.
+
+**Goal of `inflate_match`**: Scale up the variance of non-causal SNP annotations (mu_0) to approach the same scale as causal SNP annotations. This prevents the model from trivially distinguishing causal from non-causal SNPs based on annotation magnitude alone.
+
+---
+
+# Section 1: Code Review
+
+## 1.1 The `simulate_priors()` Function
+
+Let's examine the key logic:
+```r
+# For causal SNPs:
+mu_0[causal_idx] <- beta[causal_idx] + rnorm(length(causal_idx), sd = sqrt(noise_var))
+
+# For non-causal SNPs:
+target_var <- noise_var + inflate_match * causal_var
+mu_0[noncausal_idx] <- rnorm(length(noncausal_idx), sd = sqrt(target_var))
+```
+
+**Key variables:**
+- `causal_var` = Var(beta[causal]) - variance of the true causal effects
+- `noise_var` = causal_var * (1 - annotation_r2) / annotation_r2 - noise added to annotations
+- `target_var` = noise_var + inflate_match * causal_var - variance for non-causal mu_0
+
+**Expected behavior:**
+
+For **causal SNPs**, the variance of mu_0 is:
+$$\text{Var}(\mu_0^{causal}) = \text{Var}(\beta_{causal}) + \text{noise\_var} = \text{causal\_var} + \text{noise\_var}$$
+
+For **non-causal SNPs**, the variance of mu_0 is:
+$$\text{Var}(\mu_0^{noncausal}) = \text{target\_var} = \text{noise\_var} + \text{inflate\_match} \times \text{causal\_var}$$
+
+**When `inflate_match = 1`:**
+$$\text{Var}(\mu_0^{noncausal}) = \text{noise\_var} + \text{causal\_var} = \text{Var}(\mu_0^{causal})$$
+
+So at `inflate_match = 1`, both causal and non-causal SNPs should have the same mu_0 variance!
+
+---
+
+# Section 2: Simulation Experiment
+
+## 2.1 Setup
+
+```{r simulation-setup}
+# Load the package functions
+devtools::load_all(here::here())
+
+# Simulation parameters
+set.seed(42)
+p <- 1000           # Number of SNPs
+p_star <- 50        # Number of causal SNPs
+effect_sd <- 1      # SD of causal effects
+annotation_r2_values <- c(0.2, 0.4, 0.6, 0.8)  # Annotation quality levels
+inflate_match_values <- seq(0, 1.5, by = 0.25)  # Range of inflate_match to test
+n_reps <- 100       # Number of replications per setting
+```
+
+## 2.2 Run Simulation
+
+```{r run-simulation}
+# Storage for results
+results <- list()
+
+for (annot_r2 in annotation_r2_values) {
+  for (inflate in inflate_match_values) {
+    for (rep in seq_len(n_reps)) {
+      # Simulate effect sizes
+      effects <- simulate_effect_sizes(
+        p = p,
+        p_star = p_star,
+        effect_sd = effect_sd,
+        seed = rep * 1000 + round(annot_r2 * 100) + round(inflate * 100)
+      )
+      
+      # Simulate priors (this is where inflate_match is used)
+      priors <- simulate_priors(
+        beta = effects$beta,
+        annotation_r2 = annot_r2,
+        inflate_match = inflate,
+        gamma_shrink = NA,  # No shrinkage for this test
+        base_sigma2 = NULL,
+        effect_sd = effect_sd
+      )
+      
+      # Extract mu_0 for causal and non-causal
+      mu_0 <- priors$mu_0
+      causal_idx <- effects$causal_idx
+      noncausal_idx <- setdiff(seq_len(p), causal_idx)
+      
+      # Compute statistics
+      results[[length(results) + 1]] <- data.frame(
+        annotation_r2 = annot_r2,
+        inflate_match = inflate,
+        rep = rep,
+        # Causal SNP statistics
+        causal_mu0_mean = mean(mu_0[causal_idx]),
+        causal_mu0_var = var(mu_0[causal_idx]),
+        causal_mu0_abs_mean = mean(abs(mu_0[causal_idx])),
+        causal_beta_var = var(effects$beta[causal_idx]),
+        # Non-causal SNP statistics
+        noncausal_mu0_mean = mean(mu_0[noncausal_idx]),
+        noncausal_mu0_var = var(mu_0[noncausal_idx]),
+        noncausal_mu0_abs_mean = mean(abs(mu_0[noncausal_idx])),
+        # Ratio
+        var_ratio = var(mu_0[noncausal_idx]) / var(mu_0[causal_idx])
+      )
+    }
+  }
+}
+
+# Combine results
+sim_results <- dplyr::bind_rows(results)
+
+cat("Simulation complete:", nrow(sim_results), "rows\n")
+cat("Settings tested:\n")
+cat("  annotation_r2:", paste(annotation_r2_values, collapse = ", "), "\n")
+cat("  inflate_match:", paste(inflate_match_values, collapse = ", "), "\n")
+```
+
+## 2.3 Summarize Results
+
+```{r summarize-results}
+# Aggregate across replications
+summary_stats <- sim_results %>%
+  group_by(annotation_r2, inflate_match) %>%
+  summarise(
+    # Means across reps
+    causal_var_mean = mean(causal_mu0_var),
+    causal_var_se = sd(causal_mu0_var) / sqrt(n()),
+    noncausal_var_mean = mean(noncausal_mu0_var),
+    noncausal_var_se = sd(noncausal_mu0_var) / sqrt(n()),
+    var_ratio_mean = mean(var_ratio),
+    var_ratio_se = sd(var_ratio) / sqrt(n()),
+    causal_abs_mean = mean(causal_mu0_abs_mean),
+    noncausal_abs_mean = mean(noncausal_mu0_abs_mean),
+    .groups = "drop"
+  )
+
+print(summary_stats, n = 50)
+```
+
+---
+
+# Section 3: Visualizations
+
+## 3.1 Variance Comparison: Causal vs Non-Causal
+
+```{r plot-variance-comparison, fig.width=12, fig.height=8}
+# Reshape for plotting
+var_long <- summary_stats %>%
+  select(annotation_r2, inflate_match, causal_var_mean, noncausal_var_mean) %>%
+  pivot_longer(
+    cols = c(causal_var_mean, noncausal_var_mean),
+    names_to = "snp_type",
+    values_to = "variance"
+  ) %>%
+  mutate(
+    snp_type = ifelse(snp_type == "causal_var_mean", "Causal", "Non-causal")
+  )
+
+ggplot(var_long, aes(x = inflate_match, y = variance, color = snp_type)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  facet_wrap(~ annotation_r2, labeller = label_both, scales = "free_y") +
+  labs(
+    title = "Variance of mu_0 by SNP Type and inflate_match",
+    subtitle = "At inflate_match=1, variances should be equal",
+    x = "inflate_match",
+    y = "Var(mu_0)",
+    color = "SNP Type"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom") +
+  geom_vline(xintercept = 1, linetype = "dashed", alpha = 0.5)
+```
+
+## 3.2 Variance Ratio (Non-causal / Causal)
+
+```{r plot-variance-ratio, fig.width=10, fig.height=6}
+ggplot(summary_stats, aes(x = inflate_match, y = var_ratio_mean, color = factor(annotation_r2))) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  geom_ribbon(
+    aes(ymin = var_ratio_mean - 2*var_ratio_se, ymax = var_ratio_mean + 2*var_ratio_se, fill = factor(annotation_r2)),
+    alpha = 0.2, color = NA
+  ) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "red") +
+  labs(
+    title = "Variance Ratio: Var(mu_0 non-causal) / Var(mu_0 causal)",
+    subtitle = "Red dashed line = 1.0 (equal variance). Should cross ~1 at inflate_match=1",
+    x = "inflate_match",
+    y = "Variance Ratio",
+    color = "annotation_r2",
+    fill = "annotation_r2"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "right") +
+  scale_y_continuous(breaks = seq(0, 2, by = 0.25))
+```
+
+## 3.3 Mean Absolute mu_0 Comparison
+
+```{r plot-abs-mean, fig.width=12, fig.height=8}
+abs_long <- summary_stats %>%
+  select(annotation_r2, inflate_match, causal_abs_mean, noncausal_abs_mean) %>%
+  pivot_longer(
+    cols = c(causal_abs_mean, noncausal_abs_mean),
+    names_to = "snp_type",
+    values_to = "abs_mean"
+  ) %>%
+  mutate(
+    snp_type = ifelse(snp_type == "causal_abs_mean", "Causal", "Non-causal")
+  )
+
+ggplot(abs_long, aes(x = inflate_match, y = abs_mean, color = snp_type)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  facet_wrap(~ annotation_r2, labeller = label_both) +
+  labs(
+    title = "Mean |mu_0| by SNP Type and inflate_match",
+    subtitle = "Average magnitude of annotations",
+    x = "inflate_match",
+    y = "Mean |mu_0|",
+    color = "SNP Type"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom") +
+  geom_vline(xintercept = 1, linetype = "dashed", alpha = 0.5)
+```
+
+## 3.4 Distribution Overlap at Different inflate_match Levels
+
+```{r plot-distributions, fig.width=14, fig.height=10}
+# Pick a single annotation_r2 and show distributions at key inflate_match values
+annot_r2_focus <- 0.4
+inflate_focus <- c(0, 0.5, 1.0, 1.5)
+
+# Run one rep for each setting to get raw data
+dist_data <- list()
+for (inflate in inflate_focus) {
+  effects <- simulate_effect_sizes(p = p, p_star = p_star, effect_sd = effect_sd, seed = 999)
+  priors <- simulate_priors(
+    beta = effects$beta,
+    annotation_r2 = annot_r2_focus,
+    inflate_match = inflate,
+    gamma_shrink = NA,
+    effect_sd = effect_sd
+  )
+  
+  causal_idx <- effects$causal_idx
+  noncausal_idx <- setdiff(seq_len(p), causal_idx)
+  
+  dist_data[[length(dist_data) + 1]] <- data.frame(
+    inflate_match = inflate,
+    snp_type = "Causal",
+    mu_0 = priors$mu_0[causal_idx]
+  )
+  dist_data[[length(dist_data) + 1]] <- data.frame(
+    inflate_match = inflate,
+    snp_type = "Non-causal",
+    mu_0 = priors$mu_0[noncausal_idx]
+  )
+}
+
+dist_df <- dplyr::bind_rows(dist_data)
+
+ggplot(dist_df, aes(x = mu_0, fill = snp_type)) +
+  geom_density(alpha = 0.5) +
+  facet_wrap(~ inflate_match, labeller = label_both, scales = "free_y") +
+  labs(
+    title = sprintf("Distribution of mu_0 at annotation_r2 = %.1f", annot_r2_focus),
+    subtitle = "As inflate_match increases, non-causal distribution widens to match causal",
+    x = "mu_0 (annotation value)",
+    y = "Density",
+    fill = "SNP Type"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+---
+
+# Section 4: Theoretical Derivation Check
+
+## 4.1 Expected vs Observed Variance
+
+Let's verify the formulas match:
+
+```{r theoretical-check}
+# For a specific setting, compute theoretical vs observed variance
+test_annot_r2 <- 0.4
+test_inflate <- 1.0
+
+# Theoretical values
+causal_var_true <- effect_sd^2  # Var(beta) for causal
+noise_var_theory <- causal_var_true * (1 - test_annot_r2) / test_annot_r2
+
+# Causal mu_0 variance = Var(beta) + noise_var
+causal_mu0_var_theory <- causal_var_true + noise_var_theory
+
+# Non-causal mu_0 variance = noise_var + inflate_match * causal_var
+noncausal_mu0_var_theory <- noise_var_theory + test_inflate * causal_var_true
+
+cat("=== Theoretical Calculation ===\n")
+cat(sprintf("annotation_r2 = %.2f, inflate_match = %.2f\n\n", test_annot_r2, test_inflate))
+cat(sprintf("causal_var (Var of beta[causal]) = %.4f\n", causal_var_true))
+cat(sprintf("noise_var = causal_var * (1 - r2) / r2 = %.4f * %.2f / %.2f = %.4f\n", 
+            causal_var_true, 1 - test_annot_r2, test_annot_r2, noise_var_theory))
+cat(sprintf("\nCausal mu_0 variance (theory):     %.4f + %.4f = %.4f\n", 
+            causal_var_true, noise_var_theory, causal_mu0_var_theory))
+cat(sprintf("Non-causal mu_0 variance (theory): %.4f + %.2f * %.4f = %.4f\n", 
+            noise_var_theory, test_inflate, causal_var_true, noncausal_mu0_var_theory))
+cat(sprintf("\nVariance ratio (theory): %.4f / %.4f = %.4f\n",
+            noncausal_mu0_var_theory, causal_mu0_var_theory, 
+            noncausal_mu0_var_theory / causal_mu0_var_theory))
+
+# Compare to observed
+observed <- summary_stats %>%
+  filter(annotation_r2 == test_annot_r2, inflate_match == test_inflate)
+
+cat("\n=== Observed (from simulation) ===\n")
+cat(sprintf("Causal mu_0 variance (observed):     %.4f\n", observed$causal_var_mean))
+cat(sprintf("Non-causal mu_0 variance (observed): %.4f\n", observed$noncausal_var_mean))
+cat(sprintf("Variance ratio (observed):           %.4f\n", observed$var_ratio_mean))
+```
+
+---
+
+# Section 5: What to Check in Model Outputs
+
+## 5.1 SNPs Parquet Files
+
+---
+
+# Section 5: Validate Against Historical Run Data
+
+This section loads actual simulation outputs from a completed job and verifies
+that `inflate_match` behaves as expected in practice.
+
+## 5.1 Configure Job to Analyze
+
+```{r historical-job-config}
+# ==== USER INPUT: Specify the job to analyze ====
+historical_job_name <- "prior_default_testing"
+historical_job_id <- "46997729"
+output_root <- here::here("output")
+
+# Set to TRUE to run this analysis (requires the job outputs to exist)
+run_historical_analysis <- TRUE
+```
+
+## 5.2 Load Run Table and SNPs Dataset
+
+```{r historical-load-data, eval=run_historical_analysis}
+# Resolve paths
+paths <- test_susine::resolve_job_paths(
+
+  job_name = historical_job_name,
+  parent_job_id = historical_job_id,
+  output_root = output_root
+)
+
+cat("Analyzing job:", historical_job_name, "/", historical_job_id, "\n")
+cat("Run history dir:", paths$run_history_dir, "\n")
+cat("SNPs dataset dir:", paths$snps_dataset_dir, "\n")
+
+# Check paths exist
+if (!dir.exists(paths$run_history_dir)) {
+  stop("Run history directory not found: ", paths$run_history_dir)
+}
+if (!dir.exists(paths$snps_dataset_dir)) {
+  stop("SNPs dataset not found: ", paths$snps_dataset_dir)
+}
+
+# Load run table
+run_table_hist <- readr::read_csv(
+  file.path(paths$run_history_dir, "run_table.csv"),
+  show_col_types = FALSE
+)
+
+cat("\nRun table loaded:", nrow(run_table_hist), "runs\n")
+cat("Columns:", paste(names(run_table_hist), collapse = ", "), "\n")
+
+# Check for required columns
+required_cols <- c("run_id", "inflate_match", "annotation_r2", "use_case_id")
+missing_cols <- setdiff(required_cols, names(run_table_hist))
+if (length(missing_cols) > 0) {
+  warning("Missing columns in run_table: ", paste(missing_cols, collapse = ", "))
+}
+
+# Show inflate_match and annotation_r2 values
+cat("\ninflate_match values:", paste(sort(unique(run_table_hist$inflate_match)), collapse = ", "), "\n")
+cat("annotation_r2 values:", paste(sort(unique(run_table_hist$annotation_r2)), collapse = ", "), "\n")
+cat("use_case_id values:", paste(unique(run_table_hist$use_case_id), collapse = ", "), "\n")
+```
+
+## 5.3 Compute mu_0 Variance Statistics from SNPs Dataset
+
+The SNPs dataset is partitioned by use_case_id. We use Arrow to efficiently
+compute statistics without loading the entire dataset into memory.
+
+```{r historical-compute-stats, eval=run_historical_analysis}
+# Open the SNPs dataset with Hive partitioning
+snps_ds <- arrow::open_dataset(paths$snps_dataset_dir, partitioning = "use_case_id")
+
+cat("SNPs dataset schema:\n")
+print(snps_ds$schema)
+
+# Compute per-run statistics: variance of mu_0 by causal status
+# This aggregates at the Arrow level before collecting to R
+cat("\nComputing mu_0 variance by (run_id, causal)...\n")
+
+# First, compute basic stats per run × causal status
+# Note: Arrow doesn't support var() directly, so we compute sum, sum_sq, n and derive variance
+snps_stats_raw <- snps_ds %>%
+  dplyr::group_by(run_id, causal) %>%
+  dplyr::summarise(
+    n = n(),
+    mu_0_sum = sum(mu_0, na.rm = TRUE),
+    mu_0_sum_sq = sum(mu_0^2, na.rm = TRUE),
+    beta_sum = sum(beta, na.rm = TRUE),
+    beta_sum_sq = sum(beta^2, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  dplyr::collect()
+
+cat("Raw stats collected:", nrow(snps_stats_raw), "rows\n")
+
+# Compute variance: Var(X) = E[X^2] - E[X]^2
+snps_stats <- snps_stats_raw %>%
+  dplyr::mutate(
+    mu_0_mean = mu_0_sum / n,
+    mu_0_var = (mu_0_sum_sq / n) - (mu_0_mean)^2,
+    beta_mean = beta_sum / n,
+    beta_var = (beta_sum_sq / n) - (beta_mean)^2
+  ) %>%
+  dplyr::select(run_id, causal, n, mu_0_mean, mu_0_var, beta_mean, beta_var)
+
+# Pivot to wide format: one row per run with causal/noncausal columns
+snps_wide <- snps_stats %>%
+  tidyr::pivot_wider(
+    id_cols = run_id,
+    names_from = causal,
+    values_from = c(n, mu_0_mean, mu_0_var, beta_mean, beta_var),
+    names_glue = "{.value}_{ifelse(causal, 'causal', 'noncausal')}"
+  )
+
+# Fix column names (TRUE/FALSE become causal/noncausal)
+names(snps_wide) <- gsub("_TRUE", "_causal", names(snps_wide))
+names(snps_wide) <- gsub("_FALSE", "_noncausal", names(snps_wide))
+
+cat("\nSNPs stats (wide):", nrow(snps_wide), "runs\n")
+print(head(snps_wide))
+```
+
+## 5.4 Join with Run Table and Compute Variance Ratio
+
+```{r historical-join-analysis, eval=run_historical_analysis}
+# Join SNP stats with run table to get inflate_match and annotation_r2
+analysis_df <- run_table_hist %>%
+  dplyr::select(run_id, use_case_id, inflate_match, annotation_r2, p_star) %>%
+  dplyr::left_join(snps_wide, by = "run_id") %>%
+  dplyr::filter(!is.na(mu_0_var_causal), !is.na(mu_0_var_noncausal)) %>%
+  dplyr::mutate(
+    var_ratio = mu_0_var_noncausal / mu_0_var_causal
+  )
+
+cat("Analysis dataset:", nrow(analysis_df), "runs with complete data\n")
+
+# Summarize by inflate_match and annotation_r2
+hist_summary <- analysis_df %>%
+  dplyr::group_by(use_case_id, inflate_match, annotation_r2) %>%
+  dplyr::summarise(
+    n_runs = n(),
+    mu_0_var_causal_mean = mean(mu_0_var_causal, na.rm = TRUE),
+    mu_0_var_noncausal_mean = mean(mu_0_var_noncausal, na.rm = TRUE),
+    var_ratio_mean = mean(var_ratio, na.rm = TRUE),
+    var_ratio_sd = sd(var_ratio, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+cat("\nSummary by (use_case_id, inflate_match, annotation_r2):\n")
+print(hist_summary, n = 30)
+```
+
+## 5.5 Visualize Historical Results
+
+```{r historical-plot-variance-ratio, fig.width=12, fig.height=8, eval=run_historical_analysis}
+# Plot variance ratio vs inflate_match, faceted by use_case_id
+ggplot(analysis_df, aes(x = factor(inflate_match), y = var_ratio, fill = factor(annotation_r2))) +
+  geom_boxplot(outlier.size = 0.5, alpha = 0.7) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "red", linewidth = 1) +
+  facet_wrap(~ use_case_id, scales = "free_y") +
+  labs(
+    title = "Historical Run Data: Var(mu_0 noncausal) / Var(mu_0 causal)",
+    subtitle = sprintf("Job: %s / %s | Red line = 1.0 (equal variance)", 
+                       historical_job_name, historical_job_id),
+    x = "inflate_match",
+    y = "Variance Ratio",
+    fill = "annotation_r2"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "right")
+```
+
+```{r historical-plot-variance-comparison, fig.width=14, fig.height=8, eval=run_historical_analysis}
+# Reshape for causal vs noncausal comparison
+var_comparison <- analysis_df %>%
+  dplyr::select(run_id, use_case_id, inflate_match, annotation_r2, 
+                mu_0_var_causal, mu_0_var_noncausal) %>%
+  tidyr::pivot_longer(
+    cols = c(mu_0_var_causal, mu_0_var_noncausal),
+    names_to = "snp_type",
+    values_to = "mu_0_var"
+  ) %>%
+  dplyr::mutate(
+    snp_type = ifelse(snp_type == "mu_0_var_causal", "Causal", "Non-causal")
+  )
+
+# Plot actual variance values
+ggplot(var_comparison, aes(x = factor(inflate_match), y = mu_0_var, 
+                           fill = snp_type)) +
+  geom_boxplot(outlier.size = 0.5, alpha = 0.7, position = position_dodge(width = 0.8)) +
+  facet_grid(use_case_id ~ annotation_r2, scales = "free_y", 
+             labeller = labeller(annotation_r2 = label_both)) +
+  labs(
+    title = "Historical Run Data: Var(mu_0) by SNP Type",
+    subtitle = sprintf("Job: %s / %s", historical_job_name, historical_job_id),
+    x = "inflate_match",
+    y = "Var(mu_0)",
+    fill = "SNP Type"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+## 5.6 Compare Theoretical vs Historical
+
+```{r historical-vs-theoretical, eval=run_historical_analysis}
+# Compare historical variance ratios to our simulation predictions
+cat("=== Comparison: Simulation vs Historical ===\n\n")
+
+# Get overlapping settings
+common_settings <- hist_summary %>%
+  dplyr::inner_join(
+    summary_stats %>% dplyr::select(annotation_r2, inflate_match, var_ratio_mean),
+    by = c("annotation_r2", "inflate_match"),
+    suffix = c("_historical", "_simulation")
+  )
+
+if (nrow(common_settings) > 0) {
+  cat("Settings with both simulation and historical data:\n")
+  print(common_settings %>% 
+          dplyr::select(use_case_id, annotation_r2, inflate_match, 
+                        var_ratio_mean_historical, var_ratio_mean) %>%
+          dplyr::rename(var_ratio_simulation = var_ratio_mean))
+  
+  # Check correlation
+  cor_val <- cor(common_settings$var_ratio_mean_historical, 
+                 common_settings$var_ratio_mean, 
+                 use = "complete.obs")
+  cat(sprintf("\nCorrelation between historical and simulation variance ratios: %.3f\n", cor_val))
+} else {
+  cat("No overlapping settings found between simulation and historical data.\n")
+  cat("This may be because the historical job used different inflate_match values.\n")
+}
+```
+
+---
+
+# Section 6: Summary & Conclusions
+
+```{r summary}
+cat("=== Key Findings ===\n\n")
+
+# Check if variance ratio crosses 1 at inflate_match = 1
+ratio_at_1 <- summary_stats %>%
+  filter(inflate_match == 1) %>%
+  summarise(mean_ratio = mean(var_ratio_mean), sd_ratio = sd(var_ratio_mean))
+
+cat(sprintf("At inflate_match = 1.0:\n"))
+cat(sprintf("  Average variance ratio across all annotation_r2: %.4f (SD: %.4f)\n", 
+            ratio_at_1$mean_ratio, ratio_at_1$sd_ratio))
+
+if (abs(ratio_at_1$mean_ratio - 1) < 0.05) {
+  cat("  ✓ Variance ratio is close to 1.0 as expected!\n\n")
+} else {
+  cat("  ✗ Variance ratio deviates from 1.0 - investigate further\n\n")
+}
+
+cat("Interpretation:\n")
+cat("- inflate_match = 0: Non-causal SNPs have smaller mu_0 variance than causal\n")
+cat("- inflate_match = 1: Non-causal and causal SNPs have ~equal mu_0 variance\n")
+cat("- inflate_match > 1: Non-causal SNPs have LARGER mu_0 variance than causal\n")
+```
+

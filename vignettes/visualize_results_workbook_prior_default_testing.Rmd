@@ -1,0 +1,1105 @@
+---
+title: "SuSiNE Simulation Results Visualization"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+# Section 1: Setup
+
+```{r setup, message=FALSE, warning=FALSE}
+here::i_am("vignettes/visualize_results_workbook.Rmd")
+library(here)
+library(devtools)
+devtools::load_all(".")
+
+library(dplyr)
+library(tidyr)
+library(readr)
+library(ggplot2)
+library(gridExtra)
+library(arrow)
+```
+
+## 1.1 Job Configuration
+
+```{r job-config}
+job_name <- "prior_default_testing"
+parent_job_id <- "46997729"
+output_root <- here("output")
+
+# Resolve paths
+paths <- test_susine::resolve_job_paths(
+  job_name = job_name,
+  parent_job_id = parent_job_id,
+  output_root = output_root
+)
+```
+
+## 1.2 Use Case Filter
+
+Edit this list to include/exclude use cases from all plots.
+By default, we exclude EB use cases (a_ii, b_iii).
+
+```{r use-case-filter}
+# Use cases to include in plots (edit as needed)
+use_case_filter <- c("a_i", "b_ii")
+
+# Get labels from catalog (will work even if filter changes)
+use_case_labels <- test_susine::get_use_case_labels(use_case_filter)
+print(use_case_labels)
+```
+
+## 1.3 Load Data
+
+```{r load-data, message=FALSE}
+# Confusion matrix (detailed)
+confusion_detailed_path <- file.path(paths$aggregated_dir, "confusion_matrix_detailed.csv")
+if (!file.exists(confusion_detailed_path)) {
+  stop("Confusion matrix not found. Run collect_results_workbook.Rmd first.")
+}
+confusion_detailed <- readr::read_csv(confusion_detailed_path, show_col_types = FALSE)
+
+# Effect metrics
+effect_metrics_path <- file.path(paths$aggregated_dir, "effect_metrics.csv")
+effect_metrics <- readr::read_csv(effect_metrics_path, show_col_types = FALSE)
+
+# Model metrics
+model_metrics_path <- file.path(paths$aggregated_dir, "model_metrics.csv")
+model_metrics <- readr::read_csv(model_metrics_path, show_col_types = FALSE)
+
+# Run table (for p_star mapping)
+run_table <- readr::read_csv(
+  file.path(paths$run_history_dir, "run_table.csv"),
+  show_col_types = FALSE
+)
+
+cat("Loaded data:\n")
+cat("  Confusion matrix:", nrow(confusion_detailed), "rows\n")
+cat("  Effect metrics:", nrow(effect_metrics), "rows\n")
+cat("  Model metrics:", nrow(model_metrics), "rows\n")
+cat("  Run table:", nrow(run_table), "runs\n")
+```
+
+## 1.4 Create Plot Directories
+
+```{r create-plot-dirs}
+plot_base_dir <- file.path(paths$aggregated_dir, "plots")
+plot_dirs <- list(
+  auprc_informed = file.path(plot_base_dir, "auprc_informed"),
+  auprc_simple = file.path(plot_base_dir, "auprc_simple"),
+  power_fdr = file.path(plot_base_dir, "power_fdr"),
+  cs_metrics = file.path(plot_base_dir, "cs_metrics")
+)
+
+for (d in plot_dirs) {
+  dir.create(d, showWarnings = FALSE, recursive = TRUE)
+}
+cat("Plot directories created under:", plot_base_dir, "\n")
+```
+
+## 1.5 Add p_star to Metrics
+
+```{r add-pstar}
+# Join p_star from run_table to effect_metrics and model_metrics
+run_pstar <- run_table %>%
+  dplyr::select(run_id, p_star) %>%
+  dplyr::distinct()
+
+effect_metrics <- effect_metrics %>%
+  dplyr::left_join(run_pstar, by = "run_id")
+
+model_metrics <- model_metrics %>%
+  dplyr::left_join(run_pstar, by = "run_id")
+
+cat("Added p_star to metrics\n")
+cat("  p_star values in effect_metrics:", paste(sort(unique(effect_metrics$p_star)), collapse = ", "), "\n")
+```
+
+---
+
+# Section 2: AUPRC Informed Exhibits (Faceted)
+
+These plots show AUPRC vs y_noise, faceted by annotation_r2 and inflate_match,
+colored by use_case × sigma_0_2_scalar combination.
+
+```{r combined-color-setup}
+# Create combined color variable: use_case_id × sigma_0_2_scalar
+# Drop 1/L and 2/L levels (since L=10, these are 0.1 and 0.2 which duplicate other levels)
+# Relabel 0.5/L as 0.05 (since L=10)
+
+# sigma_0_2_scalar values to EXCLUDE from plots
+sigma_exclude <- c("1/L", "2/L")
+
+# Define a combined color palette with enough distinct colors
+# 2 use cases × 4 sigma values = 8 combinations
+combined_palette <- c(
+  # a_i (SuSiE) - blues (darker = smaller sigma)
+  "a_i - 0.05"  = "#08306b",
+  "a_i - 0.1"   = "#2171b5", 
+  "a_i - 0.2"   = "#4292c6",
+  "a_i - 0.4"   = "#6baed6",
+  # b_ii (SuSiNE) - oranges/reds (darker = smaller sigma)
+  "b_ii - 0.05" = "#7f2704",
+  "b_ii - 0.1"  = "#d94801",
+  "b_ii - 0.2"  = "#f16913",
+  "b_ii - 0.4"  = "#fd8d3c"
+)
+
+# Create labels for legend (more readable)
+combined_labels <- c(
+  "a_i - 0.05"  = "SuSiE - σ²₀=0.05",
+  "a_i - 0.1"   = "SuSiE - σ²₀=0.1",
+  "a_i - 0.2"   = "SuSiE - σ²₀=0.2",
+  "a_i - 0.4"   = "SuSiE - σ²₀=0.4",
+  "b_ii - 0.05" = "SuSiNE - σ²₀=0.05",
+  "b_ii - 0.1"  = "SuSiNE - σ²₀=0.1",
+  "b_ii - 0.2"  = "SuSiNE - σ²₀=0.2",
+  "b_ii - 0.4"  = "SuSiNE - σ²₀=0.4"
+)
+
+# Helper to add combined color column to data
+# Also filters out excluded sigma levels and relabels 0.5/L -> 0.05
+add_combined_color <- function(df) {
+  df %>%
+    dplyr::filter(!sigma_0_2_scalar %in% sigma_exclude) %>%
+    dplyr::mutate(
+      # Relabel 0.5/L to 0.05 (since L=10, 0.5/10 = 0.05)
+      sigma_label = dplyr::if_else(sigma_0_2_scalar == "0.5/L", "0.05", sigma_0_2_scalar),
+      use_sigma = paste(use_case_id, "-", sigma_label)
+    )
+}
+```
+
+```{r auprc-informed-prep}
+# Filter confusion matrix to use cases of interest
+confusion_filtered <- confusion_detailed %>%
+  dplyr::filter(use_case_id %in% use_case_filter)
+
+# Get unique p_star values
+pstar_values <- sort(unique(confusion_filtered$p_star))
+cat("p_star values:", paste(pstar_values, collapse = ", "), "\n")
+cat("sigma_0_2_scalar values:", paste(sort(unique(confusion_filtered$sigma_0_2_scalar)), collapse = ", "), "\n")
+```
+
+## 2.1 AUPRC Informed - All p_star Combined
+
+```{r auprc-informed-all, fig.width=14, fig.height=10}
+# Compute AUPRC grouped by all relevant variables
+auprc_all <- test_susine::compute_auprc_from_confusion(
+  confusion_filtered,
+  group_vars = c("use_case_id", "y_noise", "annotation_r2", "inflate_match", "sigma_0_2_scalar")
+)
+
+# For baseline (a_i), expand across all annotation combinations
+baseline_data <- auprc_all %>%
+  dplyr::filter(use_case_id == "a_i")
+
+annotation_grid <- auprc_all %>%
+  dplyr::filter(!is.na(annotation_r2), !is.na(inflate_match)) %>%
+  dplyr::distinct(annotation_r2, inflate_match)
+
+if (nrow(baseline_data) > 0 && nrow(annotation_grid) > 0) {
+  baseline_expanded <- baseline_data %>%
+    dplyr::select(-annotation_r2, -inflate_match) %>%
+    tidyr::crossing(annotation_grid)
+  
+  auprc_plot_data <- dplyr::bind_rows(
+    auprc_all %>% dplyr::filter(use_case_id != "a_i"),
+    baseline_expanded
+  )
+} else {
+  auprc_plot_data <- auprc_all
+}
+
+# Filter to rows with valid facet values and add combined color
+auprc_plot_data_faceted <- auprc_plot_data %>%
+  dplyr::filter(!is.na(annotation_r2), !is.na(inflate_match)) %>%
+  add_combined_color()
+
+if (nrow(auprc_plot_data_faceted) > 0) {
+  # Create plot with combined color (no linetypes)
+  p <- ggplot2::ggplot(auprc_plot_data_faceted, 
+                       ggplot2::aes(x = y_noise, y = AUPRC, color = use_sigma, group = use_sigma)) +
+    ggplot2::geom_line(linewidth = 0.8) +
+    ggplot2::geom_point(size = 2.5) +
+    ggplot2::scale_color_manual(values = combined_palette, labels = combined_labels) +
+    ggplot2::facet_grid(
+      inflate_match ~ annotation_r2,
+      labeller = ggplot2::labeller(
+        .rows = function(x) paste0("inflate_match: ", x),
+        .cols = function(x) paste0("annotation_r2: ", x)
+      )
+    ) +
+    ggplot2::labs(
+      title = "AUPRC for Informed Models (All p*)",
+      subtitle = paste("Use cases:", paste(use_case_filter, collapse = ", ")),
+      x = "y_noise (Noise Level)",
+      y = "AUPRC",
+      color = "Model × Prior Variance"
+    ) +
+    ggplot2::theme_minimal() +
+    ggplot2::theme(legend.position = "right")
+  
+  print(p)
+  
+  ggsave(
+    file.path(plot_dirs$auprc_informed, "auprc_informed_all_pstar.png"),
+    p, width = 14, height = 10, dpi = 300, bg = "white"
+  )
+  message("Saved: auprc_informed_all_pstar.png")
+}
+```
+
+## 2.2 AUPRC Informed - By p_star
+
+```{r auprc-informed-by-pstar, fig.width=14, fig.height=10}
+for (pstar in pstar_values) {
+  auprc_pstar <- test_susine::compute_auprc_from_confusion(
+    confusion_filtered %>% dplyr::filter(p_star == pstar),
+    group_vars = c("use_case_id", "y_noise", "annotation_r2", "inflate_match", "sigma_0_2_scalar")
+  )
+  
+  # Expand baseline
+  baseline_pstar <- auprc_pstar %>% dplyr::filter(use_case_id == "a_i")
+  
+  if (nrow(baseline_pstar) > 0 && nrow(annotation_grid) > 0) {
+    baseline_exp <- baseline_pstar %>%
+      dplyr::select(-annotation_r2, -inflate_match) %>%
+      tidyr::crossing(annotation_grid)
+    
+    auprc_pstar_plot <- dplyr::bind_rows(
+      auprc_pstar %>% dplyr::filter(use_case_id != "a_i"),
+      baseline_exp
+    )
+  } else {
+    auprc_pstar_plot <- auprc_pstar
+  }
+  
+  auprc_pstar_faceted <- auprc_pstar_plot %>%
+    dplyr::filter(!is.na(annotation_r2), !is.na(inflate_match)) %>%
+    add_combined_color()
+  
+  if (nrow(auprc_pstar_faceted) > 0) {
+    # Create plot with combined color (no linetypes)
+    p <- ggplot2::ggplot(auprc_pstar_faceted, 
+                         ggplot2::aes(x = y_noise, y = AUPRC, color = use_sigma, group = use_sigma)) +
+      ggplot2::geom_line(linewidth = 0.8) +
+      ggplot2::geom_point(size = 2.5) +
+      ggplot2::scale_color_manual(values = combined_palette, labels = combined_labels) +
+      ggplot2::facet_grid(
+        inflate_match ~ annotation_r2,
+        labeller = ggplot2::labeller(
+          .rows = function(x) paste0("inflate_match: ", x),
+          .cols = function(x) paste0("annotation_r2: ", x)
+        )
+      ) +
+      ggplot2::labs(
+        title = sprintf("AUPRC for Informed Models (p* = %d)", pstar),
+        subtitle = paste("Use cases:", paste(use_case_filter, collapse = ", ")),
+        x = "y_noise (Noise Level)",
+        y = "AUPRC",
+        color = "Model × Prior Variance"
+      ) +
+      ggplot2::theme_minimal() +
+      ggplot2::theme(legend.position = "right")
+    
+    fname <- sprintf("auprc_informed_pstar_%d.png", pstar)
+    ggsave(file.path(plot_dirs$auprc_informed, fname), p, width = 14, height = 10, dpi = 300, bg = "white")
+    message("Saved: ", fname)
+  }
+}
+```
+
+---
+
+# Section 3: AUPRC Simple Exhibits
+
+Simpler plots without facets, one per grouping variable on x-axis.
+For plots where sigma_0_2_scalar is NOT on x-axis, we show combined use_case × sigma_0_2_scalar colors.
+
+```{r auprc-simple-prep}
+# Grouping vars to cycle through (excluding use_case_id which is color)
+x_axis_vars <- c("p_star", "L", "y_noise", "annotation_r2", "inflate_match", "sigma_0_2_scalar")
+```
+
+```{r auprc-simple-plots, fig.width=12, fig.height=7}
+for (x_var in x_axis_vars) {
+  if (x_var == "sigma_0_2_scalar") {
+    # When sigma is on x-axis, just color by use_case_id
+    group_vars <- c("use_case_id", x_var)
+    
+    auprc_simple <- test_susine::compute_auprc_from_confusion(
+      confusion_filtered,
+      group_vars = group_vars
+    )
+    
+    if (nrow(auprc_simple) == 0) {
+      message("Skipping ", x_var, " - no data")
+      next
+    }
+    
+    p <- test_susine::plot_auprc_simple(
+      auprc_simple,
+      x_var = x_var,
+      color_var = "use_case_id",
+      color_labels = use_case_labels,
+      title = sprintf("AUPRC by %s", x_var)
+    )
+  } else {
+    # For other x-axis vars, use combined use_case × sigma color
+    group_vars <- c("use_case_id", "sigma_0_2_scalar", x_var)
+    
+    auprc_simple <- test_susine::compute_auprc_from_confusion(
+      confusion_filtered,
+      group_vars = group_vars
+    ) %>%
+      add_combined_color()
+    
+    if (nrow(auprc_simple) == 0) {
+      message("Skipping ", x_var, " - no data")
+      next
+    }
+    
+    # Split data: rows with valid x_var vs NA x_var (for horizontal lines)
+    auprc_with_x <- auprc_simple %>% dplyr::filter(!is.na(.data[[x_var]]))
+    auprc_na_x <- auprc_simple %>% dplyr::filter(is.na(.data[[x_var]]))
+    
+    # Get x-axis range for horizontal lines
+    x_range <- range(auprc_with_x[[x_var]], na.rm = TRUE)
+    
+    # For NA groups, create segment data spanning the x-axis range
+    if (nrow(auprc_na_x) > 0) {
+      auprc_hlines <- auprc_na_x %>%
+        dplyr::mutate(
+          x_start = x_range[1],
+          x_end = x_range[2]
+        )
+    } else {
+      auprc_hlines <- NULL
+    }
+    
+    # Custom plot with combined colors
+    p <- ggplot2::ggplot(auprc_with_x, ggplot2::aes(
+      x = .data[[x_var]], 
+      y = AUPRC, 
+      color = use_sigma, 
+      group = use_sigma
+    )) +
+      ggplot2::geom_line(linewidth = 0.8) +
+      ggplot2::geom_point(size = 2.5) +
+      ggplot2::scale_color_manual(values = combined_palette, labels = combined_labels) +
+      ggplot2::labs(
+        title = sprintf("AUPRC by %s", x_var),
+        x = x_var,
+        y = "AUPRC",
+        color = "Model × Prior Variance"
+      ) +
+      ggplot2::theme_minimal() +
+      ggplot2::theme(legend.position = "right")
+    
+    # Add horizontal segments for NA x_var groups (e.g., SuSiE baseline) - these will appear in legend
+    if (!is.null(auprc_hlines) && nrow(auprc_hlines) > 0) {
+      p <- p + ggplot2::geom_segment(
+        data = auprc_hlines,
+        ggplot2::aes(x = x_start, xend = x_end, y = AUPRC, yend = AUPRC, color = use_sigma),
+        linewidth = 0.8,
+        linetype = "dashed"
+      )
+    }
+  }
+  
+  fname <- sprintf("auprc_by_%s.png", x_var)
+  ggsave(file.path(plot_dirs$auprc_simple, fname), p, width = 12, height = 7, dpi = 300, bg = "white")
+  message("Saved: ", fname)
+}
+```
+
+---
+
+# Section 4: Power vs FDR Curves
+
+```{r power-fdr-prep}
+# Filter confusion matrix
+confusion_fdr <- confusion_detailed %>%
+  dplyr::filter(use_case_id %in% use_case_filter)
+```
+
+## 4.1 Power vs FDR - All Runs (Combined Coloring)
+
+```{r power-fdr-all, fig.width=14, fig.height=9}
+# Compute curves grouped by use_case × sigma combination
+curves_all <- test_susine::compute_power_fdr_curves(
+  confusion_fdr, 
+  group_vars = c("use_case_id", "sigma_0_2_scalar")
+) %>%
+  add_combined_color()
+
+p <- ggplot2::ggplot(curves_all, 
+                     ggplot2::aes(x = fdr, y = power, color = use_sigma, group = use_sigma)) +
+  ggplot2::geom_line(linewidth = 0.8) +
+  ggplot2::geom_point(size = 1.5, alpha = 0.6) +
+  ggplot2::scale_color_manual(values = combined_palette, labels = combined_labels) +
+  ggplot2::labs(
+    title = "Power vs FDR (All Settings)",
+    subtitle = paste("Use cases:", paste(use_case_filter, collapse = ", ")),
+    x = "FDR (False Discovery Rate)",
+    y = "Power (Recall)",
+    color = "Model × Prior Variance"
+  ) +
+  ggplot2::theme_minimal() +
+  ggplot2::theme(legend.position = "right") +
+  ggplot2::coord_cartesian(xlim = c(0, 1), ylim = c(0, 1))
+
+print(p)
+
+ggsave(file.path(plot_dirs$power_fdr, "power_fdr_all.png"), p, width = 14, height = 9, dpi = 300, bg = "white")
+message("Saved: power_fdr_all.png")
+```
+
+## 4.2 Power vs FDR - Low p_star (1-4)
+
+```{r power-fdr-low-pstar, fig.width=14, fig.height=9}
+confusion_low <- confusion_fdr %>% dplyr::filter(p_star %in% c(1, 2, 3, 4))
+
+if (nrow(confusion_low) > 0) {
+  curves_low <- test_susine::compute_power_fdr_curves(
+    confusion_low, 
+    group_vars = c("use_case_id", "sigma_0_2_scalar")
+  ) %>%
+    add_combined_color()
+  
+  p <- ggplot2::ggplot(curves_low, 
+                       ggplot2::aes(x = fdr, y = power, color = use_sigma, group = use_sigma)) +
+    ggplot2::geom_line(linewidth = 0.8) +
+    ggplot2::geom_point(size = 1.5, alpha = 0.6) +
+    ggplot2::scale_color_manual(values = combined_palette, labels = combined_labels) +
+    ggplot2::labs(
+      title = "Power vs FDR (p* = 1-4)",
+      subtitle = paste("Use cases:", paste(use_case_filter, collapse = ", ")),
+      x = "FDR (False Discovery Rate)",
+      y = "Power (Recall)",
+      color = "Model × Prior Variance"
+    ) +
+    ggplot2::theme_minimal() +
+    ggplot2::theme(legend.position = "right") +
+    ggplot2::coord_cartesian(xlim = c(0, 1), ylim = c(0, 1))
+  
+  print(p)
+  
+  ggsave(file.path(plot_dirs$power_fdr, "power_fdr_pstar_low.png"), p, width = 14, height = 9, dpi = 300, bg = "white")
+  message("Saved: power_fdr_pstar_low.png")
+} else {
+  message("No data for low p_star values")
+}
+```
+
+## 4.3 Power vs FDR - High p_star (5, 10, 20)
+
+```{r power-fdr-high-pstar, fig.width=14, fig.height=9}
+confusion_high <- confusion_fdr %>% dplyr::filter(p_star %in% c(5, 10, 20))
+
+if (nrow(confusion_high) > 0) {
+  curves_high <- test_susine::compute_power_fdr_curves(
+    confusion_high, 
+    group_vars = c("use_case_id", "sigma_0_2_scalar")
+  ) %>%
+    add_combined_color()
+  
+  p <- ggplot2::ggplot(curves_high, 
+                       ggplot2::aes(x = fdr, y = power, color = use_sigma, group = use_sigma)) +
+    ggplot2::geom_line(linewidth = 0.8) +
+    ggplot2::geom_point(size = 1.5, alpha = 0.6) +
+    ggplot2::scale_color_manual(values = combined_palette, labels = combined_labels) +
+    ggplot2::labs(
+      title = "Power vs FDR (p* = 5, 10, 20)",
+      subtitle = paste("Use cases:", paste(use_case_filter, collapse = ", ")),
+      x = "FDR (False Discovery Rate)",
+      y = "Power (Recall)",
+      color = "Model × Prior Variance"
+    ) +
+    ggplot2::theme_minimal() +
+    ggplot2::theme(legend.position = "right") +
+    ggplot2::coord_cartesian(xlim = c(0, 1), ylim = c(0, 1))
+  
+  print(p)
+  
+  ggsave(file.path(plot_dirs$power_fdr, "power_fdr_pstar_high.png"), p, width = 14, height = 9, dpi = 300, bg = "white")
+  message("Saved: power_fdr_pstar_high.png")
+} else {
+  message("No data for high p_star values")
+}
+```
+
+---
+
+# Section 5: Credible Set / Effect Metrics
+
+Boxplots of CS metrics (coverage, size, purity) and model power, grouped by p_star and colored by use_case × sigma_0_2_scalar combination.
+
+```{r cs-metrics-prep}
+# Filter metrics to selected use cases and purity_filtered
+effects_filtered <- effect_metrics %>%
+  dplyr::filter(
+    filtering == "purity_filtered",
+    use_case_id %in% use_case_filter
+  )
+
+models_filtered <- model_metrics %>%
+  dplyr::filter(
+    filtering == "purity_filtered",
+    use_case_id %in% use_case_filter
+  )
+
+# Join sigma_0_2_scalar from run_table
+run_sigma <- run_table %>%
+  dplyr::select(run_id, sigma_0_2_scalar, annotation_r2) %>%
+  dplyr::distinct()
+
+effects_filtered <- effects_filtered %>%
+  dplyr::left_join(run_sigma, by = "run_id")
+
+models_filtered <- models_filtered %>%
+  dplyr::left_join(run_sigma, by = "run_id")
+
+cat("Effects after filter:", nrow(effects_filtered), "\n")
+cat("Models after filter:", nrow(models_filtered), "\n")
+cat("p_star values:", paste(sort(unique(effects_filtered$p_star)), collapse = ", "), "\n")
+cat("sigma_0_2_scalar values:", paste(sort(unique(effects_filtered$sigma_0_2_scalar)), collapse = ", "), "\n")
+```
+
+```{r cs-metrics-boxplots, fig.width=16, fig.height=12}
+# Helper function to compute nice y-axis limits based on per-group IQR + mean
+compute_ylim_grouped <- function(data, var, group_vars, lower_bound = 0, upper_bound = Inf, margin = 0.1) {
+  stats <- data %>%
+    dplyr::group_by(dplyr::across(dplyr::all_of(group_vars))) %>%
+    dplyr::summarise(
+      q25 = quantile(.data[[var]], 0.25, na.rm = TRUE),
+      q75 = quantile(.data[[var]], 0.75, na.rm = TRUE),
+      mn = mean(.data[[var]], na.rm = TRUE),
+      .groups = "drop"
+    )
+  
+  data_min <- min(c(stats$q25, stats$mn), na.rm = TRUE)
+  data_max <- max(c(stats$q75, stats$mn), na.rm = TRUE)
+  
+  range_size <- data_max - data_min
+  if (range_size < 0.01) range_size <- 0.1
+  y_min <- data_min - margin * range_size
+  y_max <- data_max + margin * range_size
+  
+  y_min <- max(y_min, lower_bound)
+  y_max <- min(y_max, upper_bound)
+  
+  c(y_min, y_max)
+}
+
+# Function to create CS metrics boxplot panel with combined coloring
+create_cs_metrics_plot <- function(effects_data, models_data, plot_title) {
+  # Add combined color variable
+  effects_data <- effects_data %>% add_combined_color()
+  models_data <- models_data %>% add_combined_color()
+  
+  # Compute limits for each metric
+  coverage_lim <- compute_ylim_grouped(effects_data, "coverage", c("p_star", "use_sigma"), 
+                                        lower_bound = 0, upper_bound = 1)
+  size_lim <- compute_ylim_grouped(effects_data, "size", c("p_star", "use_sigma"), 
+                                    lower_bound = 0, upper_bound = Inf)
+  purity_lim <- compute_ylim_grouped(effects_data, "purity", c("p_star", "use_sigma"), 
+                                      lower_bound = 0.5, upper_bound = 1)
+  power_lim <- compute_ylim_grouped(models_data, "power", c("p_star", "use_sigma"), 
+                                     lower_bound = 0, upper_bound = 1)
+  
+  # Coverage boxplot
+  p_coverage <- ggplot(effects_data, aes(x = factor(p_star), y = coverage, fill = use_sigma)) +
+    geom_boxplot(position = position_dodge(width = 0.85), outlier.shape = NA, coef = 0) +
+    stat_summary(fun = mean, geom = "point", shape = 18, size = 1.5, 
+                 position = position_dodge(width = 0.85), show.legend = FALSE) +
+    scale_fill_manual(values = combined_palette, labels = combined_labels) +
+    coord_cartesian(ylim = coverage_lim) +
+    labs(title = "Coverage", x = "p* (# causal effects)", y = "Coverage", fill = "Model × Prior") +
+    theme_minimal() +
+    theme(legend.position = "none", 
+          panel.background = element_rect(fill = "white", color = NA),
+          plot.background = element_rect(fill = "white", color = NA))
+  
+  # Size boxplot
+  p_size <- ggplot(effects_data, aes(x = factor(p_star), y = size, fill = use_sigma)) +
+    geom_boxplot(position = position_dodge(width = 0.85), outlier.shape = NA, coef = 0) +
+    stat_summary(fun = mean, geom = "point", shape = 18, size = 1.5, 
+                 position = position_dodge(width = 0.85), show.legend = FALSE) +
+    scale_fill_manual(values = combined_palette, labels = combined_labels) +
+    coord_cartesian(ylim = size_lim) +
+    labs(title = "CS Size", x = "p* (# causal effects)", y = "Size", fill = "Model × Prior") +
+    theme_minimal() +
+    theme(legend.position = "none",
+          panel.background = element_rect(fill = "white", color = NA),
+          plot.background = element_rect(fill = "white", color = NA))
+  
+  # Purity boxplot
+  p_purity <- ggplot(effects_data, aes(x = factor(p_star), y = purity, fill = use_sigma)) +
+    geom_boxplot(position = position_dodge(width = 0.85), outlier.shape = NA, coef = 0) +
+    stat_summary(fun = mean, geom = "point", shape = 18, size = 1.5, 
+                 position = position_dodge(width = 0.85), show.legend = FALSE) +
+    scale_fill_manual(values = combined_palette, labels = combined_labels) +
+    coord_cartesian(ylim = purity_lim) +
+    labs(title = "Purity", x = "p* (# causal effects)", y = "Purity", fill = "Model × Prior") +
+    theme_minimal() +
+    theme(legend.position = "none",
+          panel.background = element_rect(fill = "white", color = NA),
+          plot.background = element_rect(fill = "white", color = NA))
+  
+  # Power boxplot (from models) - WITH legend at bottom
+  p_power <- ggplot(models_data, aes(x = factor(p_star), y = power, fill = use_sigma)) +
+    geom_boxplot(position = position_dodge(width = 0.85), outlier.shape = NA, coef = 0) +
+    stat_summary(fun = mean, geom = "point", shape = 18, size = 1.5, 
+                 position = position_dodge(width = 0.85), show.legend = FALSE) +
+    scale_fill_manual(values = combined_palette, labels = combined_labels) +
+    coord_cartesian(ylim = power_lim) +
+    labs(title = "Power", x = "p* (# causal effects)", y = "Power", fill = "Model × Prior Variance") +
+    theme_minimal() +
+    theme(legend.position = "bottom",
+          panel.background = element_rect(fill = "white", color = NA),
+          plot.background = element_rect(fill = "white", color = NA),
+          legend.background = element_rect(fill = "white", color = NA),
+          legend.title = element_text(face = "bold"),
+          legend.text = element_text(size = 8)) +
+    guides(fill = guide_legend(nrow = 2))
+  
+  # Build the legend as a separate grob
+  legend_grob <- ggplotGrob(p_power)$grobs[[which(sapply(ggplotGrob(p_power)$grobs, function(x) x$name) == "guide-box")]]
+  
+  # Version without legend for grid
+  p_power_no_legend <- p_power + theme(legend.position = "none")
+  
+  # Combine plots in 2x2 grid
+  plot_grid <- cowplot::plot_grid(
+    p_coverage, p_size,
+    p_purity, p_power_no_legend,
+    ncol = 2, nrow = 2
+  )
+  
+  # Add title
+  title <- cowplot::ggdraw() +
+    cowplot::draw_label(plot_title, fontface = "bold", hjust = 0.5, size = 14)
+  
+  # Combine using gridExtra
+  gridExtra::grid.arrange(
+    title, plot_grid, legend_grob,
+    ncol = 1, heights = c(0.5, 8.5, 1.5)
+  )
+}
+
+# Get unique annotation_r2 values from data
+annotation_r2_values <- sort(unique(na.omit(effects_filtered$annotation_r2)))
+
+annotation_filters <- list(
+  list(name = "all", value = NULL, title = "Credible Set Metrics by Number of Causal Effects (All Annotation Noise)")
+)
+
+# Add one filter per annotation_r2 level
+for (ar2 in annotation_r2_values) {
+  annotation_filters <- c(annotation_filters, list(
+    list(name = sprintf("annot_r2_%s", gsub("\\.", "_", as.character(ar2))), 
+         value = ar2, 
+         title = sprintf("Credible Set Metrics (Annotation R² = %s)", ar2))
+  ))
+}
+
+# Generate plots for each annotation filter
+for (af in annotation_filters) {
+  # Filter data
+  if (is.null(af$value)) {
+    eff_data <- effects_filtered
+    mod_data <- models_filtered
+  } else {
+    eff_data <- effects_filtered %>% dplyr::filter(annotation_r2 == af$value | is.na(annotation_r2))
+    mod_data <- models_filtered %>% dplyr::filter(annotation_r2 == af$value | is.na(annotation_r2))
+  }
+  
+  # Skip if no data
+  if (nrow(eff_data) == 0 || nrow(mod_data) == 0) {
+    message("Skipping ", af$name, " - no data")
+    next
+  }
+  
+  # Create plot
+  combined <- create_cs_metrics_plot(eff_data, mod_data, af$title)
+  
+  # Save
+  fname <- sprintf("cs_metrics_boxplots_%s.png", af$name)
+  ggsave(
+    file.path(plot_dirs$cs_metrics, fname),
+    plot = combined, width = 16, height = 12, dpi = 300, bg = "white"
+  )
+  message("Saved: ", fname)
+}
+```
+
+---
+
+# Section 6: X-Matrix Difficulty Analysis
+
+This section analyzes how X-matrix characteristics (LD structure) relate to fine-mapping performance (AUPRC).
+
+## 6.1 Setup & Load X Metrics
+
+```{r x-metrics-setup, message=FALSE}
+# Check if mgcv is available for GAM smoothing
+if (!requireNamespace("mgcv", quietly = TRUE)) {
+  message("Installing mgcv for GAM smoothing...")
+  install.packages("mgcv")
+}
+library(mgcv)
+
+# Create output directory for X-metric plots
+plot_dirs$x_metrics <- file.path(plot_base_dir, "x_metrics")
+dir.create(plot_dirs$x_metrics, showWarnings = FALSE, recursive = TRUE)
+```
+
+## 6.2 Load Data Sources for X-Matrix Analysis
+
+```{r x-load-data-sources}
+# Load the pre-aggregated confusion matrix by (matrix_id, use_case_id)
+# This file is already grouped by matrix_id + use_case_id with columns:
+#   matrix_id, use_case_id, pip_threshold, n_causal_at_bucket, n_noncausal_at_bucket, n_runs
+confusion_by_dataset_path <- file.path(paths$aggregated_dir, "confusion_matrix_by_dataset.csv")
+
+if (file.exists(confusion_by_dataset_path)) {
+  confusion_by_dataset <- readr::read_csv(confusion_by_dataset_path, show_col_types = FALSE)
+  cat("Loaded confusion_matrix_by_dataset.csv:", nrow(confusion_by_dataset), "rows\n")
+  cat("  Columns:", paste(names(confusion_by_dataset), collapse = ", "), "\n")
+  cat("  Unique matrices:", dplyr::n_distinct(confusion_by_dataset$matrix_id), "\n")
+  cat("  Use cases:", paste(unique(confusion_by_dataset$use_case_id), collapse = ", "), "\n")
+} else {
+  warning("confusion_matrix_by_dataset.csv not found at: ", confusion_by_dataset_path)
+  confusion_by_dataset <- NULL
+}
+
+# Load data_matrices map (matrix_id -> matrix_path)
+# X matrices are .tsv.gz files in data/sampled_simulated_genotypes/scenario_1/
+data_matrices_path <- file.path(paths$run_history_dir, "data_matrices.csv")
+
+if (file.exists(data_matrices_path)) {
+  data_matrices_map <- readr::read_csv(data_matrices_path, show_col_types = FALSE)
+  cat("\nLoaded data_matrices.csv:", nrow(data_matrices_map), "rows\n")
+  cat("  Columns:", paste(names(data_matrices_map), collapse = ", "), "\n")
+  cat("  Sample matrix_path:", data_matrices_map$matrix_path[1], "\n")
+} else {
+  warning("data_matrices.csv not found at: ", data_matrices_path)
+  data_matrices_map <- NULL
+}
+```
+
+## 6.3 Compute/Load X-Matrix Metrics
+
+```{r x-metrics-compute, eval=FALSE}
+# NOTE: This chunk is eval=FALSE by default since metric computation is slow
+# Run manually once, then load cached results
+# IMPORTANT: Run devtools::load_all(".") first to load the new x_matrix_metrics functions!
+
+if (!is.null(data_matrices_map)) {
+  cat("Computing X-matrix metrics for", nrow(data_matrices_map), "datasets...\n")
+  cat("This may take several minutes.\n")
+  
+  # Compute metrics using the matrix_path column (paths are relative to project root)
+  # Files are .tsv.gz format, function handles this automatically
+  x_metrics <- test_susine::build_x_metrics_table(
+    matrix_paths_df = data_matrices_map %>% 
+      dplyr::select(matrix_id, matrix_path) %>% 
+      dplyr::distinct(),
+    k_ref = 5,         # typical number of causal effects
+    n_samples = 200,   # MC samples for sparse eigenvalue
+    base_dir = here()  # prepend project root to relative paths
+  )
+  
+  # Save for reuse
+  readr::write_csv(x_metrics, file.path(paths$aggregated_dir, "x_matrix_metrics.csv"))
+  cat("Saved X metrics to:", file.path(paths$aggregated_dir, "x_matrix_metrics.csv"), "\n")
+}
+```
+
+```{r x-metrics-load}
+# Load pre-computed X metrics (if available)
+x_metrics_path <- file.path(paths$aggregated_dir, "x_matrix_metrics.csv")
+
+if (file.exists(x_metrics_path)) {
+  x_metrics <- readr::read_csv(x_metrics_path, show_col_types = FALSE)
+  cat("Loaded X-matrix metrics for", nrow(x_metrics), "datasets\n")
+  cat("  Metrics available:", paste(names(x_metrics)[names(x_metrics) != "matrix_id" & names(x_metrics) != ".missing_file"], collapse = ", "), "\n")
+} else {
+  warning("X-matrix metrics not found. Run the compute chunk (6.3 above) manually first.")
+  x_metrics <- NULL
+}
+```
+
+## 6.4 Aggregate AUPRC by Dataset × Use Case
+
+```{r auprc-aggregate}
+if (!is.null(x_metrics) && !is.null(confusion_by_dataset)) {
+  # Filter to use cases of interest
+  confusion_filtered_x <- confusion_by_dataset %>%
+    dplyr::filter(use_case_id %in% use_case_filter)
+  
+  # Aggregate AUPRC by (matrix_id, use_case_id)
+  auprc_by_dataset <- test_susine::aggregate_auprc_by_dataset_usecase(confusion_filtered_x)
+  
+  cat("Aggregated AUPRC:\n")
+  cat("  Rows:", nrow(auprc_by_dataset), "\n")
+  cat("  Unique datasets:", dplyr::n_distinct(auprc_by_dataset$matrix_id), "\n")
+  cat("  Use cases:", paste(unique(auprc_by_dataset$use_case_id), collapse = ", "), "\n")
+  
+  # Join with X metrics
+  auprc_with_x <- auprc_by_dataset %>%
+    dplyr::left_join(x_metrics, by = "matrix_id") %>%
+    dplyr::filter(is.na(.missing_file) | !.missing_file)
+  
+  cat("  After joining X metrics:", nrow(auprc_with_x), "rows\n")
+} else {
+  message("Skipping AUPRC aggregation - missing x_metrics or confusion_by_dataset")
+  auprc_with_x <- NULL
+}
+```
+
+## 6.5 Alternative Aggregation Schemes
+
+NOTE: For more granular analysis (by p_star, settings), we need to link confusion_by_dataset
+back to run_table settings. This basic version uses simple aggregation across all settings.
+
+```{r auprc-alternative-schemes}
+if (!is.null(auprc_with_x) && nrow(auprc_with_x) > 10) {
+  # For now, we skip p_star-specific aggregations since confusion_by_dataset
+  # doesn't have p_star. Instead, we'll use the basic aggregation and color by use_case
+  
+  # Scheme 2: Residualized AUPRC (correct for use_case_id only)
+  auprc_residualized <- test_susine::compute_residualized_auprc(
+    auprc_with_x %>% dplyr::filter(!is.na(AUPRC)),
+    setting_vars = c("use_case_id")
+  )
+  
+  # Scheme 3: Within-use-case ranks
+  auprc_ranked <- test_susine::compute_within_setting_ranks(
+    auprc_with_x %>% dplyr::filter(!is.na(AUPRC)),
+    setting_vars = c("use_case_id")
+  )
+  
+  cat("\nAlternative aggregations computed:\n")
+  cat("  Residualized:", nrow(auprc_residualized), "rows\n")
+  cat("  Ranked:", nrow(auprc_ranked), "rows\n")
+} else {
+  message("Skipping alternative aggregations - insufficient data")
+  auprc_residualized <- NULL
+  auprc_ranked <- NULL
+}
+```
+
+## 6.6 Plot X-Metrics vs AUPRC (Dataset × Use Case)
+
+```{r x-metrics-plots-basic, fig.width=8, fig.height=6}
+if (!is.null(auprc_with_x) && nrow(auprc_with_x) > 10) {
+  metric_names <- test_susine::get_x_metric_names()
+  
+  # Filter to metrics that exist in data
+  metric_names <- metric_names[metric_names %in% names(auprc_with_x)]
+  
+  cat("Plotting", length(metric_names), "X metrics vs AUPRC\n")
+  
+  r2_basic <- test_susine::generate_x_metric_plots(
+    df_joined = auprc_with_x,
+    metric_names = metric_names,
+    auprc_var = "AUPRC",
+    out_dir = file.path(plot_dirs$x_metrics, "basic"),
+    color_var = "use_case_id",
+    smoother = "gam"
+  )
+  
+  cat("\nTop metrics by R²:\n")
+  print(r2_basic %>% dplyr::arrange(dplyr::desc(r2)) %>% head(10))
+} else {
+  message("Skipping X-metric plots - insufficient data")
+  r2_basic <- NULL
+}
+```
+
+## 6.7 Plot X-Metrics vs Residualized AUPRC (Simpson's Correction)
+
+```{r x-metrics-plots-residual, fig.width=8, fig.height=6}
+if (!is.null(auprc_residualized) && nrow(auprc_residualized) > 10 && exists("metric_names")) {
+  r2_residual <- test_susine::generate_x_metric_plots(
+    df_joined = auprc_residualized,
+    metric_names = metric_names,
+    auprc_var = "AUPRC_residual",
+    out_dir = file.path(plot_dirs$x_metrics, "residualized"),
+    color_var = "use_case_id",
+    smoother = "gam"
+  )
+} else {
+  message("Skipping residualized plots - insufficient data")
+  r2_residual <- NULL
+}
+```
+
+## 6.8 Plot X-Metrics vs Within-Setting Rank
+
+```{r x-metrics-plots-rank, fig.width=8, fig.height=6}
+if (!is.null(auprc_ranked) && nrow(auprc_ranked) > 10 && exists("metric_names")) {
+  r2_ranked <- test_susine::generate_x_metric_plots(
+    df_joined = auprc_ranked,
+    metric_names = metric_names,
+    auprc_var = "AUPRC_zscore",
+    out_dir = file.path(plot_dirs$x_metrics, "ranked"),
+    color_var = "use_case_id",
+    smoother = "gam"
+  )
+} else {
+  message("Skipping ranked plots - insufficient data")
+  r2_ranked <- NULL
+}
+```
+
+## 6.9 R² Comparison Across Schemes
+
+```{r r2-comparison}
+# Combine R² results from whichever schemes were computed
+r2_tables <- list()
+if (!is.null(r2_basic)) r2_tables$basic <- r2_basic %>% dplyr::rename(r2_basic = r2)
+if (!is.null(r2_residual)) r2_tables$residual <- r2_residual %>% dplyr::rename(r2_residual = r2)
+if (!is.null(r2_ranked)) r2_tables$ranked <- r2_ranked %>% dplyr::rename(r2_ranked = r2)
+
+if (length(r2_tables) > 0) {
+  # Start with first table
+  r2_comparison <- r2_tables[[1]]
+  
+  # Join remaining tables
+  for (i in seq_along(r2_tables)[-1]) {
+    r2_comparison <- r2_comparison %>%
+      dplyr::left_join(r2_tables[[i]], by = "metric")
+  }
+  
+  # Sort by first available R² column
+  r2_cols <- grep("^r2_", names(r2_comparison), value = TRUE)
+  if (length(r2_cols) > 0) {
+    r2_comparison <- r2_comparison %>%
+      dplyr::arrange(dplyr::desc(.data[[r2_cols[1]]]))
+  }
+  
+  cat("\n=== R² Comparison: Which metrics best predict AUPRC? ===\n")
+  print(r2_comparison, n = 20)
+  
+  # Save comparison
+  readr::write_csv(r2_comparison, file.path(paths$aggregated_dir, "x_metric_r2_comparison.csv"))
+  cat("\nSaved to:", file.path(paths$aggregated_dir, "x_metric_r2_comparison.csv"), "\n")
+} else {
+  message("No R² results available - need to compute X metrics first")
+}
+```
+
+## 6.10 GAM Model Combinations & Interactions
+
+Test all 1-way and cross-axis 2-way GAM models to find which metrics best predict AUPRC.
+We restrict 2-way models to cross-axis pairs (Axis A × Axis B) since:
+- Axis A (basin size): Measures how big/strong LD neighborhoods are
+- Axis B (identifiability): Measures how interchangeable SNP neighborhoods are
+
+This is more efficient and theoretically motivated than testing all pairs.
+
+```{r gam-combinations}
+if (!is.null(auprc_with_x) && nrow(auprc_with_x) > 20 && exists("metric_names")) {
+  cat("Testing 1-way and cross-axis 2-way GAM combinations...\n\n")
+  
+  # Show which metrics are available in each axis
+  axis_a_available <- intersect(metric_names, test_susine::get_axis_a_metrics())
+  axis_b_available <- intersect(metric_names, test_susine::get_axis_b_metrics())
+  cat("Axis A metrics available:", length(axis_a_available), "\n")
+  cat("Axis B metrics available:", length(axis_b_available), "\n")
+  cat("Cross-axis pairs to test:", length(axis_a_available) * length(axis_b_available), "\n\n")
+  
+  # Test combinations with cross-axis only for 2-way models
+  gam_results <- test_susine::test_gam_combinations(
+    df_joined = auprc_with_x,
+    metric_names = metric_names,
+    auprc_var = "AUPRC",
+    out_path = file.path(paths$aggregated_dir, "gam_combinations_diagnostics.csv"),
+    k_smooth = 5,
+    cross_axis_only = TRUE
+  )
+  
+  # Show top 10 models overall by AIC (lower = better)
+  cat("\n=== Top 10 Models Overall (by AIC) ===\n")
+  gam_results %>%
+    dplyr::select(model_type, metric1, metric2, r2_adj, aic, bic) %>%
+    dplyr::arrange(aic) %>%
+    head(10) %>%
+    print()
+  
+  # Show top 1-way models by AIC
+  cat("\n=== Top 10 Single-Metric Models (by AIC) ===\n")
+  gam_results %>%
+    dplyr::filter(model_type == "1-way") %>%
+    dplyr::select(metric1, r2_adj, dev_expl, aic, pval1) %>%
+    dplyr::arrange(aic) %>%
+    head(10) %>%
+    print()
+  
+  # Show top cross-axis 2-way additive models by AIC
+  cat("\n=== Top 10 Cross-Axis Additive Models (Axis A + Axis B) ===\n")
+  gam_results %>%
+    dplyr::filter(model_type == "2-way_additive") %>%
+    dplyr::select(metric1, metric2, r2_adj, dev_expl, aic) %>%
+    dplyr::arrange(aic) %>%
+    head(10) %>%
+    print()
+  
+} else {
+  message("Skipping GAM combinations - insufficient data")
+  gam_results <- NULL
+}
+```
+
+```{r metric-interactions}
+if (!is.null(gam_results)) {
+  cat("Analyzing metric interactions...\n\n")
+  
+  # Find meaningful interactions
+  interactions <- test_susine::find_metric_interactions(gam_results)
+  
+  # Save interactions
+  readr::write_csv(interactions, file.path(paths$aggregated_dir, "metric_interactions.csv"))
+  cat("\nSaved interactions to:", file.path(paths$aggregated_dir, "metric_interactions.csv"), "\n")
+  
+  # Show pairs where 2-way is notably better than best single metric
+  cat("\n=== Metric Pairs with Synergistic Effects ===\n")
+  cat("(synergy_additive > 0.02 means pair predicts better than either alone)\n\n")
+  
+  synergistic <- interactions %>%
+    dplyr::filter(synergy_additive > 0.02) %>%
+    dplyr::select(metric1, metric2, r2_m1, r2_m2, r2_additive, synergy_additive) %>%
+    dplyr::arrange(dplyr::desc(synergy_additive))
+  
+  if (nrow(synergistic) > 0) {
+    print(synergistic, n = 15)
+  } else {
+    cat("No strong synergistic pairs found.\n")
+  }
+}
+```
+
+---
+
+# Section 7: Summary
+
+```{r summary}
+cat("\n=== Generated Plots ===\n")
+for (dir_name in names(plot_dirs)) {
+  plots <- list.files(plot_dirs[[dir_name]], pattern = "\\.png$", recursive = TRUE)
+  cat(sprintf("\n%s/ (%d plots)\n", dir_name, length(plots)))
+  for (f in plots) {
+    cat(sprintf("  - %s\n", f))
+  }
+}
+```
