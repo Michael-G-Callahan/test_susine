@@ -705,6 +705,34 @@ plt <- ggplot(r2_causal_data,
 save_or_show(plt, "06_historical_r2_causal.png", width = 12, height = 8)
 ```
 
+```{r historical-plot-variance-comparison, fig.width=14, fig.height=10, eval=run_historical_analysis}
+# Plot Var(mu_0) by SNP type (causal vs non-causal) across all settings
+# This shows how causal and non-causal variance change with inflate_match
+var_comparison <- hist_agg_table %>%
+  dplyr::mutate(
+    snp_type = ifelse(causal, "Causal", "Non-causal")
+  )
+
+plt <- ggplot(var_comparison, 
+              aes(x = inflate_match, y = mu_0_var, color = snp_type, linetype = snp_type)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  facet_grid(p_star ~ annotation_r2, scales = "free_y", 
+             labeller = labeller(annotation_r2 = label_both, p_star = label_both)) +
+  labs(
+    title = "Historical Run Data: Var(mu_0) by SNP Type (Aggregated Across Runs)",
+    subtitle = sprintf("Job: %s / %s", historical_job_name, historical_job_id),
+    x = "inflate_match",
+    y = "Var(mu_0)",
+    color = "SNP Type",
+    linetype = "SNP Type"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+save_or_show(plt, "06b_historical_variance_comparison.png", width = 14, height = 10)
+```
+
 ```{r historical-plot-r2-overall, fig.width=12, fig.height=8, eval=run_historical_analysis}
 # Plot actual_overall_r2 (all SNPs: causal + non-causal)
 # Just need one row per (inflate_match, annotation_r2, p_star) for overall R²
@@ -716,7 +744,7 @@ plt <- ggplot(r2_overall_data,
               aes(x = inflate_match, y = actual_overall_r2, color = factor(annotation_r2))) +
   geom_line(linewidth = 1) +
   geom_point(size = 3) +
-  facet_wrap(~ p_star, labeller = label_both) +
+  facet_wrap(~ p_star, labeller = label_both, scales = "fixed") +
   labs(
     title = "Historical Run Data: R² of mu_0 Predicting Beta (All SNPs)",
     subtitle = sprintf("Job: %s / %s | Includes both causal and non-causal SNPs", 
@@ -726,8 +754,7 @@ plt <- ggplot(r2_overall_data,
     color = "annotation_r2"
   ) +
   theme_minimal() +
-  theme(legend.position = "right") +
-  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, by = 0.2))
+  theme(legend.position = "right")
 
 save_or_show(plt, "07_historical_r2_overall.png", width = 12, height = 8)
 ```
