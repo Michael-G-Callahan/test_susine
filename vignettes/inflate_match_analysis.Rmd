@@ -452,10 +452,14 @@ cat("annotation_r2 values:", paste(sort(unique(run_table_hist$annotation_r2)), c
 cat("use_case_id values:", paste(unique(run_table_hist$use_case_id), collapse = ", "), "\n")
 ```
 
-## 5.3 Compute mu_0 Variance Statistics from SNPs Dataset
+## 5.3 Aggregate SNPs Across Runs (Memory-Efficient)
 
-The SNPs dataset is partitioned by use_case_id. We use Arrow to efficiently
-compute statistics without loading the entire dataset into memory.
+The SNPs dataset is partitioned by use_case_id. We aggregate **all SNPs** across runs
+by (causal, inflate_match, annotation_r2, p_star) to get proper variance estimates.
+
+**Memory-efficient approach**: Compute sufficient statistics at the Arrow level,
+then derive variance and R² from those statistics. This avoids loading the full
+dataset into memory.
 
 ```{r historical-compute-stats, eval=run_historical_analysis}
 # Open the SNPs dataset with Hive partitioning
@@ -464,131 +468,236 @@ snps_ds <- arrow::open_dataset(paths$snps_dataset_dir, partitioning = "use_case_
 cat("SNPs dataset schema:\n")
 print(snps_ds$schema)
 
-# Compute per-run statistics: variance of mu_0 by causal status
-# This aggregates at the Arrow level before collecting to R
-cat("\nComputing mu_0 variance by (run_id, causal)...\n")
+# Prepare run metadata for Arrow join
+run_metadata <- run_table_hist %>%
+  dplyr::select(run_id, use_case_id, inflate_match, annotation_r2, p_star)
 
-# First, compute basic stats per run × causal status
-# Note: Arrow doesn't support var() directly, so we compute sum, sum_sq, n and derive variance
-snps_stats_raw <- snps_ds %>%
-  dplyr::group_by(run_id, causal) %>%
+cat("\nRun metadata:", nrow(run_metadata), "runs\n")
+
+# Convert to Arrow table for efficient join
+run_metadata_arrow <- arrow::as_arrow_table(run_metadata)
+
+# Compute sufficient statistics at Arrow level:
+# - For variance: need n, sum(x), sum(x^2)
+# - For correlation/R²: need n, sum(x), sum(y), sum(x^2), sum(y^2), sum(xy)
+# 
+# Var(X) = E[X²] - E[X]² = (sum_x2/n) - (sum_x/n)²
+# Cor(X,Y) = [E[XY] - E[X]E[Y]] / [SD(X) * SD(Y)]
+
+cat("\nComputing sufficient statistics at Arrow level...\n")
+cat("(This aggregates before collecting - memory efficient)\n")
+
+# Join SNPs with run metadata at Arrow level, then aggregate
+# Group by (causal, inflate_match, annotation_r2, p_star)
+snps_agg_raw <- snps_ds %>%
+  dplyr::select(run_id, mu_0, beta, causal) %>%
+  # Join with run metadata
+  dplyr::left_join(run_metadata_arrow, by = "run_id") %>%
+  # Group and compute sufficient statistics
+  dplyr::group_by(causal, inflate_match, annotation_r2, p_star) %>%
   dplyr::summarise(
     n = n(),
-    mu_0_sum = sum(mu_0, na.rm = TRUE),
-    mu_0_sum_sq = sum(mu_0^2, na.rm = TRUE),
-    beta_sum = sum(beta, na.rm = TRUE),
-    beta_sum_sq = sum(beta^2, na.rm = TRUE),
+    n_runs = dplyr::n_distinct(run_id),
+    # For mu_0
+    sum_mu0 = sum(mu_0, na.rm = TRUE),
+    sum_mu0_sq = sum(mu_0^2, na.rm = TRUE),
+    # For beta
+    sum_beta = sum(beta, na.rm = TRUE),
+    sum_beta_sq = sum(beta^2, na.rm = TRUE),
+    # For correlation (mu_0, beta)
+    sum_mu0_beta = sum(mu_0 * beta, na.rm = TRUE),
     .groups = "drop"
   ) %>%
   dplyr::collect()
 
-cat("Raw stats collected:", nrow(snps_stats_raw), "rows\n")
+cat("Aggregated data collected:", nrow(snps_agg_raw), "rows\n")
+cat("(Much smaller than raw SNPs!)\n")
 
-# Compute variance: Var(X) = E[X^2] - E[X]^2
-snps_stats <- snps_stats_raw %>%
-  dplyr::mutate(
-    mu_0_mean = mu_0_sum / n,
-    mu_0_var = (mu_0_sum_sq / n) - (mu_0_mean)^2,
-    beta_mean = beta_sum / n,
-    beta_var = (beta_sum_sq / n) - (beta_mean)^2
+# Also compute overall stats (all SNPs together, ignoring causal status)
+# for actual_overall_r2
+snps_overall_raw <- snps_ds %>%
+  dplyr::select(run_id, mu_0, beta, causal) %>%
+  dplyr::left_join(run_metadata_arrow, by = "run_id") %>%
+  dplyr::group_by(inflate_match, annotation_r2, p_star) %>%
+  dplyr::summarise(
+    n_overall = n(),
+    sum_mu0_overall = sum(mu_0, na.rm = TRUE),
+    sum_mu0_sq_overall = sum(mu_0^2, na.rm = TRUE),
+    sum_beta_overall = sum(beta, na.rm = TRUE),
+    sum_beta_sq_overall = sum(beta^2, na.rm = TRUE),
+    sum_mu0_beta_overall = sum(mu_0 * beta, na.rm = TRUE),
+    .groups = "drop"
   ) %>%
-  dplyr::select(run_id, causal, n, mu_0_mean, mu_0_var, beta_mean, beta_var)
+  dplyr::collect()
 
-# Pivot to wide format: one row per run with causal/noncausal columns
-snps_wide <- snps_stats %>%
+cat("Overall aggregated data:", nrow(snps_overall_raw), "rows\n")
+```
+
+## 5.4 Create Aggregated Summary Table
+
+Derive variance, R², and other statistics from sufficient statistics.
+
+```{r historical-aggregate-table, eval=run_historical_analysis}
+# Helper function to compute variance from sufficient statistics
+# Var(X) = E[X²] - E[X]² = (sum_x2/n) - (sum_x/n)²
+compute_var <- function(n, sum_x, sum_x2) {
+  mean_x <- sum_x / n
+  (sum_x2 / n) - mean_x^2
+}
+
+# Helper function to compute correlation from sufficient statistics
+# Cor(X,Y) = Cov(X,Y) / (SD(X) * SD(Y))
+# Cov(X,Y) = E[XY] - E[X]E[Y]
+compute_cor <- function(n, sum_x, sum_y, sum_x2, sum_y2, sum_xy) {
+  mean_x <- sum_x / n
+  mean_y <- sum_y / n
+  var_x <- (sum_x2 / n) - mean_x^2
+  var_y <- (sum_y2 / n) - mean_y^2
+  cov_xy <- (sum_xy / n) - mean_x * mean_y
+  
+  # Handle edge cases
+  if (var_x <= 0 || var_y <= 0) return(NA_real_)
+  cov_xy / sqrt(var_x * var_y)
+}
+
+# Compute derived statistics for the main table
+hist_agg_table <- snps_agg_raw %>%
+  dplyr::rowwise() %>%
+  dplyr::mutate(
+    n_snps = n,
+    mu_0_mean = sum_mu0 / n,
+    mu_0_var = compute_var(n, sum_mu0, sum_mu0_sq),
+    mu_0_sd = sqrt(pmax(0, mu_0_var)),
+    beta_mean = sum_beta / n,
+    beta_var = compute_var(n, sum_beta, sum_beta_sq),
+    beta_sd = sqrt(pmax(0, beta_var)),
+    # Correlation for this group
+    cor_mu0_beta = compute_cor(n, sum_mu0, sum_beta, sum_mu0_sq, sum_beta_sq, sum_mu0_beta),
+    actual_causal_r2 = cor_mu0_beta^2
+  ) %>%
+  dplyr::ungroup() %>%
+  dplyr::select(-n, -sum_mu0, -sum_mu0_sq, -sum_beta, -sum_beta_sq, 
+                -sum_mu0_beta, -cor_mu0_beta)
+
+# Compute overall R² (all SNPs, regardless of causal status)
+overall_r2 <- snps_overall_raw %>%
+  dplyr::rowwise() %>%
+  dplyr::mutate(
+    cor_overall = compute_cor(n_overall, sum_mu0_overall, sum_beta_overall, 
+                               sum_mu0_sq_overall, sum_beta_sq_overall, sum_mu0_beta_overall),
+    actual_overall_r2 = cor_overall^2
+  ) %>%
+  dplyr::ungroup() %>%
+  dplyr::select(inflate_match, annotation_r2, p_star, actual_overall_r2)
+
+# Join overall R² and clean up
+hist_agg_table <- hist_agg_table %>%
+  dplyr::left_join(overall_r2, by = c("inflate_match", "annotation_r2", "p_star")) %>%
+  # Set actual_causal_r2 to NA for non-causal rows
+  dplyr::mutate(
+    actual_causal_r2 = ifelse(causal, actual_causal_r2, NA_real_)
+  ) %>%
+  dplyr::arrange(inflate_match, annotation_r2, p_star, desc(causal))
+
+cat("=== Aggregated SNP Statistics Table ===\n")
+cat("(Computed from sufficient statistics - memory efficient)\n\n")
+print(hist_agg_table, n = 50)
+
+# Save table for reference
+if (save_plots_to_file) {
+  table_path <- file.path(plot_output_dir, "historical_aggregated_stats.csv")
+  readr::write_csv(hist_agg_table, table_path)
+  cat("\nSaved table to:", table_path, "\n")
+}
+```
+
+## 5.5 Compute Variance Ratios from Aggregated Data
+
+```{r historical-variance-ratios, eval=run_historical_analysis}
+# Pivot to get causal/noncausal side by side for each setting
+hist_variance_ratios <- hist_agg_table %>%
+  dplyr::select(causal, inflate_match, annotation_r2, p_star, n_snps, n_runs, mu_0_var) %>%
   tidyr::pivot_wider(
-    id_cols = run_id,
+    id_cols = c(inflate_match, annotation_r2, p_star),
     names_from = causal,
-    values_from = c(n, mu_0_mean, mu_0_var, beta_mean, beta_var),
+    values_from = c(n_snps, n_runs, mu_0_var),
     names_glue = "{.value}_{ifelse(causal, 'causal', 'noncausal')}"
   )
 
-# Fix column names (TRUE/FALSE become causal/noncausal)
-names(snps_wide) <- gsub("_TRUE", "_causal", names(snps_wide))
-names(snps_wide) <- gsub("_FALSE", "_noncausal", names(snps_wide))
+# Fix column names
+names(hist_variance_ratios) <- gsub("_TRUE", "_causal", names(hist_variance_ratios))
+names(hist_variance_ratios) <- gsub("_FALSE", "_noncausal", names(hist_variance_ratios))
 
-cat("\nSNPs stats (wide):", nrow(snps_wide), "runs\n")
-print(head(snps_wide))
-```
-
-## 5.4 Join with Run Table and Compute Variance Ratio
-
-```{r historical-join-analysis, eval=run_historical_analysis}
-# Join SNP stats with run table to get inflate_match and annotation_r2
-analysis_df <- run_table_hist %>%
-  dplyr::select(run_id, use_case_id, inflate_match, annotation_r2, p_star) %>%
-  dplyr::left_join(snps_wide, by = "run_id") %>%
-  dplyr::filter(!is.na(mu_0_var_causal), !is.na(mu_0_var_noncausal)) %>%
+# Compute variance ratio
+hist_variance_ratios <- hist_variance_ratios %>%
   dplyr::mutate(
     var_ratio = mu_0_var_noncausal / mu_0_var_causal
-  )
+  ) %>%
+  dplyr::arrange(inflate_match, annotation_r2, p_star)
 
-cat("Analysis dataset:", nrow(analysis_df), "runs with complete data\n")
+cat("=== Variance Ratios by Setting ===\n")
+print(hist_variance_ratios, n = 50)
 
-# Summarize by inflate_match and annotation_r2
-hist_summary <- analysis_df %>%
-  dplyr::group_by(use_case_id, inflate_match, annotation_r2) %>%
+# Summary: average variance ratio at each inflate_match level
+hist_summary <- hist_variance_ratios %>%
+  dplyr::group_by(inflate_match, annotation_r2) %>%
   dplyr::summarise(
-    n_runs = n(),
-    mu_0_var_causal_mean = mean(mu_0_var_causal, na.rm = TRUE),
-    mu_0_var_noncausal_mean = mean(mu_0_var_noncausal, na.rm = TRUE),
+    n_settings = n(),
     var_ratio_mean = mean(var_ratio, na.rm = TRUE),
     var_ratio_sd = sd(var_ratio, na.rm = TRUE),
     .groups = "drop"
   )
 
-cat("\nSummary by (use_case_id, inflate_match, annotation_r2):\n")
+cat("\n=== Summary: Mean Variance Ratio by (inflate_match, annotation_r2) ===\n")
 print(hist_summary, n = 30)
 ```
 
-## 5.5 Visualize Historical Results
+## 5.6 Visualize Historical Results
 
 ```{r historical-plot-variance-ratio, fig.width=12, fig.height=8, eval=run_historical_analysis}
-# Plot variance ratio vs inflate_match, faceted by use_case_id
-plt <- ggplot(analysis_df, aes(x = factor(inflate_match), y = var_ratio, fill = factor(annotation_r2))) +
-  geom_boxplot(outlier.size = 0.5, alpha = 0.7) +
+# Plot variance ratio vs inflate_match, colored by annotation_r2, faceted by p_star
+plt <- ggplot(hist_variance_ratios, 
+              aes(x = inflate_match, y = var_ratio, color = factor(annotation_r2))) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 3) +
   geom_hline(yintercept = 1, linetype = "dashed", color = "red", linewidth = 1) +
-  facet_wrap(~ use_case_id, scales = "free_y") +
+  facet_wrap(~ p_star, labeller = label_both) +
   labs(
     title = "Historical Run Data: Var(mu_0 noncausal) / Var(mu_0 causal)",
     subtitle = sprintf("Job: %s / %s | Red line = 1.0 (equal variance)", 
                        historical_job_name, historical_job_id),
     x = "inflate_match",
     y = "Variance Ratio",
-    fill = "annotation_r2"
+    color = "annotation_r2"
   ) +
   theme_minimal() +
-  theme(legend.position = "right")
+  theme(legend.position = "right") +
+  scale_y_continuous(breaks = seq(0, 2, by = 0.25))
 
 save_or_show(plt, "05_historical_variance_ratio.png", width = 12, height = 8)
 ```
 
 ```{r historical-plot-variance-comparison, fig.width=14, fig.height=8, eval=run_historical_analysis}
-# Reshape for causal vs noncausal comparison
-var_comparison <- analysis_df %>%
-  dplyr::select(run_id, use_case_id, inflate_match, annotation_r2, 
-                mu_0_var_causal, mu_0_var_noncausal) %>%
-  tidyr::pivot_longer(
-    cols = c(mu_0_var_causal, mu_0_var_noncausal),
-    names_to = "snp_type",
-    values_to = "mu_0_var"
-  ) %>%
+# Reshape aggregated table for causal vs noncausal comparison
+var_comparison <- hist_agg_table %>%
   dplyr::mutate(
-    snp_type = ifelse(snp_type == "mu_0_var_causal", "Causal", "Non-causal")
+    snp_type = ifelse(causal, "Causal", "Non-causal")
   )
 
 # Plot actual variance values
-plt <- ggplot(var_comparison, aes(x = factor(inflate_match), y = mu_0_var, 
-                           fill = snp_type)) +
-  geom_boxplot(outlier.size = 0.5, alpha = 0.7, position = position_dodge(width = 0.8)) +
-  facet_grid(use_case_id ~ annotation_r2, scales = "free_y", 
-             labeller = labeller(annotation_r2 = label_both)) +
+plt <- ggplot(var_comparison, 
+              aes(x = inflate_match, y = mu_0_var, color = snp_type, linetype = snp_type)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  facet_grid(p_star ~ annotation_r2, scales = "free_y", 
+             labeller = labeller(annotation_r2 = label_both, p_star = label_both)) +
   labs(
-    title = "Historical Run Data: Var(mu_0) by SNP Type",
+    title = "Historical Run Data: Var(mu_0) by SNP Type (Aggregated Across Runs)",
     subtitle = sprintf("Job: %s / %s", historical_job_name, historical_job_id),
     x = "inflate_match",
     y = "Var(mu_0)",
-    fill = "SNP Type"
+    color = "SNP Type",
+    linetype = "SNP Type"
   ) +
   theme_minimal() +
   theme(legend.position = "bottom")
@@ -596,13 +705,13 @@ plt <- ggplot(var_comparison, aes(x = factor(inflate_match), y = mu_0_var,
 save_or_show(plt, "06_historical_variance_comparison.png", width = 14, height = 8)
 ```
 
-## 5.6 Compare Theoretical vs Historical
+## 5.7 Compare Theoretical vs Historical
 
 ```{r historical-vs-theoretical, eval=run_historical_analysis}
 # Compare historical variance ratios to our simulation predictions
 cat("=== Comparison: Simulation vs Historical ===\n\n")
 
-# Get overlapping settings
+# Get overlapping settings (hist_summary is now aggregated across runs)
 common_settings <- hist_summary %>%
   dplyr::inner_join(
     summary_stats %>% dplyr::select(annotation_r2, inflate_match, var_ratio_mean),
@@ -613,15 +722,23 @@ common_settings <- hist_summary %>%
 if (nrow(common_settings) > 0) {
   cat("Settings with both simulation and historical data:\n")
   print(common_settings %>% 
-          dplyr::select(use_case_id, annotation_r2, inflate_match, 
-                        var_ratio_mean_historical, var_ratio_mean) %>%
-          dplyr::rename(var_ratio_simulation = var_ratio_mean))
+          dplyr::select(annotation_r2, inflate_match, 
+                        var_ratio_mean_historical, var_ratio_mean_simulation) %>%
+          dplyr::mutate(
+            diff = var_ratio_mean_historical - var_ratio_mean_simulation,
+            pct_diff = 100 * diff / var_ratio_mean_simulation
+          ))
   
   # Check correlation
   cor_val <- cor(common_settings$var_ratio_mean_historical, 
-                 common_settings$var_ratio_mean, 
+                 common_settings$var_ratio_mean_simulation, 
                  use = "complete.obs")
   cat(sprintf("\nCorrelation between historical and simulation variance ratios: %.3f\n", cor_val))
+  
+  # Mean absolute difference
+  mad <- mean(abs(common_settings$var_ratio_mean_historical - 
+                   common_settings$var_ratio_mean_simulation), na.rm = TRUE)
+  cat(sprintf("Mean absolute difference: %.4f\n", mad))
 } else {
   cat("No overlapping settings found between simulation and historical data.\n")
   cat("This may be because the historical job used different inflate_match values.\n")
