@@ -97,8 +97,8 @@ devtools::load_all(here::here())
 
 # Simulation parameters
 set.seed(42)
-p <- 1000           # Number of SNPs
-p_star <- 50        # Number of causal SNPs
+n_snps <- 1000      # Number of SNPs
+n_causal <- 50      # Number of causal SNPs
 effect_sd <- 1      # SD of causal effects
 annotation_r2_values <- c(0.2, 0.4, 0.6, 0.8)  # Annotation quality levels
 inflate_match_values <- seq(0, 1.5, by = 0.25)  # Range of inflate_match to test
@@ -116,8 +116,8 @@ for (annot_r2 in annotation_r2_values) {
     for (rep in seq_len(n_reps)) {
       # Simulate effect sizes
       effects <- simulate_effect_sizes(
-        p = p,
-        p_star = p_star,
+        p = n_snps,
+        p_star = n_causal,
         effect_sd = effect_sd,
         seed = rep * 1000 + round(annot_r2 * 100) + round(inflate * 100)
       )
@@ -135,7 +135,7 @@ for (annot_r2 in annotation_r2_values) {
       # Extract mu_0 for causal and non-causal
       mu_0 <- priors$mu_0
       causal_idx <- effects$causal_idx
-      noncausal_idx <- setdiff(seq_len(p), causal_idx)
+      noncausal_idx <- setdiff(seq_len(n_snps), causal_idx)
       
       # Compute statistics
       results[[length(results) + 1]] <- data.frame(
@@ -294,7 +294,7 @@ inflate_focus <- c(0, 0.5, 1.0, 1.5)
 # Run one rep for each setting to get raw data
 dist_data <- list()
 for (inflate in inflate_focus) {
-  effects <- simulate_effect_sizes(p = p, p_star = p_star, effect_sd = effect_sd, seed = 999)
+  effects <- simulate_effect_sizes(p = n_snps, p_star = n_causal, effect_sd = effect_sd, seed = 999)
   priors <- simulate_priors(
     beta = effects$beta,
     annotation_r2 = annot_r2_focus,
@@ -304,7 +304,7 @@ for (inflate in inflate_focus) {
   )
   
   causal_idx <- effects$causal_idx
-  noncausal_idx <- setdiff(seq_len(p), causal_idx)
+  noncausal_idx <- setdiff(seq_len(n_snps), causal_idx)
   
   dist_data[[length(dist_data) + 1]] <- data.frame(
     inflate_match = inflate,
