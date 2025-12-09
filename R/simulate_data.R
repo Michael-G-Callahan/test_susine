@@ -57,7 +57,10 @@ simulate_effect_sizes <- function(p,
 #'
 #' @param beta Numeric vector of true effects.
 #' @param annotation_r2 Target fraction of causal effect variance captured by the annotation.
-#' @param inflate_match Degree (0-1) to inflate non-causal annotations to match causal scale.
+#' @param inflate_match Scalar controlling non-causal annotation variance relative to the
+#'   theoretical causal annotation variance. inflate_match = 0 -> no non-causal annotations;
+#'   inflate_match = 1 -> non-causal variance equals theoretical causal variance;
+#'   inflate_match = 2 -> non-causal variance is 2x the theoretical causal variance.
 #' @param gamma_shrink Optional shrinkage slope used when converting annotations to prior variances.
 #' @param base_sigma2 Optional baseline prior variance.
 #' @param effect_sd Nominal standard deviation used for causal effects (fallback when beta variance is zero).
@@ -96,13 +99,27 @@ simulate_priors <- function(beta,
     noise_var <- causal_var * (1 - annotation_r2) / annotation_r2
   }
 
+  # Compute theoretical causal annotation variance (independent of sample size)
+  # Var(mu_0[causal]) = causal_var + noise_var = causal_var / annotation_r2
+  theoretical_causal_mu0_var <- if (annotation_r2 <= 0) {
+    causal_var
+  } else if (annotation_r2 >= 1) {
+    causal_var
+  } else {
+    causal_var / annotation_r2
+  }
+
   mu_0 <- numeric(p)
   if (length(causal_idx)) {
     mu_0[causal_idx] <- beta[causal_idx] + stats::rnorm(length(causal_idx), sd = sqrt(noise_var))
   }
   if (length(noncausal_idx)) {
-    target_var <- noise_var + inflate_match * causal_var
-    mu_0[noncausal_idx] <- stats::rnorm(length(noncausal_idx), sd = sqrt(target_var))
+    # Non-causal variance scales with inflate_match relative to theoretical causal variance
+    # inflate_match = 0: variance = 0 (no annotation signal)
+    # inflate_match = 1: variance = theoretical_causal_mu0_var (same as causal)
+    # inflate_match = 2: variance = 2 * theoretical_causal_mu0_var (twice causal)
+    noncausal_var <- inflate_match * theoretical_causal_mu0_var
+    mu_0[noncausal_idx] <- stats::rnorm(length(noncausal_idx), sd = sqrt(noncausal_var))
   }
 
   observed_r2 <- NA_real_
