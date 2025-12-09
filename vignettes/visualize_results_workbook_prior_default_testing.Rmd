@@ -477,10 +477,7 @@ p <- ggplot2::ggplot(curves_all,
   ggplot2::theme(legend.position = "right") +
   ggplot2::coord_cartesian(xlim = c(0, 1), ylim = c(0, 1))
 
-print(p)
-
-ggsave(file.path(plot_dirs$power_fdr, "power_fdr_all.png"), p, width = 14, height = 9, dpi = 300, bg = "white")
-message("Saved: power_fdr_all.png")
+save_or_show(p, "power_fdr_all.png", width = 14, height = 9)
 ```
 
 ## 4.2 Power vs FDR - Low p_star (1-4)
@@ -511,10 +508,7 @@ if (nrow(confusion_low) > 0) {
     ggplot2::theme(legend.position = "right") +
     ggplot2::coord_cartesian(xlim = c(0, 1), ylim = c(0, 1))
   
-  print(p)
-  
-  ggsave(file.path(plot_dirs$power_fdr, "power_fdr_pstar_low.png"), p, width = 14, height = 9, dpi = 300, bg = "white")
-  message("Saved: power_fdr_pstar_low.png")
+  save_or_show(p, "power_fdr_pstar_low.png", width = 14, height = 9)
 } else {
   message("No data for low p_star values")
 }
@@ -548,10 +542,7 @@ if (nrow(confusion_high) > 0) {
     ggplot2::theme(legend.position = "right") +
     ggplot2::coord_cartesian(xlim = c(0, 1), ylim = c(0, 1))
   
-  print(p)
-  
-  ggsave(file.path(plot_dirs$power_fdr, "power_fdr_pstar_high.png"), p, width = 14, height = 9, dpi = 300, bg = "white")
-  message("Saved: power_fdr_pstar_high.png")
+  save_or_show(p, "power_fdr_pstar_high.png", width = 14, height = 9)
 } else {
   message("No data for high p_star values")
 }
@@ -754,11 +745,7 @@ for (af in annotation_filters) {
   
   # Save
   fname <- sprintf("cs_metrics_boxplots_%s.png", af$name)
-  ggsave(
-    file.path(plot_dirs$cs_metrics, fname),
-    plot = combined, width = 16, height = 12, dpi = 300, bg = "white"
-  )
-  message("Saved: ", fname)
+  save_or_show(combined, fname, width = 16, height = 12)
 }
 ```
 
