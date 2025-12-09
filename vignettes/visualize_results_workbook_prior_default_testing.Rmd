@@ -33,7 +33,7 @@ library(arrow)
 
 # Save plots to files instead of displaying in workbook?
 # Set to TRUE when running on HPC or when you want PNG outputs
-save_plots_to_file <- FALSE
+save_plots_to_file <- TRUE
 
 # Helper function to save or display a plot
 save_or_show <- function(p, filename, width = 10, height = 7, dpi = 300, subdir = "auprc_informed") {
@@ -64,7 +64,7 @@ save_or_show <- function(p, filename, width = 10, height = 7, dpi = 300, subdir 
 
 ```{r job-config}
 job_name <- "prior_default_testing"
-parent_job_id <- "46997729"
+parent_job_id <- "47128217"
 output_root <- here("output")
 
 # Resolve paths
@@ -188,13 +188,18 @@ colored by use_case × sigma_0_2_scalar combination.
 sigma_exclude <- c("1/L", "2/L")
 
 # Define a combined color palette with enough distinct colors
-# 2 use cases × 4 sigma values = 8 combinations
+# 3 use cases × 4 sigma values = 12 combinations
 combined_palette <- c(
   # a_i (SuSiE) - blues (darker = smaller sigma)
   "a_i - 0.05"  = "#08306b",
   "a_i - 0.1"   = "#2171b5", 
   "a_i - 0.2"   = "#4292c6",
   "a_i - 0.4"   = "#6baed6",
+  # b_i (SuSiE + functional sigma) - greens (darker = smaller sigma)
+  "b_i - 0.05"  = "#1a5f1f",
+  "b_i - 0.1"   = "#2d7c2d",
+  "b_i - 0.2"   = "#4cb342",
+  "b_i - 0.4"   = "#81c784",
   # b_ii (SuSiNE) - oranges/reds (darker = smaller sigma)
   "b_ii - 0.05" = "#7f2704",
   "b_ii - 0.1"  = "#d94801",
@@ -208,6 +213,10 @@ combined_labels <- c(
   "a_i - 0.1"   = "SuSiE - σ²₀=0.1",
   "a_i - 0.2"   = "SuSiE - σ²₀=0.2",
   "a_i - 0.4"   = "SuSiE - σ²₀=0.4",
+  "b_i - 0.05"  = "SuSiE+FS - σ²₀=0.05",
+  "b_i - 0.1"   = "SuSiE+FS - σ²₀=0.1",
+  "b_i - 0.2"   = "SuSiE+FS - σ²₀=0.2",
+  "b_i - 0.4"   = "SuSiE+FS - σ²₀=0.4",
   "b_ii - 0.05" = "SuSiNE - σ²₀=0.05",
   "b_ii - 0.1"  = "SuSiNE - σ²₀=0.1",
   "b_ii - 0.2"  = "SuSiNE - σ²₀=0.2",
