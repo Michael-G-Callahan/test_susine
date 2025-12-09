@@ -26,6 +26,37 @@ library(gridExtra)
 library(arrow)
 ```
 
+# User Options
+
+```{r user-options}
+# ==== USER OPTIONS ====
+
+# Save plots to files instead of displaying in workbook?
+# Set to TRUE when running on HPC or when you want PNG outputs
+save_plots_to_file <- FALSE
+
+# Output directory for saved plots (relative to workbook location)
+plot_output_dir <- here::here("output", "visualization_workbook_plots")
+
+# Create output directory if saving plots
+if (save_plots_to_file) {
+
+  dir.create(plot_output_dir, showWarnings = FALSE, recursive = TRUE)
+  cat("Plots will be saved to:", plot_output_dir, "\n")
+}
+
+# Helper function to save or display a plot
+save_or_show <- function(p, filename, width = 10, height = 7, dpi = 300) {
+  if (save_plots_to_file) {
+    filepath <- file.path(plot_output_dir, filename)
+    ggsave(filepath, p, width = width, height = height, dpi = dpi, bg = "white")
+    cat("Saved:", filename, "\n")
+  } else {
+    print(p)
+  }
+}
+```
+
 ## 1.1 Job Configuration
 
 ```{r job-config}
