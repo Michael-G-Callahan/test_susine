@@ -275,11 +275,10 @@ if (nrow(baseline_data) > 0 && nrow(annotation_grid) > 0) {
   auprc_plot_data <- auprc_all
 }
 
-# Filter to rows with valid facet values and add combined color
-# Note: Exclude use cases with NA sigma_0_2_scalar (functional sigma strategy) since these
-# informed plots are specifically for testing sigma_0_2_scalar parameter values
+# Filter to rows with valid facet values
+# For sigma-colored plots: keep all rows including b_i (which has NA sigma_0_2_scalar)
 auprc_plot_data_faceted <- auprc_plot_data %>%
-  dplyr::filter(!is.na(annotation_r2), !is.na(inflate_match), !is.na(sigma_0_2_scalar)) %>%
+  dplyr::filter(!is.na(annotation_r2), !is.na(inflate_match)) %>%
   add_combined_color()
 
 if (nrow(auprc_plot_data_faceted) > 0) {
@@ -336,7 +335,7 @@ for (pstar in pstar_values) {
   }
   
   auprc_pstar_faceted <- auprc_pstar_plot %>%
-    dplyr::filter(!is.na(annotation_r2), !is.na(inflate_match), !is.na(sigma_0_2_scalar)) %>%
+    dplyr::filter(!is.na(annotation_r2), !is.na(inflate_match)) %>%
     add_combined_color()
   
   if (nrow(auprc_pstar_faceted) > 0) {
@@ -364,6 +363,129 @@ for (pstar in pstar_values) {
       ggplot2::theme(legend.position = "right")
     
     fname <- sprintf("auprc_informed_pstar_%d.png", pstar)
+    save_or_show(p, fname, width = 14, height = 10, subdir = "auprc_informed")
+  }
+}
+```
+
+## 2.3 AUPRC Informed by inflate_match - All p_star Combined
+
+These plots show AUPRC vs y_noise, faceted by annotation_r2 and sigma_0_2_scalar,
+colored by use_case × inflate_match combination.
+
+```{r auprc-informed-by-inflate-all, fig.width=14, fig.height=10}
+# Create color palette for use_case × inflate_match
+inflate_match_values <- sort(unique(na.omit(auprc_all$inflate_match)))
+inflate_colors <- list()
+inflate_labels <- list()
+
+# Define colors for each combination
+color_schemes <- list(
+  "a_i" = c("#08306b", "#2171b5", "#4292c6", "#6baed6"),   # Blues
+  "b_i" = c("#1a5f1f", "#2d7c2d", "#4cb342", "#81c784"),   # Greens
+  "b_ii" = c("#7f2704", "#d94801", "#f16913", "#fd8d3c")   # Oranges
+)
+
+for (uc in use_case_filter) {
+  for (i in seq_along(inflate_match_values)) {
+    im <- inflate_match_values[i]
+    key <- sprintf("%s - inflate_%s", uc, im)
+    if (!is.null(color_schemes[[uc]])) {
+      inflate_colors[[key]] <- color_schemes[[uc]][min(i, length(color_schemes[[uc]]))]
+      inflate_labels[[key]] <- sprintf("%s - inflate_match=%.1f", uc, im)
+    }
+  }
+}
+
+# Prepare data with inflate_match grouping
+auprc_inflate_data <- auprc_plot_data %>%
+  dplyr::filter(!is.na(annotation_r2), !is.na(inflate_match)) %>%
+  dplyr::mutate(
+    use_inflate = sprintf("%s - inflate_%s", use_case_id, inflate_match)
+  )
+
+if (nrow(auprc_inflate_data) > 0) {
+  p <- ggplot2::ggplot(auprc_inflate_data, 
+                       ggplot2::aes(x = y_noise, y = AUPRC, color = use_inflate, group = use_inflate)) +
+    ggplot2::geom_line(linewidth = 0.8) +
+    ggplot2::geom_point(size = 2.5) +
+    ggplot2::scale_color_manual(values = unlist(inflate_colors), labels = unlist(inflate_labels)) +
+    ggplot2::facet_grid(
+      sigma_0_2_scalar ~ annotation_r2,
+      labeller = ggplot2::labeller(
+        .rows = function(x) paste0("σ²₀=", x),
+        .cols = function(x) paste0("annotation_r2: ", x)
+      )
+    ) +
+    ggplot2::labs(
+      title = "AUPRC for Informed Models - Colored by inflate_match (All p*)",
+      subtitle = paste("Use cases:", paste(use_case_filter, collapse = ", ")),
+      x = "y_noise (Noise Level)",
+      y = "AUPRC",
+      color = "Model × inflate_match"
+    ) +
+    ggplot2::theme_minimal() +
+    ggplot2::theme(legend.position = "right")
+  
+  save_or_show(p, "auprc_informed_by_inflate_all_pstar.png", width = 14, height = 10, subdir = "auprc_informed")
+}
+```
+
+## 2.4 AUPRC Informed by inflate_match - By p_star
+
+```{r auprc-informed-by-inflate-pstar, fig.width=14, fig.height=10}
+for (pstar in pstar_values) {
+  auprc_pstar <- test_susine::compute_auprc_from_confusion(
+    confusion_filtered %>% dplyr::filter(p_star == pstar),
+    group_vars = c("use_case_id", "y_noise", "annotation_r2", "inflate_match", "sigma_0_2_scalar")
+  )
+  
+  # Expand baseline
+  baseline_pstar <- auprc_pstar %>% dplyr::filter(use_case_id == "a_i")
+  
+  if (nrow(baseline_pstar) > 0 && nrow(annotation_grid) > 0) {
+    baseline_exp <- baseline_pstar %>%
+      dplyr::select(-annotation_r2, -inflate_match) %>%
+      tidyr::crossing(annotation_grid)
+    
+    auprc_pstar_plot <- dplyr::bind_rows(
+      auprc_pstar %>% dplyr::filter(use_case_id != "a_i"),
+      baseline_exp
+    )
+  } else {
+    auprc_pstar_plot <- auprc_pstar
+  }
+  
+  auprc_inflate_pstar <- auprc_pstar_plot %>%
+    dplyr::filter(!is.na(annotation_r2), !is.na(inflate_match)) %>%
+    dplyr::mutate(
+      use_inflate = sprintf("%s - inflate_%s", use_case_id, inflate_match)
+    )
+  
+  if (nrow(auprc_inflate_pstar) > 0) {
+    p <- ggplot2::ggplot(auprc_inflate_pstar, 
+                         ggplot2::aes(x = y_noise, y = AUPRC, color = use_inflate, group = use_inflate)) +
+      ggplot2::geom_line(linewidth = 0.8) +
+      ggplot2::geom_point(size = 2.5) +
+      ggplot2::scale_color_manual(values = unlist(inflate_colors), labels = unlist(inflate_labels)) +
+      ggplot2::facet_grid(
+        sigma_0_2_scalar ~ annotation_r2,
+        labeller = ggplot2::labeller(
+          .rows = function(x) paste0("σ²₀=", x),
+          .cols = function(x) paste0("annotation_r2: ", x)
+        )
+      ) +
+      ggplot2::labs(
+        title = sprintf("AUPRC for Informed Models - Colored by inflate_match (p* = %d)", pstar),
+        subtitle = paste("Use cases:", paste(use_case_filter, collapse = ", ")),
+        x = "y_noise (Noise Level)",
+        y = "AUPRC",
+        color = "Model × inflate_match"
+      ) +
+      ggplot2::theme_minimal() +
+      ggplot2::theme(legend.position = "right")
+    
+    fname <- sprintf("auprc_informed_by_inflate_pstar_%d.png", pstar)
     save_or_show(p, fname, width = 14, height = 10, subdir = "auprc_informed")
   }
 }
@@ -778,12 +900,20 @@ for (af in annotation_filters) {
     filepath <- file.path(plot_dirs$cs_metrics, fname)
     tryCatch(
       {
-        png(filepath, width = 16 * 100, height = 12 * 100, res = 100, bg = "white")
+        # Use cairo backend to avoid X11 requirement
+        grDevices::png(filepath, width = 16 * 100, height = 12 * 100, res = 100, bg = "white", type = "cairo")
         create_cs_metrics_plot(eff_data, mod_data, af$title)
-        dev.off()
+        grDevices::dev.off()
         cat("Saved:", fname, "\n")
       },
       error = function(e) {
+        # If cairo fails, try regular png as fallback
+        tryCatch(
+          {
+            grDevices::dev.off()
+          },
+          error = function(e2) {}
+        )
         cat("Error saving plot:", fname, "-", conditionMessage(e), "\n")
       }
     )
