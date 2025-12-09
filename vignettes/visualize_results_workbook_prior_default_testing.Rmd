@@ -99,7 +99,7 @@ By default, we exclude EB use cases (a_ii, b_iii).
 
 ```{r use-case-filter}
 # Use cases to include in plots (edit as needed)
-use_case_filter <- c("a_i", "b_ii")
+use_case_filter <- c("a_i", "b_i", "b_ii")
 
 # Get labels from catalog (will work even if filter changes)
 use_case_labels <- test_susine::get_use_case_labels(use_case_filter)
@@ -276,8 +276,10 @@ if (nrow(baseline_data) > 0 && nrow(annotation_grid) > 0) {
 }
 
 # Filter to rows with valid facet values and add combined color
+# Note: Exclude use cases with NA sigma_0_2_scalar (functional sigma strategy) since these
+# informed plots are specifically for testing sigma_0_2_scalar parameter values
 auprc_plot_data_faceted <- auprc_plot_data %>%
-  dplyr::filter(!is.na(annotation_r2), !is.na(inflate_match)) %>%
+  dplyr::filter(!is.na(annotation_r2), !is.na(inflate_match), !is.na(sigma_0_2_scalar)) %>%
   add_combined_color()
 
 if (nrow(auprc_plot_data_faceted) > 0) {
@@ -334,7 +336,7 @@ for (pstar in pstar_values) {
   }
   
   auprc_pstar_faceted <- auprc_pstar_plot %>%
-    dplyr::filter(!is.na(annotation_r2), !is.na(inflate_match)) %>%
+    dplyr::filter(!is.na(annotation_r2), !is.na(inflate_match), !is.na(sigma_0_2_scalar)) %>%
     add_combined_color()
   
   if (nrow(auprc_pstar_faceted) > 0) {
@@ -769,12 +771,31 @@ for (af in annotation_filters) {
     next
   }
   
-  # Create plot
-  combined <- create_cs_metrics_plot(eff_data, mod_data, af$title)
-  
   # Save
   fname <- sprintf("cs_metrics_boxplots_%s.png", af$name)
-  save_or_show(combined, fname, width = 16, height = 12, subdir = "cs_metrics")
+  
+  if (save_plots_to_file) {
+    filepath <- file.path(plot_dirs$cs_metrics, fname)
+    tryCatch(
+      {
+        png(filepath, width = 16 * 100, height = 12 * 100, res = 100, bg = "white")
+        create_cs_metrics_plot(eff_data, mod_data, af$title)
+        dev.off()
+        cat("Saved:", fname, "\n")
+      },
+      error = function(e) {
+        cat("Error saving plot:", fname, "-", conditionMessage(e), "\n")
+      }
+    )
+  } else {
+    tryCatch(
+      create_cs_metrics_plot(eff_data, mod_data, af$title),
+      error = function(e) {
+        cat("Cannot display plot (no X11 display available), but save_plots_to_file is FALSE\n")
+        cat("Set save_plots_to_file = TRUE to save plots to disk instead\n")
+      }
+    )
+  }
 }
 ```
 
