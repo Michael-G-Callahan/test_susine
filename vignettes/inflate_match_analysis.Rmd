@@ -469,8 +469,10 @@ cat("SNPs dataset schema:\n")
 print(snps_ds$schema)
 
 # Prepare run metadata for Arrow join
+# Ensure run_id is integer to match parquet schema
 run_metadata <- run_table_hist %>%
-  dplyr::select(run_id, use_case_id, inflate_match, annotation_r2, p_star)
+  dplyr::select(run_id, use_case_id, inflate_match, annotation_r2, p_star) %>%
+  dplyr::mutate(run_id = as.integer(run_id))
 
 cat("\nRun metadata:", nrow(run_metadata), "runs\n")
 
