@@ -12,6 +12,39 @@ library(dplyr)
 library(tidyr)
 ```
 
+# User Options
+
+```{r user-options}
+# ==== USER OPTIONS ====
+
+# Save plots to files instead of displaying in workbook?
+# Set to TRUE when running on HPC or when you want PNG outputs
+save_plots_to_file <- FALSE
+
+# Output directory for saved plots (relative to workbook location)
+plot_output_dir <- here::here("output", "inflate_match_analysis_plots")
+
+# Create output directory if saving plots
+if (save_plots_to_file) {
+
+  dir.create(plot_output_dir, showWarnings = FALSE, recursive = TRUE)
+  cat("Plots will be saved to:", plot_output_dir, "\n")
+}
+
+# Helper function to save or display a plot
+save_or_show <- function(p, filename, width = 10, height = 7, dpi = 300) {
+  if (save_plots_to_file) {
+    filepath <- file.path(plot_output_dir, filename)
+    ggsave(filepath, p, width = width, height = height, dpi = dpi, bg = "white")
+    cat("Saved:", filename, "\n")
+  } else {
+    print(p)
+  }
+}
+```
+
+---
+
 # Overview
 
 This workbook analyzes the `inflate_match` parameter in `simulate_data.R` to verify it works as intended.
@@ -175,7 +208,7 @@ var_long <- summary_stats %>%
     snp_type = ifelse(snp_type == "causal_var_mean", "Causal", "Non-causal")
   )
 
-ggplot(var_long, aes(x = inflate_match, y = variance, color = snp_type)) +
+p <- ggplot(var_long, aes(x = inflate_match, y = variance, color = snp_type)) +
   geom_line(linewidth = 1) +
   geom_point(size = 2) +
   facet_wrap(~ annotation_r2, labeller = label_both, scales = "free_y") +
@@ -189,12 +222,14 @@ ggplot(var_long, aes(x = inflate_match, y = variance, color = snp_type)) +
   theme_minimal() +
   theme(legend.position = "bottom") +
   geom_vline(xintercept = 1, linetype = "dashed", alpha = 0.5)
+
+save_or_show(p, "01_variance_comparison.png", width = 12, height = 8)
 ```
 
 ## 3.2 Variance Ratio (Non-causal / Causal)
 
 ```{r plot-variance-ratio, fig.width=10, fig.height=6}
-ggplot(summary_stats, aes(x = inflate_match, y = var_ratio_mean, color = factor(annotation_r2))) +
+p <- ggplot(summary_stats, aes(x = inflate_match, y = var_ratio_mean, color = factor(annotation_r2))) +
   geom_line(linewidth = 1) +
   geom_point(size = 2) +
   geom_ribbon(
@@ -213,6 +248,8 @@ ggplot(summary_stats, aes(x = inflate_match, y = var_ratio_mean, color = factor(
   theme_minimal() +
   theme(legend.position = "right") +
   scale_y_continuous(breaks = seq(0, 2, by = 0.25))
+
+save_or_show(p, "02_variance_ratio.png", width = 10, height = 6)
 ```
 
 ## 3.3 Mean Absolute mu_0 Comparison
@@ -229,7 +266,7 @@ abs_long <- summary_stats %>%
     snp_type = ifelse(snp_type == "causal_abs_mean", "Causal", "Non-causal")
   )
 
-ggplot(abs_long, aes(x = inflate_match, y = abs_mean, color = snp_type)) +
+p <- ggplot(abs_long, aes(x = inflate_match, y = abs_mean, color = snp_type)) +
   geom_line(linewidth = 1) +
   geom_point(size = 2) +
   facet_wrap(~ annotation_r2, labeller = label_both) +
@@ -243,6 +280,8 @@ ggplot(abs_long, aes(x = inflate_match, y = abs_mean, color = snp_type)) +
   theme_minimal() +
   theme(legend.position = "bottom") +
   geom_vline(xintercept = 1, linetype = "dashed", alpha = 0.5)
+
+save_or_show(p, "03_abs_mean_comparison.png", width = 12, height = 8)
 ```
 
 ## 3.4 Distribution Overlap at Different inflate_match Levels
@@ -281,7 +320,7 @@ for (inflate in inflate_focus) {
 
 dist_df <- dplyr::bind_rows(dist_data)
 
-ggplot(dist_df, aes(x = mu_0, fill = snp_type)) +
+p <- ggplot(dist_df, aes(x = mu_0, fill = snp_type)) +
   geom_density(alpha = 0.5) +
   facet_wrap(~ inflate_match, labeller = label_both, scales = "free_y") +
   labs(
@@ -293,6 +332,8 @@ ggplot(dist_df, aes(x = mu_0, fill = snp_type)) +
   ) +
   theme_minimal() +
   theme(legend.position = "bottom")
+
+save_or_show(p, "04_distribution_overlap.png", width = 14, height = 10)
 ```
 
 ---
@@ -504,7 +545,7 @@ print(hist_summary, n = 30)
 
 ```{r historical-plot-variance-ratio, fig.width=12, fig.height=8, eval=run_historical_analysis}
 # Plot variance ratio vs inflate_match, faceted by use_case_id
-ggplot(analysis_df, aes(x = factor(inflate_match), y = var_ratio, fill = factor(annotation_r2))) +
+p <- ggplot(analysis_df, aes(x = factor(inflate_match), y = var_ratio, fill = factor(annotation_r2))) +
   geom_boxplot(outlier.size = 0.5, alpha = 0.7) +
   geom_hline(yintercept = 1, linetype = "dashed", color = "red", linewidth = 1) +
   facet_wrap(~ use_case_id, scales = "free_y") +
@@ -518,6 +559,8 @@ ggplot(analysis_df, aes(x = factor(inflate_match), y = var_ratio, fill = factor(
   ) +
   theme_minimal() +
   theme(legend.position = "right")
+
+save_or_show(p, "05_historical_variance_ratio.png", width = 12, height = 8)
 ```
 
 ```{r historical-plot-variance-comparison, fig.width=14, fig.height=8, eval=run_historical_analysis}
@@ -535,7 +578,7 @@ var_comparison <- analysis_df %>%
   )
 
 # Plot actual variance values
-ggplot(var_comparison, aes(x = factor(inflate_match), y = mu_0_var, 
+p <- ggplot(var_comparison, aes(x = factor(inflate_match), y = mu_0_var, 
                            fill = snp_type)) +
   geom_boxplot(outlier.size = 0.5, alpha = 0.7, position = position_dodge(width = 0.8)) +
   facet_grid(use_case_id ~ annotation_r2, scales = "free_y", 
@@ -549,6 +592,8 @@ ggplot(var_comparison, aes(x = factor(inflate_match), y = mu_0_var,
   ) +
   theme_minimal() +
   theme(legend.position = "bottom")
+
+save_or_show(p, "06_historical_variance_comparison.png", width = 14, height = 8)
 ```
 
 ## 5.6 Compare Theoretical vs Historical
