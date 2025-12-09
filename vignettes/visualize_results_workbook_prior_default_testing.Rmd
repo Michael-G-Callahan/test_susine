@@ -718,9 +718,9 @@ models_filtered <- model_metrics %>%
     use_case_id %in% use_case_filter
   )
 
-# Join sigma_0_2_scalar from run_table
+# Join sigma_0_2_scalar and gamma_shrink from run_table
 run_sigma <- run_table %>%
-  dplyr::select(run_id, sigma_0_2_scalar, annotation_r2) %>%
+  dplyr::select(run_id, sigma_0_2_scalar, gamma_shrink, annotation_r2) %>%
   dplyr::distinct()
 
 effects_filtered <- effects_filtered %>%
@@ -733,6 +733,7 @@ cat("Effects after filter:", nrow(effects_filtered), "\n")
 cat("Models after filter:", nrow(models_filtered), "\n")
 cat("p_star values:", paste(sort(unique(effects_filtered$p_star)), collapse = ", "), "\n")
 cat("sigma_0_2_scalar values:", paste(sort(unique(effects_filtered$sigma_0_2_scalar)), collapse = ", "), "\n")
+cat("gamma_shrink values:", paste(sort(unique(na.omit(effects_filtered$gamma_shrink))), collapse = ", "), "\n")
 ```
 
 ```{r cs-metrics-boxplots, fig.width=16, fig.height=12}
