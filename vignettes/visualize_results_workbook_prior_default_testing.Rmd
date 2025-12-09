@@ -187,19 +187,18 @@ colored by use_case × sigma_0_2_scalar combination.
 # sigma_0_2_scalar values to EXCLUDE from plots
 sigma_exclude <- c("1/L", "2/L")
 
-# Define a combined color palette with enough distinct colors
-# 3 use cases × 4 sigma values = 12 combinations
+# Define a combined color palette
+# a_i and b_ii split by sigma_0_2_scalar (4 values each)
+# b_i split by gamma_shrink (2 values: 0.4, 0.8)
 combined_palette <- c(
   # a_i (SuSiE) - blues (darker = smaller sigma)
   "a_i - 0.05"  = "#08306b",
   "a_i - 0.1"   = "#2171b5", 
   "a_i - 0.2"   = "#4292c6",
   "a_i - 0.4"   = "#6baed6",
-  # b_i (SuSiE + functional sigma) - greens (darker = smaller sigma)
-  "b_i - 0.05"  = "#1a5f1f",
-  "b_i - 0.1"   = "#2d7c2d",
-  "b_i - 0.2"   = "#4cb342",
-  "b_i - 0.4"   = "#81c784",
+  # b_i (SuSiE + functional sigma) - greens (split by gamma)
+  "b_i - 0.4"   = "#238b45",  # darker green for smaller gamma
+  "b_i - 0.8"   = "#74c476",  # lighter green for larger gamma
   # b_ii (SuSiNE) - oranges/reds (darker = smaller sigma)
   "b_ii - 0.05" = "#7f2704",
   "b_ii - 0.1"  = "#d94801",
@@ -213,10 +212,8 @@ combined_labels <- c(
   "a_i - 0.1"   = "SuSiE - σ²₀=0.1",
   "a_i - 0.2"   = "SuSiE - σ²₀=0.2",
   "a_i - 0.4"   = "SuSiE - σ²₀=0.4",
-  "b_i - 0.05"  = "SuSiE+FS - σ²₀=0.05",
-  "b_i - 0.1"   = "SuSiE+FS - σ²₀=0.1",
-  "b_i - 0.2"   = "SuSiE+FS - σ²₀=0.2",
-  "b_i - 0.4"   = "SuSiE+FS - σ²₀=0.4",
+  "b_i - 0.4"   = "SuSiE+FS - γ=0.4",
+  "b_i - 0.8"   = "SuSiE+FS - γ=0.8",
   "b_ii - 0.05" = "SuSiNE - σ²₀=0.05",
   "b_ii - 0.1"  = "SuSiNE - σ²₀=0.1",
   "b_ii - 0.2"  = "SuSiNE - σ²₀=0.2",
@@ -224,12 +221,18 @@ combined_labels <- c(
 )
 
 # Helper to add combined color column to data
-# Also filters out excluded sigma levels
+# Filters out excluded sigma levels and creates color key:
+#  - For b_i: use_case_id - gamma_shrink
+#  - For others: use_case_id - sigma_0_2_scalar
 add_combined_color <- function(df) {
   df %>%
     dplyr::filter(!sigma_0_2_scalar %in% sigma_exclude) %>%
     dplyr::mutate(
-      use_sigma = paste(use_case_id, "-", sigma_0_2_scalar)
+      use_sigma = dplyr::if_else(
+        use_case_id == "b_i",
+        paste(use_case_id, "-", gamma_shrink),
+        paste(use_case_id, "-", sigma_0_2_scalar)
+      )
     )
 }
 ```
@@ -248,10 +251,10 @@ cat("sigma_0_2_scalar values:", paste(sort(unique(confusion_filtered$sigma_0_2_s
 ## 2.1 AUPRC Informed - All p_star Combined
 
 ```{r auprc-informed-all, fig.width=14, fig.height=10}
-# Compute AUPRC grouped by all relevant variables
+# Compute AUPRC grouped by all relevant variables (including gamma_shrink for b_i)
 auprc_all <- test_susine::compute_auprc_from_confusion(
   confusion_filtered,
-  group_vars = c("use_case_id", "y_noise", "annotation_r2", "inflate_match", "sigma_0_2_scalar")
+  group_vars = c("use_case_id", "y_noise", "annotation_r2", "inflate_match", "sigma_0_2_scalar", "gamma_shrink")
 )
 
 # For baseline (a_i), expand across all annotation combinations
@@ -315,7 +318,7 @@ if (nrow(auprc_plot_data_faceted) > 0) {
 for (pstar in pstar_values) {
   auprc_pstar <- test_susine::compute_auprc_from_confusion(
     confusion_filtered %>% dplyr::filter(p_star == pstar),
-    group_vars = c("use_case_id", "y_noise", "annotation_r2", "inflate_match", "sigma_0_2_scalar")
+    group_vars = c("use_case_id", "y_noise", "annotation_r2", "inflate_match", "sigma_0_2_scalar", "gamma_shrink")
   )
   
   # Expand baseline
@@ -410,12 +413,9 @@ if (nrow(auprc_inflate_data) > 0) {
     ggplot2::geom_line(linewidth = 0.8) +
     ggplot2::geom_point(size = 2.5) +
     ggplot2::scale_color_manual(values = unlist(inflate_colors), labels = unlist(inflate_labels)) +
-    ggplot2::facet_grid(
-      sigma_0_2_scalar ~ annotation_r2,
-      labeller = ggplot2::labeller(
-        .rows = function(x) paste0("σ²₀=", x),
-        .cols = function(x) paste0("annotation_r2: ", x)
-      )
+    ggplot2::facet_wrap(
+      ~ annotation_r2,
+      labeller = ggplot2::labeller(annotation_r2 = function(x) paste0("annotation_r2: ", x))
     ) +
     ggplot2::labs(
       title = "AUPRC for Informed Models - Colored by inflate_match (All p*)",
@@ -468,12 +468,9 @@ for (pstar in pstar_values) {
       ggplot2::geom_line(linewidth = 0.8) +
       ggplot2::geom_point(size = 2.5) +
       ggplot2::scale_color_manual(values = unlist(inflate_colors), labels = unlist(inflate_labels)) +
-      ggplot2::facet_grid(
-        sigma_0_2_scalar ~ annotation_r2,
-        labeller = ggplot2::labeller(
-          .rows = function(x) paste0("σ²₀=", x),
-          .cols = function(x) paste0("annotation_r2: ", x)
-        )
+      ggplot2::facet_wrap(
+        ~ annotation_r2,
+        labeller = ggplot2::labeller(annotation_r2 = function(x) paste0("annotation_r2: ", x))
       ) +
       ggplot2::labs(
         title = sprintf("AUPRC for Informed Models - Colored by inflate_match (p* = %d)", pstar),
@@ -506,10 +503,10 @@ x_axis_vars <- c("p_star", "L", "y_noise", "annotation_r2", "inflate_match", "si
 ```{r auprc-simple-plots, fig.width=12, fig.height=7}
 for (x_var in x_axis_vars) {
   if (x_var == "sigma_0_2_scalar") {
-    # When sigma is on x-axis, just color by use_case_id
-    group_vars <- c("use_case_id", x_var)
+    # When sigma is on x-axis, just color by use_case_id (but still group by gamma for b_i)
+    group_vars <- c("use_case_id", "gamma_shrink", x_var)
     
-    auprc_simple <- test_susine::compute_auprc_from_confusion(
+    auprc_simple <- test_susie::compute_auprc_from_confusion(
       confusion_filtered,
       group_vars = group_vars
     )
@@ -527,8 +524,8 @@ for (x_var in x_axis_vars) {
       title = sprintf("AUPRC by %s", x_var)
     )
   } else {
-    # For other x-axis vars, use combined use_case × sigma color
-    group_vars <- c("use_case_id", "sigma_0_2_scalar", x_var)
+    # For other x-axis vars, use combined use_case × sigma (or gamma for b_i) color
+    group_vars <- c("use_case_id", "sigma_0_2_scalar", "gamma_shrink", x_var)
     
     auprc_simple <- test_susine::compute_auprc_from_confusion(
       confusion_filtered,
@@ -607,10 +604,10 @@ confusion_fdr <- confusion_detailed %>%
 ## 4.1 Power vs FDR - All Runs (Combined Coloring)
 
 ```{r power-fdr-all, fig.width=14, fig.height=9}
-# Compute curves grouped by use_case × sigma combination
+# Compute curves grouped by use_case × sigma (or gamma for b_i) combination
 curves_all <- test_susine::compute_power_fdr_curves(
   confusion_fdr, 
-  group_vars = c("use_case_id", "sigma_0_2_scalar")
+  group_vars = c("use_case_id", "sigma_0_2_scalar", "gamma_shrink")
 ) %>%
   add_combined_color()
 
@@ -641,7 +638,7 @@ confusion_low <- confusion_fdr %>% dplyr::filter(p_star %in% c(1, 2, 3, 4))
 if (nrow(confusion_low) > 0) {
   curves_low <- test_susine::compute_power_fdr_curves(
     confusion_low, 
-    group_vars = c("use_case_id", "sigma_0_2_scalar")
+    group_vars = c("use_case_id", "sigma_0_2_scalar", "gamma_shrink")
   ) %>%
     add_combined_color()
   
@@ -675,7 +672,7 @@ confusion_high <- confusion_fdr %>% dplyr::filter(p_star %in% c(5, 10, 20))
 if (nrow(confusion_high) > 0) {
   curves_high <- test_susine::compute_power_fdr_curves(
     confusion_high, 
-    group_vars = c("use_case_id", "sigma_0_2_scalar")
+    group_vars = c("use_case_id", "sigma_0_2_scalar", "gamma_shrink")
   ) %>%
     add_combined_color()
   
@@ -893,38 +890,70 @@ for (af in annotation_filters) {
     next
   }
   
-  # Save
+  # Save or display
   fname <- sprintf("cs_metrics_boxplots_%s.png", af$name)
   
   if (save_plots_to_file) {
     filepath <- file.path(plot_dirs$cs_metrics, fname)
-    tryCatch(
-      {
-        # Use cairo backend to avoid X11 requirement
-        grDevices::png(filepath, width = 16 * 100, height = 12 * 100, res = 100, bg = "white", type = "cairo")
-        create_cs_metrics_plot(eff_data, mod_data, af$title)
-        grDevices::dev.off()
-        cat("Saved:", fname, "\n")
-      },
-      error = function(e) {
-        # If cairo fails, try regular png as fallback
-        tryCatch(
-          {
-            grDevices::dev.off()
-          },
-          error = function(e2) {}
-        )
-        cat("Error saving plot:", fname, "-", conditionMessage(e), "\n")
-      }
-    )
+    
+    # Must open device BEFORE calling create_cs_metrics_plot (gridExtra requires active device)
+    plot_saved <- FALSE
+    
+    # Try ragg first (best for HPC)
+    if (requireNamespace("ragg", quietly = TRUE)) {
+      tryCatch(
+        {
+          ragg::agg_png(filepath, width = 16 * 100, height = 12 * 100, res = 100, bg = "white")
+          create_cs_metrics_plot(eff_data, mod_data, af$title)
+          grDevices::dev.off()
+          cat("Saved:", fname, "\n")
+          plot_saved <- TRUE
+        },
+        error = function(e) {
+          tryCatch(grDevices::dev.off(), error = function(e2) {})
+          cat("Error saving with ragg:", conditionMessage(e), "\n")
+        }
+      )
+    }
+    
+    # Try Cairo package if ragg failed or not available
+    if (!plot_saved && requireNamespace("Cairo", quietly = TRUE)) {
+      tryCatch(
+        {
+          Cairo::CairoPNG(filepath, width = 16 * 100, height = 12 * 100, res = 100, bg = "white")
+          create_cs_metrics_plot(eff_data, mod_data, af$title)
+          grDevices::dev.off()
+          cat("Saved:", fname, "\n")
+          plot_saved <- TRUE
+        },
+        error = function(e) {
+          tryCatch(grDevices::dev.off(), error = function(e2) {})
+          cat("Error saving with Cairo:", conditionMessage(e), "\n")
+        }
+      )
+    }
+    
+    # Try png() with cairo type as last resort
+    if (!plot_saved) {
+      tryCatch(
+        {
+          grDevices::png(filepath, width = 16 * 100, height = 12 * 100, res = 100, bg = "white", type = "cairo")
+          create_cs_metrics_plot(eff_data, mod_data, af$title)
+          grDevices::dev.off()
+          cat("Saved:", fname, "\n")
+          plot_saved <- TRUE
+        },
+        error = function(e) {
+          tryCatch(grDevices::dev.off(), error = function(e2) {})
+          cat("Error: Cannot save", fname, "\n")
+          cat("  Reason:", conditionMessage(e), "\n")
+          cat("  Install ragg or Cairo package: install.packages('ragg')\n")
+        }
+      )
+    }
   } else {
-    tryCatch(
-      create_cs_metrics_plot(eff_data, mod_data, af$title),
-      error = function(e) {
-        cat("Cannot display plot (no X11 display available), but save_plots_to_file is FALSE\n")
-        cat("Set save_plots_to_file = TRUE to save plots to disk instead\n")
-      }
-    )
+    # Only try to display if not saving to file
+    create_cs_metrics_plot(eff_data, mod_data, af$title)
   }
 }
 ```
