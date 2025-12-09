@@ -164,14 +164,12 @@ combined_labels <- c(
 )
 
 # Helper to add combined color column to data
-# Also filters out excluded sigma levels and relabels 0.5/L -> 0.05
+# Also filters out excluded sigma levels
 add_combined_color <- function(df) {
   df %>%
     dplyr::filter(!sigma_0_2_scalar %in% sigma_exclude) %>%
     dplyr::mutate(
-      # Relabel 0.5/L to 0.05 (since L=10, 0.5/10 = 0.05)
-      sigma_label = dplyr::if_else(sigma_0_2_scalar == "0.5/L", "0.05", sigma_0_2_scalar),
-      use_sigma = paste(use_case_id, "-", sigma_label)
+      use_sigma = paste(use_case_id, "-", sigma_0_2_scalar)
     )
 }
 ```
