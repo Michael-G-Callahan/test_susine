@@ -275,13 +275,7 @@ if (nrow(auprc_plot_data_faceted) > 0) {
     ggplot2::theme_minimal() +
     ggplot2::theme(legend.position = "right")
   
-  print(p)
-  
-  ggsave(
-    file.path(plot_dirs$auprc_informed, "auprc_informed_all_pstar.png"),
-    p, width = 14, height = 10, dpi = 300, bg = "white"
-  )
-  message("Saved: auprc_informed_all_pstar.png")
+  save_or_show(p, "auprc_informed_all_pstar.png", width = 14, height = 10)
 }
 ```
 
@@ -339,8 +333,7 @@ for (pstar in pstar_values) {
       ggplot2::theme(legend.position = "right")
     
     fname <- sprintf("auprc_informed_pstar_%d.png", pstar)
-    ggsave(file.path(plot_dirs$auprc_informed, fname), p, width = 14, height = 10, dpi = 300, bg = "white")
-    message("Saved: ", fname)
+    save_or_show(p, fname, width = 14, height = 10)
   }
 }
 ```
@@ -444,8 +437,7 @@ for (x_var in x_axis_vars) {
   }
   
   fname <- sprintf("auprc_by_%s.png", x_var)
-  ggsave(file.path(plot_dirs$auprc_simple, fname), p, width = 12, height = 7, dpi = 300, bg = "white")
-  message("Saved: ", fname)
+  save_or_show(p, fname, width = 12, height = 7)
 }
 ```
 
