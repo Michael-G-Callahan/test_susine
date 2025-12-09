@@ -506,7 +506,7 @@ for (x_var in x_axis_vars) {
     # When sigma is on x-axis, just color by use_case_id (but still group by gamma for b_i)
     group_vars <- c("use_case_id", "gamma_shrink", x_var)
     
-    auprc_simple <- test_susie::compute_auprc_from_confusion(
+    auprc_simple <- test_susine::compute_auprc_from_confusion(
       confusion_filtered,
       group_vars = group_vars
     )
