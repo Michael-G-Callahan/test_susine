@@ -49,10 +49,23 @@ if (save_plots_to_file) {
 save_or_show <- function(p, filename, width = 10, height = 7, dpi = 300) {
   if (save_plots_to_file) {
     filepath <- file.path(plot_output_dir, filename)
-    ggsave(filepath, p, width = width, height = height, dpi = dpi, bg = "white")
-    cat("Saved:", filename, "\n")
+    tryCatch(
+      {
+        ggsave(filepath, p, width = width, height = height, dpi = dpi, bg = "white")
+        cat("Saved:", filename, "\n")
+      },
+      error = function(e) {
+        cat("Error saving plot:", filename, "-", conditionMessage(e), "\n")
+      }
+    )
   } else {
-    print(p)
+    tryCatch(
+      print(p),
+      error = function(e) {
+        cat("Cannot display plot (no X11 display available), but save_plots_to_file is FALSE\n")
+        cat("Set save_plots_to_file = TRUE to save plots to disk instead\n")
+      }
+    )
   }
 }
 ```
