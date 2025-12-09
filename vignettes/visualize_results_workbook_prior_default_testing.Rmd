@@ -35,20 +35,10 @@ library(arrow)
 # Set to TRUE when running on HPC or when you want PNG outputs
 save_plots_to_file <- FALSE
 
-# Output directory for saved plots (relative to workbook location)
-plot_output_dir <- here::here("output", "visualization_workbook_plots")
-
-# Create output directory if saving plots
-if (save_plots_to_file) {
-
-  dir.create(plot_output_dir, showWarnings = FALSE, recursive = TRUE)
-  cat("Plots will be saved to:", plot_output_dir, "\n")
-}
-
 # Helper function to save or display a plot
-save_or_show <- function(p, filename, width = 10, height = 7, dpi = 300) {
+save_or_show <- function(p, filename, width = 10, height = 7, dpi = 300, subdir = "auprc_informed") {
   if (save_plots_to_file) {
-    filepath <- file.path(plot_output_dir, filename)
+    filepath <- file.path(plot_dirs[[subdir]], filename)
     tryCatch(
       {
         ggsave(filepath, p, width = width, height = height, dpi = dpi, bg = "white")
@@ -85,7 +75,24 @@ paths <- test_susine::resolve_job_paths(
 )
 ```
 
-## 1.2 Use Case Filter
+## 1.2 Create Plot Directories
+
+```{r create-plot-dirs}
+plot_base_dir <- file.path(paths$aggregated_dir, "plots")
+plot_dirs <- list(
+  auprc_informed = file.path(plot_base_dir, "auprc_informed"),
+  auprc_simple = file.path(plot_base_dir, "auprc_simple"),
+  power_fdr = file.path(plot_base_dir, "power_fdr"),
+  cs_metrics = file.path(plot_base_dir, "cs_metrics")
+)
+
+for (d in plot_dirs) {
+  dir.create(d, showWarnings = FALSE, recursive = TRUE)
+}
+cat("Plot directories created under:", plot_base_dir, "\n")
+```
+
+## 1.3 Use Case Filter
 
 Edit this list to include/exclude use cases from all plots.
 By default, we exclude EB use cases (a_ii, b_iii).
@@ -288,7 +295,7 @@ if (nrow(auprc_plot_data_faceted) > 0) {
     ggplot2::theme_minimal() +
     ggplot2::theme(legend.position = "right")
   
-  save_or_show(p, "auprc_informed_all_pstar.png", width = 14, height = 10)
+  save_or_show(p, "auprc_informed_all_pstar.png", width = 14, height = 10, subdir = "auprc_informed")
 }
 ```
 
@@ -346,7 +353,7 @@ for (pstar in pstar_values) {
       ggplot2::theme(legend.position = "right")
     
     fname <- sprintf("auprc_informed_pstar_%d.png", pstar)
-    save_or_show(p, fname, width = 14, height = 10)
+    save_or_show(p, fname, width = 14, height = 10, subdir = "auprc_informed")
   }
 }
 ```
@@ -450,7 +457,7 @@ for (x_var in x_axis_vars) {
   }
   
   fname <- sprintf("auprc_by_%s.png", x_var)
-  save_or_show(p, fname, width = 12, height = 7)
+  save_or_show(p, fname, width = 12, height = 7, subdir = "auprc_simple")
 }
 ```
 
@@ -490,7 +497,7 @@ p <- ggplot2::ggplot(curves_all,
   ggplot2::theme(legend.position = "right") +
   ggplot2::coord_cartesian(xlim = c(0, 1), ylim = c(0, 1))
 
-save_or_show(p, "power_fdr_all.png", width = 14, height = 9)
+save_or_show(p, "power_fdr_all.png", width = 14, height = 9, subdir = "power_fdr")
 ```
 
 ## 4.2 Power vs FDR - Low p_star (1-4)
@@ -521,7 +528,7 @@ if (nrow(confusion_low) > 0) {
     ggplot2::theme(legend.position = "right") +
     ggplot2::coord_cartesian(xlim = c(0, 1), ylim = c(0, 1))
   
-  save_or_show(p, "power_fdr_pstar_low.png", width = 14, height = 9)
+  save_or_show(p, "power_fdr_pstar_low.png", width = 14, height = 9, subdir = "power_fdr")
 } else {
   message("No data for low p_star values")
 }
@@ -555,7 +562,7 @@ if (nrow(confusion_high) > 0) {
     ggplot2::theme(legend.position = "right") +
     ggplot2::coord_cartesian(xlim = c(0, 1), ylim = c(0, 1))
   
-  save_or_show(p, "power_fdr_pstar_high.png", width = 14, height = 9)
+  save_or_show(p, "power_fdr_pstar_high.png", width = 14, height = 9, subdir = "power_fdr")
 } else {
   message("No data for high p_star values")
 }
@@ -758,7 +765,7 @@ for (af in annotation_filters) {
   
   # Save
   fname <- sprintf("cs_metrics_boxplots_%s.png", af$name)
-  save_or_show(combined, fname, width = 16, height = 12)
+  save_or_show(combined, fname, width = 16, height = 12, subdir = "cs_metrics")
 }
 ```
 
