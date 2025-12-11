@@ -1,4 +1,4 @@
----
+﻿---
 title: "SuSiNE Paper Draft Exhibits"
 output:
   html_document:
@@ -248,7 +248,7 @@ curves_high <- test_susine::compute_power_fdr_curves(
 
 ## 2.2 Power vs FDR - Faceted (All / p* 1-4 / p* 5,10,20)
 
-```{r power-fdr-faceted}
+```{r power-fdr-faceted, fig.width=8, fig.height=12}
 # Build a combined data frame with facet labels
 curves_facets <- list(
   "All p*" = curves_all,
@@ -258,38 +258,255 @@ curves_facets <- list(
 
 curves_facets <- purrr::imap(curves_facets, ~ dplyr::mutate(.x, facet_label = .y)) %>%
   dplyr::bind_rows() %>%
-  dplyr::filter(!is.na(facet_label))
+  dplyr::filter(!is.na(facet_label)) %>%
+  dplyr::mutate(
+    facet_label = factor(facet_label, levels = c("All p*", "p* 1-4", "p* 5,10,20"))
+  )
 
 if (nrow(curves_facets) > 0) {
   p <- ggplot2::ggplot(
     curves_facets,
     ggplot2::aes(x = fdr, y = power, color = use_case_id, group = use_case_id)
   ) +
-    ggplot2::geom_line(linewidth = 0.8) +
-    ggplot2::geom_point(size = 1.5, alpha = 0.6) +
-    ggplot2::facet_wrap(~facet_label, ncol = 3, scales = "free_y") +
-    ggplot2::scale_color_manual(values = use_case_palette, labels = use_case_labels) +
-  ggplot2::labs(
-    title = "Power vs FDR (faceted by p* group)",
-    x = "False discovery rate (1 - precision)",
-    y = "Power (recall)",
-    color = "Use case"
-  ) +
-  ggplot2::theme_minimal() +
-  ggplot2::theme(
-    legend.position = "bottom",
-    legend.title = ggplot2::element_text(size = 12),
-    legend.text = ggplot2::element_text(size = 12),
-    strip.text.x = ggplot2::element_text(size = 13, face = "bold"),
-    axis.title = ggplot2::element_text(size = 13),
-    axis.text = ggplot2::element_text(size = 12),
-    plot.title = ggplot2::element_text(size = 18, face = "bold")
-  ) +
-  ggplot2::coord_cartesian(xlim = c(0, 1))
+    ggplot2::geom_line(linewidth = 1.0) +
+    ggplot2::geom_point(size = 3, alpha = 0.7) +
+    ggplot2::facet_wrap(~facet_label, ncol = 1, scales = "free_y") +
+    ggplot2::scale_color_manual(
+      values = use_case_palette,
+      labels = use_case_labels,
+      name = "Use case"
+    ) +
+    ggplot2::labs(
+      title = "Power vs FDR (faceted by p* group)",
+      x = "False discovery rate (1 - precision)",
+      y = "Power (recall)"
+    ) +
+    ggplot2::guides(
+      color = ggplot2::guide_legend(
+        title.position = "top",
+        title.hjust = 0.5,
+        ncol = 1,
+        byrow = TRUE
+      )
+    ) +
+    ggplot2::theme_minimal(base_size = 14) +
+    ggplot2::theme(
+      legend.position = "bottom",
+      legend.box = "vertical",
+      legend.justification = "center",
+      legend.title = ggplot2::element_text(size = 16, face = "bold"),
+      legend.text = ggplot2::element_text(size = 14),
+      legend.box.margin = ggplot2::margin(t = 10, b = 10, l = 10, r = 10),
+      legend.key.width = ggplot2::unit(1.5, "lines"),
+      strip.text.x = ggplot2::element_text(size = 16, face = "bold"),
+      axis.title.x = ggplot2::element_text(size = 18, margin = ggplot2::margin(t = 10)),
+      axis.title.y = ggplot2::element_text(size = 18),
+      axis.text = ggplot2::element_text(size = 14),
+      plot.title = ggplot2::element_text(size = 16, face = "bold", hjust = 0.5),
+      plot.margin = ggplot2::margin(t = 10, b = 10, l = 10, r = 10)
+    ) +
+    ggplot2::coord_cartesian(xlim = c(0, 1))
 
-save_or_show(p, "power_fdr_faceted.png", width = 12, height = 4, subdir = "power_fdr")
+  save_or_show(p, "power_fdr_faceted.png", width = 8, height = 12, subdir = "power_fdr")
 } else {
   message("No data available for faceted Power/FDR plot")
+}
+```
+
+## 2.3 Power vs FDR - Filtered One-Off (user-controlled)
+
+```{r power-fdr-filtered, fig.width=10, fig.height=7}
+# User-editable filters (NA always included in filtering)
+y_noise_filter <- c(0.6)
+annotation_r2_filter <- c(0.4, NA)
+inflate_match_filter <- c(1, NA)
+sigma_0_2_scalar_filter <- c(0.4, NA)
+gamma_shrink_filter <- c(NA, 0.8)
+pstar_filter <- c(10, NA)
+# Total SNPs per dataset (used for overall annotation R^2 including noncausals)
+p_total <- 1000
+
+include_with_na <- function(x, allowed) {
+  is.na(x) | x %in% allowed
+}
+
+confusion_filtered <- confusion_base %>%
+  dplyr::filter(
+    include_with_na(y_noise, y_noise_filter),
+    include_with_na(annotation_r2, annotation_r2_filter),
+    include_with_na(inflate_match, inflate_match_filter),
+    include_with_na(sigma_0_2_scalar, sigma_0_2_scalar_filter),
+    include_with_na(gamma_shrink, gamma_shrink_filter),
+    include_with_na(p_star, pstar_filter)
+  )
+
+if (nrow(confusion_filtered) > 0) {
+  curves_filtered <- test_susine::compute_power_fdr_curves(
+    confusion_filtered,
+    group_vars = "use_case_id"
+  ) %>%
+    filter_pip_range()
+
+  if (nrow(curves_filtered) > 0) {
+    line_meta <- confusion_filtered %>%
+      dplyr::group_by(use_case_id) %>%
+      dplyr::summarise(
+        n_runs = {
+          nr <- n_runs
+          if (all(is.na(nr))) NA_real_ else suppressWarnings(max(nr, na.rm = TRUE))
+        },
+        theoretical_prior_r2_vals = list(sort(unique(annotation_r2[!is.na(annotation_r2)]))),
+        .groups = "drop"
+      ) %>%
+      dplyr::mutate(
+        theoretical_prior_r2_label = purrr::map_chr(
+          theoretical_prior_r2_vals,
+          ~ if (length(.x) == 0) "NA" else paste(.x, collapse = ", ")
+        ),
+        n_runs_label = dplyr::if_else(is.na(n_runs) | is.infinite(n_runs), "NA", as.character(n_runs)),
+        label = paste0(
+          use_case_labels[use_case_id],
+          " (runs=", n_runs_label,
+          "; theoretical prior R^2=", theoretical_prior_r2_label,
+          ")"
+        )
+      )
+
+    if (nrow(line_meta) > 0) {
+      cat("Line metadata (runs and theoretical causal annotation R^2 targets):\n")
+      print(line_meta %>% dplyr::select(use_case_id, label, n_runs, theoretical_prior_r2_label))
+    }
+
+    # Theoretical overall prior annotation R^2 including noncausal SNPs:
+    # Causal mu0 variance = causal_var / annotation_r2 (from noise construction)
+    # Noncausal mu0 variance = causal_var * ((1 - annotation_r2) / annotation_r2 + inflate_match)
+    # overall_r2 = pi / (pi / annotation_r2 + (1 - pi) * ((1 - annotation_r2) / annotation_r2 + inflate_match))
+    # where pi = p_star / p_total
+    ann_vals <- sort(unique(confusion_filtered$annotation_r2[!is.na(confusion_filtered$annotation_r2)]))
+    inflate_vals <- sort(unique(confusion_filtered$inflate_match[!is.na(confusion_filtered$inflate_match)]))
+    pstar_vals <- sort(unique(confusion_filtered$p_star[!is.na(confusion_filtered$p_star)]))
+
+    if (length(ann_vals) == 1 && length(inflate_vals) == 1 && length(pstar_vals) == 1 && p_total > 0) {
+      pi <- pstar_vals / p_total
+      overall_r2 <- pi / (pi / ann_vals + (1 - pi) * ((1 - ann_vals) / ann_vals + inflate_vals))
+      cat(sprintf("Theoretical overall prior annotation R^2 (including noncausal SNPs) approx %.6f\n", overall_r2))
+    } else {
+      cat("Cannot compute single overall prior annotation R^2 (multiple/NA annotation_r2, inflate_match, or p* values present).\n")
+    }
+
+    label_lookup <- rlang::set_names(line_meta$label, line_meta$use_case_id)
+
+    # Compare methods at target FDR and matched power
+    target_fdr <- 0.5
+    power_at_target <- curves_filtered %>%
+      dplyr::group_by(use_case_id) %>%
+      dplyr::summarise(
+        power = {
+          df <- dplyr::arrange(dplyr::distinct(cur_data_all(), fdr, power), fdr)
+          stats::approx(df$fdr, df$power, xout = target_fdr, ties = "ordered", rule = 2)$y
+        },
+        .groups = "drop"
+      )
+
+    if (nrow(power_at_target) == nrow(line_meta) && all(is.finite(power_at_target$power))) {
+      best <- power_at_target %>%
+        dplyr::arrange(dplyr::desc(power)) %>%
+        dplyr::mutate(rank = dplyr::row_number())
+      best_power <- best$power[1]
+
+      fdr_at_best_power <- curves_filtered %>%
+        dplyr::group_by(use_case_id) %>%
+        dplyr::summarise(
+          fdr_at_power = {
+            df <- dplyr::arrange(dplyr::distinct(cur_data_all(), power, fdr), power)
+            stats::approx(df$power, df$fdr, xout = best_power, ties = "ordered", rule = 2)$y
+          },
+          .groups = "drop"
+        )
+
+      ranking <- best %>%
+        dplyr::left_join(line_meta, by = "use_case_id") %>%
+        dplyr::left_join(fdr_at_best_power, by = "use_case_id")
+
+      cat(sprintf("The best method at FDR = %.2f is: %s, with power of: %.4f\n",
+                  target_fdr,
+                  ranking$label[ranking$rank == 1],
+                  best_power))
+
+      if (nrow(ranking) >= 2) {
+        cat(sprintf("At power %.4f the FDR of the second best method, %s, is %.4f\n",
+                    best_power,
+                    ranking$label[ranking$rank == 2],
+                    ranking$fdr_at_power[ranking$rank == 2]))
+      }
+      if (nrow(ranking) >= 3) {
+        cat(sprintf("At power %.4f the FDR of the third best method, %s, is %.4f\n",
+                    best_power,
+                    ranking$label[ranking$rank == 3],
+                    ranking$fdr_at_power[ranking$rank == 3]))
+      }
+
+      if (length(pstar_vals) == 1) {
+        for (i in seq_len(nrow(ranking))) {
+          tp <- best_power * pstar_vals
+          fp <- ranking$fdr_at_power[i] / (1 - ranking$fdr_at_power[i]) * tp
+          cat(sprintf(
+            "At p* = %s, and n_runs = %s per line, we would expect that using %s would have resulted in ~%.2f causal SNPs selected and ~%.2f noncausal SNPs selected.\n",
+            pstar_vals,
+            ranking$n_runs[i],
+            ranking$label[i],
+            tp,
+            fp
+          ))
+        }
+      }
+    }
+
+    p <- ggplot2::ggplot(
+      curves_filtered,
+      ggplot2::aes(x = fdr, y = power, color = use_case_id, group = use_case_id)
+    ) +
+      ggplot2::geom_line(linewidth = 1.0) +
+      ggplot2::geom_point(size = 3, alpha = 0.7) +
+      ggplot2::scale_color_manual(
+        values = use_case_palette,
+        labels = label_lookup,
+        breaks = names(label_lookup),
+        name = "Use case"
+      ) +
+      ggplot2::labs(
+        title = "Power vs FDR (filtered one-off)",
+        x = "False discovery rate (1 - precision)",
+        y = "Power (recall)"
+      ) +
+      ggplot2::guides(
+        color = ggplot2::guide_legend(
+          title.position = "top",
+          title.hjust = 0.5,
+          ncol = 1
+        )
+      ) +
+      ggplot2::theme_minimal(base_size = 14) +
+      ggplot2::theme(
+        legend.position = "bottom",
+        legend.box = "vertical",
+        legend.title = ggplot2::element_text(size = 16, face = "bold"),
+        legend.text = ggplot2::element_text(size = 14),
+        strip.text.x = ggplot2::element_text(size = 16, face = "bold"),
+        axis.title.x = ggplot2::element_text(size = 18, margin = ggplot2::margin(t = 10)),
+        axis.title.y = ggplot2::element_text(size = 18),
+        axis.text = ggplot2::element_text(size = 14),
+        plot.title = ggplot2::element_text(size = 16, face = "bold", hjust = 0.5),
+        plot.margin = ggplot2::margin(t = 10, b = 10, l = 10, r = 10)
+      ) +
+      ggplot2::coord_cartesian(xlim = c(0, 1), ylim = power_limits(curves_filtered))
+
+    save_or_show(p, "power_fdr_filtered_oneoff.png", width = 10, height = 7, subdir = "power_fdr")
+  } else {
+    message("No power/FDR curves after applying filters")
+  }
+} else {
+  message("No data after applying filters for one-off Power/FDR plot")
 }
 ```
 
@@ -494,6 +711,16 @@ if (nrow(auprc_ann_pstar) > 0) {
   message("No data for annotation_r2 by p_star band plot")
 }
 ```
+
+
+
+
+
+
+
+
+
+
 
 
 
