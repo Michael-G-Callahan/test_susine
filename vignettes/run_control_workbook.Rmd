@@ -93,6 +93,8 @@ job_inputs <- list(
   annotation_r2 = c(0.2, 0.4, 0.6, 0.8),
   inflate_match = c(0.5, 1, 1.5),
   gamma_shrink = c(0.4, 0.8),
+  # Scalar multipliers for functional prior means (mu_0)
+  annotation_scale = c(1),
   
   # sigma_0_2 prior variance scalars to test (only for naive sigma use cases)
   # Formats: "X" = X * var(y), "X/L" = X/L * var(y)
@@ -183,7 +185,8 @@ job_config <- make_job_config(
   write_legacy_snp_csv = job_inputs$write_legacy_snp_csv,
   grid_mode = job_inputs$grid_mode,
   pair_L_p_star = job_inputs$pair_L_p_star,
-  sigma_0_2_scalars = job_inputs$sigma_0_2_scalars
+  sigma_0_2_scalars = job_inputs$sigma_0_2_scalars,
+  annotation_scales = job_inputs$annotation_scale
 )
 ```
 

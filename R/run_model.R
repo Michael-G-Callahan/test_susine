@@ -266,7 +266,18 @@ run_use_case <- function(use_case, run_row, data_bundle, job_config) {
   mu_strategy <- use_case$mu_strategy[[1]]
   sigma_strategy <- use_case$sigma_strategy[[1]]
 
+  annotation_scale <- NA_real_
+  if ("annotation_scale" %in% names(run_row)) {
+    annotation_scale <- suppressWarnings(as.numeric(run_row$annotation_scale))
+  }
   mu_0 <- if (mu_strategy %in% c("functional", "eb_mu")) data_bundle$mu_0 else 0
+  if (mu_strategy == "functional") {
+    scale_val <- annotation_scale
+    if (is.null(scale_val) || length(scale_val) == 0 || is.na(scale_val) || !is.finite(scale_val)) {
+      scale_val <- 1
+    }
+    mu_0 <- mu_0 * scale_val
+  }
   
   # Determine sigma_0_2 based on strategy and optional scalar override
   if (sigma_strategy %in% c("functional", "eb_sigma")) {

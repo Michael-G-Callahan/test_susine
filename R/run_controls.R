@@ -474,6 +474,10 @@ assign_task_ids <- function(runs,
 #'   - Numeric values (e.g., 0.1, 0.2, 0.4): multiplier of var(y)
 #'   - Strings with /L suffix (e.g., "1/L", "0.5/L", "2/L"): multiplier/L of var(y)
 #'   When NULL (default), uses susine's internal default (1/L * var_y).
+#' @param annotation_scales Numeric vector of multipliers applied to functional
+#'   prior means (`mu_0`). Only use cases with `mu_strategy == "functional"`
+#'   receive these values; all other runs are assigned `NA`. When NULL or empty,
+#'   defaults to a single value of 1 (no scaling).
 #' @param anneal_settings Named list for tempering runs.
 #' @param model_average_settings Named list for model averaging runs.
 #' @param pair_L_p_star Logical; when TRUE, the full grid pairs `L` and `p_star` values 1-1
@@ -506,6 +510,7 @@ make_job_config <- function(job_name,
                             grid_mode = c("full", "minimal"),
                             pair_L_p_star = FALSE,
                             sigma_0_2_scalars = NULL,
+                            annotation_scales = NULL,
                             anneal_settings = list(
                               anneal_start_T = 5,
                               anneal_schedule_type = "geometric",
@@ -540,10 +545,36 @@ make_job_config <- function(job_name,
     data_matrix_catalog = data_matrix_catalog
   )
 
+  use_cases <- tables$use_cases
+
+  # Expand annotation scales across runs that use functional prior means
+  functional_mu_ids <- use_cases$use_case_id[use_cases$mu_strategy == "functional"]
+  scale_values <- annotation_scales
+  if (is.null(scale_values) || length(scale_values) == 0) {
+    scale_values <- 1
+  }
+  scale_values <- as.numeric(scale_values)
+
+  runs_functional <- tables$runs %>%
+    dplyr::filter(.data$use_case_id %in% functional_mu_ids)
+  runs_non_functional <- tables$runs %>%
+    dplyr::filter(!(.data$use_case_id %in% functional_mu_ids)) %>%
+    dplyr::mutate(annotation_scale = NA_real_)
+
+  if (nrow(runs_functional) > 0) {
+    runs_functional <- runs_functional %>%
+      tidyr::crossing(annotation_scale = scale_values)
+  } else {
+    runs_functional <- dplyr::mutate(runs_functional, annotation_scale = numeric(0))
+  }
+
+  tables$runs <- dplyr::bind_rows(runs_functional, runs_non_functional) %>%
+    dplyr::arrange(.data$scenario_id, .data$use_case_id, .data$seed, .data$annotation_scale) %>%
+    dplyr::mutate(run_id = dplyr::row_number())
+
   # Expand sigma_0_2_scalars across runs with naive sigma strategy
   # Only applies to use cases with sigma_strategy == "naive"
   if (!is.null(sigma_0_2_scalars) && length(sigma_0_2_scalars) > 0) {
-    use_cases <- tables$use_cases
     naive_sigma_ids <- use_cases$use_case_id[use_cases$sigma_strategy == "naive"]
     
     # Split runs into those that need expansion and those that don't
@@ -559,7 +590,13 @@ make_job_config <- function(job_name,
         tidyr::crossing(sigma_0_2_scalar = as.character(sigma_0_2_scalars))
       
       tables$runs <- dplyr::bind_rows(runs_expanded, runs_no_expand) %>%
-        dplyr::arrange(.data$scenario_id, .data$use_case_id, .data$seed, .data$sigma_0_2_scalar) %>%
+        dplyr::arrange(
+          .data$scenario_id,
+          .data$use_case_id,
+          .data$seed,
+          .data$annotation_scale,
+          .data$sigma_0_2_scalar
+        ) %>%
         dplyr::mutate(run_id = dplyr::row_number())
     } else {
       tables$runs <- runs_no_expand
@@ -788,6 +825,7 @@ summarise_job_config <- function(job_config) {
       "annotation_r2",
       "inflate_match",
       "gamma_shrink",
+      "annotation_scale",
       "sigma_0_2_scalar"
     ),
     names(runs)
