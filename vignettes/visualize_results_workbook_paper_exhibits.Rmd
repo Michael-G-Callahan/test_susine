@@ -1,0 +1,502 @@
+---
+title: "SuSiNE Paper Draft Exhibits"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+# Section 1: Setup
+
+```{r setup, message=FALSE, warning=FALSE}
+here::i_am("vignettes/visualize_results_workbook_paper_exhibits.Rmd")
+library(here)
+library(devtools)
+devtools::load_all(".")
+
+library(dplyr)
+library(tidyr)
+library(readr)
+library(ggplot2)
+library(arrow)
+```
+
+## 1.1 User Options
+
+```{r user-options}
+# Save plots to files instead of displaying in workbook?
+# Set to TRUE when running on HPC or when you want PNG outputs
+save_plots_to_file <- TRUE
+
+# Show plots in the RStudio "Plots" pane while running interactively (not during render)
+show_in_rstudio_plots <- TRUE
+
+# Configure knitr devices: during render use png, during interactive use RStudioGD
+if (isTRUE(getOption("knitr.in.progress"))) {
+  knitr::opts_chunk$set(fig.ext = "png")
+} else if (show_in_rstudio_plots && interactive()) {
+  knitr::opts_chunk$set(fig.show = "hide", dev = "RStudioGD", fig.ext = "png")
+} else {
+  knitr::opts_chunk$set(fig.ext = "png")
+}
+
+# Best-effort helper to send plots to the Plots pane
+maybe_show_plot <- function(p) {
+  if (show_in_rstudio_plots && interactive()) {
+    try(print(p), silent = TRUE)
+  }
+}
+
+# Helper function to save or display a plot
+save_or_show <- function(p, filename, width = 12, height = 8, dpi = 300, subdir = "power_fdr") {
+  maybe_show_plot(p)
+  if (save_plots_to_file) {
+    filepath <- file.path(plot_dirs[[subdir]], filename)
+    tryCatch(
+      {
+        ggsave(filepath, p, width = width, height = height, dpi = dpi, bg = "white")
+        cat("Saved:", filename, "\n")
+      },
+      error = function(e) {
+        cat("Error saving plot:", filename, "-", conditionMessage(e), "\n")
+      }
+    )
+  } else {
+    tryCatch(
+      print(p),
+      error = function(e) {
+        cat("Cannot display plot (no X11 display available), but save_plots_to_file is FALSE\n")
+        cat("Set save_plots_to_file = TRUE to save plots to disk instead\n")
+      }
+    )
+  }
+}
+```
+
+## 1.2 Job Configuration
+
+```{r job-config}
+job_name <- "prior_default_testing"
+parent_job_id <- "47128217"
+output_root <- here("output")
+
+# Resolve paths
+paths <- test_susine::resolve_job_paths(
+  job_name = job_name,
+  parent_job_id = parent_job_id,
+  output_root = output_root
+)
+```
+
+## 1.3 Plot Directories
+
+```{r create-plot-dirs}
+plot_base_dir <- file.path(paths$aggregated_dir, "plots_paper")
+plot_dirs <- list(
+  power_fdr = file.path(plot_base_dir, "power_fdr"),
+  auprc_simple = file.path(plot_base_dir, "auprc_simple"),
+  auprc_new = file.path(plot_base_dir, "auprc_new")
+)
+
+for (d in plot_dirs) {
+  dir.create(d, showWarnings = FALSE, recursive = TRUE)
+}
+cat("Plot directories created under:", plot_base_dir, "\n")
+```
+
+## 1.4 Use Case Filter
+
+```{r use-case-filter}
+# Use cases to include in plots (edit as needed)
+use_case_filter <- c("a_i", "b_i", "b_ii")
+
+# Get labels from catalog (will work even if filter changes)
+use_case_labels <- test_susine::get_use_case_labels(use_case_filter)
+print(use_case_labels)
+```
+
+## 1.5 Load Data
+
+```{r load-data, message=FALSE}
+# Confusion matrix (detailed)
+confusion_detailed_path <- file.path(paths$aggregated_dir, "confusion_matrix_detailed.csv")
+if (!file.exists(confusion_detailed_path)) {
+  stop("Confusion matrix not found. Run collect_results_workbook.Rmd first.")
+}
+confusion_detailed <- readr::read_csv(confusion_detailed_path, show_col_types = FALSE)
+
+cat("Loaded confusion matrix:", nrow(confusion_detailed), "rows\n")
+```
+
+## 1.6 Shared Palettes and Helpers
+
+```{r palettes}
+confusion_base <- confusion_detailed %>%
+  dplyr::filter(use_case_id %in% use_case_filter)
+
+# sigma_0_2_scalar values to exclude from colored plots
+sigma_exclude <- c("1/L", "2/L")
+
+# Combined palette for use_case_id + sigma/gamma splits (used for annotation_r2 plot)
+combined_palette <- c(
+  # a_i (SuSiE) - blues (darker = smaller sigma)
+  "a_i - 0.05"  = "#08306b",
+  "a_i - 0.1"   = "#2171b5",
+  "a_i - 0.2"   = "#4292c6",
+  "a_i - 0.4"   = "#6baed6",
+  # b_i (SuSiE + functional sigma) - greens (split by gamma)
+  "b_i - 0.4"   = "#238b45",
+  "b_i - 0.8"   = "#74c476",
+  # b_ii (SuSiNE) - oranges/reds (darker = smaller sigma)
+  "b_ii - 0.05" = "#7f2704",
+  "b_ii - 0.1"  = "#d94801",
+  "b_ii - 0.2"  = "#f16913",
+  "b_ii - 0.4"  = "#fd8d3c"
+)
+
+combined_labels <- c(
+  "a_i - 0.05"  = "SuSiE - sigma=0.05",
+  "a_i - 0.1"   = "SuSiE - sigma=0.1",
+  "a_i - 0.2"   = "SuSiE - sigma=0.2",
+  "a_i - 0.4"   = "SuSiE - sigma=0.4",
+  "b_i - 0.4"   = "SuSiE+FS - gamma=0.4",
+  "b_i - 0.8"   = "SuSiE+FS - gamma=0.8",
+  "b_ii - 0.05" = "SuSiNE - sigma=0.05",
+  "b_ii - 0.1"  = "SuSiNE - sigma=0.1",
+  "b_ii - 0.2"  = "SuSiNE - sigma=0.2",
+  "b_ii - 0.4"  = "SuSiNE - sigma=0.4"
+)
+
+# Palette for collapsed plots (use_case only)
+use_case_palette <- c(
+  "a_i" = "#08306b",
+  "b_i" = "#238b45",
+  "b_ii" = "#7f2704"
+)
+
+# Helper to add combined color column to data
+# Filters out excluded sigma levels and creates color key:
+#  - For b_i: use_case_id - gamma_shrink
+#  - For others: use_case_id - sigma_0_2_scalar
+add_combined_color <- function(df) {
+  df %>%
+    dplyr::filter(!sigma_0_2_scalar %in% sigma_exclude) %>%
+    dplyr::mutate(
+      use_sigma = dplyr::if_else(
+        use_case_id == "b_i",
+        paste(use_case_id, "-", gamma_shrink),
+        paste(use_case_id, "-", sigma_0_2_scalar)
+      )
+    )
+}
+```
+
+---
+
+# Section 2: Power vs FDR (Paper Focused)
+
+Collapse lines to one per use_case_id and zoom to the 0.05-0.95 PIP
+threshold range.
+
+```{r power-fdr-prep}
+pip_zoom_range <- c(0.05, 0.95)
+# Helper to trim curves after they are computed, so cumulative TP/FP stay monotone
+filter_pip_range <- function(curves) {
+  curves %>%
+    dplyr::filter(
+      pip_threshold >= pip_zoom_range[1],
+      pip_threshold <= pip_zoom_range[2]
+    )
+}
+
+# Helper to set y-axis limits to observed power range (with small padding)
+power_limits <- function(curves, pad = 0.02) {
+  if (nrow(curves) == 0 || all(is.na(curves$power))) return(c(0, 1))
+  y_min <- max(0, min(curves$power, na.rm = TRUE) - pad)
+  y_max <- min(1, max(curves$power, na.rm = TRUE) + pad)
+  c(y_min, y_max)
+}
+```
+
+## 2.1 Power vs FDR - Data Prep (All / Low / High p*)
+
+```{r power-fdr-data}
+curves_all <- test_susine::compute_power_fdr_curves(
+  confusion_base,
+  group_vars = "use_case_id"
+) %>%
+  filter_pip_range()
+
+confusion_low <- confusion_base %>% dplyr::filter(p_star %in% c(1, 2, 3, 4))
+curves_low <- test_susine::compute_power_fdr_curves(
+  confusion_low,
+  group_vars = "use_case_id"
+) %>%
+  filter_pip_range()
+
+confusion_high <- confusion_base %>% dplyr::filter(p_star %in% c(5, 10, 20))
+curves_high <- test_susine::compute_power_fdr_curves(
+  confusion_high,
+  group_vars = "use_case_id"
+) %>%
+  filter_pip_range()
+```
+
+## 2.2 Power vs FDR - Faceted (All / p* 1-4 / p* 5,10,20)
+
+```{r power-fdr-faceted}
+# Build a combined data frame with facet labels
+curves_facets <- list(
+  "All p*" = curves_all,
+  "p* 1-4" = curves_low,
+  "p* 5,10,20" = curves_high
+)
+
+curves_facets <- purrr::imap(curves_facets, ~ dplyr::mutate(.x, facet_label = .y)) %>%
+  dplyr::bind_rows() %>%
+  dplyr::filter(!is.na(facet_label))
+
+if (nrow(curves_facets) > 0) {
+  p <- ggplot2::ggplot(
+    curves_facets,
+    ggplot2::aes(x = fdr, y = power, color = use_case_id, group = use_case_id)
+  ) +
+    ggplot2::geom_line(linewidth = 0.8) +
+    ggplot2::geom_point(size = 1.5, alpha = 0.6) +
+    ggplot2::facet_wrap(~facet_label, ncol = 3, scales = "free_y") +
+    ggplot2::scale_color_manual(values = use_case_palette, labels = use_case_labels) +
+  ggplot2::labs(
+    title = "Power vs FDR (faceted by p* group)",
+    x = "False discovery rate (1 - precision)",
+    y = "Power (recall)",
+    color = "Use case"
+  ) +
+  ggplot2::theme_minimal() +
+  ggplot2::theme(
+    legend.position = "bottom",
+    legend.title = ggplot2::element_text(size = 12),
+    legend.text = ggplot2::element_text(size = 12),
+    strip.text.x = ggplot2::element_text(size = 13, face = "bold"),
+    axis.title = ggplot2::element_text(size = 13),
+    axis.text = ggplot2::element_text(size = 12),
+    plot.title = ggplot2::element_text(size = 18, face = "bold")
+  ) +
+  ggplot2::coord_cartesian(xlim = c(0, 1))
+
+save_or_show(p, "power_fdr_faceted.png", width = 12, height = 4, subdir = "power_fdr")
+} else {
+  message("No data available for faceted Power/FDR plot")
+}
+```
+
+---
+
+# Section 3: AUPRC Simple Exhibits
+
+## 3.1 AUPRC by Inflation Match and p* (faceted, collapsed)
+
+```{r auprc-simple-faceted, fig.width=14, fig.height=6}
+# Helper to prepare facet data with optional dashed baselines for NA x values
+prep_facet <- function(df, x_var, facet_label) {
+  with_x <- df %>%
+    dplyr::filter(!is.na(.data[[x_var]])) %>%
+    dplyr::mutate(facet_label = facet_label, x = .data[[x_var]])
+  
+  x_range <- range(with_x$x, na.rm = TRUE)
+  hlines <- df %>%
+    dplyr::filter(is.na(.data[[x_var]])) %>%
+    dplyr::mutate(
+      facet_label = facet_label,
+      x_start = x_range[1],
+      x_end = x_range[2]
+    )
+  
+  list(with_x = with_x, hlines = hlines)
+}
+
+auprc_inflate_simple <- test_susine::compute_auprc_from_confusion(
+  confusion_base,
+  group_vars = c("use_case_id", "inflate_match")
+)
+
+auprc_pstar_simple <- test_susine::compute_auprc_from_confusion(
+  confusion_base,
+  group_vars = c("use_case_id", "p_star")
+)
+
+facets <- list(
+  prep_facet(auprc_inflate_simple, "inflate_match", "Inflation match factor"),
+  prep_facet(auprc_pstar_simple, "p_star", "Expected signals per locus (p*)")
+)
+
+auprc_with_x_all <- purrr::map_dfr(facets, "with_x")
+auprc_hlines_all <- purrr::map_dfr(facets, "hlines")
+
+if (nrow(auprc_with_x_all) > 0) {
+  p <- ggplot2::ggplot(
+    auprc_with_x_all,
+    ggplot2::aes(x = x, y = AUPRC, color = use_case_id, group = use_case_id)
+  ) +
+    ggplot2::geom_line(linewidth = 0.9) +
+    ggplot2::geom_point(size = 2.5) +
+    ggplot2::facet_wrap(~facet_label, ncol = 2, scales = "free") +
+    ggplot2::scale_color_manual(values = use_case_palette, labels = use_case_labels) +
+    ggplot2::labs(
+      title = "AUPRC across alignment and signal burden",
+      x = NULL,
+      y = "AUPRC",
+      color = "Use case"
+    ) +
+    ggplot2::theme_minimal() +
+    ggplot2::theme(
+      legend.position = "bottom",
+      legend.title = ggplot2::element_text(size = 12),
+      legend.text = ggplot2::element_text(size = 12),
+      strip.text.x = ggplot2::element_text(size = 13, face = "bold"),
+      axis.title = ggplot2::element_text(size = 13),
+      axis.text = ggplot2::element_text(size = 12),
+      plot.title = ggplot2::element_text(size = 18, face = "bold")
+    )
+  
+  if (nrow(auprc_hlines_all) > 0) {
+    p <- p + ggplot2::geom_segment(
+      data = auprc_hlines_all,
+      ggplot2::aes(x = x_start, xend = x_end, y = AUPRC, yend = AUPRC, color = use_case_id),
+      linewidth = 0.9,
+      linetype = "dashed"
+    )
+  }
+  
+  save_or_show(p, "auprc_simple_faceted.png", width = 14, height = 6, subdir = "auprc_simple")
+} else {
+  message("No data for AUPRC simple facets")
+}
+```
+
+---
+
+# Section 4: AUPRC by annotation_r2 with p_star Facets
+
+```{r auprc-annotation-pstar-faceted, fig.width=8, fig.height=12}
+# Compute AUPRC separately for each p* group, then combine (like Power/FDR plot)
+group_vars <- c("use_case_id", "annotation_r2", "sigma_0_2_scalar", "gamma_shrink")
+
+# All p*
+auprc_all <- test_susine::compute_auprc_from_confusion(
+  confusion_base,
+  group_vars = group_vars
+) %>%
+  dplyr::mutate(pstar_band = "All p*")
+
+# Low p* (1-4)
+confusion_low_ann <- confusion_base %>% dplyr::filter(p_star %in% c(1, 2, 3, 4))
+auprc_low <- test_susine::compute_auprc_from_confusion(
+ confusion_low_ann,
+  group_vars = group_vars
+) %>%
+  dplyr::mutate(pstar_band = "p* 1-4")
+
+# High p* (5, 10, 20)
+confusion_high_ann <- confusion_base %>% dplyr::filter(p_star %in% c(5, 10, 20))
+auprc_high <- test_susine::compute_auprc_from_confusion(
+  confusion_high_ann,
+  group_vars = group_vars
+) %>%
+  dplyr::mutate(pstar_band = "p* 5-20")
+
+# Combine all three
+auprc_ann_pstar <- dplyr::bind_rows(auprc_all, auprc_low, auprc_high)
+
+if (nrow(auprc_ann_pstar) > 0) {
+  pstar_levels <- c("All p*", "p* 1-4", "p* 5-20")
+  
+  # Separate a_i (with NAs) from others (with annotation_r2 values)
+  ai_data <- auprc_ann_pstar %>%
+    dplyr::filter(use_case_id == "a_i") %>%
+    dplyr::mutate(
+      pstar_band = factor(pstar_band, levels = pstar_levels),
+      line_group = paste0(use_case_id, " - ", sigma_0_2_scalar)
+    )
+  
+  other_data <- auprc_ann_pstar %>%
+    dplyr::filter(use_case_id != "a_i") %>%
+    dplyr::filter(!is.na(annotation_r2)) %>%
+    dplyr::mutate(
+      pstar_band = factor(pstar_band, levels = pstar_levels),
+      line_group = dplyr::if_else(
+        use_case_id == "b_i",
+        paste0(use_case_id, " - ", gamma_shrink),
+        paste0(use_case_id, " - ", sigma_0_2_scalar)
+      )
+    )
+  
+  # Create the plot
+  p <- ggplot2::ggplot() +
+    # Lines for non-a_i use cases
+    ggplot2::geom_line(
+      data = other_data,
+      ggplot2::aes(x = annotation_r2, y = AUPRC, color = line_group, group = line_group),
+      linewidth = 1.0,
+      linetype = "solid"
+    ) +
+    ggplot2::geom_point(
+      data = other_data,
+      ggplot2::aes(x = annotation_r2, y = AUPRC, color = line_group),
+      size = 3
+    ) +
+    # Dashed horizontal lines for a_i (NA values)
+    ggplot2::geom_segment(
+      data = ai_data,
+      ggplot2::aes(x = -Inf, xend = Inf, y = AUPRC, yend = AUPRC, color = line_group),
+      linewidth = 1.0,
+      linetype = "dashed"
+    ) +
+    ggplot2::facet_wrap(~pstar_band, ncol = 1, scales = "free_y") +
+    ggplot2::scale_color_manual(
+      values = combined_palette,
+      labels = combined_labels,
+      name = "Method"
+    ) +
+    ggplot2::labs(
+      title = "AUPRC by Annotation Quality, faceted by p* group",
+      x = "Annotation Quality (causal R^2)",
+      y = "AUPRC"
+    ) +
+    ggplot2::guides(
+      color = ggplot2::guide_legend(
+        title.position = "top",
+        title.hjust = 0.5,
+        ncol = 3,
+        byrow = FALSE
+      )
+    ) +
+    ggplot2::theme_minimal(base_size = 14) +
+    ggplot2::theme(
+      legend.position = "bottom",
+      legend.title = ggplot2::element_text(size = 16, face = "bold"),
+      legend.text = ggplot2::element_text(size = 14),
+      legend.box.margin = ggplot2::margin(t = 10, b = 10, l = 0, r = 0),
+      legend.key.width = ggplot2::unit(1.5, "lines"),
+      strip.text.x = ggplot2::element_text(size = 16, face = "bold"),
+      axis.title.x = ggplot2::element_text(size = 18, margin = ggplot2::margin(t = 10)),
+      axis.title.y = ggplot2::element_text(size = 18),
+      axis.text = ggplot2::element_text(size = 14),
+      plot.title = ggplot2::element_text(size = 16, face = "bold", hjust = 0.5),
+      plot.margin = ggplot2::margin(t = 10, b = 10, l = 10, r = 10)
+    )
+  
+  save_or_show(p, "auprc_annotation_r2_by_pstar_band.png", width = 8, height = 12, subdir = "auprc_new")
+} else {
+  message("No data for annotation_r2 by p_star band plot")
+}
+```
+
+
+
+
+
+
