@@ -118,6 +118,7 @@ validate_staging_outputs <- function(file_index) {
 #' @param output_root Root directory for outputs.
 #' @param validate When TRUE, read each staging file first and fail fast on errors.
 #' @param output_dir Optional destination; defaults to `combined/aggregated`.
+#' @param write_snps_dataset When FALSE, skip writing the aggregated snps_dataset parquet output.
 #' @return List with aggregated paths and validation summary.
 #' @export
 aggregate_staging_outputs <- function(job_name,
@@ -125,7 +126,8 @@ aggregate_staging_outputs <- function(job_name,
                                       output_root = "output",
                                       validate = TRUE,
                                       output_dir = NULL,
-                                      run_table_path = NULL) {
+                                      run_table_path = NULL,
+                                      write_snps_dataset = TRUE) {
   idx <- index_staging_outputs(job_name, parent_job_id, output_root)
   validation <- NULL
   if (validate) {
@@ -179,13 +181,20 @@ if (is.null(run_table_path)) {
 
   read_csv_safe <- function(paths, idx_tbl) {
     log_progress(sprintf("Reading %d CSV file(s)...", length(paths)))
-    purrr::map_dfr(paths, function(p) {
+    n <- length(paths)
+    pb <- if (n) utils::txtProgressBar(min = 0, max = n, style = 3, initial = 0, width = NA) else NULL
+    on.exit(if (!is.null(pb)) close(pb), add = TRUE)
+    out <- vector("list", n)
+    for (i in seq_along(paths)) {
+      p <- paths[[i]]
       df <- readr::read_csv(p, show_col_types = FALSE)
       meta <- dplyr::filter(idx_tbl, .data$path == !!p)
       if (!"task_id" %in% names(df)) df$task_id <- meta$task_id[[1]]
       if (!"flush_id" %in% names(df)) df$flush_id <- meta$flush_id[[1]]
-      df
-    })
+      out[[i]] <- df
+      if (!is.null(pb)) utils::setTxtProgressBar(pb, i)
+    }
+    dplyr::bind_rows(out)
   }
 
   model_files <- dplyr::filter(idx, .data$type == "model_metrics")$path
@@ -197,18 +206,24 @@ if (is.null(run_table_path)) {
     model_tbl <- read_csv_safe(model_files, idx)
     readr::write_csv(model_tbl, file.path(output_dir, "model_metrics.csv"))
     log_progress("Wrote model_metrics.csv")
+    rm(model_tbl, model_files)
+    gc()
   }
   if (length(effect_files)) {
     effect_tbl <- read_csv_safe(effect_files, idx)
     readr::write_csv(effect_tbl, file.path(output_dir, "effect_metrics.csv"))
     log_progress("Wrote effect_metrics.csv")
+    rm(effect_tbl, effect_files)
+    gc()
   }
   if (length(validation_files)) {
     validation_tbl <- read_csv_safe(validation_files, idx)
     readr::write_csv(validation_tbl, file.path(output_dir, "validation.csv"))
     log_progress("Wrote validation.csv")
+    rm(validation_tbl, validation_files)
+    gc()
   }
-  if (length(snp_files)) {
+  if (length(snp_files) && isTRUE(write_snps_dataset)) {
     log_progress(sprintf("Writing SNP dataset from %d parquet fragment(s)...", length(snp_files)))
     snp_dataset <- arrow::open_dataset(snp_files, format = "parquet")
 
@@ -233,6 +248,8 @@ if (is.null(run_table_path)) {
       # Perform the join lazily via dplyr
       snp_dataset <- snp_dataset %>%
         dplyr::left_join(run_lookup_arrow, by = "run_id")
+      rm(run_lookup, run_lookup_arrow)
+      gc()
     }
 
     snp_out_dir <- file.path(output_dir, "snps_dataset")
@@ -246,12 +263,17 @@ if (is.null(run_table_path)) {
       partitioning = "use_case_id"
     )
     log_progress("Finished writing snps_dataset (partitioned by use_case_id)")
+    rm(snp_dataset)
+    gc()
+  } else if (length(snp_files) && !isTRUE(write_snps_dataset)) {
+    log_progress("Skipping snps_dataset parquet aggregation (write_snps_dataset = FALSE)")
   }
 
   list(
     output_dir = output_dir,
     validation = validation,
-    file_index = idx
+    file_index = idx,
+    snp_files = snp_files
   )
 }
 
@@ -261,58 +283,43 @@ if (is.null(run_table_path)) {
 #' at each PIP threshold, grouped by the specified variables. Stores per-bucket
 #' counts (NOT cumulative) to allow flexible downstream aggregation.
 #'
-#' @param snps_dataset_path Path to the aggregated snps_dataset folder (partitioned parquet).
+#' @param snps_dataset_path Path to the aggregated snps_dataset folder (partitioned parquet). Optional when `snp_files` supplied.
+#' @param snp_files Optional character vector of parquet file paths (e.g., staging flush outputs) to stream over.
 #' @param run_table Data frame with run metadata (must contain run_id and grouping columns).
 #' @param grouping_vars Character vector of column names to group by.
 #' @param pip_bucket_width Numeric bucket width for PIP binning (default 0.01).
 #' @param use_cases_path Optional path to use_cases.csv for label lookup.
 #' @param output_path Path where the CSV will be written.
+#' @param stream When TRUE, aggregates per file and combines results (recommended when using staging `snp_files`).
 #' @return The confusion matrix tibble (invisibly).
 #' @export
 build_confusion_matrix <- function(snps_dataset_path,
+                                   snp_files = NULL,
                                    run_table,
                                    grouping_vars,
                                    pip_bucket_width = 0.01,
                                    use_cases_path = NULL,
-                                   output_path) {
+                                   output_path,
+                                   stream = FALSE) {
 
-  if (!dir.exists(snps_dataset_path)) {
-    stop("SNPs dataset not found: ", snps_dataset_path)
+  dataset_available <- !is.null(snps_dataset_path) && dir.exists(snps_dataset_path)
+  if (!dataset_available && (is.null(snp_files) || !length(snp_files))) {
+    stop("No SNP sources provided: supply snps_dataset_path or snp_files.")
+  }
+  if (!dataset_available) {
+    stream <- TRUE
+  }
+  if (dataset_available && isTRUE(stream) && (is.null(snp_files) || !length(snp_files))) {
+    snp_files <- list.files(snps_dataset_path, pattern = "\\.parquet$", recursive = TRUE, full.names = TRUE)
   }
 
-  # Open SNPs dataset
-snps_ds <- arrow::open_dataset(snps_dataset_path)
-  snps_cols <- names(snps_ds)
-
-  # Determine use_case_id source
-  has_use_case_id <- "use_case_id" %in% snps_cols
-
-  if (has_use_case_id) {
-    message("use_case_id found in SNPs dataset (from parquet or partition folders)")
-    snps_ds_with_ucid <- snps_ds
+  # Open SNPs dataset (or derive schema from the first file)
+  if (dataset_available) {
+    snps_ds <- arrow::open_dataset(snps_dataset_path)
+    snps_cols <- names(snps_ds)
   } else {
-    # Check for Hive-style partitions
-    subfolders <- list.dirs(snps_dataset_path, recursive = FALSE, full.names = FALSE)
-    hive_partitions <- grep("^use_case_id=", subfolders, value = TRUE)
-
-    if (length(hive_partitions) > 0) {
-      message("Detected Hive-style use_case_id partitions; re-opening with partitioning schema...")
-      snps_ds_with_ucid <- arrow::open_dataset(snps_dataset_path, partitioning = "use_case_id")
-    } else {
-      # Fall back to run_table join
-      message("No use_case_id in dataset; joining from run_table...")
-      run_lookup <- run_table %>%
-        dplyr::select(run_id, use_case_id) %>%
-        dplyr::mutate(run_id = as.integer(run_id)) %>%
-        dplyr::distinct()
-      run_lookup_ds <- arrow::InMemoryDataset$create(run_lookup)
-      snps_ds_with_ucid <- snps_ds %>%
-        dplyr::left_join(run_lookup_ds, by = "run_id")
-    }
+    snps_cols <- names(arrow::open_dataset(snp_files[[1]], format = "parquet"))
   }
-
-  # Refresh column list
-  snps_cols <- names(snps_ds_with_ucid)
 
   # Prepare run metadata for grouping
   available_grouping <- intersect(grouping_vars, names(run_table))
@@ -359,22 +366,94 @@ snps_ds <- arrow::open_dataset(snps_dataset_path)
   agg_group_vars <- available_grouping
   if (include_label) agg_group_vars <- c(agg_group_vars, "label")
 
-  message("Aggregating confusion matrix counts from SNPs dataset...")
+  message("Aggregating confusion matrix counts...")
   message("  Grouping by: ", paste(agg_group_vars, collapse = ", "))
+  if (dataset_available) {
+    message("  Source: ", snps_dataset_path, if (isTRUE(stream)) " (streaming files)" else " (dataset)")
+  } else {
+    message("  Source: staging parquet files (streaming)")
+  }
 
-  confusion_agg <- snps_ds_with_ucid %>%
-    dplyr::left_join(run_map_ds, by = "run_id") %>%
-    dplyr::mutate(
-      pip_bucket = pmax(0, pmin(1, floor(pip / pip_bucket_width) * pip_bucket_width))
-    ) %>%
-    dplyr::group_by(dplyr::across(dplyr::all_of(agg_group_vars)), pip_bucket) %>%
-    dplyr::summarise(
-      n_snps = dplyr::n(),
-      n_causal = sum(causal == 1, na.rm = TRUE),
-      n_noncausal = sum(causal == 0, na.rm = TRUE),
-      .groups = "drop"
-    ) %>%
-    dplyr::collect()
+  aggregate_single_file <- function(path) {
+    arrow::open_dataset(path, format = "parquet") %>%
+      dplyr::left_join(run_map_ds, by = "run_id") %>%
+      dplyr::mutate(
+        pip_bucket = pmax(0, pmin(1, floor(pip / pip_bucket_width) * pip_bucket_width))
+      ) %>%
+      dplyr::group_by(dplyr::across(dplyr::all_of(agg_group_vars)), pip_bucket) %>%
+      dplyr::summarise(
+        n_snps = dplyr::n(),
+        n_causal = sum(causal == 1, na.rm = TRUE),
+        n_noncausal = sum(causal == 0, na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      dplyr::collect()
+  }
+
+  if (isTRUE(stream)) {
+    if (is.null(snp_files) || !length(snp_files)) {
+      stop("Streaming requested but no snp_files supplied.")
+    }
+    pb <- utils::txtProgressBar(min = 0, max = length(snp_files), style = 3, initial = 0, width = NA)
+    on.exit(if (!is.null(pb)) close(pb), add = TRUE)
+    agg_list <- vector("list", length(snp_files))
+    for (i in seq_along(snp_files)) {
+      message(sprintf("  Streaming %d/%d: %s", i, length(snp_files), basename(snp_files[[i]])))
+      agg_list[[i]] <- aggregate_single_file(snp_files[[i]])
+      if (!is.null(pb)) utils::setTxtProgressBar(pb, i)
+      gc()
+    }
+    confusion_agg <- dplyr::bind_rows(agg_list)
+    rm(agg_list)
+    if (nrow(confusion_agg)) {
+      confusion_agg <- confusion_agg %>%
+        dplyr::group_by(dplyr::across(dplyr::all_of(agg_group_vars)), pip_bucket) %>%
+        dplyr::summarise(
+          n_snps = sum(n_snps, na.rm = TRUE),
+          n_causal = sum(n_causal, na.rm = TRUE),
+          n_noncausal = sum(n_noncausal, na.rm = TRUE),
+          .groups = "drop"
+        )
+    }
+  } else {
+    # Non-streaming: rely on Arrow to aggregate lazily over the dataset
+    has_use_case_id <- "use_case_id" %in% snps_cols
+
+    if (has_use_case_id) {
+      snps_ds_with_ucid <- snps_ds
+    } else {
+      subfolders <- list.dirs(snps_dataset_path, recursive = FALSE, full.names = FALSE)
+      hive_partitions <- grep("^use_case_id=", subfolders, value = TRUE)
+
+      if (length(hive_partitions) > 0) {
+        snps_ds_with_ucid <- arrow::open_dataset(snps_dataset_path, partitioning = "use_case_id")
+      } else {
+        run_lookup <- run_table %>%
+          dplyr::select(run_id, use_case_id) %>%
+          dplyr::mutate(run_id = as.integer(run_id)) %>%
+          dplyr::distinct()
+        run_lookup_ds <- arrow::InMemoryDataset$create(run_lookup)
+        snps_ds_with_ucid <- snps_ds %>%
+          dplyr::left_join(run_lookup_ds, by = "run_id")
+        rm(run_lookup, run_lookup_ds)
+      }
+    }
+
+    confusion_agg <- snps_ds_with_ucid %>%
+      dplyr::left_join(run_map_ds, by = "run_id") %>%
+      dplyr::mutate(
+        pip_bucket = pmax(0, pmin(1, floor(pip / pip_bucket_width) * pip_bucket_width))
+      ) %>%
+      dplyr::group_by(dplyr::across(dplyr::all_of(agg_group_vars)), pip_bucket) %>%
+      dplyr::summarise(
+        n_snps = dplyr::n(),
+        n_causal = sum(causal == 1, na.rm = TRUE),
+        n_noncausal = sum(causal == 0, na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      dplyr::collect()
+    rm(snps_ds_with_ucid)
+  }
 
   message("Collected ", nrow(confusion_agg), " rows from Arrow")
 
@@ -396,6 +475,9 @@ snps_ds <- arrow::open_dataset(snps_dataset_path)
   # Save
   readr::write_csv(confusion_matrix_table, output_path)
   message("Saved confusion matrix to: ", output_path)
+
+  rm(confusion_agg, confusion_matrix_table, run_map, run_map_for_join, run_map_ds)
+  gc()
 
   invisible(confusion_matrix_table)
 }

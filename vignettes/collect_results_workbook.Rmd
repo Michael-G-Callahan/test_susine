@@ -38,6 +38,10 @@ library(arrow)
 job_name <- "prior_default_testing"
 parent_job_id <- "47128217"
 output_root <- here("output")
+
+# Toggle to skip writing the aggregated snps_dataset parquet folder.
+# Set to TRUE when you only need confusion matrices and want to reduce I/O.
+skip_snps_dataset_aggregation <- FALSE
 ```
 
 ## 1.2 Resolve Paths and Load Run Table
@@ -78,24 +82,26 @@ cat("Loaded run_table with", nrow(run_table), "runs\n")
 
 This section processes raw staging outputs into aggregated files.
 It will **automatically skip** if aggregated outputs already exist.
+Set `skip_snps_dataset_aggregation = TRUE` to skip writing the parquet
+snps_dataset while still aggregating the metrics CSVs.
 
 ```{r check-aggregation-status}
 staging_exists <- dir.exists(paths$staging_dir)
-aggregated_exists <- dir.exists(paths$snps_dataset_dir) && 
-                     length(list.files(paths$snps_dataset_dir, recursive = TRUE)) > 0
+snps_dataset_exists <- dir.exists(paths$snps_dataset_dir) && 
+                       length(list.files(paths$snps_dataset_dir, recursive = TRUE)) > 0
 
 cat("Staging directory exists:", staging_exists, "\n")
-cat("Aggregated SNPs dataset exists:", aggregated_exists, "\n")
+cat("Aggregated SNPs dataset exists:", snps_dataset_exists, "\n")
 
 # Determine whether to run aggregation
-run_aggregation <- staging_exists && !aggregated_exists
+run_aggregation <- staging_exists && (!snps_dataset_exists || skip_snps_dataset_aggregation)
 
-if (aggregated_exists) {
-  message("✓ Aggregated outputs already exist. Skipping Section 2.")
+if (snps_dataset_exists && !skip_snps_dataset_aggregation) {
+  message("Aggregated outputs already exist. Skipping Section 2.")
 } else if (!staging_exists) {
   stop("Neither staging nor aggregated outputs found. Cannot proceed.")
 } else {
-  message("→ Staging found but not yet aggregated. Will run aggregation.")
+  message(if (skip_snps_dataset_aggregation) "Staging found; aggregating metrics (skipping snps_dataset parquet)." else "Staging found but not yet aggregated. Will run aggregation.")
 }
 ```
 
@@ -148,12 +154,13 @@ if (run_aggregation) {
     parent_job_id = parent_job_id,
     output_root = output_root,
     validate = FALSE,  # already validated above
-    output_dir = paths$aggregated_dir
+    output_dir = paths$aggregated_dir,
+    write_snps_dataset = !skip_snps_dataset_aggregation
   )
   
   cat("Aggregated outputs written to:", agg$output_dir, "\n")
   
-  if (dir.exists(paths$snps_dataset_dir)) {
+  if (!skip_snps_dataset_aggregation && dir.exists(paths$snps_dataset_dir)) {
     snp_files <- list.files(paths$snps_dataset_dir, pattern = "\\.parquet$", recursive = TRUE)
     cat("SNP dataset fragments:", length(snp_files), "\n")
   }
@@ -183,27 +190,33 @@ if (dir.exists(paths$staging_dir)) {
 # Section 3: Build Pre-aggregated Confusion Matrices
 
 Create compact summary tables for Power/FDR/AUPRC analysis. This section
-requires only the aggregated SNPs dataset (not staging files).
+uses the aggregated SNPs dataset when available, or will stream the
+staging parquet fragments to avoid holding everything in memory.
 
 **Prerequisites:** 
-- Section 1 must have been run (to load paths and run_table)
-- SNPs dataset must exist at `paths$snps_dataset_dir`
+- Section 1 must have been run (to load paths and run_table).
+- Either an aggregated SNPs dataset at `paths$snps_dataset_dir` **or**
+  staging parquet fragments in `paths$staging_dir`.
 
 ## 3.1 Check SNPs Dataset Exists
 
 ```{r check-snps-dataset}
-snps_exists <- dir.exists(paths$snps_dataset_dir)
-cat("SNPs dataset exists:", snps_exists, "\n")
-if (!snps_exists) {
-  stop("SNPs dataset not found at: ", paths$snps_dataset_dir,
-       "\nRun Section 2 first to aggregate staging outputs.")
+snps_dataset_exists <- dir.exists(paths$snps_dataset_dir) &&
+                       length(list.files(paths$snps_dataset_dir, recursive = TRUE)) > 0
+staging_snp_files <- list.files(paths$staging_dir, pattern = "_snps\\.parquet$", recursive = TRUE, full.names = TRUE)
+cat("SNPs dataset exists:", snps_dataset_exists, "\n")
+cat("Staging parquet fragments available:", length(staging_snp_files), "\n")
+
+if (!snps_dataset_exists && !length(staging_snp_files)) {
+  stop("No SNPs dataset or staging parquet fragments found. Run Section 2 first.")
 }
 
-# Show partitions
-partitions <- list.dirs(paths$snps_dataset_dir, recursive = FALSE, full.names = FALSE)
-cat("Partitions found:", length(partitions), "\n")
-if (length(partitions) <= 10) {
-  cat(paste(" ", partitions, collapse = "\n"), "\n")
+if (snps_dataset_exists) {
+  partitions <- list.dirs(paths$snps_dataset_dir, recursive = FALSE, full.names = FALSE)
+  cat("Partitions found:", length(partitions), "\n")
+  if (length(partitions) <= 10) {
+    cat(paste(" ", partitions, collapse = "\n"), "\n")
+  }
 }
 ```
 
@@ -228,14 +241,17 @@ dataset_grouping_vars <- c("matrix_id", "use_case_id")
 
 ```{r build-confusion-detailed, message=FALSE}
 detailed_output_path <- file.path(paths$aggregated_dir, "confusion_matrix_detailed.csv")
+stream_confusion <- !snps_dataset_exists
 
 confusion_detailed <- test_susine::build_confusion_matrix(
-  snps_dataset_path = paths$snps_dataset_dir,
+  snps_dataset_path = if (snps_dataset_exists) paths$snps_dataset_dir else NULL,
+  snp_files = if (stream_confusion) staging_snp_files else NULL,
   run_table = run_table,
   grouping_vars = detailed_grouping_vars,
   pip_bucket_width = pip_bucket_width,
   use_cases_path = use_cases_path,
-  output_path = detailed_output_path
+  output_path = detailed_output_path,
+  stream = stream_confusion
 )
 
 cat("\nDetailed confusion matrix:\n")
@@ -251,12 +267,14 @@ cat("  Saved to:", detailed_output_path, "\n")
 dataset_output_path <- file.path(paths$aggregated_dir, "confusion_matrix_by_dataset.csv")
 
 confusion_by_dataset <- test_susine::build_confusion_matrix(
-  snps_dataset_path = paths$snps_dataset_dir,
+  snps_dataset_path = if (snps_dataset_exists) paths$snps_dataset_dir else NULL,
+  snp_files = if (stream_confusion) staging_snp_files else NULL,
   run_table = run_table,
   grouping_vars = dataset_grouping_vars,
   pip_bucket_width = pip_bucket_width,
   use_cases_path = NULL,  
-  output_path = dataset_output_path
+  output_path = dataset_output_path,
+  stream = stream_confusion
 )
 
 cat("\nDataset-level confusion matrix:\n")

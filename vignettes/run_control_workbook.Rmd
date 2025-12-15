@@ -45,7 +45,9 @@ Each completed run now writes a compact `snps.parquet` file that merges
 the combined PIPs with the causal truth table so downstream routines can
 work off a single artifact. Flip `write_legacy_snp_csv = TRUE` inside
 `job_inputs` if you still need the historical `pip.csv`/`truth.csv`
-pairs for ad hoc debugging.
+pairs for ad hoc debugging. If downstream confusion matrices are the
+only parquet consumer, you can now skip writing the aggregated
+`snps_dataset` during collection to save time/space.
 
 Set `verbose_file_output = FALSE` to suppress the per-run directories and
 stream metrics into task-local CSV/Parquet flush files during the

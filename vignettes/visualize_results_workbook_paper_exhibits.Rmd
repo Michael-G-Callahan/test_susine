@@ -1,4 +1,4 @@
-﻿---
+---
 title: "SuSiNE Paper Draft Exhibits"
 output:
   html_document:
@@ -320,9 +320,9 @@ if (nrow(curves_facets) > 0) {
 y_noise_filter <- c(0.6)
 annotation_r2_filter <- c(0.4, NA)
 inflate_match_filter <- c(1, NA)
-sigma_0_2_scalar_filter <- c(0.4, NA)
+sigma_0_2_scalar_filter <- c(0.2, NA)
 gamma_shrink_filter <- c(NA, 0.8)
-pstar_filter <- c(10, NA)
+pstar_filter <- c(5)
 # Total SNPs per dataset (used for overall annotation R^2 including noncausals)
 p_total <- 1000
 
