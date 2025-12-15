@@ -476,8 +476,9 @@ build_confusion_matrix <- function(snps_dataset_path,
   readr::write_csv(confusion_matrix_table, output_path)
   message("Saved confusion matrix to: ", output_path)
 
-  rm(confusion_agg, confusion_matrix_table, run_map, run_map_for_join, run_map_ds)
+  result <- confusion_matrix_table
+  rm(confusion_agg, run_map, run_map_for_join, run_map_ds)
   gc()
 
-  invisible(confusion_matrix_table)
+  invisible(result)
 }
