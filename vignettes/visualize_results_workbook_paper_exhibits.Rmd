@@ -836,6 +836,108 @@ if (nrow(auprc_ann_pstar_scale) > 0) {
 
   save_or_show(p, "auprc_annotation_r2_by_pstar_band_and_annscale.png", width = 16, height = 12, subdir = "auprc_new")
 
+  # New plot: annotation_scale on x-axis, faceted by p* band
+  group_vars_scale_x <- c("use_case_id", "sigma_0_2_scalar", "gamma_shrink", "annotation_scale")
+
+  auprc_all_scale_x <- test_susine::compute_auprc_from_confusion(
+    confusion_base,
+    group_vars = group_vars_scale_x
+  ) %>%
+    dplyr::mutate(pstar_band = "All p*")
+
+  auprc_low_scale_x <- test_susine::compute_auprc_from_confusion(
+    confusion_low_ann,
+    group_vars = group_vars_scale_x
+  ) %>%
+    dplyr::mutate(pstar_band = "p* 1-4")
+
+  auprc_high_scale_x <- test_susine::compute_auprc_from_confusion(
+    confusion_high_ann,
+    group_vars = group_vars_scale_x
+  ) %>%
+    dplyr::mutate(pstar_band = "p* 5-20")
+
+  auprc_ann_pstar_scale_x <- dplyr::bind_rows(auprc_all_scale_x, auprc_low_scale_x, auprc_high_scale_x)
+
+  if (nrow(auprc_ann_pstar_scale_x) > 0) {
+    ai_data_scale_x <- auprc_ann_pstar_scale_x %>%
+      dplyr::filter(use_case_id == "a_i") %>%
+      dplyr::mutate(
+        pstar_band = factor(pstar_band, levels = pstar_levels),
+        line_group = paste0(use_case_id, " - ", sigma_0_2_scalar)
+      )
+
+    other_data_scale_x <- auprc_ann_pstar_scale_x %>%
+      dplyr::filter(use_case_id != "a_i") %>%
+      dplyr::filter(!is.na(annotation_scale)) %>%
+      dplyr::mutate(
+        pstar_band = factor(pstar_band, levels = pstar_levels),
+        line_group = dplyr::if_else(
+          use_case_id == "b_i",
+          paste0(use_case_id, " - ", gamma_shrink),
+          paste0(use_case_id, " - ", sigma_0_2_scalar)
+        )
+      )
+
+    p_scale_x <- ggplot2::ggplot() +
+      # Lines for non-a_i use cases
+      ggplot2::geom_line(
+        data = other_data_scale_x,
+        ggplot2::aes(x = annotation_scale, y = AUPRC, color = line_group, group = line_group),
+        linewidth = 1.0,
+        linetype = "solid"
+      ) +
+      ggplot2::geom_point(
+        data = other_data_scale_x,
+        ggplot2::aes(x = annotation_scale, y = AUPRC, color = line_group),
+        size = 3
+      ) +
+      # Dashed horizontal lines for a_i (NA values)
+      ggplot2::geom_segment(
+        data = ai_data_scale_x,
+        ggplot2::aes(x = -Inf, xend = Inf, y = AUPRC, yend = AUPRC, color = line_group),
+        linewidth = 1.0,
+        linetype = "dashed"
+      ) +
+      ggplot2::facet_wrap(~pstar_band, ncol = 1, scales = "free_y") +
+      ggplot2::scale_color_manual(
+        values = combined_palette,
+        labels = combined_labels,
+        name = "Method"
+      ) +
+      ggplot2::labs(
+        title = "AUPRC by Annotation Scale, faceted by p* group",
+        x = "Annotation Scale",
+        y = "AUPRC"
+      ) +
+      ggplot2::guides(
+        color = ggplot2::guide_legend(
+          title.position = "top",
+          title.hjust = 0.5,
+          ncol = 3,
+          byrow = FALSE
+        )
+      ) +
+      ggplot2::theme_minimal(base_size = 14) +
+      ggplot2::theme(
+        legend.position = "bottom",
+        legend.title = ggplot2::element_text(size = 16, face = "bold"),
+        legend.text = ggplot2::element_text(size = 14),
+        legend.box.margin = ggplot2::margin(t = 10, b = 10, l = 0, r = 0),
+        legend.key.width = ggplot2::unit(1.5, "lines"),
+        strip.text.x = ggplot2::element_text(size = 14, face = "bold"),
+        axis.title.x = ggplot2::element_text(size = 18, margin = ggplot2::margin(t = 10)),
+        axis.title.y = ggplot2::element_text(size = 18),
+        axis.text = ggplot2::element_text(size = 12),
+        plot.title = ggplot2::element_text(size = 16, face = "bold", hjust = 0.5),
+        plot.margin = ggplot2::margin(t = 10, b = 10, l = 10, r = 10)
+      )
+
+    save_or_show(p_scale_x, "auprc_annotation_scale_by_pstar_band.png", width = 8, height = 12, subdir = "auprc_new")
+  } else {
+    message("No data for annotation_scale by p_star band plot")
+  }
+
   # Same plot, but color by annotation_scale (red/orange palette) instead of faceting by it
   ann_scale_labels <- paste0("Ann. Scale = ", ann_scale_vals)
   ann_scale_palette <- grDevices::colorRampPalette(
@@ -1051,7 +1153,6 @@ for (band in pstar_bands) {
   }
 }
 ```
-
 
 
 
