@@ -80,8 +80,8 @@ save_or_show <- function(p, filename, width = 12, height = 8, dpi = 300, subdir 
 ## 1.2 Job Configuration
 
 ```{r job-config}
-job_name <- "prior_default_testing"
-parent_job_id <- "47128217"
+job_name <- "prior_default_testing_more_annotation_scales"
+parent_job_id <- "47336613"
 output_root <- here("output")
 
 # Resolve paths
@@ -839,7 +839,7 @@ if (nrow(auprc_ann_pstar_scale) > 0) {
   # Same plot, but color by annotation_scale (red/orange palette) instead of faceting by it
   ann_scale_labels <- paste0("Ann. Scale = ", ann_scale_vals)
   ann_scale_palette <- grDevices::colorRampPalette(
-    c("#7f0000", "#b30000", "#d94801", "#f16913", "#fdae6b")
+    c("#1a9850", "#d73027")
   )(length(ann_scale_vals))
   names(ann_scale_palette) <- ann_scale_labels
 
@@ -870,7 +870,8 @@ if (nrow(auprc_ann_pstar_scale) > 0) {
     # Dashed horizontal lines for a_i (NA values)
     ggplot2::geom_segment(
       data = ai_data_scale_color,
-      ggplot2::aes(x = -Inf, xend = Inf, y = AUPRC, yend = AUPRC, color = annotation_scale_label),
+      ggplot2::aes(x = -Inf, xend = Inf, y = AUPRC, yend = AUPRC),
+      color = "gray60",
       linewidth = 1.0,
       linetype = "dashed"
     ) +
@@ -907,7 +908,7 @@ if (nrow(auprc_ann_pstar_scale) > 0) {
       plot.margin = ggplot2::margin(t = 10, b = 10, l = 10, r = 10)
     )
 
-  save_or_show(p_color, "auprc_annotation_r2_by_pstar_band_and_annscale_color.png", width = 16, height = 12, subdir = "auprc_new")
+  save_or_show(p_color, "auprc_annotation_r2_by_pstar_band_and_annscale_color.png", width = 8, height = 12, subdir = "auprc_new")
 } else {
   message("No data for annotation_r2 by p_star band and annotation_scale plot")
 }
@@ -1040,8 +1041,6 @@ for (band in pstar_bands) {
   }
 }
 ```
-
-
 
 
 
