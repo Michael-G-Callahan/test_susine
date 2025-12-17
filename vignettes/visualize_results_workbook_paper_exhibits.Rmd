@@ -842,12 +842,22 @@ if (nrow(auprc_ann_pstar_scale) > 0) {
     c("#1a9850", "#d73027")
   )(length(ann_scale_vals))
   names(ann_scale_palette) <- ann_scale_labels
+  sigma_0_2_vals <- sort(unique(auprc_ann_pstar_scale$sigma_0_2_scalar[!is.na(auprc_ann_pstar_scale$sigma_0_2_scalar)]))
+  sigma_0_2_labels <- paste0("sigma_0_2 = ", sigma_0_2_vals)
 
   other_data_scale_color <- other_data_scale %>%
-    dplyr::mutate(annotation_scale_label = factor(annotation_scale_label, levels = ann_scale_labels))
+    dplyr::filter(!is.na(sigma_0_2_scalar)) %>%
+    dplyr::mutate(
+      annotation_scale_label = factor(annotation_scale_label, levels = ann_scale_labels),
+      sigma_0_2_label = factor(paste0("sigma_0_2 = ", sigma_0_2_scalar), levels = sigma_0_2_labels)
+    )
 
   ai_data_scale_color <- ai_data_scale %>%
-    dplyr::mutate(annotation_scale_label = factor(annotation_scale_label, levels = ann_scale_labels))
+    dplyr::filter(!is.na(sigma_0_2_scalar)) %>%
+    dplyr::mutate(
+      annotation_scale_label = factor(annotation_scale_label, levels = ann_scale_labels),
+      sigma_0_2_label = factor(paste0("sigma_0_2 = ", sigma_0_2_scalar), levels = sigma_0_2_labels)
+    )
 
   p_color <- ggplot2::ggplot() +
     # Lines for non-a_i use cases
@@ -875,7 +885,7 @@ if (nrow(auprc_ann_pstar_scale) > 0) {
       linewidth = 1.0,
       linetype = "dashed"
     ) +
-    ggplot2::facet_grid(pstar_band ~ ., scales = "free_y") +
+    ggplot2::facet_grid(pstar_band ~ sigma_0_2_label, scales = "free_y") +
     ggplot2::scale_color_manual(
       values = ann_scale_palette,
       name = "Annotation Scale"
@@ -1041,7 +1051,6 @@ for (band in pstar_bands) {
   }
 }
 ```
-
 
 
 
