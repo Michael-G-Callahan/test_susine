@@ -843,112 +843,130 @@ if (nrow(auprc_ann_pstar_scale) > 0) {
 ## 4.2 AUPRC by annotation_r2 with inflate_match and annotation_scale Facets
 
 ```{r auprc-annotation-inflate-annscale-faceted, fig.width=16, fig.height=12}
-# Compute AUPRC for each inflate_match level with annotation_scale
+# Compute AUPRC for each inflate_match level with annotation_scale, split by p* bands
 group_vars_inflate <- c("use_case_id", "annotation_r2", "sigma_0_2_scalar", "gamma_shrink", "annotation_scale", "inflate_match")
 
-auprc_inflate_scale <- test_susine::compute_auprc_from_confusion(
-  confusion_base,
-  group_vars = group_vars_inflate
+pstar_bands <- list(
+  list(label = "All p*", values = NULL, filename = "auprc_annotation_r2_by_inflate_match_and_annscale.png"),
+  list(label = "p* 1-4", values = c(1, 2, 3, 4), filename = "auprc_annotation_r2_by_inflate_match_and_annscale_pstar_1_4.png"),
+  list(label = "p* 5-20", values = c(5, 10, 20), filename = "auprc_annotation_r2_by_inflate_match_and_annscale_pstar_5_20.png")
 )
 
-if (nrow(auprc_inflate_scale) > 0) {
-  # Get unique annotation_scale and inflate_match values for faceting
-  ann_scale_vals <- sort(unique(auprc_inflate_scale$annotation_scale[!is.na(auprc_inflate_scale$annotation_scale)]))
-  inflate_vals <- sort(unique(auprc_inflate_scale$inflate_match[!is.na(auprc_inflate_scale$inflate_match)]))
-
-  # Separate a_i (with NAs) from others (with annotation_r2 values)
-  ai_data_inflate <- auprc_inflate_scale %>%
-    dplyr::filter(use_case_id == "a_i") %>%
-    dplyr::mutate(
-      line_group = paste0(use_case_id, " - ", sigma_0_2_scalar)
-    )
-
-  other_data_inflate <- auprc_inflate_scale %>%
-    dplyr::filter(use_case_id != "a_i") %>%
-    dplyr::filter(!is.na(annotation_r2), !is.na(inflate_match)) %>%
-    dplyr::mutate(
-      inflate_match_label = paste0("Inflate Match = ", inflate_match),
-      annotation_scale_label = paste0("Ann. Scale = ", annotation_scale),
-      line_group = dplyr::if_else(
-        use_case_id == "b_i",
-        paste0(use_case_id, " - ", gamma_shrink),
-        paste0(use_case_id, " - ", sigma_0_2_scalar)
-      )
-    )
-
-  # For a_i, we need to replicate across annotation_scale and inflate_match facets
-  if (nrow(ai_data_inflate) > 0 && length(ann_scale_vals) > 0 && length(inflate_vals) > 0) {
-    ai_data_inflate <- ai_data_inflate %>%
-      dplyr::select(-annotation_scale, -inflate_match) %>%
-      tidyr::crossing(annotation_scale = ann_scale_vals, inflate_match = inflate_vals) %>%
-      dplyr::mutate(
-        inflate_match_label = paste0("Inflate Match = ", inflate_match),
-        annotation_scale_label = paste0("Ann. Scale = ", annotation_scale)
-      )
+for (band in pstar_bands) {
+  confusion_band <- confusion_base
+  if (!is.null(band$values)) {
+    confusion_band <- confusion_band %>% dplyr::filter(p_star %in% band$values)
   }
 
-  # Create the plot with grid faceting
-  p <- ggplot2::ggplot() +
-    # Lines for non-a_i use cases
-    ggplot2::geom_line(
-      data = other_data_inflate,
-      ggplot2::aes(x = annotation_r2, y = AUPRC, color = line_group, group = line_group),
-      linewidth = 1.0,
-      linetype = "solid"
-    ) +
-    ggplot2::geom_point(
-      data = other_data_inflate,
-      ggplot2::aes(x = annotation_r2, y = AUPRC, color = line_group),
-      size = 3
-    ) +
-    # Dashed horizontal lines for a_i (NA values)
-    ggplot2::geom_segment(
-      data = ai_data_inflate,
-      ggplot2::aes(x = -Inf, xend = Inf, y = AUPRC, yend = AUPRC, color = line_group),
-      linewidth = 1.0,
-      linetype = "dashed"
-    ) +
-    ggplot2::facet_grid(inflate_match_label ~ annotation_scale_label, scales = "free_y") +
-    ggplot2::scale_color_manual(
-      values = combined_palette,
-      labels = combined_labels,
-      name = "Method"
-    ) +
-    ggplot2::labs(
-      title = "AUPRC by Annotation Quality, faceted by Inflate Match and Annotation Scale",
-      x = "Annotation Quality (causal R^2)",
-      y = "AUPRC"
-    ) +
-    ggplot2::guides(
-      color = ggplot2::guide_legend(
-        title.position = "top",
-        title.hjust = 0.5,
-        ncol = 3,
-        byrow = FALSE
-      )
-    ) +
-    ggplot2::theme_minimal(base_size = 14) +
-    ggplot2::theme(
-      legend.position = "bottom",
-      legend.title = ggplot2::element_text(size = 16, face = "bold"),
-      legend.text = ggplot2::element_text(size = 14),
-      legend.box.margin = ggplot2::margin(t = 10, b = 10, l = 0, r = 0),
-      legend.key.width = ggplot2::unit(1.5, "lines"),
-      strip.text.x = ggplot2::element_text(size = 14, face = "bold"),
-      strip.text.y = ggplot2::element_text(size = 14, face = "bold"),
-      axis.title.x = ggplot2::element_text(size = 18, margin = ggplot2::margin(t = 10)),
-      axis.title.y = ggplot2::element_text(size = 18),
-      axis.text = ggplot2::element_text(size = 12),
-      plot.title = ggplot2::element_text(size = 16, face = "bold", hjust = 0.5),
-      plot.margin = ggplot2::margin(t = 10, b = 10, l = 10, r = 10)
-    )
+  auprc_inflate_scale <- test_susine::compute_auprc_from_confusion(
+    confusion_band,
+    group_vars = group_vars_inflate
+  )
 
-  save_or_show(p, "auprc_annotation_r2_by_inflate_match_and_annscale.png", width = 16, height = 12, subdir = "auprc_new")
-} else {
-  message("No data for annotation_r2 by inflate_match and annotation_scale plot")
+  if (nrow(auprc_inflate_scale) > 0) {
+    # Get unique annotation_scale and inflate_match values for faceting
+    ann_scale_vals <- sort(unique(auprc_inflate_scale$annotation_scale[!is.na(auprc_inflate_scale$annotation_scale)]))
+    inflate_vals <- sort(unique(auprc_inflate_scale$inflate_match[!is.na(auprc_inflate_scale$inflate_match)]))
+
+    # Separate a_i (with NAs) from others (with annotation_r2 values)
+    ai_data_inflate <- auprc_inflate_scale %>%
+      dplyr::filter(use_case_id == "a_i") %>%
+      dplyr::mutate(
+        line_group = paste0(use_case_id, " - ", sigma_0_2_scalar)
+      )
+
+    other_data_inflate <- auprc_inflate_scale %>%
+      dplyr::filter(use_case_id != "a_i") %>%
+      dplyr::filter(!is.na(annotation_r2), !is.na(inflate_match)) %>%
+      dplyr::mutate(
+        inflate_match_label = paste0("Inflate Match = ", inflate_match),
+        annotation_scale_label = paste0("Ann. Scale = ", annotation_scale),
+        line_group = dplyr::if_else(
+          use_case_id == "b_i",
+          paste0(use_case_id, " - ", gamma_shrink),
+          paste0(use_case_id, " - ", sigma_0_2_scalar)
+        )
+      )
+
+    # For a_i, we need to replicate across annotation_scale and inflate_match facets
+    if (nrow(ai_data_inflate) > 0 && length(ann_scale_vals) > 0 && length(inflate_vals) > 0) {
+      ai_data_inflate <- ai_data_inflate %>%
+        dplyr::select(-annotation_scale, -inflate_match) %>%
+        tidyr::crossing(annotation_scale = ann_scale_vals, inflate_match = inflate_vals) %>%
+        dplyr::mutate(
+          inflate_match_label = paste0("Inflate Match = ", inflate_match),
+          annotation_scale_label = paste0("Ann. Scale = ", annotation_scale)
+        )
+    }
+
+    plot_title <- if (band$label == "All p*") {
+      "AUPRC by Annotation Quality, faceted by Inflate Match and Annotation Scale"
+    } else {
+      paste0("AUPRC by Annotation Quality, faceted by Inflate Match and Annotation Scale (", band$label, ")")
+    }
+
+    # Create the plot with grid faceting
+    p <- ggplot2::ggplot() +
+      # Lines for non-a_i use cases
+      ggplot2::geom_line(
+        data = other_data_inflate,
+        ggplot2::aes(x = annotation_r2, y = AUPRC, color = line_group, group = line_group),
+        linewidth = 1.0,
+        linetype = "solid"
+      ) +
+      ggplot2::geom_point(
+        data = other_data_inflate,
+        ggplot2::aes(x = annotation_r2, y = AUPRC, color = line_group),
+        size = 3
+      ) +
+      # Dashed horizontal lines for a_i (NA values)
+      ggplot2::geom_segment(
+        data = ai_data_inflate,
+        ggplot2::aes(x = -Inf, xend = Inf, y = AUPRC, yend = AUPRC, color = line_group),
+        linewidth = 1.0,
+        linetype = "dashed"
+      ) +
+      ggplot2::facet_grid(inflate_match_label ~ annotation_scale_label, scales = "free_y") +
+      ggplot2::scale_color_manual(
+        values = combined_palette,
+        labels = combined_labels,
+        name = "Method"
+      ) +
+      ggplot2::labs(
+        title = plot_title,
+        x = "Annotation Quality (causal R^2)",
+        y = "AUPRC"
+      ) +
+      ggplot2::guides(
+        color = ggplot2::guide_legend(
+          title.position = "top",
+          title.hjust = 0.5,
+          ncol = 3,
+          byrow = FALSE
+        )
+      ) +
+      ggplot2::theme_minimal(base_size = 14) +
+      ggplot2::theme(
+        legend.position = "bottom",
+        legend.title = ggplot2::element_text(size = 16, face = "bold"),
+        legend.text = ggplot2::element_text(size = 14),
+        legend.box.margin = ggplot2::margin(t = 10, b = 10, l = 0, r = 0),
+        legend.key.width = ggplot2::unit(1.5, "lines"),
+        strip.text.x = ggplot2::element_text(size = 14, face = "bold"),
+        strip.text.y = ggplot2::element_text(size = 14, face = "bold"),
+        axis.title.x = ggplot2::element_text(size = 18, margin = ggplot2::margin(t = 10)),
+        axis.title.y = ggplot2::element_text(size = 18),
+        axis.text = ggplot2::element_text(size = 12),
+        plot.title = ggplot2::element_text(size = 16, face = "bold", hjust = 0.5),
+        plot.margin = ggplot2::margin(t = 10, b = 10, l = 10, r = 10)
+      )
+
+    save_or_show(p, band$filename, width = 16, height = 12, subdir = "auprc_new")
+  } else {
+    message("No data for annotation_r2 by inflate_match and annotation_scale plot for ", band$label)
+  }
 }
 ```
-
 
 
 
