@@ -835,6 +835,79 @@ if (nrow(auprc_ann_pstar_scale) > 0) {
     )
 
   save_or_show(p, "auprc_annotation_r2_by_pstar_band_and_annscale.png", width = 16, height = 12, subdir = "auprc_new")
+
+  # Same plot, but color by annotation_scale (red/orange palette) instead of faceting by it
+  ann_scale_labels <- paste0("Ann. Scale = ", ann_scale_vals)
+  ann_scale_palette <- grDevices::colorRampPalette(
+    c("#7f0000", "#b30000", "#d94801", "#f16913", "#fdae6b")
+  )(length(ann_scale_vals))
+  names(ann_scale_palette) <- ann_scale_labels
+
+  other_data_scale_color <- other_data_scale %>%
+    dplyr::mutate(annotation_scale_label = factor(annotation_scale_label, levels = ann_scale_labels))
+
+  ai_data_scale_color <- ai_data_scale %>%
+    dplyr::mutate(annotation_scale_label = factor(annotation_scale_label, levels = ann_scale_labels))
+
+  p_color <- ggplot2::ggplot() +
+    # Lines for non-a_i use cases
+    ggplot2::geom_line(
+      data = other_data_scale_color,
+      ggplot2::aes(
+        x = annotation_r2,
+        y = AUPRC,
+        color = annotation_scale_label,
+        group = interaction(line_group, annotation_scale_label)
+      ),
+      linewidth = 1.0,
+      linetype = "solid"
+    ) +
+    ggplot2::geom_point(
+      data = other_data_scale_color,
+      ggplot2::aes(x = annotation_r2, y = AUPRC, color = annotation_scale_label),
+      size = 3
+    ) +
+    # Dashed horizontal lines for a_i (NA values)
+    ggplot2::geom_segment(
+      data = ai_data_scale_color,
+      ggplot2::aes(x = -Inf, xend = Inf, y = AUPRC, yend = AUPRC, color = annotation_scale_label),
+      linewidth = 1.0,
+      linetype = "dashed"
+    ) +
+    ggplot2::facet_grid(pstar_band ~ ., scales = "free_y") +
+    ggplot2::scale_color_manual(
+      values = ann_scale_palette,
+      name = "Annotation Scale"
+    ) +
+    ggplot2::labs(
+      title = "AUPRC by Annotation Quality, colored by Annotation Scale and faceted by p* group",
+      x = "Annotation Quality (causal R^2)",
+      y = "AUPRC"
+    ) +
+    ggplot2::guides(
+      color = ggplot2::guide_legend(
+        title.position = "top",
+        title.hjust = 0.5,
+        ncol = 3,
+        byrow = FALSE
+      )
+    ) +
+    ggplot2::theme_minimal(base_size = 14) +
+    ggplot2::theme(
+      legend.position = "bottom",
+      legend.title = ggplot2::element_text(size = 16, face = "bold"),
+      legend.text = ggplot2::element_text(size = 14),
+      legend.box.margin = ggplot2::margin(t = 10, b = 10, l = 0, r = 0),
+      legend.key.width = ggplot2::unit(1.5, "lines"),
+      strip.text.y = ggplot2::element_text(size = 14, face = "bold"),
+      axis.title.x = ggplot2::element_text(size = 18, margin = ggplot2::margin(t = 10)),
+      axis.title.y = ggplot2::element_text(size = 18),
+      axis.text = ggplot2::element_text(size = 12),
+      plot.title = ggplot2::element_text(size = 16, face = "bold", hjust = 0.5),
+      plot.margin = ggplot2::margin(t = 10, b = 10, l = 10, r = 10)
+    )
+
+  save_or_show(p_color, "auprc_annotation_r2_by_pstar_band_and_annscale_color.png", width = 16, height = 12, subdir = "auprc_new")
 } else {
   message("No data for annotation_r2 by p_star band and annotation_scale plot")
 }
@@ -967,7 +1040,6 @@ for (band in pstar_bands) {
   }
 }
 ```
-
 
 
 
