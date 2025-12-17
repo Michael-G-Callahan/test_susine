@@ -879,6 +879,19 @@ if (nrow(auprc_ann_pstar_scale) > 0) {
         )
       )
 
+    susine_zero_point <- ai_data_scale_x %>%
+      dplyr::transmute(
+        use_case_id = "b_ii",
+        annotation_scale = 0,
+        AUPRC = AUPRC,
+        pstar_band = pstar_band,
+        sigma_0_2_scalar = sigma_0_2_scalar,
+        gamma_shrink = NA_real_,
+        line_group = paste0("b_ii - ", sigma_0_2_scalar)
+      )
+
+    other_data_scale_x <- dplyr::bind_rows(other_data_scale_x, susine_zero_point)
+
     p_scale_x <- ggplot2::ggplot() +
       # Lines for non-a_i use cases
       ggplot2::geom_line(
@@ -1156,7 +1169,6 @@ for (band in pstar_bands) {
   }
 }
 ```
-
 
 
 
