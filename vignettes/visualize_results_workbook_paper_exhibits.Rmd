@@ -474,6 +474,9 @@ if (nrow(confusion_filtered) > 0) {
         breaks = names(label_lookup),
         name = "Use case"
       ) +
+      ggplot2::scale_x_continuous(
+        breaks = c(0, 0.2, 0.4, 0.6, 0.8, 1.0, 1.2)
+      ) +
       ggplot2::labs(
         title = "Power vs FDR (filtered one-off)",
         x = "False discovery rate (1 - precision)",
@@ -1153,7 +1156,6 @@ for (band in pstar_bands) {
   }
 }
 ```
-
 
 
 
