@@ -1,0 +1,404 @@
+---
+title: "SuSiNE Real Case Study"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+```{r setup, message=FALSE}
+here::i_am("vignettes/run_control_workbook.Rmd")
+library(here)
+here()
+library(devtools)
+devtools::load_all(".")
+library(susine)
+library(data.table)
+library(arrow)
+library(ggplot2)
+```
+
+```{r user-inputs}
+gene_name <- "CBX8"
+
+sigma_0_2_vec <- seq(from=0.1, to=0.4, by=0.05)
+annotation_scale_vec <- c(seq(from=0, to=0.2, by=0.02))
+L <- 10
+
+use_slurm <- FALSE
+slurm_task_max <- 200
+slurm_job_name <- paste0("susine_real_", tolower(gene_name))
+slurm_email <- "mgc5166@psu.edu"
+slurm_time <- "04:00:00"
+slurm_mem <- "8G"
+slurm_output_root <- here("output")
+slurm_shuffle_seed <- 1
+
+real_data_root <- here("output", "real_data_analysis", tolower(gene_name))
+rss_inputs_file <- file.path(real_data_root, paste0(gene_name, "_rss_inputs.RData"))
+
+fit_store_template <- list(
+  PIPs = NULL,
+  elbo_last = NULL,
+  sigma_2_last = NULL,
+  b_hat_sum = NULL
+)
+```
+
+```{r data-loading}
+z_file = here("data", "real_case_studies", gene_name, paste0(gene_name, "_GTEx_z_scores.csv"))
+R_file = here("data", "real_case_studies", gene_name, paste0(gene_name, "_LD_R.csv"))
+annotation_file = here("data", "real_case_studies", gene_name, paste0(gene_name, "_variant_effects.csv"))
+# vcf_file = here("data", "real_case_studies", gene_name, paste0(gene_name, "_variants.vcf"))
+
+z_scores = as.data.table(read.csv(z_file, header=TRUE))
+annotations = as.data.table(read.csv(annotation_file, header=TRUE))
+# variant_info = read.csv(vcf_file, header=TRUE)
+
+R_long_file_name = here("data", "real_case_studies", gene_name, paste0(gene_name, "LD_R_long.parquet"))
+
+if (file.exists(R_long_file_name)) {
+  R_long <- as.data.table(read_parquet(R_long_file_name))
+} else if (file.exists(R_file)) {
+  # Read LD R as a matrix with row/col variant IDs
+  R_dt <- fread(R_file, check.names = FALSE)
+
+  variant_ids <- R_dt[[1]]                # first column: row IDs
+  R <- as.matrix(R_dt[, -1, with = FALSE])
+  rownames(R) <- variant_ids
+  colnames(R) <- names(R_dt)[-1]
+
+  # Extract upper triangle only (set diag=TRUE if you want diagonal too)
+  idx <- which(upper.tri(R, diag = FALSE), arr.ind = TRUE)
+
+  R_long <- data.table(
+    variant_id_1 = rownames(R)[idx[, 1]],
+    variant_id_2 = colnames(R)[idx[, 2]],
+    r            = R[idx]
+  )
+  write_parquet(R_long, R_long_file_name, compression = "zstd")
+} else {
+  stop("Neither parquet nor CSV LD R file exists for ", gene_name)
+}
+```
+
+```{r data-validation}
+z_ids <- unique(z_scores$variant_id)
+ann_ids <- unique(annotations$rsID)
+z_ann_ids <- intersect(z_ids, ann_ids)
+
+z_dropped <- length(z_ids) - length(z_ann_ids)
+ann_dropped <- length(ann_ids) - length(z_ann_ids)
+cat("z_scores: kept", length(z_ann_ids), "dropped", z_dropped, "\n")
+cat("annotations: kept", length(z_ann_ids), "dropped", ann_dropped, "\n")
+
+z_scores <- z_scores[z_scores$variant_id %in% z_ann_ids, , drop = FALSE]
+annotations <- annotations[annotations$rsID %in% z_ann_ids, , drop = FALSE]
+
+R_long_ids <- unique(c(R_long$variant_id_1, R_long$variant_id_2))
+final_ids <- intersect(z_ann_ids, R_long_ids)
+
+z_ann_dropped <- length(z_ann_ids) - length(final_ids)
+cat("z+annotations in R_long: kept", length(final_ids), "dropped", z_ann_dropped, "\n")
+
+z_scores <- z_scores[z_scores$variant_id %in% final_ids, , drop = FALSE]
+annotations <- annotations[annotations$rsID %in% final_ids, , drop = FALSE]
+R_long <- R_long[R_long$variant_id_1 %in% final_ids & R_long$variant_id_2 %in% final_ids]
+
+n_sample <- round(as.numeric(median(z_scores$sample_size, na.rm = TRUE)),0)
+
+pair_dt <- data.table(
+  v1 = pmin(R_long$variant_id_1, R_long$variant_id_2),
+  v2 = pmax(R_long$variant_id_1, R_long$variant_id_2)
+)
+pair_dt <- unique(pair_dt)
+pair_dt <- pair_dt[v1 != v2]
+
+expected_pairs <- length(final_ids) * (length(final_ids) - 1) / 2
+pair_count <- nrow(pair_dt)
+missing_pairs <- expected_pairs - pair_count
+
+cat("R_long unique pairs:", pair_count, "expected:", expected_pairs, "\n")
+if (missing_pairs == 0) {
+  cat("R_long is complete for upper triangle (i>j) for", length(final_ids), "variants\n")
+} else if (missing_pairs > 0) {
+  cat("R_long is missing", missing_pairs, "pairs for upper triangle (i>j)\n")
+} else {
+  cat("R_long has", abs(missing_pairs), "extra pairs beyond upper triangle expectation\n")
+}
+
+variant_map <- data.table(variant_id = final_ids)
+variant_map[, snp_index := as.integer(seq_len(.N))]
+
+z_scores <- merge(z_scores, variant_map, by.x = "variant_id", by.y = "variant_id", all.x = FALSE, all.y = FALSE)
+annotations <- merge(annotations, variant_map, by.x = "rsID", by.y = "variant_id", all.x = FALSE, all.y = FALSE)
+R_long <- merge(R_long, variant_map, by.x = "variant_id_1", by.y = "variant_id", all.x = FALSE, all.y = FALSE)
+setnames(R_long, "snp_index", "snp_index_1")
+R_long <- merge(R_long, variant_map, by.x = "variant_id_2", by.y = "variant_id", all.x = FALSE, all.y = FALSE)
+setnames(R_long, "snp_index", "snp_index_2")
+
+z_scores[, variant_id := NULL]
+annotations[, rsID := NULL]
+R_long[, c("variant_id_1", "variant_id_2") := NULL]
+setcolorder(R_long, c("snp_index_1", "snp_index_2", "r"))
+
+z_scores[, snp_index := as.integer(snp_index)]
+annotations[, snp_index := as.integer(snp_index)]
+R_long[, snp_index_1 := as.integer(snp_index_1)]
+R_long[, snp_index_2 := as.integer(snp_index_2)]
+R_long[, r := round(as.numeric(r), 6)]
+
+setorder(z_scores, snp_index)
+setorder(annotations, snp_index)
+setorder(R_long, snp_index_1, snp_index_2)
+
+n_variants <- nrow(variant_map)
+i_idx <- pmin(R_long$snp_index_1, R_long$snp_index_2)
+j_idx <- pmax(R_long$snp_index_1, R_long$snp_index_2)
+R <- matrix(0, n_variants, n_variants)
+diag(R) <- 1
+R[cbind(i_idx, j_idx)] <- R_long$r
+R[cbind(j_idx, i_idx)] <- R_long$r
+
+a <- annotations$normalized_diff
+z <- z_scores$z_score
+cor(z, a, use = "complete.obs")
+
+rm(R_long, annotations, z_scores, i_idx, j_idx, n_variants)
+rm(z_ids, ann_ids, z_ann_ids, R_long_ids, final_ids, pair_dt, expected_pairs, pair_count, missing_pairs)
+
+obj_sizes <- sapply(list(R = R, a = a, z = z, variant_map = variant_map), object.size)
+print(format(obj_sizes, units = "auto"))
+
+dir.create(real_data_root, recursive = TRUE, showWarnings = FALSE)
+save(R, z, a, variant_map, n_sample, file = rss_inputs_file)
+```
+
+```{r susine-grid}
+param_grid <- expand.grid(
+  sigma_0_2 = sigma_0_2_vec,
+  annotation_scale = annotation_scale_vec,
+  stringsAsFactors = FALSE
+)
+
+if (use_slurm) {
+  job_config <- build_real_case_job_config(
+    job_name = slurm_job_name,
+    gene_name = gene_name,
+    param_grid = param_grid,
+    data_path = rss_inputs_file,
+    L = L,
+    output_root = slurm_output_root,
+    task_max = slurm_task_max,
+    email = slurm_email,
+    time = slurm_time,
+    mem = slurm_mem,
+    shuffle_seed = slurm_shuffle_seed
+  )
+
+  artifacts <- write_real_case_job_artifacts(
+    job_config,
+    run_task_script = here("inst", "scripts", "run_real_case_task.R")
+  )
+  print(artifacts)
+} else {
+  fit_summaries <- vector("list", nrow(param_grid))
+  total_runs <- nrow(param_grid)
+
+  for (i in seq_len(total_runs)) {
+    sigma_0_2 <- param_grid$sigma_0_2[i]
+    annotation_scale <- param_grid$annotation_scale[i]
+
+    fit <- susine_rss(
+      L = L,
+      z = z,
+      R = R,
+      n = n_sample,
+      sigma_0_2 = sigma_0_2,
+      mu_0 = annotation_scale * a,
+      prior_update_method = "none"
+    )
+
+    fit_summaries[[i]] <- list(
+      settings = list(
+        gene_name = gene_name,
+        sigma_0_2 = sigma_0_2,
+        annotation_scale = annotation_scale,
+        L = L,
+        n_sample = n_sample
+      ),
+      PIPs = fit$model_fit$PIPs,
+      elbo_last = tail(fit$model_fit$elbo, 1),
+      sigma_2_last = tail(fit$model_fit$sigma_2, 1),
+      n_iter = length(fit$model_fit$elbo),
+      b_hat_sum = colSums(fit$effect_fits$b_hat)
+    )
+
+    cat(i, "/", total_runs, "runs completed\n")
+  }
+
+  fit_summaries_file <- here(
+    "output",
+    paste0(gene_name, "_susine_fit_summaries.RData")
+  )
+  save(fit_summaries, file = fit_summaries_file)
+}
+```
+
+```{r visualization}
+if (use_slurm) {
+  message("Visualization skipped in SLURM mode. Load fit_summaries first.")
+} else {
+normalize_pips <- TRUE
+
+fit_df <- rbindlist(lapply(fit_summaries, function(x) {
+  data.table(
+    gene_name = x$settings$gene_name,
+    sigma_0_2 = x$settings$sigma_0_2,
+    annotation_scale = x$settings$annotation_scale,
+    L = x$settings$L,
+    n_sample = x$settings$n_sample,
+    elbo = x$elbo_last,
+    n_iter = x$n_iter,
+    sigma_2 = x$sigma_2_last,
+    PIPs = list(x$PIPs)
+  )
+}))
+
+pip_normalize <- function(p) {
+  p <- as.numeric(p)
+  p[p < 0] <- 0
+  s <- sum(p)
+  if (s == 0) return(rep(1 / length(p), length(p)))
+  p / s
+}
+
+entropy_from_pips <- function(p) {
+  p <- if (normalize_pips) pip_normalize(p) else as.numeric(p)
+  p <- p + 1e-12
+  -sum(p * log(p))
+}
+
+kl_div <- function(p, q) {
+  p <- if (normalize_pips) pip_normalize(p) else as.numeric(p)
+  q <- if (normalize_pips) pip_normalize(q) else as.numeric(q)
+  p <- p + 1e-12
+  q <- q + 1e-12
+  sum(p * log(p / q))
+}
+
+base_df <- fit_df[annotation_scale == 0]
+
+fit_df[, entropy := vapply(PIPs, entropy_from_pips, numeric(1))]
+fit_df[, KL_to_base := NA_real_]
+fit_df[, KL_from_base := NA_real_]
+
+for (i in seq_len(nrow(fit_df))) {
+  base_match <- base_df[sigma_0_2 == fit_df$sigma_0_2[i]]
+  if (nrow(base_match) > 0) {
+    p <- fit_df$PIPs[[i]]
+    q <- base_match$PIPs[[1]]
+    fit_df$KL_to_base[i] <- kl_div(p, q)
+    fit_df$KL_from_base[i] <- kl_div(q, p)
+  }
+}
+
+p_elbo_sigma <- ggplot(fit_df, aes(x = sigma_0_2, y = elbo, color = factor(annotation_scale))) +
+  geom_line() +
+  geom_point() +
+  labs(title = "ELBO by sigma_0_2", color = "annotation_scale")
+
+p_elbo_ann <- ggplot(fit_df, aes(x = annotation_scale, y = elbo, color = factor(sigma_0_2))) +
+  geom_line() +
+  geom_point() +
+  labs(title = "ELBO by annotation_scale", color = "sigma_0_2")
+
+p_iter_sigma <- ggplot(fit_df, aes(x = sigma_0_2, y = n_iter, color = factor(annotation_scale))) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Iterations by sigma_0_2", color = "annotation_scale")
+
+p_iter_ann <- ggplot(fit_df, aes(x = annotation_scale, y = n_iter, color = factor(sigma_0_2))) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Iterations by annotation_scale", color = "sigma_0_2")
+
+p_sigma2_sigma <- ggplot(fit_df, aes(x = sigma_0_2, y = sigma_2, color = factor(annotation_scale))) +
+  geom_line() +
+  geom_point() +
+  labs(title = "sigma_2 by sigma_0_2", color = "annotation_scale")
+
+p_sigma2_ann <- ggplot(fit_df, aes(x = annotation_scale, y = sigma_2, color = factor(sigma_0_2))) +
+  geom_line() +
+  geom_point() +
+  labs(title = "sigma_2 by annotation_scale", color = "sigma_0_2")
+
+p_entropy_sigma <- ggplot(fit_df, aes(x = sigma_0_2, y = entropy, color = factor(annotation_scale))) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Entropy by sigma_0_2", color = "annotation_scale")
+
+p_entropy_ann <- ggplot(fit_df, aes(x = annotation_scale, y = entropy, color = factor(sigma_0_2))) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Entropy by annotation_scale", color = "sigma_0_2")
+
+p_kl_to_base <- ggplot(fit_df, aes(x = annotation_scale, y = KL_to_base, color = factor(sigma_0_2))) +
+  geom_line() +
+  geom_point() +
+  labs(title = "KL(current || base) by annotation_scale", color = "sigma_0_2")
+
+p_kl_from_base <- ggplot(fit_df, aes(x = annotation_scale, y = KL_from_base, color = factor(sigma_0_2))) +
+  geom_line() +
+  geom_point() +
+  labs(title = "KL(base || current) by annotation_scale", color = "sigma_0_2")
+
+plot_dir <- here("output", "real_data_analysis", tolower(gene_name))
+dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
+
+print(p_elbo_sigma)
+print(p_elbo_ann)
+print(p_iter_sigma)
+print(p_iter_ann)
+print(p_sigma2_sigma)
+print(p_sigma2_ann)
+print(p_entropy_sigma)
+print(p_entropy_ann)
+print(p_kl_to_base)
+print(p_kl_from_base)
+
+ggsave(filename = file.path(plot_dir, "elbo_by_sigma_0_2.png"), plot = p_elbo_sigma, width = 7, height = 5, dpi = 300)
+ggsave(filename = file.path(plot_dir, "elbo_by_annotation_scale.png"), plot = p_elbo_ann, width = 7, height = 5, dpi = 300)
+ggsave(filename = file.path(plot_dir, "n_iter_by_sigma_0_2.png"), plot = p_iter_sigma, width = 7, height = 5, dpi = 300)
+ggsave(filename = file.path(plot_dir, "n_iter_by_annotation_scale.png"), plot = p_iter_ann, width = 7, height = 5, dpi = 300)
+ggsave(filename = file.path(plot_dir, "sigma_2_by_sigma_0_2.png"), plot = p_sigma2_sigma, width = 7, height = 5, dpi = 300)
+ggsave(filename = file.path(plot_dir, "sigma_2_by_annotation_scale.png"), plot = p_sigma2_ann, width = 7, height = 5, dpi = 300)
+ggsave(filename = file.path(plot_dir, "entropy_by_sigma_0_2.png"), plot = p_entropy_sigma, width = 7, height = 5, dpi = 300)
+ggsave(filename = file.path(plot_dir, "entropy_by_annotation_scale.png"), plot = p_entropy_ann, width = 7, height = 5, dpi = 300)
+ggsave(filename = file.path(plot_dir, "kl_to_base_by_annotation_scale.png"), plot = p_kl_to_base, width = 7, height = 5, dpi = 300)
+ggsave(filename = file.path(plot_dir, "kl_from_base_by_annotation_scale.png"), plot = p_kl_from_base, width = 7, height = 5, dpi = 300)
+
+ggplot(data.frame(z = z), aes(x = z)) +
+  geom_histogram(bins = 50) +
+  labs(title = "z distribution")
+
+ggplot(data.frame(a = a), aes(x = a)) +
+  geom_histogram(bins = 50) +
+  labs(title = "annotations distribution")
+
+p_hist_z <- ggplot(data.frame(z = z), aes(x = z)) +
+  geom_histogram(bins = 50) +
+  labs(title = "z distribution")
+
+p_hist_a <- ggplot(data.frame(a = a), aes(x = a)) +
+  geom_histogram(bins = 50) +
+  labs(title = "annotations distribution")
+
+ggsave(filename = file.path(plot_dir, "z_histogram.png"), plot = p_hist_z, width = 7, height = 5, dpi = 300)
+ggsave(filename = file.path(plot_dir, "annotations_histogram.png"), plot = p_hist_a, width = 7, height = 5, dpi = 300)
+}
+```

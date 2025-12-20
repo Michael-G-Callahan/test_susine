@@ -1,0 +1,734 @@
+\documentclass[11pt, notitlepage, letterpaper]{article}
+
+% math, bib and url 
+\usepackage{amsthm,amsmath,amssymb,bm}
+\usepackage[hyphens,colorlinks=false,hidelinks]{hyperref}
+
+% font info
+\usepackage{fouriernc} % print
+
+% figure info
+\usepackage{rotating}
+\usepackage{graphicx}
+\usepackage{pdflscape}
+\usepackage[margin=-0.5in,labelfont=bf]{caption}
+\usepackage{float}
+
+% table info
+\usepackage{booktabs}
+\usepackage{tabularx}
+
+% color info
+\usepackage[dvipsnames]{xcolor}
+
+% page info
+\usepackage[margin=1in]{geometry}
+
+\usepackage{fancyhdr}
+\usepackage{lastpage}
+
+\pagestyle{fancy}
+\fancyhf{}
+\renewcommand{\headrulewidth}{0pt}
+\rfoot{\thepage \hspace{1pt} / \pageref{LastPage}}
+
+% paragraph info
+\usepackage{parskip} % add blank line b/t paragraphs
+\setlength\parindent{0em} % prevent paragraph indentation
+
+% add line numbers for journal
+\usepackage[left]{lineno}
+\linenumbers
+
+% custom editing info
+\usepackage[normalem]{ulem}
+\newcommand{\note}[1]{\textcolor{blue}{\uline{#1}}} % author note
+
+
+\begin{document}
+
+\begin{center}
+{\bf\huge SuSiNE Paper Draft}    
+\end{center}
+
+\section*{Abstract}
+
+Genetic fine-mapping assigns causal probability to many highly correlated variants from limited samples, a setting in which causal structure is only weakly identifiable and external information can be decisive. We introduce SuSiNE (Sum of Single Non-central Effects), an extension of the popular SuSiE finemapping model, that enriches the effect-size prior by allowing SNP-specific non-zero prior means while still learning prior variances from data. This design lets SuSiNE ingest directional annotations from diverse sources—including single-nucleotide–resolution sequence-to-function models—so the model can express both where effects are likely and in which direction they point. Conceptually, SuSiNE complements informed priors on causal SNP probabilities (e.g., PolyFun’s per-SNP-heritability–proportional priors) with functional annotation priors that convey effect signs and magnitudes. In simulations reflecting eQTL settings, SuSiNE improves causal selection power and precision over existing approaches and remains robust under LD and sample-size constraints, though the advantage depends on the quality of the annotations provided. From these simulations we define a new metric that serves to capture an important aspect of dataset difficulty when using the IBSS algorithm. We further illustrate real eQTL applications guided by deep sequence-to-function models (e.g., Enformer, Borzoi, AlphaGenome), transforming their predictions into calibrated, signed priors. Finally, we provide an out-of-the-box summary-statistics implementation of SuSiNE for studies lacking individual-level data due to privacy restrictions, and discuss practical guidance for curating and calibrating signed priors.
+
+\section*{Introduction}
+
+- Something something about GWAS... 
+
+- Finemapping methods are limited due to data properties of LD, causing high levels of correlation, and the abundance of columns and limited rows causing weak identifiability in the data (rehash common knowledge). 
+
+- At the same time sequence to function models (Enformer, Borzoi, AlphaGenome now has single SNP resolution over a whole 1Mb window!) have been getting better and better, but until now there has not been much cross-talk between these two studies. 
+
+- Previous methods -> SuSiE
+
+- Multiple fine-mapping methods have been developed to address this problem.
+
+- Popular methods primarily all model the effect of SNPs on a phenotype as a sparse linear regression problem, with some implied binary selection indicator vector over all SNPs, and the goal being to estimate the posterior distribution of that indicator vector.
+
+[basic equations here]
+
+Earlier methods (CAVIAR, FINEMAP, DAP-G) sample discretely from the SNP selection space, estimating the probability of each possible model configuration sampled, and sometimes estimating a cumulative tail probability for all unsampled configurations, with most of the nuance being differences in the sampling procedure. The SuSiE (Sum of Single Effects) provides a unique innovation -- applying a variational bayes approach the problem, and allowing for a continuous relaxation of the SNP indicator vector throughout the estimation procedure. This allows for more fluid objective-ascent algorithms, although SuSiE's only primary implementation uses IBSS (iterative bayesian stepwise selection), a powerful yet simple algorithm which loops through the enumerated model effects until a convergence criteria is met. 
+
+We propose SuSiNE (sum of single noncentral effects), which is a generalized formulation of SuSiE, that allows for a non-zero prior mean on the SNP effect size, conditional on inclusion. 
+
+[model here]
+
+This simple generalization allows for a dramatic increase in the richness of prior information that the finemapping model can draw from, and perfectly suits the rich functional annotations provided by new sequence-to-function models. Setting $mu_0 = 0$ returns the original SuSiE model. We prove that this more generalized version of the model still exhibits all of the valued properties of SuSiE, sporting a closed form posterior distribution which yields a simplified variational inference procedure based on an anlytically tractable SER model.
+
+(May want to include a note that we expect these to be roughly orthogonal sources of information! As seq-to-fun models are trained by scrolling across the whole reference genome whilst finemapping compares variations across individuals in a single locus!)
+
+We show in simulations that SuSiNE is well calibrated and more powerful than SuSiE when supplied with well-specified functional annotations of SNP effects. In simulations where the functional annotations provided vary in significantly in quality, SuSiNE remains well calibrated and its power mostly robust to annotation quality (at least within what we would expect for the current generation of seq-to-fun models). 
+
+We apply SuSiNE to a real eQTL case study of the CBX8 gene using per-SNP effect predictions from the Borzoi sequence model, and identify candidate X causal SNPs with posterior causal probability > 0.95. Of these, X were unidentified previously, indicating the decisiveness of the functional annotations provided.
+
+Read \url{https://www.nature.com/articles/s41588-018-0196-7}.
+
+\section{Methods} 
+SuSiNE prioritizes eQTL variants with signed functional annotations that align well with the GWAS data by specifying prior effect distributions that center on best-estimates from external functional sources. For each SNPs in a given locus, some external model -- likely a deep learning sequence-to-function model like Borzoi -- performs major-to-minor allelic replacement in the reference sequence at the variant's position and records the predicted log-fold change in expression. After performing this for all such SNPs in the locus, the predicted changes to expression are normalized across all variants to produce z-scores, which are matched to the same scale as the standardized GWAS data. 
+
+Once functional annotations are specified, the SuSiNE model is fit using the iterative bayesian stepwise selection (IBSS) algorithm, same as the SuSiE. However, unlike the SuSiE, model, the SuSiNE model will calculate the log-prior odds for each SNP in proportion to the distance between the its observed effect and its annotated effect, rather than the distance between its observed effect and zero. This simple difference allows the SuSiNE model to up-weight variants with observed effects that have directions and magnitudes that best align with prior information, and penalize variants with observed effects that do not align with prior information. The relative magnitude of this discrimination is controlled by (a) the scale of the annotations provided and (b) the prior effect variance, which is assumed to be a scalar per effect, $l$. 
+
+The resulting model's estimated posterior distrbution over causal variant inclusion will thus draw information both from genotype data and rich functional sources. 
+
+
+\section*{Simulations}
+
+\paragraph{Main simulations.}
+We evaluated SuSiNE using simulated genotypes from $120{,}000$ European-ancestry individuals generated from 1000 Genomes LD estimates\footnote{``This repository contains simulated genotype data for 600{,}000 individuals from five distinct populations \dots (2023-02-13).''}. Following the SuSiE design, we uniformly sampled $150$ genes from the $>$20{,}000 autosomal genes, took the $1{,}000$ SNPs nearest each TSS, sampled $n=600$ individuals (EUR) per gene, removed variants with MAF $<0.01$ (resulting $p\in[970,1000]$, mean $p=994.7$), and column-standardized $X\in\mathbb{R}^{n\times p}$. Unlike the SuSiE paper, we did not run second, larger scale simultations with $p \approx 10,000$ becuase our genotype data source was less densely populated, with 1,000 PIPs already skirting the edge of a 1MB search radius around the TSS, so larger cuts of the data would not have produced the LD pattern relevant to finemapping studies. To make our simulation study more definitive, we instead ran more extensive simulations in the smaller, more common data case, increasing the seed replicates from 2 to 3, and testing more setting combinations in general.
+
+
+\paragraph{Simulation setup.}
+
+Given a genotype matrix $\mathbf{X} \in \mathbb{R}^{n \times p}$, we simulate sparse causal effects, phenotypes, and functional annotations as follows.
+
+\medskip
+\noindent\textbf{Causal effects and phenotypes.}
+We first draw a causal mask
+\[
+\mathbf{m} \in \{0,1\}^p,\qquad 
+\|\mathbf{m}\|_0 = p^\star,
+\]
+uniformly over all subsets of size $p^\star$. Conditional on $\mathbf{m}$, we draw effect sizes
+\[
+\boldsymbol{\epsilon}_b \sim N_p(\mathbf{0}, I_p), \qquad 
+\beta_j = m_j \,\epsilon_{b,j}, \quad j=1,\dots,p,
+\]
+so that exactly $p^\star \ll p$ variants are causal.
+
+Phenotypes are simulated according to
+\[
+\mathbf{y} = \mathbf{X}\boldsymbol{\beta} + \boldsymbol{\varepsilon}_y,
+\qquad
+\boldsymbol{\varepsilon}_y \sim N_n(\mathbf{0}, \sigma_y^2 I_n).
+\]
+We target a specified proportion of variance explained (PVE)
+\[
+\phi_y 
+= \frac{\text{var}(\mathbf{X}\boldsymbol{\beta})}
+       {\text{var}(\mathbf{X}\boldsymbol{\beta}) + \sigma_y^2},
+\]
+and set $\sigma_y^2$ accordingly for each simulated locus. Thus, $\mathbf{y}$ is generated from a sparse genetic architecture with $p^\star$ causal variants and PVE $\phi_y$.
+
+\medskip
+\noindent\textbf{Annotation-based prior means.}
+For SuSiNE, we construct a vector of prior effect means $\boldsymbol{\mu}_0 \in \mathbb{R}^p$ based on the true effects. Conceptually, $\mu_{0j}$ is defined as a prior mean \emph{conditional} on SNP $j$ being causal, so the model does not require any particular structure for $\mu_{0j}$ at non-causal SNPs. In the simulations, however, we generate $\boldsymbol{\mu}_0$ using three scalar “knobs”:
+
+1. An \emph{annotation quality} parameter $\phi_a \in [0,1]$ controlling how well $\mu_{0j}$ predicts $\beta_j$ on causal SNPs.  \\
+2. A \emph{relative variance} parameter $\nu_a > 0$ controlling the relative scale of $\mu_{0j}$ on non-causal vs causal SNPs. \\
+3. An \emph{annotation scaling} parameter $c > 0$ controlling the scale $\mu_0$ over all SNPs immediately before model ingestion. \\
+
+Concretely, we set
+\[
+\mu_{0j} = c \times a_j \\
+\]
+
+\[
+a_{j} =
+\begin{cases}
+\beta_j + \epsilon_{a,j}^{(1)}, & m_j = 1,\\[4pt]
+\epsilon_{a,j}^{(0)},          & m_j = 0,
+\end{cases}
+\]
+with independent noise terms
+\[
+\epsilon_{a,j}^{(1)} \sim N(0, \sigma_{a,1}^2),
+\qquad
+\epsilon_{a,j}^{(0)} \sim N(0, \sigma_{a,0}^2).
+\]
+We choose $(\sigma_{a,1}^2, \sigma_{a,0}^2)$ so that
+\[
+\phi_a 
+= 1 - \frac{\Var(a_{j} - \beta_j \mid m_j = 1)}
+            {\Var(\beta_j \mid m_j = 1)},
+\qquad
+\nu_a 
+= \frac{\Var(a_{j} \mid m_j = 0)}
+        {\Var(a_{j} \mid m_j = 1)}.
+\]
+Thus, $\phi_a$ is the coefficient of determination ($R^2$) of $a$ with respect to the true causal effects, and $\nu_a$ is the ratio of annotation variance at non-causal versus causal SNPs. The model parameter for prior conditional effect size mean is set to the annotation vector $a$, $\mu_0 = ca$, while for model runs tested that ingest functional annotations through the confiditonal effect size variance, $\sigma_0^2$, we set $\mu_0 = 0$ and provide $\sigma_0^2$ thusly.
+
+\medskip
+\noindent\textbf{Annotation-based prior variances.}
+For SuSiNE model evaluations we also vary a scalar prior variance $\sigma_0^2$, which is taken to be constant across all SNPs and single-effect components (i.e., shared across all $n$, $p$, and $L$).
+
+In addition, we explore an alternative way of incorporating functional information into SuSiE by encoding annotations through SNP-specific prior variances rather than prior means. In these runs we fix the prior mean at zero,
+\[
+\mu_{0j} \equiv 0,\quad j=1,\dots,p,
+\]
+and instead construct SNP-specific prior variances from an exponential kernel applied to the (underlying) mean annotations:
+\[
+\sigma_{0j}^2 
+= \text{var}(\mathbf{y}) \,\exp\!\bigl(-\gamma \,|\mu_{0j}|\bigr),
+\]
+for a decay parameter $\gamma > 0$. This choice yields larger prior variances (weaker shrinkage) for SNPs with weaker annotations and smaller prior variances (stronger shrinkage) for SNPs with stronger annotations, encoding unsigned enrichments.
+
+\medskip
+\noindent\textbf{Simulation grid.}
+For each genotype dataset $\mathbf{X}$ (150 distinct loci), we run a full factorial grid of phenotypic and model settings.
+
+\emph{Phenotype grid:}
+\[
+\phi_y \in \{0.40, 0.20, 0.10, 0.05\}, 
+\qquad
+p^\star \in \{1, 2, 3, 4, 5, 10, 20\}.
+\]
+For each $(\phi_y, p^\star)$ combination, we generate 3 replicate phenotypes (independent random seeds) per $\mathbf{X}$. This yields
+\[
+150 \times 4 \times 7 \times 3 = 12{,}600
+\]
+distinct $(\mathbf{X}, \mathbf{y})$ datasets.
+
+\emph{Model grids:}
+for each simulated dataset we fit the following models.
+
+\begin{itemize}
+  \item \textbf{SuSiE (no priors):} standard SuSiE with constant prior variance
+  \[
+  \sigma_0^2 \in \{0.1,\, 0.2,\, 0.4\},
+  \]
+  and no functional priors on means or variances.
+  
+  \item \textbf{SuSiE (functional variances):} SuSiE with $\mu_{0j} \equiv 0$ and SNP-specific prior variances $\sigma_{0j}^2$ defined by the exponential kernel above, using
+  \[
+  c \in \{1.0\}, \quad
+  \phi_a \in \{0.2, 0.4, 0.6, 0.8\}, \quad
+  \nu_a \in \{0.5, 1.0, 1.5\}, \quad
+  \gamma \in \{0.4, 0.8\}.
+  \]
+  
+  \item \textbf{SuSiNE (functional means - general study):} SuSiNE with prior means $\boldsymbol{\mu}_0$ constructed as above and a scalar prior variance $\sigma_0^2$, with
+  \[
+  c \in \{1.0\}, \quad
+   \sigma_0^2 \in \{0.1,\, 0.2,\, 0.4\}, \quad
+  \phi_a \in \{0.2, 0.4, 0.6, 0.8\}, \quad
+  \nu_a \in \{0.5, 1.0, 1.5\}.
+  \]
+  
+  \item \textbf{SuSiNE (functional means - scaling study):} SuSiNE with prior means $\boldsymbol{\mu}_0$ constructed as above and a scalar prior variance $\sigma_0^2$, with
+  \[
+  c \in \{0,\, 0.2,\, 0.4,\, 0.6,\, 0.8,\, 1.0,\, 1.2\}, \quad
+   \sigma_0^2 \in \{0.1\}, \quad
+  \phi_a \in \{0.2, 0.4, 0.6, 0.8\}, \quad
+  \nu_a \in \{1.0\}.
+  \]
+  
+\end{itemize}
+
+In all runs, the number of single-effect components in the SuSiE/SuSiNE prior is fixed at
+\[
+L = 10.
+\]
+
+\paragraph{Simulation results.}
+
+Next we analyzed the simulation results to determine the relative effectiveness of each method under different regimes. In this paper, we focus our attention exclusively on the quality of the PIPs generated on a per-model basis, rather than placing emphasis on individual effects or credible sets. Model performance is determined by viewing the tradeoff between precision and recall at various PIP thresholds across large sets of runs, often summarized using AUPRC. More detailed analytics regarding credible sets and other metrics is provided in Appendix [TBD].
+
+We first examine an illustrative example where $p^{\star} = 5$, $\phi_y = 0.2$, $\phi_a = 0.4$, $\gamma = 0.8$, $\nu_a = 1.0$, and $\sigma_0^2 = 0.4$, and $c = 0.7$. This phenotypic scenario should be considered reasonable for a finemapping regime, and the simulated annotation properties might also be considered moderate, with no variable setting being ideal for SuSiNE performance over SuSiE. In particular, the annotation PVE of $\phi_a = 0.4$ merely denotes the alignment between the annotations and true effect sizes for the 5 causal SNPs in each dataset. For the other $p \approx 995$ noncausal SNPs in the dataset, the prior mean annotations $\mu_0$ are all nonzero, representing pure noise, with the same scale as the causal annotations due the setting $\nu_a = 1.0$. Thus, the overall annotation PVE of $\mu_0$ on $\beta$ is simulated as $\approx 0.002$. So from an overall perspective, the whole annotation vector $\mu_0$ can thought of as containing very little information about the coefficent vector $\beta$. Despite the signal sparsity in its prior annotations, SuSiNE generates PIPS with moderate, yet consistently higher power for a given FDR on the precision recall curve than baseline SuSiE with no functional priors, or SuSiE with prior variance annotations [FIGURE 1]. 
+
+The advantage that functional prior annotations provide in the illustrative "moderate" example can be greatly increased or erased completely depending on the simulation parameters. Namely, we observe that for higher values of causal annotation accuracy $\phi_a$, and for higher values of $p^\star$, prior annotations generally provide a very significant benefit over baseline SuSiE, and vice-versa [FIG 2, \texttt{AUPRC\_NEW}]. Suprisingly, when an additional annotation scaling study was performed to identify the ideal scale of overall annotations, we found that the annotations vector benefits significantly from shrinkage [scale fig]. Though the ideal scale of annotations provided, $c$, depends on $p*$ and $\phi_a$, we observe that lower scales in the $c \in [0.4, 0.6]$ range exhibit the best performance under a fairly broad regime of simulation settings. This finding may have a connection to Stein's lemma [cite?], due to the annotation vector being a high dimensional estimation problem --  although our objective is the AUPRC on model PIPs rather than the MSE on coefficient estimations, so the traditional formulations of James-Stein shrinkage estimators do not directly apply to our situation.
+
+As for SuSiE models using unsigned functional annotations ingested through the prior variance parameter $\sigma_0_2$, we can see that performance is greatly dependent upon the relative scale of causal and noncausal annotations, controlled by $\nu_a$. When $\nu_a = 0.5$, for example, the effect annotations $a$ can be expected to be larger for the causal SNPs and thus the $\sigma_0^2$ values will be smaller, effectively reweighting the prior odds to favor SNPs with annotations of greater magnitude. We observe that in such a regime, this prior annotation strategy can provide some benefit over vanilla SuSiE without annotations -- however, unlike with SuSiNE this benefit does not greatly increase with $p\star$ or $\phi_a$, resulting in consistently modest performance gains across many scenarios rather than dominating other methods under specific regimes. 
+
+Finally, we observe that all methods tested are of course sensitive to $p\star$ and $\phi_y$, however, they are also sensitive to the X dataset sampled from our genotype data. While finemapping literature in general -- and the SuSiE paper especially -- is concerned with blocks of highly correlated features ($r_ij > 0.9$) appearing in the genotype dataset and introducing identifiability limits in the data, we find that a novel orthogonal measure of identifiability is just as significant in contributing to finemapping error. Specifically, we define the M1 measure as the "mid-LD" metric of the X datasets as follows:
+
+\begin{eqnarray}
+M_1: R^{n x p} \rightarrow R \\
+M_1(X) = \frac{2}{p(p-1)}\sum_{i <j}|r_{ij}|(1-|r_{ij}|)
+\end{eqnarray}
+
+Where $r_{ij}$ is an entry of the correlation matrix, $R$ of $X$.
+
+In particular, any genotype matrix X with a correlational LD matrix R composed of 0s and 1s produces an $M_1 = 0$, regardless of the size and number of LD blocks in the data set, making $M_1$ generally agnostic to the scale and severity of identifiability issues within LD blocks, and instead reflect only the relative level of identifiability between LD blocks. We observe that $M_1$ alone explains 42\% of the variation in overall PIP AUPRC for all runs across the 150 datasets generated for the study [FIGURE - M1 metric], despite within-block identifiability varying between datasets as well. This aligns with our expectations of SuSiE/SuSiNE, as the IBSS algorithm is somehwat greedy, and $M_1$ is a proxy for submodularity of the variable selection process in the dataset [cite approximate submod paper]. This suggests that higher levels of $M_1$ cause SuSiE/SuSiNE to converge to the wrong local optima in model space, whereas block-wise identifiability reflects the difficulty of weighting PIPs correctly once the model has already converged to the correct variational inference basin.
+
+\section*{Real Data Case Study}
+
+We performed an eQTL finemapping study on real data to demonstrate the utility of SuSiNE model in identifying novel candidate causal variants. Note that this is really more of an illustrative study, as its based on lower quality data. Thankfully, like SuSiE, SuSiNE also has a summary statistic formulation which is identical to the individual data formulation. Our real data use case study uses the summary statistics mode of SuSiNE, specifically SuSiNE RSS [cite susie rss and link to our own supplements]. 
+
+\paragraph{Real Data Case Study - Setup}
+
+We use real de-identified genotype data from GTEx in the for our case study. Specifically, we obtain the z-scores provided from GTEx, $z$, on all variants covered in the GTEx 10 study against CBX8 expression in lung tissue [https://pmc.ncbi.nlm.nih.gov/articles/PMC7737656/pdf/nihms-1651674.pdf] as is was a study of interest in the GTEx paper. We selected a set of ~2210 variants in the gene region, after taking all variants in the GTEx data (9,791) and applying an MAF >= 0.01 filter (9,466) then filtering by variants at least 50 total samples (9,224) with the Borsoi receptive field window when centering on the gene TSS (2,258). This ensured that we could obtain functional annotations, and also limited the data to the variants for which we expected the greatest level of LD. Lastly, we filtered by SNP variants only (2,110) to simplify the study interpretation. The median sample size of the remaining SNPs was 601, which was the sample size provided to the SuSiNE model for finemapping. 
+
+To obtain annotation vector $a$, for each SNP, the reference sequence was mutated to the alternate allele, and the change in scaled expression level for GTEx lung tissue tasks (Borzoi has its own weird scaling on the RNA levels, not quite log but also not raw) was recorded. These prediction were performed for each of the four independently borzoi model deep replicates, with mean aggregation across them to prevent overfitting. The resulting gene expression deltas were then normalized to the standard normal distribution across all SNPs in the set. 
+
+We obtained the reference panel LD matrix $R$ from the reference genotype panel provided by the 1000G project[cite], and further filtered the SNPs considered in the study to those for which LD reference correlations could be obtained from this source (2057). Thus, our finemapping study considereds 2,057 SNPs to causing the phenotype of CBX8 expression in lung tissue. 
+
+Finally, the SuSiNE model was run on the $z$, $R$, $a$, and $n=601$ obtained above with $L=10$ effects. In addition, we fit the SuSiNE model using the following settings grid to explore the model landscape under varying levels of trust in the annotations:
+\begin{eqnarray}
+    c \in \{0,\, 0.02,\, 0.04,\, \dots ,\, 0.2\} \\
+    \sigma_0^2 \in \{0.10,\, 0.15,\, 0.20,\, \dots ,\, 0.4\} 
+\end{eqnarray}
+
+For a total of 77 model runs on the same set of 2,057 SNPs. We observed that our annotations were roughly independent to our eQTL z scores ($\rho(a, z) = 0.06$).
+
+\paragraph{Real Data Case Study - Results}
+
+We observed that all 77 model fits produced PIP vectors that clustered tightly into 4 completely distinct clusters (figure - cluster number, details in supplement), which can generally be thought of as local optima, or basins, in the model space that SuSiNE explores. Further, each model's fit and each cluster/basin can be viewed on a frontier that trades off residual variance, $\sigma_2$ and the entropy of the PIP vector. The intuition behind this is that generally speaking, similar to ridge regression, when the $\sigma_0^2$ is very low, the model is encouraged to spread out posterior inclusion mass across more SNPs, creating an overly diffuse model that fails to provide much predictive power. When the opposite is true and $\sigma_0^2$, the model will degenerate in the other direction, selecting sparse variants in an almost binary fashion and claiming high predictive power on the dataset, with perhaps too much confidence. Thus the art of fitting a finemapping model like SuSiNE is to run a grid that explores the model space well between these two modes. We observe that the four basins explored by the models in our study represent, roughly, four different points along this frontier (sigma2 entropy figure). 
+
+We can connect this to our finding on Mid-LD energy and references on submodularity.
+
+We observe that the SuSiNE uniquely discovers the two intermediate basins in the fitted model space, which are invisible to the SuSiE models with $c=0$ (figure - clustering grid). Hypothetically, this could have happened only because more models were run using $c \ne0$, which gives SuSiNE models more chances to find additional basins that SuSiE, making it an unfair comparison. To test this hypothesis, for each set of models fit for a fixed $\sigma_0^2$, we set $c=0$ as the baseline model and calculated the KL divergence from all other models to their respective SuSiE baseline. We observe that the model drift under annotation scalling is U-shaped rather than monotonic (figure, KL to base). This is a suprising result, which indicates that, for a fixed $\sigma_0^2$, the annoation scale as a "sweet spot" and going too low or to high with return the model to the exact same SuSiE baseline fit, which is on either end of the $\sigma_2$ - entropy spectrum. Essentially, we can be reasonably confident that the annotations are genuinely providing novel optima, and this is not a sampling bias we see in the clustering analysis. 
+
+Lastly, it is important to note that, while every basin poses a different $\sigma_2$ - entropy tradeoff, this is not simplying a monotonic transformation of the some kernel over the same set of prioritized snps across all clusters. The within-group rank correlation of PIPs is high (min=0.96, max=1, median=0.99) and the between-group correlation is low (min=0.07, max=0.71, median=0.09). While some variants were selected somewhat consistenly across models. For example, using the centroid model of each cluster as its representative, we observe that \emph{chr17\_79546204\_A\_G\_b38} has a PIP of 1.0 across most of the models in cluster 1, and 0 in other clusters. You can see small sample of such cluster-specific SNPs below (table 1):
+
+\begin{table}[ht]
+\centering
+\caption{Sample of Cluster-Specific SNPs}
+\label{tab:cluster_pips}
+\begin{tabular}{rrrrrrr}
+\toprule
+variant\_id & pip\_cluster\_1 & pip\_cluster\_2 & pip\_cluster\_3 & pip\_cluster\_4 \\
+\midrule
+chr17\_79546204\_A\_G\_b38 & 1.00 & 0.00 & 0.00 & 0.00 \\
+chr17\_79562528\_T\_C\_b38 & 0.00 & 1.00 & 0.00 & 0.05 \\
+chr17\_79559422\_G\_A\_b38 & 0.00 & 0.00 & 1.00 & 0.00 \\
+chr17\_79585481\_C\_T\_b38 & 0.00 & 0.08 & 0.07 & 0.64 \\
+chr17\_79580025\_T\_C\_b38 & 1.00 & 1.00 & 1.00 & 0.03 \\
+chr17\_79545400\_C\_G\_b38 & 0.00 & 1.00 & 1.00 & 0.01 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Notably, cluster 4 is the diffuse cluster, while cluster 1 is the spiky cluster, and 2 and 3 in the middle. This indicates that there are SNPs with 100\% causal probability selected in model clusters 2 \& 3 which are only selected in 2 \& 3, and thus the functional annotations are a requirement to uncover them.  
+
+Finally, if we want to select SNPs for lab validation, one might scan the PIPs across all models and select all SNPs with at least one PIP across all models greater than some threshold $\alpha \prime$. We note that this form of selection benefits greatly from functional annotations in the below table:
+
+\begin{table}[ht]
+\centering
+\caption{Number of study-wide significant SNPs}
+\label{tab:significant_snps}
+\begin{tabular}{rrrrrrr}
+\toprule
+PIP threshold ($\alpha\prime$) & \# SNPs in SuSiE models & \# SNPs in SuSiNE models & \# SNPs combined & \% gain\\
+\midrule
+0.5 & 10 & 15 & 15 & 50\%\\
+0.9 & 9 & 13 & 13 & 44\% \\
+0.99 & 9 & 12 & 12 & 33\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Thus, we can conclude that functional annotations provide novel finemapping benefit in this study. Additionally we can see that our real case study fell into the $p\star$ regime that our simulations denoted as highly advantageous to SuSiNE.
+
+\section*{Discussion}
+
+0. We establish a new model (theory part -quick and basic)
+
+1. We found in simulations, for models with $p\star > 5$, and pre-specified annotation shrinkage, functional annotations provide significant and robust benefit across a broad range of annotation quality. 
+
+2. our simulations also suggest that one of the greatest challenges selection models face in realistic finemapping scenarios is mid-LD energy, causing non-submodular model fit processes, and creating many local optima in the model space which are hard for the greedy-like IBSS algorithm to navigate through and find.
+
+3. In practice, when running multiple models on the same data, we never really know 100\% what model is "true" or even "best" but we can run a setting grid over SuSiNE to uncover different plausible variant combinations. As we did in our real data case study.
+
+4. From our case study results, we confirmed that our case was well wihtin the regime of receiving benefit from SuSiNE functional annotations. We also observed  that our orthogonal functional annotations vector $a$ was crucial in serving as a soft "north-star" that was able to help steer the model toward novel variational inference optima, and uncovering as many as 50 \% more novel candidate causal SNPs in our real case study.
+
+5. Ultimately, choosing the right pre-specified values for $\sigma_0^2$ and $c$ in practice comes down to searching for critical regions where the $\sigma_2$ - entropy tradeoff curve is being explored. This visualization can help practitioners zero in on the right values. 
+
+6. Going forward, the biggest questions we have are about coming up with ways to alter the IBSS algorithm to play well with genotyope data that exhibits mid-LD energy and thus non-submodular forms, as well as developing smarter composite models to provide elegant bayesian model averaging across different settings, and perhaps encouraging models to disperse in the model space during the fitting process. 
+
+\section*{Scrap}
+
+\section*{Methods}
+
+\subsection*{SuSiNE Model}
+
+\textbf{New Potential Model description:}
+
+\begin{eqnarray}
+    \bf y = X \boldsymbol{\beta} + e \\
+    {\bf e} \sim N_n({\bf 0}, \sigma^2 {\bf I_n}) \\
+    \boldsymbol{\beta} = \sum_{l=1}^L \boldsymbol{\beta}_l \\
+    \boldsymbol{\beta}_l = {\bf b}_l \odot \boldsymbol{\gamma}_l \\
+    \boldsymbol{\gamma}_l \sim Multi(1, {\bf \boldsymbol{\pi}} ) \\
+    {\bf b}_l \sim N_p(\mu_{0l}, \Sigma = diag(\sigma^2_{0l})) 
+\end{eqnarray}
+
+Here, $b_l$ is a vector of causal SNP effects for a given l, with a multivariate normal distribution conditioned on $\mu_l$, a (p x 1) vector of mean, and $\Sigma$, a (p x p) covariance matrix with diagonal elements of (p x 1) vector $\sigma^2_{0l}.$
+
+Users have the following options available to specify the prior-effects distribution:
+
+\begin{table}[h!]
+\centering
+\begin{tabular}{|c|c|c|c|c|}
+\hline
+Option name & Mean vary by L & Mean vary by p & Variance vary by L & Variance vary by p \\ \hline
+Full spec & Yes & Yes & Yes & Yes   \\ \hline
+Empty spec & No & No & No & No   \\ \hline
+Custom spec (any other combo) & ... & ... & ... & ...   \\ \hline
+\end{tabular}
+\label{tab:input_specs}
+\end{table}
+
+In addition, the users will have the following options to specify empirical bayes (EB) update policy on the prior effect distribution:
+
+\begin{table}[h!]
+\centering
+\begin{tabular}{|c|c|c|c|c|}
+\hline
+Option name & Mean vary by L & Mean vary by p & Variance vary by L & Variance vary by p \\ \hline
+Full update & Yes & No & Yes & No   \\ \hline
+Mean update & Yes & No & No & No   \\ \hline
+Var update & No & No & Yes & No   \\ \hline
+No EB & No & No & No & No   \\ \hline
+\end{tabular}
+\label{tab:eb_options}
+\end{table}
+
+\pagebreak
+Please note, that due to computational tractability, EB updating will never allow SNP-specific parameters in either effect mean or variance. If users wish to preserve SNP-specific prior information for either mean or variance, that information must be provided by the user, and EB updating must be turned off for that parameter.
+
+\pagebreak
+
+\textbf{Simulation model:}
+
+\begin{eqnarray}
+    \bf y = X \boldsymbol{\beta} + e \\
+    {\bf e} \sim N_n({\bf 0}, \sigma_e^2 {\bf I_n}) \\
+    \boldsymbol{\beta} = \sum_{l=1}^L \boldsymbol{\beta}_l \\
+    \boldsymbol{\beta}_l = {\bf b}_l \odot \boldsymbol{\gamma}_l \\
+    \boldsymbol{\gamma}_l \sim Multi(1, {\bf \boldsymbol{\pi}} ) \\
+    {\bf b}_l =  {\bf b}_{lg} + {\bf b}_{lv}\\
+    {\bf b}_{lg} \sim N(\mu_g, \Sigma = diag(\sigma_g^2)) \\
+    {\bf b}_{lv} \sim N(0,\Sigma = diag(\sigma_v^2)) \\  
+    \implies {\bf b}_l \sim  N(\mu_g, \Sigma = diag(\sigma_g^2 + \sigma_v^2)) \\
+    \implies var(y_i) = \sigma_e^2 + x_i^tx_i(\sigma_g^2 + \sigma_v^2)
+\end{eqnarray}
+
+\textbf{Simulation process:}
+\begin{enumerate}
+    \item Choose:
+        \begin{enumerate}
+            \item Data X, $\mu_g$ [Optional]
+            \item \# Causal effects: L
+            \item Trait noise (\% of y var): $\sigma_e^2$
+            \item Gene importance ratio (\% of causal var): $\sigma_g^2 / (\sigma_g^2+\sigma_v^2)$        
+        \end{enumerate}
+    \item Simulate:
+        \begin{enumerate}
+            \item Set: $\sigma_g^2, \sigma_v^2$
+            \item Sample: $\mu_g \sim N(0, diag(\sigma_g^2$)) [optional]
+            \item Sample: $b_l \sim N(\mu_g, diag(\sigma_{v}^2))$ 
+            \item Sample: $\boldsymbol{\gamma}_l \sim Multi(1, {\bf \boldsymbol{\pi}} )$
+            \item Sample: $y \sim N(\sum{b_l \cdot \gamma_l}, \sigma_e^2)$    
+        \end{enumerate}
+
+\end{enumerate}
+
+\pagebreak
+
+\textbf{Connection to SLDP paper:}
+
+\begin{eqnarray}
+   \text{Trait noise:  } \sigma^2 = \sigma_e^2\\
+   \text{SNP effects:  } \bf{b} = \beta \\
+   \text{Prior effect mean:  } c\mu_g = \mu v \\
+   \text{Prior accuracy:  } \frac{\sigma_g^2}{\sigma_g^2 + \sigma_v^2} \approx r_f^2 \\
+\end{eqnarray}
+
+\pagebreak
+As we can see, $E(\beta_j) = \pi_j (\mu_0^T \bf{1}_L) = \pi_j (\sum_{l=1}^{L} \mu_{0l})$, where $\mu_0$ is an (L x 1) vector of conditional prior means and $\pi$ is a (p x 1) vector of prior inclusion probabilities.
+
+Alternative prior 3 (**this is what Siming needs from us ): $${\bf b}_l \sim N_p(j_l \cdot \boldsymbol{m},k_l \cdot \text{Diag}(\boldsymbol{d}))$$
+where $\boldsymbol{m}$ and $\boldsymbol{d}$ are both $p$-length and known to us (treated as given data), whereas $j_l$ and $k_l$ are scalars.
+If we set $j_l=1$ and $k_l=1$, then we recover Alternative prior 1 above.
+If we set $\boldsymbol{m}={\bf 1}_p$ and $\text{Diag}(\boldsymbol{d})=\boldsymbol{I}_p$, then we recover Eqn 6 above. However, these scalars allow us to perform some amount of EB updating on the priors specific to the $l^{th}$  effect.
+
+
+\textbf{Algorithm overview - alternative prior 1:} \\
+Here, $\mu_0$ and $sigma^2_{0}$ do not vary by $l$, so it cannot be updated using inner loop empirical bayes.
+
+
+\begin{enumerate}
+    \item \textbf{repeat} ...
+    \item \begin{enumerate}
+        \item $\bar{r} \leftarrow y - X\sum_{l=1}^L \bar{b}_l$
+    \item \textbf{for} \emph{l} in 1,...,\emph{L} \textbf{do}
+    \item 
+        \begin{enumerate}
+        \item $\bar{r}_l \leftarrow \bar{r} + X\bar{b}_l$
+        \item $(\alpha_l, \mu_{1l}, \sigma^2_{1l}) \leftarrow SER(X, \bar{r}_l: \sigma^2, \sigma^2_{0}, \mu_{0}, \pi)$
+        \item $\bar{b}_l \leftarrow \alpha_l \cdot \mu_{1l}$
+        \item $\bar{b}^2_l \leftarrow \alpha_l \cdot (\sigma^2_{1l} + \mu^2_{1l}$)
+        \item $\bar{r} \leftarrow \bar{r}_l - X \bar{b}_l$
+        \end{enumerate}
+    \item $\sigma^2 \leftarrow ERSS(y, \bar{b}, \bar{b}^2)/n$ [OPTIONAL]
+    \end{enumerate}
+    \item until convergence criterion satisfied
+    \item return all scalars: $\sigma^2, \sigma^2_{1lj}, \mu_{1lj}, \alpha_{1lj}$
+        \begin{itemize}
+        \item Note: $l$ is the index for effects $1,...,l,..., L$ 
+        \item Note: $j$ is the index for variables, or X columns $1,...,j,..., p$ 
+        \end{itemize}
+    \end{enumerate}
+
+\textbf{Algorithm overview - alternative prior 2:} \\
+Here, $\mu_0$ and $sigma^2_{0}$ do vary by $l$, so it can be updated using inner loop empirical bayes. However, this will have high computational cost.
+
+\begin{enumerate}
+    \item \textbf{repeat} ...
+    \item \begin{enumerate}
+        \item $\bar{r} \leftarrow y - X\sum_{l=1}^L \bar{b}_l$
+    \item \textbf{for} \emph{l} in 1,...,\emph{L} \textbf{do}
+    \item 
+        \begin{enumerate}
+        \item $\bar{r}_l \leftarrow \bar{r} + X\bar{b}_l$
+        \item $\sigma^2_{0l}, \mu_{0l} \leftarrow$ argmax $l_{SER} (\bar{r_l}; \sigma^2_{0l}, \mu_{0l}, \sigma^2)$
+        \item $(\alpha_l, \mu_{1l}, \sigma^2_{1l}) \leftarrow SER(X, \bar{r}_l: \sigma^2, \sigma^2_{0l}, \mu_{0l}, \pi)$
+        \item $\bar{b}_l \leftarrow \alpha_l \cdot \mu_{1l}$
+        \item $\bar{b}^2_l \leftarrow \alpha_l \cdot (\sigma^2_{1l} + \mu^2_{1l}$)
+        \item $\bar{r} \leftarrow \bar{r}_l - X \bar{b}_l$
+        \end{enumerate}
+    \item $\sigma^2 \leftarrow ERSS(y, \bar{b}, \bar{b}^2)/n$ [OPTIONAL]
+    \end{enumerate}
+    \item until convergence criterion satisfied
+    \item return all scalars: $\sigma^2, \sigma^2_{1lj}, \mu_{1lj}, \alpha_{1lj}$
+        \begin{itemize}
+        \item Note: $l$ is the index for effects $1,...,l,..., L$ 
+        \item Note: $j$ is the index for variables, or X columns $1,...,j,..., p$ 
+        \end{itemize}
+    \end{enumerate}
+
+\textbf{Algorithm overview - alternative prior 3:} \\
+Here, $\mu_0$ and $\sigma^2_{0}$ are set to be the matrix product of a (l x 1) vector (j, k) with the transpose of a (p x 1) vector (m, d). m and d are informed by prior knowledge whereas j and k are set to 1 initially and then fit using EB updates.
+
+\begin{enumerate}
+    \item \textbf{repeat} ...
+    \item \begin{enumerate}
+        \item $\bar{r} \leftarrow y - X\sum_{l=1}^L \bar{b}_l$
+    \item \textbf{for} \emph{l} in 1,...,\emph{L} \textbf{do}
+    \item 
+        \begin{enumerate}
+        \item $\bar{r}_l \leftarrow \bar{r} + X\bar{b}_l$
+        \item $j_l, k_l \leftarrow$ argmax $l_{SER} (\bar{r_l}; \sigma^2_{0l} = k_l \cdot d, \mu_{0l} = j_l \cdot m, \sigma^2)$
+        \item $(\alpha_l, \mu_{1l}, \sigma^2_{1l}) \leftarrow SER(X, \bar{r}_l: \sigma^2, \sigma^2_{0l}, \mu_{0l}, \pi)$
+        \item $\bar{b}_l \leftarrow \alpha_l \cdot \mu_{1l}$
+        \item $\bar{b}^2_l \leftarrow \alpha_l \cdot (\sigma^2_{1l} + \mu^2_{1l}$)
+        \item $\bar{r} \leftarrow \bar{r}_l - X \bar{b}_l$
+        \end{enumerate}
+    \item $\sigma^2 \leftarrow ERSS(y, \bar{b}, \bar{b}^2)/n$ [OPTIONAL]
+    \end{enumerate}
+    \item until convergence criterion satisfied
+    \item return all scalars: $\sigma^2, \sigma^2_{1lj}, \mu_{1lj}, \alpha_{1lj}$
+        \begin{itemize}
+        \item Note: $l$ is the index for effects $1,...,l,..., L$ 
+        \item Note: $j$ is the index for variables, or X columns $1,...,j,..., p$ 
+        \end{itemize}
+    \end{enumerate}
+
+
+\textbf{Model description:}
+
+\begin{eqnarray}
+    \bf y = X \boldsymbol{\beta} + e \\
+    {\bf e} \sim N_n({\bf 0}, \sigma^2 {\bf I_n}) \\
+    \boldsymbol{\beta} = \sum_{l=1}^L \boldsymbol{\beta}_l \\
+    \boldsymbol{\beta}_l = {\bf b}_l \odot \boldsymbol{\gamma}_l \\
+    \boldsymbol{\gamma}_l \sim Multi(1, {\bf \boldsymbol{\pi}} ) \\
+    {\bf b}_l \sim N_p(\boldsymbol{\mu}_{0}, \boldsymbol{\Sigma}_0 =\text{diag}[\boldsymbol{\sigma}^2_{0}]) 
+\end{eqnarray}
+
+Where X is (n x p), y is (n x 1), and $\mu_0$, $\sigma^2_{0}$, $\pi$, are each (p x 1) vectors of prior parameters, which may differ across each effect.\\
+
+\textbf{Implied SER model description:}
+
+Here, we filter for a single effect, and a data matrix X.
+\begin{eqnarray}
+    {\bf y} = {\bf X} b + {\bf e} \\
+    {\bf e} \sim N_n({\bf 0}, \sigma^2 {\bf I_n}) \\ 
+    b = {\bf b} \cdot \gamma \\
+    \gamma \sim \text{Multi}(1, \pi) \\
+    {\bf b} =  {\bf b}_{g} + {\bf b}_{v}\\
+    {\bf b}_{g} \sim N(c \mu_g, \Sigma = diag(\sigma_g^2)) \\
+    {\bf b}_{v} \sim N(0,\Sigma = diag(\sigma_v^2)) \\  
+    \implies {\bf b} \sim  N(c\mu_g, \Sigma = diag(\sigma_g^2 + \sigma_v^2)) \\
+        y|X, \Theta \sim N_n(\mu_1,  \Sigma_1)\\
+    {\bf y} \sim N_n({\bf x}\mu_0, \Sigma_1 = {\bf x}\sigma_0^2 {\bf x}^T + \sigma^2 {\bf I_n})
+\end{eqnarray}
+
+\textbf{Implied SER model properties:}
+\begin{eqnarray}
+    b | {\bf x} , {\bf y}, \mu_0, \sigma^2, \sigma_0^2 \sim N_1(\mu_1, \sigma_1^2)\\
+    \sigma_1^2 = \frac{\sigma^2}{\frac{\sigma^2}{\sigma_0^2} + {\bf x}^T{\bf x}} \\
+    \mu_1 = \frac{\frac{\sigma^2}{\sigma_0^2}\mu_0 + {\bf x}^T{\bf y}}{\frac{\sigma^2}{\sigma_0^2} + {\bf x}^T{\bf x}} \\
+    \hat{b} = ({\bf x}^T{\bf x})^{-1}{\bf x}^T{\bf y} \\
+    BF({\bf x},{\bf y},\sigma^2, \sigma_0^2, \mu_0) = \frac{p({\bf y} | {\bf x}, \sigma^2, \sigma_0^2, \mu_0)}{p({\bf y} | {\bf x}, \sigma^2, b=0)} \\
+    = \frac{det(\Sigma_1)^{-1/2}exp[-\frac{1}{2}({\bf y}-{\bf x}\mu_0)^T\Sigma^{-1}_1({\bf y}-{\bf x}\mu_0)]} 
+    {det(\Sigma_{b=0})^{-1/2}exp[-\frac{1}{2}({\bf y}^T\Sigma^{-1}_{b=0}{\bf y})]} \\
+    = \sqrt{\frac{\sigma^2}{\sigma_0^2 ({\bf x}^T{\bf x}) + \sigma^2}} \times \exp (\frac{-1}{2\sigma^2} \cdot [({\bf y} - {\bf x}\mu_0)^T({\bf y} - {\bf x}\mu_0) - \frac{[({\bf y}-{\bf x}\mu_0)^T{\bf x}]^2}{\frac{\sigma^2}{\sigma^2_0} + {\bf x}^T{\bf x}} - {\bf y}^T{\bf y}]) \\
+     = \sqrt{\frac{s^2}{\sigma_0^2 + s^2}} \times \exp (\frac{-1}{2\sigma^2} \cdot [\boldsymbol{\epsilon}^T\boldsymbol{\epsilon} - \frac{[\boldsymbol{\epsilon}^T{\bf x}]^2}{\frac{\sigma^2}{\sigma^2_0} + {\bf x}^T{\bf x}} - {\bf y}^T{\bf y}]) 
+\end{eqnarray}
+Where $\boldsymbol{\epsilon} = {\bf y} - {\bf x}\mu_0$.
+
+\textbf{Implied full model properties:}
+\begin{eqnarray}
+    \gamma \mid X, y, \sigma^2, \sigma_0^2 \sim Mult(1, \alpha ) \\
+    b \mid X, y, \sigma^2, \sigma_{0j}^2, \gamma_j = 1 \sim N_1(\mu_{1j}, \sigma^2_{1j}) \\ 
+    \alpha_j = Pr(\gamma_j = 1 \mid  X, y, \sigma^2, \sigma_0^2) = \frac{\pi_j \textbf{BF}(x_j, y; \sigma^2, \sigma^2_{0j})}{\sum_{j'=1}^p \pi_{j'} \textbf{BF}(x_{j'}y; \sigma^2, \sigma^2_{0j'})} \\
+    ELBO = F(q, g, \sigma^2; y) =-\frac{n}{2} \log \left(2 \pi \sigma^2\right)-\frac{1}{2 \sigma^2} \mathrm{E}_q\left[\left\|\boldsymbol{y}-\sum_{l=1}^L \boldsymbol{\mu}_l\right\|^2\right]+\sum_{l=1}^L \mathrm{E}_{q_l}\left[\log \frac{g_l\left(\boldsymbol{\mu}_l\right)}{q_l\left(\boldsymbol{\mu}_l\right)}\right] \\ 
+     =-\frac{n}{2}  \log \left(2 \pi \sigma^2\right)  - \frac{1}{2 \sigma^2} ERSS(X, y, \bar{b}, \bar{b}^2) + \sum_{l=1}^L \mathrm{E}_{q_l}\left[\log \frac{g_l\left(\boldsymbol{\mu}_l\right)}{q_l\left(\boldsymbol{\mu}_l\right)}\right]  \\ 
+     \mathrm{E}_{\hat{q}_l}\left[\log \frac{g_l\left(\boldsymbol{\mu}_l\right)}{\hat{q}_l\left(\boldsymbol{\mu}_l\right)}\right]=\ell_l\left(\overline{\boldsymbol{r}}_l ; g_l, \sigma^2\right)+\frac{n}{2} \log \left(2 \pi \sigma^2\right)+\frac{1}{2 \sigma^2} \mathrm{E}_{\hat{q}_l}\left\|\overline{\boldsymbol{r}}_l-\boldsymbol{\mu}_l\right\|^2 \\ 
+     \ell_{\mathrm{SER}}\left(\boldsymbol{y} ; \sigma_0^2, \mu_0, \sigma^2\right):=p\left(\boldsymbol{y} \mid \boldsymbol{X}, \sigma_0^2, \mu_0, \sigma^2\right)=p_0\left(\boldsymbol{y} \mid \sigma^2\right) \sum_{j=1}^p \pi_j \mathrm{BF}\left(\boldsymbol{x}_j, \boldsymbol{y} ; \sigma^2, \sigma_0^2, \mu_0\right), \\ 
+     \mathrm{E}_{\hat{q}_l}\left\|\overline{\boldsymbol{r}}_l-\boldsymbol{\mu}_l\right\|^2 = \sum_{i=1}^n(\bar{r_{li}}^2) - 2 \sum_{i=1}^n \bar{r_{li}} x_{li} \bar{b}_{li} + \sum_{i=1}^n x_{i}^2 \bar{b}_{li}^2
+\end{eqnarray}
+
+\subsection*{SuSiNE Algorithm}
+
+\textbf{Requirements:}
+\begin{itemize}
+    \item Observed data: 
+        \begin{itemize}
+        \item X (n x p)
+        \item y (n x 1)
+        \end{itemize}
+    \item Model parameters:
+        \begin{itemize}
+        \item L (the number of effects -- arbitrarily chosen \& fixed)
+        \end{itemize}
+    \item Prior distribution parameters (same across all L effects):
+        \begin{itemize}
+        \item $\mu_0$ (p x 1) prior effect mean
+        \item $\sigma_0^2$ (p x 1) prior effect variance 
+        \item $\pi$ (p x 1) prior inclusion probability
+        \end{itemize}
+    \item Initial settings:
+        \begin{itemize}
+        \item $\sigma^2$ (1 x 1) constant residual variance
+        \item $\bar{b}_l$ (p x 1) $l$th effect coefficients
+        \end{itemize}
+\end{itemize}
+
+\textbf{Other data specs:}
+\begin{itemize}
+    \item Posteriors (specific to lth effect): 
+        \begin{itemize}
+        \item $\mu_{1l}$ (p x 1) posterior effect mean
+        \item $\sigma_{1l}^2$ (p x 1) posterior effect variance
+        \item $\alpha_{1l}$ (p x 1) posterior inclusion probability
+        \end{itemize}
+    \item Residuals:
+        \begin{itemize}
+        \item $\bar{r}_l$ (n x 1) the residuals for the $l$th effect
+        \end{itemize}
+\end{itemize}
+
+\textbf{Algorithm overview:}
+\begin{enumerate}
+    \item \textbf{repeat} ...
+    \item \begin{enumerate}
+        \item $\bar{r} \leftarrow y - X\sum_{l=1}^L \bar{b}_l$
+    \item \textbf{for} \emph{l} in 1,...,\emph{L} \textbf{do}
+    \item 
+        \begin{enumerate}
+        \item $\bar{r}_l \leftarrow \bar{r} + X\bar{b}_l$
+        \item $\sigma^2_{0l}, \mu_{0l} \leftarrow$ argmax $l_{SER} (\bar{r_l}; \sigma^2_{0l}, \mu_{0l}, \sigma^2)$
+        \item $(\alpha_l, \mu_{1l}, \sigma^2_{1l}) \leftarrow SER(X, \bar{r}_l: \sigma^2, \sigma^2_{0}, \mu_{0}, \pi)$
+        \item $\bar{b}_l \leftarrow \alpha_l \cdot \mu_{1l}$
+        \item $\bar{b}^2_l \leftarrow \alpha_l \cdot (\sigma^2_{1l} + \mu^2_{1l}$)
+        \item $\bar{r} \leftarrow \bar{r}_l - X \bar{b}_l$
+        \end{enumerate}
+    \item $\sigma^2 \leftarrow ERSS(y, \bar{b}, \bar{b}^2)/n$ [OPTIONAL]
+    \end{enumerate}
+    \item until convergence criterion satisfied
+    \item return all scalars: $\sigma^2, \sigma^2_{1lj}, \mu_{1lj}, \alpha_{1lj}$
+        \begin{itemize}
+        \item Note: $l$ is the index for effects $1,...,l,..., L$ 
+        \item Note: $j$ is the index for variables, or X columns $1,...,j,..., p$ 
+        \end{itemize}
+    
+\end{enumerate}
+
+\textbf{Function:} $(\alpha_l, \mu_{1l}, \sigma^2_{1l}) \leftarrow SER(X, \bar{r}_l: \sigma^2, \sigma^2_{0}, \mu_{0}, \pi)$
+
+*Substitute $y = \boldsymbol{}{\bar{r}_l}$
+
+*Omitted $l$ subscript, but calculation steps 1-4 below and their corresponding output pertain to ONE individual effect, $l$. The only input variation across the L effects for this process is $\bar{r}_l$, which is denoted as $y$ below
+
+\begin{enumerate}
+    \item vectorize over j: $\mu_{1j} = \frac{\frac{\sigma^2}{\sigma_0^2}\mu_{0j} + x_j^Ty}{\frac{\sigma^2}{\sigma_0^2} + x_j^Tx_j}$  [OUTPUT]
+    \item vectorize over j: $\sigma_{1j}^2 = \frac{\sigma^2}{\frac{\sigma^2}{\sigma_0^2} + x_j^Tx_j}$ [OUTPUT]
+    \item  vectorize over j: $\textbf{BF}(x_j, y; \sigma^2, \sigma^2_{0j}, \mu_{0j}) = \sqrt{\frac{\sigma^2}{\sigma_0^2 (x_j^Tx_j) + \sigma^2}} \times \exp (\frac{-1}{2\sigma^2} \cdot [(y - x_j\mu_{0j})^T(y - x_j\mu_{0j}) - \frac{[(y-x_j\mu_{0j})^Tx_j]^2}{\frac{\sigma^2}{\sigma^2_0} + x_j^Tx_j} - y^Ty])$
+    \item vectorize over j: $\alpha_j = \frac{\pi_j \textbf{BF}(x_j, y; \sigma^2, \sigma^2_{0j}, \mu_{0j})}{\sum_{j'=1}^p \pi_{j'} \textbf{BF}(x_{j'}y; \sigma^2, \sigma^2_{0j'}, \mu_{0j'})}$ [OUTPUT]
+\end{enumerate}
+
+\textbf{Function:} $\sigma^2 \leftarrow ERSS(y, \bar{b}, \bar{b}^2)/n$ 
+
+\begin{enumerate}
+    \item $ERSS(X, y, \bar{b}, \bar{b}^2) = \sum^n_{i=1}(y_i - \sum^L_{l=1} \sum^P_{j=1} x_{ij} \bar{b}_{lj}) + \sum^L_{l=1} \sum^n_{i=1}\{\sum^P_{j=1} x^2_{ij} \bar{b}^2_{lj} - (\sum^P_{j=1} x_{ij} \bar{b}_l)^2 \}$
+\end{enumerate}
+
+\textbf{Function:} $\sigma^2_{0l} \leftarrow$ argmax $l_{SER} (\bar{r_l}; \sigma^2_{0l}, \mu_{0l}, \sigma^2)$
+
+Use numerical algorithms (e.g. optim() in R) to maximize the model likelihood (line 32 above).
+
+\textbf{Note:} \\
+I will need to spend some time optimizing the computation by saving key intermediates and carefully vectorizing operations. However, I may skip this optimization for my first attempt at proof-of-concept coding. 
+
+
+Scrap:\\
+\\Notes:
+\\ ${\hat{s_j}^2 = \sigma^2 / X_j^tX_j} = \sigma^2 / n$ 
+\\ $\phi $ is the standard normal pdf
+\\ For SuSiE, $\sigma_0^2 >> \hat{s^2}$
+\\ For SuSiNE, $\sigma_0^2 \approx 0 << \hat{s^2} $
+
+1: SuSiE \\
+\\ $\alpha^{(1)} = \frac{[BF^{(1)}_1 BF^{(1)}_2 ...  \ BF^{(1)}_p]}{\sum_{j=1}^p BF^{(1)}_j}$
+
+$BF^{(1)}_j = \phi (\frac{\hat{\beta}}{\sqrt{\hat{s_j}^2 + \sigma_0^2}} ) /
+\phi (\frac{\hat{\beta}}{\hat{s_j}} )$ 
+
+$\log(BF^{(1)}_j) = - \hat{\beta}^2 (\frac{1}{2 (\hat{s_j}^2 + \sigma_0^2)}  - \frac{1}{2\hat{s_j^2}})$
+
+$\frac{\delta \log(BF^{(1)}_j)}{\delta \hat{\beta}} = - \hat{\beta} (\frac{1}{ (\hat{s_j}^2 + \sigma_0^2)}  - \frac{1}{\hat{s_j^2}}) 
+\approx 
+ \frac{\hat{\beta}}{\hat{s_j^2}}$
+
+$\frac{\delta^2 \log(BF^{(1)}_j)}{\delta \hat{\beta}^2} = - (\frac{1}{ (\hat{s_j}^2 + \sigma_0^2)}  - \frac{1}{\hat{s_j^2}}) 
+\approx 
+ \frac{1}{\hat{s_j^2}}$
+\\
+
+2: SuSiNE \\
+
+$\alpha^{(2)} = \frac{[BF^{(2)}_1 BF^{(2)}_2 ...  \ BF^{(2)}_p]}{\sum_{j=1}^p BF^{(2)}_j}$
+
+$BF^{(2)}_j = \phi (\frac{\hat{\beta} - \mu_0}{\sqrt{\hat{s_j}^2 + \sigma_0^2}} ) /
+\phi (\frac{\hat{\beta}}{\hat{s_j}} )$ 
+
+$\log(BF^{(2)}_j) = - \hat{\beta}^2 (\frac{1}{2 (\hat{s_j}^2 + \sigma_0^2)}  - \frac{1}{2\hat{s_j^2}}) + \frac{\hat{\beta}\mu_0}{\hat{s_j}^2 + \sigma_0^2} - \frac{\mu_0^2}{2(\hat{s_j}^2 + \sigma_0^2)}$
+
+$\frac{\delta \log(BF^{(2)}_j)}{\delta \hat{\beta}} = - \hat{\beta} (\frac{1}{ (\hat{s_j}^2 + \sigma_0^2)}  - \frac{1}{\hat{s_j^2}}) + \frac{\mu_0}{\hat{s_j}^2 + \sigma_0^2} 
+\approx 
+\frac{\mu_0}{\hat{s_j}^2} $
+
+$\frac{\delta^2 \log(BF^{(2)}_j)}{\delta \hat{\beta}^2} = - (\frac{1}{ (\hat{s_j}^2 + \sigma_0^2)}  - \frac{1}{\hat{s_j^2}}) \approx 
+\frac{\sigma_0^2}{\hat{s_j}^4}\approx 0$
+\\
+
+Let's find the score of model-log-lik with respect to mu:
+
+
+\end{document}

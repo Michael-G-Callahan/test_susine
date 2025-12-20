@@ -1,5 +1,5 @@
 ---
-title: "SuSiNE RSS Sensitivity Grid"
+title: "SuSiNE Real Case Study"
 output:
   html_document:
     toc: true
