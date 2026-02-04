@@ -10,6 +10,8 @@ editor_options:
     wrap: 72
 ---
 
+Summary: Requires saved real-data fit summaries and RSS inputs (e.g., from the real case study grid). This notebook clusters models by PIP similarity, summarizes entropy/rank correlations, and highlights SNPs consistently prioritized across clusters.
+
 ```{r setup, message=FALSE}
 here::i_am("vignettes/real_data_model_clustering.Rmd")
 library(here)

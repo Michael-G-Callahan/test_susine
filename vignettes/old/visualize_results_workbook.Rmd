@@ -10,6 +10,8 @@ editor_options:
     wrap: 72
 ---
 
+Summary: Requires a completed simulation run with aggregated outputs (confusion matrix plus effect/model metrics) from the collection workflow. This notebook generates AUPRC, power/FDR, and credible-set plots and explores LD-based diagnostic metrics, writing figures and CSVs under the run’s aggregated output directory.
+
 # Section 1: Setup
 
 ```{r setup, message=FALSE, warning=FALSE}

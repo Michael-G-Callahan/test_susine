@@ -10,6 +10,8 @@ editor_options:
     wrap: 72
 ---
 
+Summary: Standalone dummy run that writes small synthetic z-scores/LD/annotations to disk, reads them back, and runs a compact SuSiNE RSS grid. Use this to sanity-check the grid workflow and plotting without real data dependencies.
+
 ```{r setup, message=FALSE}
 library(dplyr)
 library(tidyr)

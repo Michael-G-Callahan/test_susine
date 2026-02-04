@@ -10,6 +10,8 @@ editor_options:
     wrap: 72
 ---
 
+Summary: Builds SLURM-ready simulation control files from a parameter grid. It previews run/task tables and writes job artifacts (config JSON + SLURM script) used by `inst/scripts/run_task.R`.
+
 ```{r setup, message=FALSE}
 here::i_am("vignettes/run_control_workbook.Rmd")
 library(here)

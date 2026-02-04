@@ -14,8 +14,8 @@ editor_options:
 
 This workbook walks through a minimal simulation that highlights how a single SNP-level annotation vector can be routed into the SuSiNE (mean-informed) or SuSiE (variance-informed) models. We introduce two knobs:
 
-- `lambda_align` — how strongly the annotation aligns with the true effects (`1 = perfect`, `0 = pure noise`);
-- `rho_noise` — how much extra noise is injected into non-causal SNP annotations (scaled to the effect size).
+- `annotation_r2` — how strongly the annotation aligns with the true causal effects (`1 = perfect`, `0 = pure noise`);
+- `inflate_match` — how much extra variance is injected into non-causal SNP annotations (scaled to the causal effect size).
 
 We start from a fixed fine-mapping region, generate effects, construct annotations using these knobs, and compare the downstream impact when the same information is passed through the mean (`mu_0`) or the variance (`sigma_0^2`).
 

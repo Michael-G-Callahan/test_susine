@@ -10,6 +10,8 @@ editor_options:
     wrap: 72
 ---
 
+Summary: Requires the detailed confusion matrix from `collect_results_workbook.Rmd`. This notebook produces paper-ready plots (power/FDR, AUPRC, annotation-quality panels) and saves figures under the run’s aggregated `plots_paper` directory.
+
 # Section 1: Setup
 
 ```{r setup, message=FALSE, warning=FALSE}

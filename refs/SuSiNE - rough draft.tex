@@ -1,0 +1,445 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{natbib}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage{hyperref}
+
+\title{SuSiNE: Fine-mapping with directional functional priors from sequence-to-function models}
+
+\author{Michael Callahan$^{1,*}$ \and Xiang Zhu$^{2}$\\
+\\
+$^1$Penn State University\\
+$^2$Calico Life Sciences\\
+$^*$Correspondence: [mgc5166@psu.edu]}
+
+\date{12/19/25}
+
+\begin{document}
+
+\maketitle
+
+%==============================================================================
+% ABSTRACT
+%==============================================================================
+\begin{abstract}
+Genetic fine-mapping identifies causal variants within trait-associated loci but struggles to distinguish among variants in linkage disequilibrium (LD). The Sum of Single Effects (SuSiE) model provides a principled Bayesian framework for this task, yet its standard formulation uses uninformative zero-mean priors on effect sizes. We introduce SuSiNE (Sum of Single Non-central Effects), an extension that incorporates SNP-specific prior means derived from sequence-to-function models such as Enformer, Borzoi, and AlphaGenome. Unlike existing approaches that modulate prior inclusion probabilities, SuSiNE directly encodes predicted effect directions and magnitudes, providing orthogonal information that can resolve LD-induced ambiguity. Through simulations across 12,600 datasets, we find that SuSiNE exhibits surprising robustness: even when annotations have 
+$R^2 \approx 0.002$ with true effects across all SNPs (99.8\% noise), moderately shrunk directional priors match or improve SuSiE in polygenic architectures. However, when few causal variants exist, even high-quality annotations provide limited benefit, suggesting that directional priors are most valuable precisely when fine-mapping is otherwise most difficult. We introduce the $M_1$ ``mid-LD energy'' metric, which explains 42\% of cross-locus variation in fine-mapping difficulty. Application to GTEx CBX8 lung eQTLs using Borzoi annotations identifies 50\% more candidate causal variants than standard SuSiE while revealing distinct posterior clustering patterns across the hyperparameter space. We propose a grid-based workflow that embraces posterior multimodality, pooling candidates across hyperparameter settings rather than committing to a single model fit. SuSiNE is implemented as an extension to the \texttt{susieR} package and supports both individual-level and summary-statistic inputs (citation - SuSiE-RSS).
+\end{abstract}
+
+%==============================================================================
+% INTRODUCTION
+%==============================================================================
+\section*{Introduction}
+
+Genome-wide association studies have identified thousands of loci associated with complex traits and diseases, yet translating these statistical associations into biological mechanisms remains challenging (citation - GWAS review). The fundamental obstacle is linkage disequilibrium: causal variants are correlated with many neighboring variants, making it difficult to identify which specific genetic changes drive phenotypic effects (citation - fine-mapping review).
+
+Fine-mapping methods address this challenge by computing posterior probabilities that each variant is causal, conditional on the observed associations and LD structure. The Sum of Single Effects (SuSiE) model (citation - Wang et al. 2020) has emerged as a leading approach, decomposing the total genetic effect into a sum of sparse ``single effects,'' each capturing one putative causal signal. SuSiE's iterative Bayesian stepwise selection (IBSS) algorithm provides efficient inference while naturally producing credible sets---groups of variants that collectively contain causal variants with high probability.
+
+However, standard SuSiE uses uninformative priors: effect sizes are drawn from a zero-mean normal distribution with variance estimated from data. This ignores the growing wealth of functional genomic annotations that can inform which variants are likely causal and in which direction they act. Recent deep learning models trained on massively parallel reporter assays and epigenomic data---including Enformer (citation - Avsec et al. 2021), Borzoi (citation - Linder et al. 2023), Decima (citation) and AlphaGenome (citation - AlphaGenome)---now predict how specific sequence variants affect gene expression with increasing accuracy.
+
+Existing methods incorporate functional annotations primarily through prior inclusion probabilities. PolyFun (citation - Weissbrod et al. 2020) uses per-SNP heritability estimates to weight which variants are likely causal, effectively modulating the $\pi$ parameter in SuSiE's multinomial prior. While valuable, this approach does not exploit directional information: a variant predicted to strongly upregulate a gene receives the same prior inclusion probability as one predicted to strongly downregulate it, even though their effects on an expression trait would have opposite signs.
+
+We propose SuSiNE (Sum of Single Non-central Effects), which generalizes SuSiE by allowing SNP-specific non-zero prior means on effect sizes. Given annotations $\mathbf{a} = (a_1, \ldots, a_p)$ from a sequence-to-function model, SuSiNE sets the prior mean for each variant proportional to its predicted effect: $\mu_{0j} = c \cdot a_j$, where $c$ is a scaling hyperparameter. This provides two sources of information that are largely orthogonal: annotations which are derived from the variation across the length of the reference genome, and marginal effects which are derived from variation across a population for a given loci. 
+
+Our contributions are fivefold. First, we develop the SuSiNE model and show that it retains SuSiE's computational tractability, with closed-form variational updates and interpretable credible sets (supplement). Second, through extensive simulations, we characterize when directional priors improve fine-mapping and identify genotype regimes in which SuSiNE provides robust benefit across varying levels of annotation quality. Third, we introduce the $M_1$ metric---a novel measure of ``mid-LD energy'' in the correlation matrix---that explains 42\% of variation in fine-mapping difficulty across loci, providing practitioners with a diagnostic to anticipate when fine-mapping will succeed or struggle. Fourth, we present a case study demonstrating SuSiNE's practical utility, detecting 50\% more candidate causal SNPs than SuSiE and illustrating how to navigate hyperparameter tuning. Fifth, we provide SuSiNE and its summary-statistic implementation (for settings where individual-level data are unavailable due to privacy restrictions) as a freely available R package.
+
+
+%==============================================================================
+% RESULTS
+%==============================================================================
+\section*{Results}
+
+\subsection*{Model overview}
+
+SuSiNE extends SuSiE by replacing the zero-mean effect prior with SNP-specific means derived from functional annotations. For a phenotype vector $\mathbf{y}$ and genotype matrix $\mathbf{X}$, the model is:
+\begin{align}
+    \mathbf{y} &= \mathbf{X}\boldsymbol{\beta} + \mathbf{e}, \quad \mathbf{e} \sim N_n(\mathbf{0}, \sigma^2 \mathbf{I}_n) \\
+    \boldsymbol{\beta} &= \sum_{l=1}^{L} \boldsymbol{\beta}_l, \quad \boldsymbol{\beta}_l = \mathbf{b}_l \odot \boldsymbol{\gamma}_l \\
+    \boldsymbol{\gamma}_l &\sim \text{Multinomial}(1, \boldsymbol{\pi}) \\
+    \mathbf{b}_l &\sim N_p(\boldsymbol{\mu}_0, \text{diag}(\boldsymbol{\sigma}^2_0))
+\end{align}
+where $L$ is the maximum number of causal effects, $\boldsymbol{\gamma}_l$ is a one-hot indicator selecting which variant carries the $l$-th effect, and $\mathbf{b}_l$ contains the effect sizes. The key extension is that $\boldsymbol{\mu}_0 = c \cdot \mathbf{a}$ where $\mathbf{a}$ are functional annotations and $c$ scales their contribution. In this work, we use a single global scale $c_l \equiv c$ shared across all effects (see details in Methods). 
+
+Standard SuSiE corresponds to $\boldsymbol{\mu}_0 = \mathbf{0}$. An alternative extension sets SNP-specific variances $\boldsymbol{\sigma}^2_0 = f(\mathbf{a})$ while keeping $\boldsymbol{\mu}_0 = \mathbf{0}$ (``functional variance'' model). We compare all three approaches below.
+
+\subsection*{Simulation framework}
+
+We evaluated SuSiNE through simulations designed to mirror realistic eQTL fine-mapping scenarios. We extracted genotype matrices from 150 genes with median $n = 600$ samples and $p \approx 1000$ SNPs per locus. For each gene, we simulated phenotypes under a sparse genetic architecture with $p^* \in \{1, 2, 3, 4, 5, 10, 20\}$ causal variants and phenotypic variance explained $\phi_y \in \{0.05, 0.1, 0.2, 0.4\}$ with 3 random seed replicates per combination, resulting in 12,600 datasets total.
+
+Annotations were simulated to correlate with true causal effects at quality levels $\phi_a \in \{0.2, 0.4, 0.6, 0.8\}$, representing the $R^2$ between annotations and true effects among causal variants. This captures the range from noisy early-generation sequence models to hypothetical near-perfect predictors. Full simulation details are provided in (supplement).
+
+We compared three model classes across a grid of hyperparameters: (i) SuSiE baseline with $\sigma^2_0 \in \{0.1, 0.2, 0.4\}$; (ii) SuSiE with functional variance priors; and (iii) SuSiNE with annotation scaling $c \in \{0, 0.2, 0.4, 0.6, 0.8, 1.0, 1.2\}$. This yielded 77 distinct model configurations per dataset.
+
+\subsection*{Illustrative example}
+
+Before presenting full simulation results, we highlight a key subtlety in interpreting annotation quality. The parameter $\phi_a$ measures the correlation between annotations and true effects \textit{among causal variants only}. Because most variants are null ($\beta_j = 0$), and their annotations are uninformative noise, the overall correlation between annotations and effects across all $p$ SNPs is far lower.
+
+For example, with $p \approx 1000$ SNPs, $p^* = 5$ causal variants, and $\phi_a = 0.4$, the marginal $R^2$ between the full annotation vector $\mathbf{a}$ and effect vector $\boldsymbol{\beta}$ is approximately 0.002. That is, 99.8\% of the annotation signal is noise---the $\sim$995 noncausal SNPs have nonzero annotations at the same scale as causal SNPs, representing pure noise. Figure~\ref{fig:illustrative} shows that even in this setting, SuSiNE outperforms both baseline SuSiE and the functional variance alternative, demonstrating that directional priors can extract useful signal from annotations that are overwhelmingly uninformative. 
+
+This robustness reflects a fundamental advantage of directional priors over inclusion-probability approaches. Methods like PolyFun modulate $\pi_j$ -- SNPs with strong annotations are more likely to be selected regardless of whether the predicted effect direction matches the data. In contrast, SuSiNE's prior means only influence inference when they align with data-supported effects: an annotation predicting upregulation provides no benefit to (and may penalize) a SNP whose data suggest downregulation. Noisy annotations, equally likely to agree or disagree with the truth, are automatically attenuated through the likelihood. This conditional gating is why SuSiNE extracts signal from annotations that are 99.8\% noise---the noise disagrees with the data and is ignored, while the 0.2\% true signal reinforces it.
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=0.85\textwidth]{power_fdr_filtered_oneoff.png}
+\caption{\textbf{Illustrative example with 99.8\% noise in annotations.} Power-FDR curves for a single simulation configuration: $p^* = 5$ causal variants, $\phi_y = 0.2$ phenotypic variance explained, $\phi_a = 0.4$ annotation quality among causal SNPs (corresponding to $R^2 \approx 0.002$ overall), $\sigma^2_0 = 0.4$, $c = 0.7$, $\gamma = 0.8$, and $\nu_a = 1.0$. SuSiNE (brown) outperforms baseline SuSiE (blue) despite the annotation vector being dominated by noise.}
+\label{fig:illustrative}
+\end{figure}
+
+\subsection*{Directional priors improve fine-mapping when annotations are informative}
+
+Figure~\ref{fig:power_fdr} shows power versus false discovery rate curves across three regimes defined by the number of causal variants. When few variants are causal ($p^* = 1$--$4$), SuSiE and its functional variance extension perform similarly, while SuSiNE performs poorly, as the signal is sufficiently strong for the data alone to resolve causal variants, and noise in the annotations is heavily penalized. However, as genetic architecture becomes more polygenic ($p^* \geq 5$), SuSiNE with informative annotations achieves higher power at matched FDR compared to both baseline SuSiE and the functional variance extension.
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=0.9\textwidth]{power_fdr_faceted.png}
+\caption{\textbf{Power-FDR tradeoff by genetic architecture.} Curves show power (recall of true causal variants) versus false discovery rate for SuSiE baseline (blue), SuSiE with functional variance priors (green), and SuSiNE with directional priors (brown). Facets show results pooled across all $p^*$ values (top), sparse architectures with $p^* = 1$--$4$ (middle), and polygenic architectures with $p^* = 5$--$20$ (bottom).}
+\label{fig:power_fdr}
+\end{figure}
+
+The improvement from directional priors also depends  on annotation quality. Figure~\ref{fig:auprc_quality} shows area under the precision-recall curve (AUPRC) as a function of annotation quality $\phi_a$. SuSiE baseline performance is invariant to annotation quality (blue dashed lines), as expected since it ignores annotations entirely. The functional variance model (green) shows modest improvement with better annotations, though rarely performs batter than baseline SuSiE. SuSiNE (orange) exhibits the steepest improvement: at high annotation quality ($\phi_a = 0.8$), it substantially outperforms alternatives, while at low quality ($\phi_a = 0.2$) it can underperform baseline SuSiE, particularly with aggressive scaling.
+
+The prior variance $\sigma^2_0$ controls the sensitivity of this relationship. Smaller $\sigma^2_0$ yields tighter priors that weight annotations more heavily: performance degrades sharply with poor annotations but improves substantially with good ones (darkest orange lines in Figure~\ref{fig:auprc_quality}). Larger $\sigma^2_0$ produces diffuse priors that attenuate the annotation signal, yielding flatter curves that are more robust to annotation quality but forfeit potential gains when annotations are informative. The annotation scale $c$ provides a second mechanism for controlling prior influence.
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=0.9\textwidth]{auprc_annotation_r2_by_pstar_band.png}
+\caption{\textbf{Fine-mapping performance scales with annotation quality.} AUPRC as a function of annotation quality ($\phi_a$, x-axis), faceted by number of causal variants. SuSiE baseline (blue dashed) is invariant to annotation quality. Functional variance models (green) show modest gains. SuSiNE (orange) shows strong improvement with annotation quality, especially for polygenic architectures.}
+\label{fig:auprc_quality}
+\end{figure}
+
+\subsection*{Annotation scaling exhibits regime-dependent behavior}
+
+A key practical question is how strongly to weight the annotation prior relative to data. While $\sigma^2_0$ controls how tightly the model adheres to annotation values, the annotation scale $c$ directly modulates their magnitude before they enter the prior. In polygenic settings ($p^* \geq 5$), AUPRC follows an inverted-U relationship with annotation scale: intermediate values outperform both $c = 0$ (ignoring annotations) and large $c$ (over-weighting annotations), with performance remaining at or above baseline across a wide range. Additionally, models with annotations scaled in the $c \in \{0.3, 0.4\}$ range were found to out perform both SuSiE models even in the low quality annotation regime $\phi_a = 0.2$. This empirical finding connects to classical shrinkage estimation---optimally combining prior and data involves regularizing annotations toward zero, analogous to James-Stein estimation (citation - James \& Stein 1961).
+
+However, in sparse architectures ($p^* \leq 4$), any non-zero annotation weight degrades performance relative to baseline SuSiE. When few causal variants exist, the data alone provide sufficient resolution, and annotations---even informative ones---introduce noise that outweighs their benefit.
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=0.8\textwidth]{auprc_annotation_scale_by_pstar_band.png}
+\caption{\textbf{Optimal annotation scaling depends on genetic architecture.} AUPRC versus annotation scale $c$, faceted by number of causal variants. In polygenic architectures ($p^* = 5$--$20$), intermediate scaling maximizes performance. In sparse architectures ($p^* = 1$--$4$), any annotation weighting reduces performance.}
+\label{fig:scaling}
+\end{figure}
+
+\subsection*{The $M_1$ metric predicts fine-mapping difficulty}
+
+Fine-mapping performance varies dramatically across loci, even for methods and hyperparameters that perform well on average. When discussing loci-specific difficulty, the fine-mapping literature has traditionally focused on tight LD blocks---groups of variants with $|r_{ij}| > 0.9$---as the primary source of difficulty (citation - SuSiE, fine-mapping reviews). Within such blocks, variants are nearly collinear, creating fundamental identifiability limits: the data cannot distinguish which correlated variant is causal.
+
+We find that an orthogonal source of difficulty is equally important. We introduce the $M_1$ ``mid-LD energy'' metric:
+\begin{equation}
+    M_1(\mathbf{X}) = \frac{2}{p(p-1)} \sum_{i < j} |r_{ij}|(1 - |r_{ij}|)
+\end{equation}
+where $r_{ij}$ is the correlation between SNPs $i$ and $j$. Crucially, $M_1$ is agnostic to within-block identifiability: any LD matrix composed entirely of 0s and 1s yields $M_1 = 0$, regardless of the number or size of perfectly correlated blocks. Instead, $M_1$ captures the prevalence of \textit{moderate} correlations---variants correlated enough to share signal but not so correlated that they form obvious blocks.
+
+Figure~\ref{fig:m1} shows that $M_1$ alone explains 42\% of variation in AUPRC across simulated loci ($R^2 = 0.423$), despite substantial variation in within-block structure across datasets. This suggests that $M_1$ and within-block LD reflect distinct failure modes. High within-block LD creates difficulty assigning posterior mass \textit{within} a credible set once the model has converged to the correct region of model space. High $M_1$, by contrast, appears to cause the IBSS algorithm to converge to incorrect local optima entirely--- a problem caused by between-basin confusion rather than within-basin confusion. This interpretation aligns with $M_1$ serving as a proxy for the submodularity of variable selection (citation - approximate submodularity), where moderate correlations create diminishing returns that mislead greedy search. This metric provides a simple diagnostic: practitioners can compute $M_1$ from LD matrices to anticipate whether a locus requires extensive hyperparameter exploration to escape local optima, or whether default settings will adequately explore the model space.
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=0.7\textwidth]{AUPRC_vs_M1.png}
+\caption{\textbf{The $M_1$ metric predicts fine-mapping difficulty.} Scatter plot of AUPRC versus $M_1$ across all simulated loci and model configurations. Higher $M_1$ (more mid-range LD) corresponds to lower fine-mapping performance. The smoothed trend (blue line) shows the relationship with $R^2 = 0.423$.}
+\label{fig:m1}
+\end{figure}
+
+\subsection*{Application to CBX8 eQTL fine-mapping with Borzoi annotations}
+
+We applied SuSiNE to fine-map eQTLs for CBX8 (Chromobox 8) in GTEx lung tissue, using effect predictions from the Borzoi sequence-to-function model (citation - Linder et al. 2023) as annotations. Starting from 9,791 variants in the GTEx data, we applied filters for MAF $\geq 0.01$, at least 50 samples, location within the Borzoi receptive field centered on the CBX8 TSS, SNPs only, and availability in the 1000 Genomes LD reference panel (citation - 1000G), yielding 2,057 variants for analysis. The median sample size was $n = 601$. Borzoi predictions of expression change were averaged across four model replicates and standardized. Notably, the $M_1$ metric for this locus was 0.04, placing it in the low range where our simulations suggest multimodal posteriors are rare.
+
+We fit SuSiNE with $L = 10$ effects across a grid of 77 hyperparameter combinations: annotation scales $c \in \{0, 0.02, 0.04, \ldots, 0.2\}$ and prior variances $\sigma^2_0 \in \{0.1, 0.15, 0.2, \ldots, 0.4\}$. Correlation between Borzoi annotations and marginal z-scores was low ($\rho = 0.06$), confirming that annotations provide largely orthogonal information to what marginal associations reveal.
+
+\paragraph{Multimodal posterior landscape.}
+
+Hierarchical clustering of the 77 fitted models based on Jensen-Shannon divergence between PIP vectors revealed four distinct solution clusters (Figure~\ref{fig:hclust}). This choice of four clusters is supported by the dendrogram structure: a clear gap exists between merge heights 2 and 3.5, indicating natural cluster boundaries rather than arbitrary cutting. The clustering is strong: within-cluster PIP rank correlations were high (min = 0.96, median = 0.99, max = 1.0), while between-cluster correlations were generally low (min = 0.07, median = 0.09, max = 0.71).
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=0.7\textwidth]{JS_hclust_number.png}
+\caption{\textbf{Hierarchical clustering supports four distinct posterior basins.} Dendrogram of 77 model fits based on Jensen-Shannon divergence (average linkage). The gap between heights 2 and 3.5 supports cutting into four clusters.}
+\label{fig:hclust}
+\end{figure}
+
+Figure~\ref{fig:clusters} shows the cluster assignments across the hyperparameter grid. The four clusters are primarily stratified by prior variance $\sigma^2_0$, but critically, the two intermediate clusters (clusters 2 and 3) are discovered exclusively by SuSiNE models with $c > 0$. No baseline SuSiE model ($c = 0$) converges to these intermediate basins.
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=0.8\textwidth]{clustering_color_grid.png}
+\caption{\textbf{Posterior clustering across the hyperparameter space.} Jensen-Shannon divergence-based clustering of 77 model fits ($\sigma^2_0$ vs.\ annotation scale $c$). Four clusters emerge. Notably, clusters 2 and 3 (intermediate basins) contain no $c = 0$ models, indicating that SuSiE alone cannot discover these solutions.}
+\label{fig:clusters}
+\end{figure}
+
+\paragraph{The entropy-variance frontier.}
+
+The four clusters occupy distinct positions along a tradeoff between residual variance $\sigma^2$ (model fit) and PIP entropy (posterior concentration). Figure~\ref{fig:entropy} illustrates this frontier. Low prior variance $\sigma^2_0$ encourages sparse, confident posteriors (low entropy) that claim to explain more phenotypic variance (low $\sigma^2$). High prior variance produces diffuse posteriors (high entropy) with more modest variance explained. The art of fine-mapping is navigating this tradeoff: overly sparse models may overfit, while overly diffuse models fail to prioritize variants. The four basins represent qualitatively different positions along this frontier, and SuSiNE's directional priors enable discovery of intermediate positions inaccessible to baseline SuSiE.
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=0.8\textwidth]{p_sigma2_entropy_ann.png}
+\caption{\textbf{Entropy-variance frontier reveals distinct model regimes.} Each point is one of 77 model fits, plotted by residual variance ($\sigma^2$, y-axis) versus PIP entropy (x-axis), colored by annotation scale $c$. The four clusters occupy distinct regions of this tradeoff space.}
+\label{fig:entropy}
+\end{figure}
+
+\paragraph{Annotations provide genuine novel optima.}
+
+We were concerned that SuSiNE may have discovered additional basins simply because we ran more models with $c \neq 0$ than $c = 0$, giving SuSiNE more opportunities to find optima by chance. To test this, we considered two pieces of evidence: first, the computed KL divergence was computed from each model to its corresponding SuSiE baseline (matching $\sigma^2_0$, setting $c = 0$). Figure~\ref{fig:kl_divergence} shows a U-shaped pattern: posteriors at both very low and very high annotation scales resemble the SuSiE baseline, while intermediate scales produce maximally different solutions. If SuSiNE were merely adding sampling noise, we would expect monotonic divergence with increasing $c$. Instead, the U-shape indicates that intermediate annotation scaling genuinely guides the model to distinct optima, while extreme scaling (too low or too high) returns the model to the same basins SuSiE finds. 
+
+Second, we consider that the $M_1$ metric for this locus was 0.04, placing it in the low range where our simulations suggest LD-induced optimization difficulties are rare. Yet SuSiNE discovered multiple posterior basins inaccessible to SuSiE. This indicates that the multimodality here is \emph{annotation-induced} rather than \emph{LD-induced}: directional priors enable exploration of causal hypotheses that zero-mean priors cannot express, independent of whether the optimization landscape is benign.
+These two findings suggests that annotations provide real information for navigating the posterior landscape, not just additional random exploration, and that annotation scaling preferentially accesses distinct posterior modes. 
+
+[NOTE TO SELF -- this is a heuristic rather than a real test. A real test would be like taking the borzoi annotations and doing some randomized index permutation to generate "noised annotations" and rerunning the analysis a few times on different noised annotations to see if we stumble into more optima or not -- but I don't know if that's really worth the compute, would take $\approx$ 3 days of more work to do followed by a little more write up, so maybe a mid January turn-around. Alternatively, we can mention this as a potential future work / recommendation in the Discussion section without running the analysis, or simply leave it out entirely -- Ask Xiang for guidance].
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=0.8\textwidth]{kl_to_base_by_annotation_scale.png}
+\caption{\textbf{U-shaped divergence from baseline rules out sampling bias.} KL divergence between SuSiNE posterior and baseline SuSiE posterior (matched $\sigma^2_0$), plotted against annotation scale. The U-shape indicates that intermediate annotation scales guide the model to genuinely distinct optima, while extreme scales return to SuSiE solutions.}
+\label{fig:kl_divergence}
+\end{figure}
+
+\paragraph{Practical gains for variant prioritization.}
+
+The different basins do not simply reweight variants using the same prioritization order --- they identify qualitatively different candidate causal SNPs. Some variants achieve PIP $= 1.0$ exclusively in the intermediate clusters discovered by SuSiNE, and PIP $= 0$ in clusters accessible to baseline SuSiE.
+
+For practical variant prioritization, one might scan across all fitted models and select variants exceeding a PIP threshold in at least one model. Table~\ref{tab:significant_snps} shows that this strategy yields substantially more candidates when SuSiNE models are included:
+
+\begin{table}[ht]
+\centering
+\caption{Number of variants exceeding PIP threshold in at least one model}
+\label{tab:significant_snps}
+\begin{tabular}{lcccc}
+\toprule
+PIP threshold & SuSiE only & SuSiNE only & Combined & \% gain \\
+\midrule
+0.50 & 10 & 15 & 15 & 50\% \\
+0.90 & 9 & 13 & 13 & 44\% \\
+0.99 & 9 & 12 & 12 & 33\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Recommended workflow for practitioners.}
+
+Our analysis suggests a departure from the conventional one-model approach to fine-mapping. Rather than relying on a single EB-tuned fit or default hyperparameters, we recommend a workflow summarized in ~\ref{box:workflow}. (i) compute $M_1$ from the LD matrix to anticipate whether multimodal posteriors are likely; (ii) if $M_1$ is moderate to high, fit a grid of models varying $c$ and $\sigma^2_0$; (iii) cluster the resulting PIP vectors to identify distinct posterior basins; (iv) examine the entropy-variance frontier to understand what tradeoffs each basin represents; and (v) for variant prioritization, pool across all models---selecting variants that exceed a PIP threshold in \textit{any} fitted model. This approach treats posterior multimodality as informative rather than problematic: different basins may capture different plausible causal architectures, and reporting candidates from multiple basins provides a more complete picture for experimental follow-up than arbitrarily committing to one.
+
+At a PIP threshold of 0.5, SuSiNE identifies 50\% more candidate causal variants than SuSiE alone. These additional variants are not marginal calls---they achieve high posterior probability in basins that are invisible to standard fine-mapping. This demonstrates the practical value of directional priors: in a regime where our simulations predict SuSiNE should excel (moderate $M_1$, polygenic architecture), the method delivers meaningfully expanded candidate sets for experimental validation.
+
+\begin{figure}[ht]
+\fbox{\parbox{0.95\textwidth}{
+\textbf{Box 1: Recommended SuSiNE Workflow}
+
+\smallskip
+\textbf{1. Assess locus difficulty.} Compute $M_1 = \frac{2}{p(p-1)} \sum_{i<j} |r_{ij}|(1-|r_{ij}|)$ from the LD matrix. Low $M_1$ ($<0.10$): default settings may suffice. Moderate/high $M_1$: grid search recommended.
+
+\smallskip
+\textbf{2. Obtain functional annotations.} Generate variant effect predictions from sequence-to-function models (e.g., Borzoi, Enformer). Standardize to zero mean, unit variance. Verify low correlation with marginal z-scores ($|\rho| < 0.2$).
+
+\smallskip
+\textbf{3. Fit model grid.} Run SuSiNE with $c \in \{0, 0.02, 0.04, \ldots, 0.2\}$ and $\sigma^2_0 \in \{0.1, 0.15, \ldots, 0.4\}$ ($\sim$77 fits). Include $c=0$ as SuSiE baseline.
+
+\smallskip
+\textbf{4. Characterize posterior landscape.} Cluster models by Jensen-Shannon divergence on PIP vectors. Visualize on (entropy, $\hat{\sigma}^2$) frontier. Verify distinct basins via within- vs.\ between-cluster correlations.
+
+\smallskip
+\textbf{5. Prioritize variants.} Pool across models: select variants with $\text{PIP} > \alpha$ in \textit{any} fit. Report which basins support each candidate. Flag variants found only with $c > 0$.
+
+\smallskip
+\textbf{6. Report uncertainty.} Present number of basins discovered, sensitivity of candidates to hyperparameters, and whether basins agree on causal architecture.
+
+\smallskip
+\small\textit{Note: For sparse architectures ($p^* \leq 4$ expected), SuSiNE provides limited benefit; consider standard SuSiE.}
+}}
+\caption{\textbf{Recommended workflow for SuSiNE fine-mapping.} A grid-based approach that embraces posterior multimodality rather than committing to a single model fit.}
+\label{box:workflow}
+\end{figure}
+
+%==============================================================================
+% DISCUSSION
+%==============================================================================
+\section*{Discussion}
+
+We have introduced SuSiNE, an extension of SuSiE that incorporates directional functional priors from sequence-to-function models. By encoding predicted effect signs and magnitudes rather than just variant importance, SuSiNE exploits information that is orthogonal to existing approaches like PolyFun that modulate inclusion probabilities. Our simulations demonstrate that this additional information improves fine-mapping when annotations are moderately to highly predictive of true effects, with benefits most pronounced for polygenic architectures.
+
+Several practical insights emerge from our analysis. First, annotation scaling matters: even excellent annotations benefit from shrinkage toward zero, with optimal scaling factors around 0.4--0.6. This suggests that practitioners should treat sequence model predictions as informative priors to be combined with data, not as ground truth. Second, the $M_1$ metric provides a simple pre-analysis diagnostic for anticipated fine-mapping difficulty. Loci with high mid-LD energy may warrant alternative approaches or tempered expectations.
+
+The predictive power of $M_1$ has a theoretical basis in the geometry of SuSiE and IBSS. SuSiE's single-effect decomposition makes inference largely invariant to within-block LD: perfectly correlated variants are effectively treated as a single unit and receive shared posterior mass. Abstracting away these blocks, IBSS reduces to greedy forward selection with sparse regularization. Sparse variable selection is NP-hard in general (citation), but for independent features, the problem is submodular and greedy algorithms enjoy strong theoretical guarantees (citation - submodularity). These guarantees degrade gracefully as features become correlated (citation - approximate submodularity). The $M_1$ metric captures precisely this deviation from the independent setting—not the within-block collinearity that SuSiE handles well, but the between-block moderate correlations that erode the submodularity guarantees IBSS implicitly relies on.
+
+The multimodal posterior landscape observed in real data warrants caution. Different hyperparameter choices lead to qualitatively different conclusions about which variants are causal. We recommend exploring the hyperparameter space systematically and reporting sensitivity of conclusions to these choices. This workflow represents a philosophical shift from standard fine-mapping practice. Conventional approaches typically fit a single model---often with EB-selected hyperparameters---and report its posterior as \textit{the} answer. This implicitly assumes unimodal posteriors or that EB reliably finds the ``correct'' mode. Our results suggest both assumptions are often violated: posteriors can be strongly multimodal (Figure 8), and EB estimation of annotation parameters is inherently unstable (Methods). Rather than viewing this as a failure, we argue that exploring the posterior landscape provides richer information. When multiple basins exist, they represent genuinely different hypotheses about causal architecture that the data cannot definitively distinguish. Reporting this uncertainty---rather than hiding it behind a point estimate---better serves downstream experimental design.
+
+SuSiNE's value will grow as sequence-to-function models improve. Current models like Borzoi achieve modest correlation with true regulatory effects, limiting the gains from directional priors. However, rapid progress in this area (citation - AlphaGenome, recent reviews) suggests that near-future models may achieve the high annotation quality regimes where SuSiNE shows the largest advantages.
+
+Limitations of this work include focus on cis-eQTL fine-mapping; extension to trans effects and complex traits is straightforward but not evaluated here. We also assume that sequence model predictions are well-calibrated, which may not hold across cellular contexts. Finally, computational cost scales with the hyperparameter grid; adaptive methods for navigating this space would improve practical utility.
+
+In summary, SuSiNE provides a principled framework for incorporating the growing wealth of sequence-based functional predictions into genetic fine-mapping. As our ability to predict variant effects from sequence improves, methods like SuSiNE that can exploit this information will become increasingly valuable for identifying causal genetic variants.
+
+%==============================================================================
+% METHODS
+%==============================================================================
+\section*{Methods}
+
+\subsection*{SuSiNE model specification}
+
+The SuSiNE model extends SuSiE by allowing non-zero prior means on SNP effects. For $n$ individuals and $p$ SNPs with genotype matrix $\mathbf{X} \in \mathbb{R}^{n \times p}$ and phenotype $\mathbf{y} \in \mathbb{R}^n$:
+\begin{align}
+    \mathbf{y} &= \mathbf{X}\boldsymbol{\beta} + \mathbf{e}, \quad \mathbf{e} \sim N_n(\mathbf{0}, \sigma^2 \mathbf{I}_n) \\
+    \boldsymbol{\beta} &= \sum_{l=1}^{L} \boldsymbol{\beta}_l \\
+    \boldsymbol{\beta}_l &= \mathbf{b}_l \odot \boldsymbol{\gamma}_l \\
+    \boldsymbol{\gamma}_l &\sim \text{Multinomial}(1, \boldsymbol{\pi}) \\
+    \mathbf{b}_l &\sim N_p(\boldsymbol{\mu}_{0l}, \boldsymbol{\Sigma}_l), \quad \boldsymbol{\Sigma}_l = \text{diag}(\boldsymbol{\sigma}^2_{0l}) \\
+    \boldsymbol{\mu}_{0l} &= \boldsymbol{c_l} \cdot \boldsymbol{a}
+\end{align}
+
+Here $\odot$ denotes elementwise multiplication, $\boldsymbol{\gamma}_l \in \{0,1\}^p$ is a one-hot vector indicating which SNP carries the $l$-th effect, and $\mathbf{b}_l \in \mathbb{R}^p$ contains effect sizes drawn from a multivariate normal with mean $\boldsymbol{\mu}_{0l}$ and diagonal covariance $\boldsymbol{\Sigma}_l$. The prior mean $\mu_0$ is set as the product of a scalar value $c_l$, and a vector derived from functional annotations, $a$. 
+
+Users may specify prior parameters with varying degrees of flexibility:
+
+\begin{center}
+\begin{tabular}{lcccc}
+\toprule
+Configuration & $\boldsymbol{c}$ vary by $l$ & $\boldsymbol{a}$ vary by $j$ & $\boldsymbol{\sigma_0^2}$ vary by $l$ & $\boldsymbol{\sigma_0^2}$ vary by $j$ \\
+\midrule
+Full specification & Yes & Yes & Yes & Yes \\
+SuSiE baseline & No & No & No & No \\
+SuSiNE (this work) & No & Yes & No & No \\
+Functional variance & No & No & No & Yes \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Empirical Bayes updating of $\boldsymbol{c_l}$ and $\sigma^2_{0l}$ is supported for parameters that do not vary by SNP, maintaining computational tractability (supplement). In this work, we focus on fixed, pre-specified hyperparameters rather than EB estimation for two reasons. First, preliminary simulations suggest that EB updating of $\sigma^2_0$ and especially $c$ generally underperforms against models with fixed values, across a broad range of settings (supplement). The difficulty is intuitive for $c$: estimating the optimal annotation scale requires inferring which SNPs are causal, then calibrating annotations to match their effects -- but identifying causal SNPs is precisely what fine-mapping aims to do. This circularity makes EB estimation of $c$ inherently unstable. Second, fixed hyperparameters provide transparency and control, enabling the exploratory grid searches we use to characterize the posterior landscape in our real data application, and creating distinct scenarios for comparison in simulations.
+
+\subsection*{Inference}
+
+SuSiNE inference follows the iterative Bayesian stepwise selection (IBSS) algorithm (citation - Wang et al. 2020). The non-zero prior means modify the single-effect regression updates but preserve closed-form posterior computations. For each effect $l$, the posterior inclusion probabilities are:
+\begin{equation}
+    \alpha_{lj} \propto \pi_j \cdot BF_{lj}
+\end{equation}
+where $BF_{lj}$ is the Bayes factor for SNP $j$ carrying effect $l$, computed from the residualized phenotype and incorporating the prior mean $\mu_{0lj}$. Full derivations showing that tractability is preserved appear in (supplement).
+
+The algorithm iterates over effects $l = 1, \ldots, L$, updating posterior distributions conditional on current estimates for other effects. Convergence is assessed by monitoring the evidence lower bound (ELBO). Credible sets can be constructed by ordering SNPs within each effect by posterior inclusion probability and including variants until cumulative probability exceeds a threshold (typically 0.95). 
+
+\subsection*{Summary statistic extension}
+
+SuSiNE supports summary-statistic inputs via the SuSiE-RSS framework (citation - SuSiE-RSS). Given marginal association z-scores $\hat{\mathbf{z}}$ and an LD matrix $\mathbf{R}$ from a reference panel, the model approximates the individual-level likelihood. The non-zero prior means in SuSiNE translate directly to this setting, with Bayes factors computed from the summary statistics. Implementation details are provided in (supplement).
+
+\subsection*{Simulation design}
+
+Simulated whole genotypes (CITE - harvard genotype) for 120,000 EUR individuals were used for the simulation studies. Loci-specific genotype matrices were extracted from 150 genes across diverse chromosomal regions, with $n = 600$ randomly subset samples out of the total 120,000 and the 1,000 variants closest to the gene TSS. SNPs were then filtered to MAF $\geq 0.01$ (median: 1000, range: 971--1000).
+
+\paragraph{Causal effects and phenotypes.}
+
+For each genotype matrix $\mathbf{X} \in \mathbb{R}^{n \times p}$, we simulate sparse causal effects by first drawing a causal mask $\mathbf{m} \in \{0,1\}^p$ uniformly over all subsets of size $p^*$, then drawing effect sizes
+\[
+\boldsymbol{\epsilon}_b \sim N_p(\mathbf{0}, \mathbf{I}_p), \qquad \beta_j = m_j \, \epsilon_{b,j},
+\]
+so that exactly $p^*$ variants are causal. Phenotypes follow
+\[
+\mathbf{y} = \mathbf{X}\boldsymbol{\beta} + \boldsymbol{\varepsilon}_y, \qquad \boldsymbol{\varepsilon}_y \sim N_n(\mathbf{0}, \sigma^2_y \mathbf{I}_n),
+\]
+with $\sigma^2_y$ set to achieve target PVE $\phi_y = \text{var}(\mathbf{X}\boldsymbol{\beta}) / [\text{var}(\mathbf{X}\boldsymbol{\beta}) + \sigma^2_y]$.
+
+\paragraph{Annotation construction.}
+
+We construct annotation vectors $\mathbf{a} \in \mathbb{R}^p$ to simulate functional predictions of varying quality. Three parameters control annotation properties:
+
+\begin{itemize}
+    \item \textit{Annotation quality} $\phi_a \in [0,1]$: the $R^2$ between annotations and true effects among causal SNPs only.
+    \item \textit{Relative variance} $\nu_a > 0$: the ratio of annotation variance at non-causal versus causal SNPs.
+    \item \textit{Annotation scale} $c > 0$: a global multiplier applied before model fitting.
+\end{itemize}
+
+Concretely, we set $\mu_{0j} = c \times a_j$ where
+\[
+a_j = 
+\begin{cases}
+\beta_j + \epsilon^{(1)}_{a,j}, & m_j = 1 \\
+\epsilon^{(0)}_{a,j}, & m_j = 0
+\end{cases}
+\]
+with independent noise $\epsilon^{(1)}_{a,j} \sim N(0, \sigma^2_{a,1})$ and $\epsilon^{(0)}_{a,j} \sim N(0, \sigma^2_{a,0})$. We choose $(\sigma^2_{a,1}, \sigma^2_{a,0})$ such that
+\[
+\phi_a = 1 - \frac{\text{Var}(a_j - \beta_j \mid m_j = 1)}{\text{Var}(\beta_j \mid m_j = 1)}, \qquad
+\nu_a = \frac{\text{Var}(a_j \mid m_j = 0)}{\text{Var}(a_j \mid m_j = 1)}.
+\]
+
+Importantly, $\phi_a$ measures annotation quality only among causal SNPs. Because the $\sim p - p^*$ non-causal SNPs have annotations that are pure noise (at scale controlled by $\nu_a$), the marginal $R^2$ between $\mathbf{a}$ and $\boldsymbol{\beta}$ across all SNPs is far lower than $\phi_a$.
+
+\paragraph{Simulation grid.}
+
+For each of 150 genotype matrices, we simulated phenotypes across:
+\[
+\phi_y \in \{0.05, 0.10, 0.20, 0.40\}, \qquad p^* \in \{1, 2, 3, 4, 5, 10, 20\},
+\]
+with 3 replicates per $(\phi_y, p^*)$ combination, yielding $150 \times 4 \times 7 \times 3 = 12{,}600$ datasets.
+
+\subsection*{Model configurations evaluated}
+
+For each dataset, we fit the following model families:
+
+\paragraph{SuSiE baseline.} Standard SuSiE with $\boldsymbol{\mu}_0 = \mathbf{0}$ and scalar prior variance $\sigma^2_0 \in \{0.1, 0.2, 0.4\}$.
+
+\paragraph{SuSiE with functional variances.} SuSiE with $\boldsymbol{\mu}_0 = \mathbf{0}$ and SNP-specific prior variances defined by an exponential kernel:
+\[
+\sigma^2_{0j} = \text{var}(\mathbf{y}) \exp(-\gamma |a_j|),
+\]
+encoding unsigned enrichment (stronger annotations $\to$ smaller variance $\to$ stronger shrinkage toward zero). We used $c = 1.0$, $\phi_a \in \{0.2, 0.4, 0.6, 0.8\}$, $\nu_a \in \{0.5, 1.0, 1.5\}$, and $\gamma \in \{0.4, 0.8\}$.
+
+\paragraph{SuSiNE (general study).} SuSiNE with prior means $\mu_{0j} = c \cdot a_j$ and scalar prior variance, using $c = 1.0$, $\sigma^2_0 \in \{0.1, 0.2, 0.4\}$, $\phi_a \in \{0.2, 0.4, 0.6, 0.8\}$, and $\nu_a \in \{0.5, 1.0, 1.5\}$.
+
+\paragraph{SuSiNE (scaling study).} SuSiNE with $c \in \{0, 0.2, 0.4, 0.6, 0.8, 1.0, 1.2\}$, $\sigma^2_0 = 0.1$, $\phi_a \in \{0.2, 0.4, 0.6, 0.8\}$, and $\nu_a = 1.0$.
+
+\medskip
+All models used $L = 10$ single-effect components.
+
+\subsection*{Evaluation metrics}
+
+Performance was assessed using AUPRC (area under precision-recall curve) computed from posterior inclusion probabilities against true causal status. Power-FDR curves were generated by thresholding posterior probabilities at varying levels. The $M_1$ metric was computed from sample correlation matrices as defined in the Results.
+
+\subsection*{GTEx CBX8 analysis}
+
+We analyzed eQTLs for CBX8 (ENSG00000141510) in GTEx v8 lung tissue ($n = 601$). SNPs were filtered to MAF $\geq 0.01$, at least 50 samples with minor allele, and location within the Borzoi receptive field centered on CBX8 TSS ($\pm$ 262kb), yielding 2,057 variants.
+
+Borzoi annotations were generated by: (1) extracting reference and alternate sequences for each SNP; (2) running Borzoi inference with 4 model replicates; (3) computing predicted log fold-change in CBX8 expression; (4) averaging across replicates; and (5) standardizing to zero mean and unit variance.
+
+LD was computed from 1000 Genomes Project phase 3 European samples (citation - 1000G). SuSiNE was fit with summary statistics (z-scores from GTEx single-tissue eQTL analysis) across 77 hyperparameter combinations. Posterior similarity was assessed via Jensen-Shannon divergence, with hierarchical clustering (average linkage) used to identify solution regimes.
+
+\subsection*{Software availability}
+
+SuSiNE is implemented as an extension to the \texttt{susieR} package (citation - susieR) and is available at [GitHub URL]. Analysis code for simulations and the CBX8 application is available at [repository URL].
+
+%==============================================================================
+% ACKNOWLEDGMENTS
+%==============================================================================
+\section*{Acknowledgments}
+
+[To be added]
+
+%==============================================================================
+% REFERENCES
+%==============================================================================
+\section*{References}
+
+[References to be properly added later, this is just a running list of things I know I already want to cite:]
+
+\begin{itemize}
+    \item Wang et al. (2020) - SuSiE
+    \item Weissbrod et al. (2020) - PolyFun
+    \item Avsec et al. (2021) - Enformer
+    \item Linder et al. (2023) - Borzoi
+    \item AlphaGenome - [citation]
+    \item SuSiE-RSS - [citation]
+    \item James \& Stein (1961) - shrinkage estimation
+    \item GTEx Consortium - [citation]
+    \item 1000 Genomes Project - [citation]
+    \item Harvard dataset source
+    \item SLDP paper 
+    \item Approximate submodularity paper
+    \item Bayesian Deep learning paper
+    \item FINEMAP
+    \item CAVIAR
+    \item DAP-G
+    \item wakefield paper (likelihood simplification)
+    \item mvsusie
+    \item grelu (package used)
+    
+\end{itemize}
+
+\end{document}

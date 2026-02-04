@@ -5,6 +5,8 @@ date: "`r Sys.Date()`"
 output: html_document
 ---
 
+Summary: Validates the `inflate_match` behavior in `simulate_priors()` using targeted simulations and (optionally) historical run outputs. It reports variance matching diagnostics and produces plots saved to `output/inflate_match_analysis_plots` when enabled.
+
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.show = "hold")
 library(ggplot2)

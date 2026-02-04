@@ -10,6 +10,8 @@ editor_options:
     wrap: 72
 ---
 
+Summary: Runs a real-data SuSiNE RSS grid for a chosen gene (default CBX8) using z-scores, LD, and annotations from `data/real_case_studies/<gene>`. It validates inputs, builds/saves `rss_inputs`, fits the hyperparameter grid locally or via SLURM, and writes fit summaries plus diagnostic plots under `output/real_data_analysis/<gene>`.
+
 ```{r setup, message=FALSE}
 here::i_am("vignettes/run_control_workbook.Rmd")
 library(here)

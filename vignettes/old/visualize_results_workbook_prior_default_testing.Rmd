@@ -10,6 +10,8 @@ editor_options:
     wrap: 72
 ---
 
+Summary: Requires aggregated outputs for the `prior_default_testing` simulation run. This notebook produces AUPRC, power/FDR, and credible-set plots and saves figures/diagnostic CSVs under the run’s aggregated output directory (with file output enabled by default).
+
 # Section 1: Setup
 
 ```{r setup, message=FALSE, warning=FALSE}

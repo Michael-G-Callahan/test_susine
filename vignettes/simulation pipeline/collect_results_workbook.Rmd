@@ -10,6 +10,8 @@ editor_options:
     wrap: 72
 ---
 
+Summary: Requires a completed simulation run with run_history and staged outputs. This notebook aggregates staging outputs, optionally builds a parquet `snps_dataset`, and writes detailed and dataset-level confusion matrices for downstream analysis.
+
 # Section 1: Setup (Always Run First)
  
 Load libraries, specify job identifiers, and establish paths. This section
