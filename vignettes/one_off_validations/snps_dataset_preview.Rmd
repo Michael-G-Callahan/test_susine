@@ -40,7 +40,7 @@ snps_path <- file.path(
   here(),
   "output", "slurm_output",
   job_name, job_id,
-  "combined", "aggregated",
+  "aggregated",
   "snps_dataset"
 )
 

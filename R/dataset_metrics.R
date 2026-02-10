@@ -1,5 +1,203 @@
-### Deprecated file. Dataset metrics now live in `dataset_metrics.R`.
-### This stub is retained only for backward compatibility with file references.
+# dataset_metrics.R
+# Functions for computing dataset difficulty metrics (LD + z-based) and relating them to AUPRC
+# Based on theory linking LD structure to fine-mapping performance
+# ------------------------------------------------------------------------------
+
+#' @importFrom stats cor quantile sd
+#' @importFrom Matrix Matrix
+NULL
+
+# ==============================================================================
+# SECTION 1: Core X-matrix metric computations
+# ==============================================================================
+
+#' Compute mid-energy M1 (linear)
+#' Higher values indicate more mass in ambiguous mid-LD range
+#' @param R Correlation matrix
+#' @return Scalar M1 value
+#' @keywords internal
+mid_energy_M1 <- function(R) {
+
+  A <- abs(R)
+  diag(A) <- 0
+  ut <- A[upper.tri(A)]
+  mean(ut * (1 - ut)) * 2
+}
+
+#' Compute mid-energy M2 (quadratic)
+#' Sharper emphasis on moderate-high mid-LD
+#' @param R Correlation matrix
+#' @return Scalar M2 value
+#' @keywords internal
+mid_energy_M2 <- function(R) {
+  A2 <- R * R
+  diag(A2) <- 0
+  ut <- A2[upper.tri(A2)]
+  mean(ut * (1 - ut)) * 2
+}
+
+#' Compute distance-weighted mid-energy
+#' Detects non-local "plaid" LD patterns
+#' @param R Correlation matrix
+#' @return Scalar M1_dist value
+#' @keywords internal
+mid_energy_dist_weighted <- function(R) {
+  p <- ncol(R)
+  A <- abs(R)
+  diag(A) <- 0
+  
+  # Distance weights: phi(d) = d/(d+1)
+  dists <- outer(1:p, 1:p, function(i, j) abs(i - j))
+  phi <- dists / (dists + 1)
+  diag(phi) <- 0
+  
+  num <- sum(A * (1 - A) * phi) / 2
+
+  den <- p * (p - 1) / 2
+  num / den
+}
+
+#' Compute eigenvalue-based summaries
+#' @param R Correlation matrix
+#' @return Tibble with spectral metrics
+#' @keywords internal
+eigs_summaries <- function(R) {
+  ev <- eigen(R, symmetric = TRUE, only.values = TRUE)$values
+  p <- length(ev)
+  lam1 <- max(ev)
+  
+  # Participation ratio (effective rank normalized)
+  PR <- (sum(ev)^2) / sum(ev^2) / p
+  
+  # Spectral entropy (normalized)
+  lam_norm <- ev / sum(ev)
+  lam_norm <- pmax(lam_norm, .Machine$double.eps)  
+  H <- -sum(lam_norm * log(lam_norm))
+  spec_entropy_norm <- exp(H) / p
+  
+  # Stable rank
+  stable_rank <- sum(ev^2) / (lam1^2)
+  
+  # Spectral gap
+  ev_sorted <- sort(ev, decreasing = TRUE)
+  spectral_gap <- ev_sorted[1] - ev_sorted[2]
+  
+  tibble::tibble(
+    lambda_max_frac = lam1 / p,
+    participation_ratio = PR,
+    spectral_entropy_norm = spec_entropy_norm,
+    stable_rank = stable_rank,
+    spectral_gap = spectral_gap
+  )
+}
+
+#' Compute mutual coherence (max off-diagonal |r|)
+#' @param R Correlation matrix
+#' @return Scalar mu value
+#' @keywords internal
+mutual_coherence <- function(R) {
+  A <- abs(R)
+  diag(A) <- 0
+  max(A)
+}
+
+#' Compute row concentration (Herfindahl index per row)
+#' High = mass on few neighbors (blocky); Low = diffuse
+#' @param R Correlation matrix
+#' @return Tibble with mean and q90 of row concentration
+#' @keywords internal
+row_concentration <- function(R) {
+  A <- abs(R)
+  diag(A) <- 0
+  row_sums <- rowSums(A)
+  row_sums <- pmax(row_sums, .Machine$double.eps)
+  w <- A / row_sums
+  H <- rowSums(w^2)
+  tibble::tibble(
+    row_conc_mean = mean(H),
+    row_conc_q90 = unname(stats::quantile(H, 0.9))
+  )
+}
+
+#' Compute Toeplitz (AR1) fit error
+#' Low = near-banded (simple); High = complex structure
+#' @param R Correlation matrix
+#' @return Tibble with rho_hat and relative Frobenius error
+#' @keywords internal
+toeplitz_fit_error <- function(R) {
+  p <- ncol(R)
+  
+  # Fit AR(1) by matching first subdiagonal
+  sub1 <- R[row(R) == col(R) + 1]
+  rho_hat <- mean(sub1)
+  
+  # Build Toeplitz matrix
+  T_rho <- outer(1:p, 1:p, function(a, b) rho_hat^(abs(a - b)))
+  
+  # Relative error
+  err <- norm(R - T_rho, type = "F") / norm(R, type = "F")
+  
+  tibble::tibble(
+    ar1_rho_hat = rho_hat,
+    toeplitz_rel_F_error = err
+  )
+}
+
+# ==============================================================================
+# SECTION 1b: Axis A metrics - Basin Size / Resolution Difficulty
+# "How big are the LD neighborhoods that SuSiE will find?"
+# ==============================================================================
+
+#' Compute Effective Cluster Size (ECS)
+#'
+#' Measures average effective neighborhood size using Herfindahl inverse.
+#' Uses alpha=2 weighting to emphasize strong correlations.
+#' High ECS = big/strong clusters = IBSS finds them but CSs are large.
+#'
+#' @param R Correlation matrix
+#' @param alpha Weighting exponent (default 2, emphasizes strong correlations)
+#' @return Scalar ECS value (median across SNPs)
+#' @keywords internal
+effective_cluster_size <- function(R, alpha = 2) {
+  A <- abs(R)
+  diag(A) <- 0
+  
+  # Compute row-wise weights: w_ij = A_ij^alpha / sum_k A_ik^alpha
+  A_alpha <- A^alpha
+  row_sums <- rowSums(A_alpha)
+  row_sums <- pmax(row_sums, .Machine$double.eps)
+  W <- A_alpha / row_sums
+  
+  # ECS_i = 1 / sum_j w_ij^2 (inverse Herfindahl)
+  ecs_i <- 1 / rowSums(W^2)
+  
+  # Return median (robust to outliers)
+  median(ecs_i)
+}
+
+#' Compute High-LD Mass
+#'
+#' Measures mass in strong-LD pairs using gamma=2 to emphasize tail.
+#' High value = big tight blocks.
+#'
+#' @param R Correlation matrix
+#' @param gamma Exponent for emphasizing strong correlations (default 2)
+#' @return Scalar high-LD mass value
+#' @keywords internal
+high_ld_mass <- function(R, gamma = 2) {
+  A2 <- R * R  # r^2
+  A2g <- A2^gamma  # (r^2)^gamma
+  diag(A2g) <- 0
+  
+  # Mean over upper triangle
+  mean(A2g[upper.tri(A2g)]) * 2
+}
+
+#' Compute top-k eigenvalue fraction
+#'
+#' Fraction of variance captured by top k eigenvalues.
+#' High value = few dominant directions = block structure.
+#'
 #' @param R Correlation matrix
 #' @param k Number of top eigenvalues (default 5)
 #' @return Scalar fraction
@@ -258,20 +456,31 @@ compute_x_metrics_from_file <- function(x_path, k_ref = 3, n_samples = 200) {
 #' @param matrix_paths_df Data frame with columns `matrix_id` and `matrix_path`
 #' @param k_ref Reference k for submodularity bounds
 #' @param n_samples MC samples per dataset
+#' @param progress_every Integer; print a progress message every N datasets.
+#'   Set to 0 to silence per-dataset progress.
 #' @param base_dir Optional base directory to prepend to paths (e.g., here())
 #' @return Tibble with matrix_id and all metrics
 #' @export
-build_x_metrics_table <- function(matrix_paths_df, k_ref = 3, n_samples = 200, base_dir = NULL) {
+build_x_metrics_table <- function(matrix_paths_df,
+                                  k_ref = 3,
+                                  n_samples = 200,
+                                  progress_every = 10L,
+                                  base_dir = NULL) {
   stopifnot("matrix_id" %in% names(matrix_paths_df))
   stopifnot("matrix_path" %in% names(matrix_paths_df))
-  
+
   n_matrices <- nrow(matrix_paths_df)
   message("Computing X-matrix metrics for ", n_matrices, " datasets...")
-  
+
   purrr::map_dfr(seq_len(n_matrices), function(i) {
     row <- matrix_paths_df[i, ]
     id <- row$matrix_id
     path <- row$matrix_path
+
+    if (isTRUE(progress_every > 0) &&
+        (i == 1L || i == n_matrices || (i %% as.integer(progress_every) == 0L))) {
+      message("  -> X metrics ", i, "/", n_matrices, " (matrix_id=", id, ")")
+    }
     
     # Prepend base_dir if provided
     if (!is.null(base_dir)) {
@@ -1092,4 +1301,68 @@ find_metric_interactions <- function(gam_results) {
   }
   
   invisible(interactions)
+}
+
+# ==============================================================================
+# SECTION 2: Z-score-based dataset metrics (requires X and y)
+# ==============================================================================
+
+#' Compute marginal z-scores for each SNP (univariate regression).
+#'
+#' @param X Numeric matrix (n x p).
+#' @param y Numeric vector (length n).
+#' @return Numeric vector of z-scores (length p).
+#' @keywords internal
+compute_marginal_z <- function(X, y) {
+  stopifnot(is.matrix(X), length(y) == nrow(X))
+  y_centered <- y - mean(y)
+  X_centered <- sweep(X, 1L, 0, FUN = "+")
+  X_centered <- sweep(X_centered, 2L, colMeans(X_centered), FUN = "-")
+  d <- colSums(X_centered^2)
+  d[d == 0] <- NA_real_
+  beta_hat <- as.numeric(crossprod(X_centered, y_centered) / d)
+  shat2 <- stats::var(y_centered) / d
+  beta_hat / sqrt(shat2)
+}
+
+#' Compute z-score difficulty metrics.
+#'
+#' @param z Numeric vector of z-scores.
+#' @param top_k Integer for top-k concentration ratio (default 10).
+#' @return Tibble with z-metrics.
+#' @keywords internal
+z_score_metrics <- function(z, top_k = 10L) {
+  z <- as.numeric(z)
+  z2 <- z^2
+  z4 <- z2^2
+  k <- as.integer(top_k)
+  if (k < 1) k <- 1L
+  ord <- order(z2, decreasing = TRUE, na.last = NA)
+  top_idx <- head(ord, k)
+  rest_idx <- setdiff(ord, top_idx)
+  top_sum <- sum(z2[top_idx], na.rm = TRUE)
+  rest_sum <- sum(z2[rest_idx], na.rm = TRUE)
+  tibble::tibble(
+    z_topk_ratio = if (rest_sum > 0) top_sum / rest_sum else NA_real_,
+    z_max_abs = max(abs(z), na.rm = TRUE),
+    z_count_abs_gt_3 = sum(abs(z) > 3, na.rm = TRUE),
+    z_eff_signals = if (sum(z4, na.rm = TRUE) > 0) (sum(z2, na.rm = TRUE)^2) / sum(z4, na.rm = TRUE) else NA_real_
+  )
+}
+
+#' Compute dataset-level metrics (LD + z-based).
+#'
+#' @param X Numeric matrix (n x p).
+#' @param y Numeric vector (length n).
+#' @param top_k Integer for top-k concentration ratio.
+#' @return Tibble with dataset metrics.
+#' @export
+compute_dataset_metrics <- function(X, y, top_k = 10L) {
+  stopifnot(is.matrix(X), length(y) == nrow(X))
+  R <- suppressWarnings(stats::cor(X, use = "pairwise.complete.obs"))
+  z <- compute_marginal_z(X, y)
+  tibble::tibble(
+    M1 = mid_energy_M1(R)
+  ) %>%
+    dplyr::bind_cols(z_score_metrics(z, top_k = top_k))
 }

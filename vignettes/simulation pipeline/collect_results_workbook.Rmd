@@ -10,7 +10,7 @@ editor_options:
     wrap: 72
 ---
 
-Summary: Requires a completed simulation run with run_history and staged outputs. This notebook aggregates staging outputs, optionally builds a parquet `snps_dataset`, and writes detailed and dataset-level confusion matrices for downstream analysis.
+Summary: Requires a completed simulation run with run_history and task outputs. This notebook aggregates task outputs, optionally builds a parquet `snps_dataset`, and writes confusion matrices plus dataset/multimodal metrics for downstream analysis.
 
 # Section 1: Setup (Always Run First)
  
@@ -18,7 +18,7 @@ Load libraries, specify job identifiers, and establish paths. This section
 must be run before either Section 2 or Section 3.
 
 ```{r setup, message=FALSE}
-here::i_am("vignettes/collect_results_workbook.Rmd")
+here::i_am("vignettes/simulation pipeline/collect_results_workbook.Rmd")
 library(here)
 here()
 
@@ -80,9 +80,9 @@ cat("Loaded run_table with", nrow(run_table), "runs\n")
 ---
 ---
 
-# Section 2: Staging → Aggregated (Auto-skip if already done)
+# Section 2: Staging -> Aggregated (Auto-skip if already done)
 
-This section processes raw staging outputs into aggregated files.
+This section processes raw task outputs into aggregated files.
 It will **automatically skip** if aggregated outputs already exist.
 Set `skip_snps_dataset_aggregation = TRUE` to skip writing the parquet
 snps_dataset while still aggregating the metrics CSVs.
@@ -92,7 +92,7 @@ staging_exists <- dir.exists(paths$staging_dir)
 snps_dataset_exists <- dir.exists(paths$snps_dataset_dir) && 
                        length(list.files(paths$snps_dataset_dir, recursive = TRUE)) > 0
 
-cat("Staging directory exists:", staging_exists, "\n")
+cat("Task output directory exists:", staging_exists, "\n")
 cat("Aggregated SNPs dataset exists:", snps_dataset_exists, "\n")
 
 # Determine whether to run aggregation
@@ -101,9 +101,9 @@ run_aggregation <- staging_exists && (!snps_dataset_exists || skip_snps_dataset_
 if (snps_dataset_exists && !skip_snps_dataset_aggregation) {
   message("Aggregated outputs already exist. Skipping Section 2.")
 } else if (!staging_exists) {
-  stop("Neither staging nor aggregated outputs found. Cannot proceed.")
+  stop("Neither task outputs nor aggregated outputs found. Cannot proceed.")
 } else {
-  message(if (skip_snps_dataset_aggregation) "Staging found; aggregating metrics (skipping snps_dataset parquet)." else "Staging found but not yet aggregated. Will run aggregation.")
+  message(if (skip_snps_dataset_aggregation) "Task outputs found; aggregating metrics (skipping snps_dataset parquet)." else "Task outputs found but not yet aggregated. Will run aggregation.")
 }
 ```
 
@@ -117,7 +117,7 @@ if (run_aggregation) {
     output_root = output_root
   )
   
-  cat("Discovered", nrow(staging_index), "staging files across",
+  cat("Discovered", nrow(staging_index), "task output files across",
       length(unique(staging_index$task_id)), "tasks\n")
 } else {
   message("Skipped: aggregation not needed.")
@@ -135,10 +135,10 @@ if (run_aggregation) {
     cat("Validation failures:", fail_count, "\n")
     if (fail_count > 0) {
       print(dplyr::filter(validation, !ok))
-      stop("Fix unreadable staging files before aggregating.")
+      stop("Fix unreadable task output files before aggregating.")
     }
   } else {
-    cat("No staging files found to validate.\n")
+    cat("No task output files found to validate.\n")
   }
 } else {
   message("Skipped: aggregation not needed.")
@@ -180,9 +180,9 @@ if you want to delete staging files after confirming aggregation.
 # DANGER: Set eval=TRUE only after verifying aggregation is complete
 if (dir.exists(paths$staging_dir)) {
   unlink(paths$staging_dir, recursive = TRUE)
-  cat("Deleted staging directory:", paths$staging_dir, "\n")
+  cat("Deleted task output directory:", paths$staging_dir, "\n")
 } else {
-  cat("Staging directory already deleted.\n")
+  cat("Task output directory already deleted.\n")
 }
 ```
 
@@ -192,25 +192,44 @@ if (dir.exists(paths$staging_dir)) {
 # Section 3: Build Pre-aggregated Confusion Matrices
 
 Create compact summary tables for Power/FDR/AUPRC analysis. This section
-uses the aggregated SNPs dataset when available, or will stream the
-staging parquet fragments to avoid holding everything in memory.
+prefers `confusion_bins` when available (aggregated or staging), and
+falls back to the aggregated SNPs dataset or staging parquet fragments
+when bins are not present.
 
 **Prerequisites:** 
 - Section 1 must have been run (to load paths and run_table).
-- Either an aggregated SNPs dataset at `paths$snps_dataset_dir` **or**
-  staging parquet fragments in `paths$staging_dir`.
+- Either `confusion_bins` (aggregated or staging), or an aggregated SNPs
+  dataset at `paths$snps_dataset_dir`, or staging parquet fragments.
 
-## 3.1 Check SNPs Dataset Exists
+## 3.1 Check Confusion Bins / SNPs Dataset Exists
 
 ```{r check-snps-dataset}
+confusion_bins_path <- file.path(paths$aggregated_dir, "confusion_bins.csv")
+confusion_bins_exists <- file.exists(confusion_bins_path)
+staging_confusion_files <- list.files(
+  paths$staging_dir,
+  pattern = "_confusion_bins\\.csv$",
+  recursive = TRUE,
+  full.names = TRUE
+)
+
 snps_dataset_exists <- dir.exists(paths$snps_dataset_dir) &&
                        length(list.files(paths$snps_dataset_dir, recursive = TRUE)) > 0
-staging_snp_files <- list.files(paths$staging_dir, pattern = "_snps\\.parquet$", recursive = TRUE, full.names = TRUE)
-cat("SNPs dataset exists:", snps_dataset_exists, "\n")
-cat("Staging parquet fragments available:", length(staging_snp_files), "\n")
+staging_snp_files <- list.files(
+  paths$staging_dir,
+  pattern = "_snps\\.parquet$",
+  recursive = TRUE,
+  full.names = TRUE
+)
 
-if (!snps_dataset_exists && !length(staging_snp_files)) {
-  stop("No SNPs dataset or staging parquet fragments found. Run Section 2 first.")
+cat("Confusion bins (aggregated) exists:", confusion_bins_exists, "\n")
+cat("Task confusion bins available:", length(staging_confusion_files), "\n")
+cat("SNPs dataset exists:", snps_dataset_exists, "\n")
+cat("Task SNP parquet fragments available:", length(staging_snp_files), "\n")
+
+if (!confusion_bins_exists && !length(staging_confusion_files) &&
+    !snps_dataset_exists && !length(staging_snp_files)) {
+  stop("No confusion bins, SNPs dataset, or task parquet fragments found. Run Section 2 first.")
 }
 
 if (snps_dataset_exists) {
@@ -229,25 +248,30 @@ if (snps_dataset_exists) {
 pip_bucket_width <- 0.01
 
 # Grouping variables for the detailed confusion matrix
-# This will create one row per (grouping combo × pip_threshold)
+# This will create one row per (grouping combo x pip_threshold)
 detailed_grouping_vars <- c(
-  "use_case_id", "p_star", "L", "y_noise",
-  "annotation_r2", "inflate_match", "gamma_shrink", "sigma_0_2_scalar"
+  "use_case_id", "variant_type", "agg_method",
+  "p_star", "L", "y_noise",
+  "annotation_r2", "inflate_match", "gamma_shrink",
+  "annotation_scale", "sigma_0_2_scalar"
 )
 
 # Grouping variables for the dataset-level confusion matrix
-dataset_grouping_vars <- c("matrix_id", "use_case_id")
+dataset_grouping_vars <- c("matrix_id", "use_case_id", "variant_type", "agg_method")
 ```
 
 ## 3.3 Build Detailed Confusion Matrix (by Use Case + Parameters)
 
 ```{r build-confusion-detailed, message=FALSE}
 detailed_output_path <- file.path(paths$aggregated_dir, "confusion_matrix_detailed.csv")
-stream_confusion <- !snps_dataset_exists
+use_confusion_bins <- confusion_bins_exists || length(staging_confusion_files) > 0
+stream_confusion <- !use_confusion_bins && !snps_dataset_exists
 
 confusion_detailed <- test_susine::build_confusion_matrix(
-  snps_dataset_path = if (snps_dataset_exists) paths$snps_dataset_dir else NULL,
-  snp_files = if (stream_confusion) staging_snp_files else NULL,
+  confusion_bins_path = if (confusion_bins_exists) confusion_bins_path else NULL,
+  confusion_bins_files = if (!confusion_bins_exists && length(staging_confusion_files)) staging_confusion_files else NULL,
+  snps_dataset_path = if (!use_confusion_bins && snps_dataset_exists) paths$snps_dataset_dir else NULL,
+  snp_files = if (!use_confusion_bins && !snps_dataset_exists) staging_snp_files else NULL,
   run_table = run_table,
   grouping_vars = detailed_grouping_vars,
   pip_bucket_width = pip_bucket_width,
@@ -269,8 +293,10 @@ cat("  Saved to:", detailed_output_path, "\n")
 dataset_output_path <- file.path(paths$aggregated_dir, "confusion_matrix_by_dataset.csv")
 
 confusion_by_dataset <- test_susine::build_confusion_matrix(
-  snps_dataset_path = if (snps_dataset_exists) paths$snps_dataset_dir else NULL,
-  snp_files = if (stream_confusion) staging_snp_files else NULL,
+  confusion_bins_path = if (confusion_bins_exists) confusion_bins_path else NULL,
+  confusion_bins_files = if (!confusion_bins_exists && length(staging_confusion_files)) staging_confusion_files else NULL,
+  snps_dataset_path = if (!use_confusion_bins && snps_dataset_exists) paths$snps_dataset_dir else NULL,
+  snp_files = if (!use_confusion_bins && !snps_dataset_exists) staging_snp_files else NULL,
   run_table = run_table,
   grouping_vars = dataset_grouping_vars,
   pip_bucket_width = pip_bucket_width,
@@ -302,3 +328,31 @@ if (dir.exists(paths$snps_dataset_dir)) {
   cat(sprintf("  snps_dataset/ (%s total)\n", format(structure(snp_size, class = "object_size"), units = "auto")))
 }
 ```
+
+---
+---
+
+# Section 4: Inspect Dataset + Multimodal Metrics (Optional)
+
+Load the aggregated dataset-level and multimodal metrics if they were
+written during the run.
+
+```{r load-metrics}
+dataset_metrics_path <- file.path(paths$aggregated_dir, "dataset_metrics.csv")
+multimodal_metrics_path <- file.path(paths$aggregated_dir, "multimodal_metrics.csv")
+
+if (file.exists(dataset_metrics_path)) {
+  dataset_metrics <- readr::read_csv(dataset_metrics_path, show_col_types = FALSE)
+  cat("Loaded dataset_metrics:", nrow(dataset_metrics), "rows\n")
+} else {
+  message("dataset_metrics.csv not found.")
+}
+
+if (file.exists(multimodal_metrics_path)) {
+  multimodal_metrics <- readr::read_csv(multimodal_metrics_path, show_col_types = FALSE)
+  cat("Loaded multimodal_metrics:", nrow(multimodal_metrics), "rows\n")
+} else {
+  message("multimodal_metrics.csv not found.")
+}
+```
+

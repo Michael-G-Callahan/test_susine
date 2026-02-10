@@ -27,7 +27,19 @@ find_repo_root <- function() {
 
 repo_root <- find_repo_root()
 setwd(repo_root)
-devtools::load_all(repo_root)
+
+use_dev <- Sys.getenv("SUSINE_DEV", unset = "") == "1"
+if (use_dev) {
+  # Try loading local susine dependency first
+  susine_path <- file.path(dirname(repo_root), "susine")
+  if (dir.exists(susine_path) && file.exists(file.path(susine_path, "DESCRIPTION"))) {
+    message("Loading local dev susine from: ", susine_path)
+    devtools::load_all(susine_path)
+  }
+  devtools::load_all(repo_root)
+} else {
+  suppressPackageStartupMessages(library(test_susine))
+}
 
 parse_args <- function(args) {
   out <- list()

@@ -13,6 +13,8 @@ use_case_catalog <- function() {
     ~extra_compute, ~requires_prior_quality,
     "a_i",   "1a", "SuSiE - naive sigma, naive mu",           "naive",      "naive",
     "none",       FALSE, FALSE, "none",       FALSE,
+    "a_i_restart", "1a", "SuSiE - naive sigma, naive mu (restarts)", "naive", "naive",
+    "none",       FALSE, FALSE, "restart_alpha", FALSE,
     "a_ii",  "1a", "SuSiE - EB sigma, naive mu",              "naive",      "eb_sigma",
     "var",        FALSE, FALSE, "none",       FALSE,
     "a_iii", "1a", "SuSiNE - EB mu, naive sigma",             "eb_mu",      "naive",

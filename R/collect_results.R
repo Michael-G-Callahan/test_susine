@@ -13,8 +13,8 @@ resolve_job_paths <- function(job_name,
 
   run_history_dir <- file.path(output_root, "run_history", job_name, parent_job_id)
   results_dir <- file.path(output_root, "slurm_output", job_name, parent_job_id)
-  staging_dir <- file.path(results_dir, "combined", "staging")
-  aggregated_dir <- file.path(results_dir, "combined", "aggregated")
+  staging_dir <- results_dir
+  aggregated_dir <- file.path(results_dir, "aggregated")
   snps_dataset_dir <- file.path(aggregated_dir, "snps_dataset")
 
 list(
@@ -31,7 +31,7 @@ list(
 staging_base_dir <- function(job_name,
                              parent_job_id,
                              output_root = "output") {
-  file.path(output_root, "slurm_output", job_name, parent_job_id, "combined", "staging")
+  file.path(output_root, "slurm_output", job_name, parent_job_id)
 }
 
 #' Index all task/flush files written during a job.
@@ -56,6 +56,9 @@ index_staging_outputs <- function(job_name,
     if (grepl("_model_metrics\\.csv$", fname)) return("model_metrics")
     if (grepl("_effect_metrics\\.csv$", fname)) return("effect_metrics")
     if (grepl("_validation\\.csv$", fname)) return("validation")
+    if (grepl("_confusion_bins\\.csv$", fname)) return("confusion_bins")
+    if (grepl("_dataset_metrics\\.csv$", fname)) return("dataset_metrics")
+    if (grepl("_multimodal_metrics\\.csv$", fname)) return("multimodal_metrics")
     if (grepl("_snps\\.parquet$", fname)) return("snps")
     NA_character_
   }
@@ -139,7 +142,7 @@ aggregate_staging_outputs <- function(job_name,
   }
   results_dir <- file.path(output_root, "slurm_output", job_name, parent_job_id)
   if (is.null(output_dir)) {
-    output_dir <- file.path(results_dir, "combined", "aggregated")
+  output_dir <- file.path(results_dir, "aggregated")
   }
   ensure_dir(output_dir)
 
@@ -200,6 +203,9 @@ if (is.null(run_table_path)) {
   model_files <- dplyr::filter(idx, .data$type == "model_metrics")$path
   effect_files <- dplyr::filter(idx, .data$type == "effect_metrics")$path
   validation_files <- dplyr::filter(idx, .data$type == "validation")$path
+  confusion_files <- dplyr::filter(idx, .data$type == "confusion_bins")$path
+  dataset_files <- dplyr::filter(idx, .data$type == "dataset_metrics")$path
+  multimodal_files <- dplyr::filter(idx, .data$type == "multimodal_metrics")$path
   snp_files <- dplyr::filter(idx, .data$type == "snps")$path
 
   if (length(model_files)) {
@@ -221,6 +227,27 @@ if (is.null(run_table_path)) {
     readr::write_csv(validation_tbl, file.path(output_dir, "validation.csv"))
     log_progress("Wrote validation.csv")
     rm(validation_tbl, validation_files)
+    gc()
+  }
+  if (length(confusion_files)) {
+    conf_tbl <- read_csv_safe(confusion_files, idx)
+    readr::write_csv(conf_tbl, file.path(output_dir, "confusion_bins.csv"))
+    log_progress("Wrote confusion_bins.csv")
+    rm(conf_tbl, confusion_files)
+    gc()
+  }
+  if (length(dataset_files)) {
+    dataset_tbl <- read_csv_safe(dataset_files, idx)
+    readr::write_csv(dataset_tbl, file.path(output_dir, "dataset_metrics.csv"))
+    log_progress("Wrote dataset_metrics.csv")
+    rm(dataset_tbl, dataset_files)
+    gc()
+  }
+  if (length(multimodal_files)) {
+    multimodal_tbl <- read_csv_safe(multimodal_files, idx)
+    readr::write_csv(multimodal_tbl, file.path(output_dir, "multimodal_metrics.csv"))
+    log_progress("Wrote multimodal_metrics.csv")
+    rm(multimodal_tbl, multimodal_files)
     gc()
   }
   if (length(snp_files) && isTRUE(write_snps_dataset)) {
@@ -300,7 +327,37 @@ build_confusion_matrix <- function(snps_dataset_path,
                                    pip_bucket_width = 0.01,
                                    use_cases_path = NULL,
                                    output_path,
-                                   stream = FALSE) {
+                                   stream = FALSE,
+                                   confusion_bins_path = NULL,
+                                   confusion_bins_files = NULL) {
+  has_conf_bins <- (!is.null(confusion_bins_path) && file.exists(confusion_bins_path)) ||
+    (!is.null(confusion_bins_files) && length(confusion_bins_files))
+  if (has_conf_bins) {
+    conf_tbl <- if (!is.null(confusion_bins_path) && file.exists(confusion_bins_path)) {
+      readr::read_csv(confusion_bins_path, show_col_types = FALSE)
+    } else {
+      dplyr::bind_rows(lapply(confusion_bins_files, readr::read_csv, show_col_types = FALSE))
+    }
+    available_grouping <- intersect(grouping_vars, names(conf_tbl))
+    if (!length(available_grouping)) {
+      stop("None of the specified grouping_vars found in confusion_bins data.")
+    }
+    conf_agg <- conf_tbl %>%
+      dplyr::group_by(dplyr::across(dplyr::all_of(available_grouping)), .data$pip_threshold) %>%
+      dplyr::summarise(
+        n_causal_at_bucket = sum(.data$n_causal_at_bucket, na.rm = TRUE),
+        n_noncausal_at_bucket = sum(.data$n_noncausal_at_bucket, na.rm = TRUE),
+        .groups = "drop"
+      )
+    n_runs_per_group <- conf_tbl %>%
+      dplyr::group_by(dplyr::across(dplyr::all_of(available_grouping))) %>%
+      dplyr::summarise(n_runs = dplyr::n_distinct(.data$run_id, .data$variant_type, .data$variant_id, .data$agg_method), .groups = "drop")
+    confusion_matrix_table <- conf_agg %>%
+      dplyr::left_join(n_runs_per_group, by = available_grouping)
+    readr::write_csv(confusion_matrix_table, output_path)
+    message("Saved confusion matrix to: ", output_path)
+    return(invisible(confusion_matrix_table))
+  }
 
   dataset_available <- !is.null(snps_dataset_path) && dir.exists(snps_dataset_path)
   if (!dataset_available && (is.null(snp_files) || !length(snp_files))) {

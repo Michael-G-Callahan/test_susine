@@ -64,6 +64,7 @@ simulate_effect_sizes <- function(p,
 #' @param gamma_shrink Optional shrinkage slope used when converting annotations to prior variances.
 #' @param base_sigma2 Optional baseline prior variance.
 #' @param effect_sd Nominal standard deviation used for causal effects (fallback when beta variance is zero).
+#' @param seed Optional seed for reproducibility of annotation draws.
 #'
 #' @return List with `mu_0`, `sigma_0_2`, and `observed_r2`.
 #' @keywords internal
@@ -72,7 +73,11 @@ simulate_priors <- function(beta,
                             inflate_match,
                             gamma_shrink = NA_real_,
                             base_sigma2 = NULL,
-                            effect_sd = NULL) {
+                            effect_sd = NULL,
+                            seed = NULL) {
+  if (!is.null(seed) && is.finite(seed)) {
+    set.seed(as.integer(seed))
+  }
   p <- length(beta)
   causal_idx <- which(beta != 0)
   noncausal_idx <- setdiff(seq_len(p), causal_idx)
@@ -178,7 +183,7 @@ simulate_phenotype <- function(X, beta, noise_fraction, seed = NULL) {
 #' Generate a single simulation dataset for a run specification.
 #'
 #' @param spec Named list or data.frame row containing simulation controls.
-#'   Required fields: `seed`, `p_star`, `y_noise`. Optional prior controls:
+#'   Required fields: `phenotype_seed`, `p_star`, `y_noise`. Optional prior controls:
 #'   `annotation_r2`, `inflate_match`, `gamma_shrink`. Additional optional inputs:
 #'   `effect_sd`, `standardize_X`.
 #' @param base_X Optional matrix to reuse instead of loading the package data.
@@ -198,7 +203,7 @@ generate_simulation_data <- function(spec,
     X <- standardize_x(X)
   }
 
-  seed <- spec$seed %||% 1L
+  seed <- spec$phenotype_seed %||% spec$seed %||% 1L
   effects <- simulate_effect_sizes(
     p = ncol(X),
     p_star = spec$p_star %||% 5L,
@@ -217,7 +222,8 @@ generate_simulation_data <- function(spec,
     inflate_match = spec$inflate_match %||% 0,
     gamma_shrink = spec$gamma_shrink,
     base_sigma2 = stats::var(phenotype$y),
-    effect_sd = spec$effect_sd %||% 1
+    effect_sd = spec$effect_sd %||% 1,
+    seed = spec$annotation_seed %||% NULL
   )
 
   list(

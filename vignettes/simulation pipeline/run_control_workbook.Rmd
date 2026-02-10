@@ -10,16 +10,21 @@ editor_options:
     wrap: 72
 ---
 
-Summary: Builds SLURM-ready simulation control files from a parameter grid. It previews run/task tables and writes job artifacts (config JSON + SLURM script) used by `inst/scripts/run_task.R`.
+Summary: Builds SLURM-ready simulation control files from a parameter grid. It previews dataset bundles/run tables and writes job artifacts (config JSON + SLURM script) used by `inst/scripts/run_task.R`.
 
 ```{r setup, message=FALSE}
-here::i_am("vignettes/run_control_workbook.Rmd")
+here::i_am("vignettes/simulation pipeline/run_control_workbook.Rmd")
 library(here)
 here()
 
 library(devtools)
 devtools::load_all(".")
-devtools::load_all("../../susine")
+susine_path <- here("..", "susine")
+if (file.exists(file.path(susine_path, "DESCRIPTION"))) {
+  devtools::load_all(susine_path)
+} else {
+  warning("susine package not found at: ", susine_path)
+}
 
 library(dplyr)
 library(tidyr)
@@ -40,7 +45,7 @@ The generated artifacts follow the repository layout:
 -   output/run_history/<job_name>/<parent_job_id> - permanent immutable record copied from temp after first SLURM task.
 -   output/slurm_scripts/<job_name>.slurm - submission script.
 -   inst/scripts/run_task.R - task runner referenced by each SLURM array task.
--   During execution, results land in task-local staging files at output/slurm_output/<job_name>/<parent_job_id>/combined/staging/task-*/flush-*_*.
+-   During execution, results land in task-local files at output/slurm_output/<job_name>/<parent_job_id>/task-*/flush-*_*.
 -   SLURM stdout/stderr are re-homed to output/slurm_prints/<job_name>/<parent_job_id>/....
 
 Each completed run now writes a compact `snps.parquet` file that merges
@@ -62,8 +67,9 @@ Edit the list below to reflect the sweep you want to perform. Every
 section is commented; update values as needed before knitting or running
 the chunks interactively. Switch `grid_mode` to `"minimal"` for a
 smoke-test grid that touches each parameter value once instead of the
-full Cartesian product (only the first seed in `seeds` is used in that
-mode).
+full Cartesian product (only the first phenotype seed in `seeds` is used in that
+mode). Use `"intersect"` to "zip" across the grid values with `rep_len`
+semantics so you get a small but representative sample of bundles.
 
 ```{r job-inputs}
 job_inputs <- list(
@@ -81,7 +87,8 @@ job_inputs <- list(
   # Root folder that already contains run_history/, slurm_output/, slurm_prints/
   output_root = here("output"),
 
-  # Grid mode: "full" for Cartesian product, "minimal" for lightweight smoke tests
+  # Grid mode: "full" for Cartesian product, "minimal" for lightweight smoke tests,
+  # "intersect" for a zipped grid (rep_len across values)
   grid_mode = "full",
 
   # Which predefined model variants to include (see use_case_catalog())
@@ -98,7 +105,7 @@ job_inputs <- list(
   inflate_match = c(0.5, 1, 1.5),
   gamma_shrink = c(0.4, 0.8),
   # Scalar multipliers for functional prior means (mu_0)
-  annotation_scale = c(1),
+  annotation_scales = c(1),
   
   # sigma_0_2 prior variance scalars to test (only for naive sigma use cases)
   # Formats: "X" = X * var(y), "X/L" = X/L * var(y)
@@ -112,10 +119,14 @@ job_inputs <- list(
   # Seeds per design matrix (each sampled X receives these many phenotype draws)
   seeds = 1:3,
 
-  # Number of runs to assign to each SLURM array task
-  # (~2112 total runs / 150 per task = ~14 tasks, well under SLURM QoS limits)
-  runs_per_task = 3969, #5,
-  # Number of runs to accumulate before flushing task-local outputs
+  # Task assignment: must be "dataset" (run-based assignment is disabled).
+  task_unit = "dataset",
+  # When task_unit = "dataset", number of bundles per SLURM task
+  bundles_per_task = 1,
+  # Seed used to shuffle dataset bundles into tasks (reproducible assignment)
+  task_assignment_seed = 1L,
+  # Legacy (ignored) when task_unit = "dataset"
+  runs_per_task = 3969,
   buffer_flush_interval = 300,
 
   # Data scenarios: "simulation_n3" for the built-in toy data, or scenario_{1-4}
@@ -130,7 +141,23 @@ job_inputs <- list(
   credible_set_rho = 0.95,
   purity_threshold = 0.50,
   verbose_file_output = FALSE,
-  write_legacy_snp_csv = FALSE
+  write_legacy_snp_csv = FALSE,
+  write_snps_parquet = TRUE,
+  write_confusion_bins = TRUE,
+  
+  # Aggregation + metrics controls
+  aggregation_methods = c("softmax_elbo"),
+  metrics_settings = list(
+    pip_bucket_width = 0.01,
+    z_top_k = 10,
+    jsd_threshold = 0.171661
+  ),
+  
+  # Restart controls for pilot runs (ignored unless the use case requests it)
+  restart_settings = list(
+    n_inits = 5,
+    alpha_concentration = 1
+  )
 )
 ```
 
@@ -138,12 +165,12 @@ Set `pair_L_p_star = TRUE` to lock `L_grid` and `p_star_grid` together (only ide
 values are paired when the full grid is built); flip it to `FALSE` if you want the
 complete Cartesian product again.
 
-Double-check that `job_name` is meaningful and unique — it determines
+Double-check that `job_name` is meaningful and unique - it determines
 where the job history and outputs are stored.
 
-When you choose one of the sampled data scenarios (`scenario_1`–`scenario_4`),
+When you choose one of the sampled data scenarios (`scenario_1`-`scenario_4`),
 the grid will automatically include every available design matrix (one per
-gene) from `data/sampled_simulated_genotypes/…`. The `seeds` vector now
+gene) from `data/sampled_simulated_genotypes/...`. The `seeds` vector now
 controls **phenotype replicates per matrix** rather than per scenario, so
 in the example above we will simulate five phenotypes for each extracted
 `X`. The legacy `simulation_n3` scenario still behaves as before with a
@@ -170,6 +197,8 @@ job_config <- make_job_config(
   HPC = job_inputs$HPC,
   time = job_inputs$time,
   mem = job_inputs$mem,
+  task_unit = job_inputs$task_unit,
+  bundles_per_task = job_inputs$bundles_per_task,
   use_case_ids = job_inputs$use_cases,
   L_grid = job_inputs$L_grid,
   y_noise_grid = job_inputs$y_noise,
@@ -187,10 +216,16 @@ job_config <- make_job_config(
   purity_threshold = job_inputs$purity_threshold,
   verbose_file_output = job_inputs$verbose_file_output,
   write_legacy_snp_csv = job_inputs$write_legacy_snp_csv,
+  write_snps_parquet = job_inputs$write_snps_parquet,
+  write_confusion_bins = job_inputs$write_confusion_bins,
+  task_assignment_seed = job_inputs$task_assignment_seed,
   grid_mode = job_inputs$grid_mode,
   pair_L_p_star = job_inputs$pair_L_p_star,
   sigma_0_2_scalars = job_inputs$sigma_0_2_scalars,
-  annotation_scales = job_inputs$annotation_scale
+  annotation_scales = job_inputs$annotation_scales,
+  aggregation_methods = job_inputs$aggregation_methods,
+  metrics_settings = job_inputs$metrics_settings,
+  restart_settings = job_inputs$restart_settings
 )
 ```
 
@@ -205,15 +240,124 @@ job_config$tables$use_cases %>%
   kable()
 ```
 
-## Scenario Grid
+## Run Accounting Preview
 
-Each row is a unique combination of simulation settings (before seeding
-and model selection).
+```{r preview-run-accounting}
+runs_tbl <- job_config$tables$runs
+bundles_tbl <- job_config$tables$dataset_bundles
 
-```{r preview-scenarios}
-job_config$tables$scenarios %>%
-  select(scenario_id, data_scenario, L, y_noise, p_star,
-         annotation_r2, inflate_match, gamma_shrink) %>%
+n_bundles <- nrow(bundles_tbl)
+n_matrices <- dplyr::n_distinct(bundles_tbl$matrix_id)
+n_p_star <- dplyr::n_distinct(bundles_tbl$p_star)
+n_y_noise <- dplyr::n_distinct(bundles_tbl$y_noise)
+n_seeds <- dplyr::n_distinct(bundles_tbl$phenotype_seed)
+
+bundles_formula <- sprintf(
+  "(= %d loci x %d p_star x %d y_noise x %d seeds)",
+  n_matrices, n_p_star, n_y_noise, n_seeds
+)
+
+n_tasks <- nrow(job_config$tables$tasks)
+bundles_per_task <- job_config$job$bundles_per_task %||% 1L
+tasks_formula <- sprintf("(= ceiling(%d / %d))", n_bundles, bundles_per_task)
+
+use_cases_tbl <- job_config$tables$use_cases %>%
+  filter(use_case_id %in% job_inputs$use_cases)
+n_use_cases <- nrow(use_cases_tbl)
+
+count_or_one <- function(x) {
+  val <- dplyr::n_distinct(x[!is.na(x)])
+  ifelse(val < 1, 1L, val)
+}
+
+uc_counts <- runs_tbl %>%
+  group_by(use_case_id) %>%
+  summarise(
+    n_L = dplyr::n_distinct(L),
+    n_ann_r2 = count_or_one(annotation_r2),
+    n_inflate = count_or_one(inflate_match),
+    n_gamma = count_or_one(gamma_shrink),
+    n_scale = count_or_one(annotation_scale),
+    n_sigma = count_or_one(sigma_0_2_scalar),
+    n_restart = count_or_one(restart_id),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    groups_per_bundle = n_L * n_ann_r2 * n_inflate,
+    runs_per_group = n_gamma * n_scale * n_sigma * n_restart
+  )
+
+group_counts <- runs_tbl %>%
+  group_by(use_case_id, dataset_bundle_id) %>%
+  summarise(n_groups = dplyr::n_distinct(group_key), .groups = "drop") %>%
+  group_by(use_case_id) %>%
+  summarise(min_groups = min(n_groups), max_groups = max(n_groups), .groups = "drop")
+
+run_counts <- runs_tbl %>%
+  group_by(use_case_id, dataset_bundle_id, group_key) %>%
+  summarise(n_runs = dplyr::n(), .groups = "drop") %>%
+  group_by(use_case_id) %>%
+  summarise(min_runs = min(n_runs), max_runs = max(n_runs), .groups = "drop")
+
+uc_counts <- uc_counts %>%
+  left_join(group_counts, by = "use_case_id") %>%
+  left_join(run_counts, by = "use_case_id")
+
+cat(sprintf("Number of dataset bundles: %d %s\n", n_bundles, bundles_formula))
+cat(sprintf("Number of tasks: %d %s\n", n_tasks, tasks_formula))
+cat(sprintf("# of use cases: %d\n", n_use_cases))
+
+for (i in seq_len(nrow(uc_counts))) {
+  row <- uc_counts[i, ]
+  uc <- row$use_case_id
+  groups_line <- sprintf(
+    "Groups per bundle (%s): %d (= %d L x %d annotation_r2 x %d inflate_match)",
+    uc, row$groups_per_bundle, row$n_L, row$n_ann_r2, row$n_inflate
+  )
+  if (!is.na(row$min_groups) && row$min_groups != row$max_groups) {
+    groups_line <- paste0(groups_line, sprintf(" [observed range: %d-%d]", row$min_groups, row$max_groups))
+  }
+  cat(groups_line, "\n")
+
+  runs_line <- sprintf(
+    "Runs per group (%s): %d (= %d gamma_shrink x %d annotation_scale x %d sigma_0_2_scalar x %d restart_id)",
+    uc, row$runs_per_group, row$n_gamma, row$n_scale, row$n_sigma, row$n_restart
+  )
+  if (!is.na(row$min_runs) && row$min_runs != row$max_runs) {
+    runs_line <- paste0(runs_line, sprintf(" [observed range: %d-%d]", row$min_runs, row$max_runs))
+  }
+  cat(runs_line, "\n")
+}
+
+total_runs <- nrow(runs_tbl)
+per_uc_terms <- uc_counts %>%
+  mutate(term = sprintf("%s: %d groups x %d runs = %d",
+                        use_case_id, groups_per_bundle, runs_per_group,
+                        groups_per_bundle * runs_per_group)) %>%
+  pull(term)
+cat(sprintf(
+  "Total runs: %d (= %d bundles x (%s))\n",
+  total_runs,
+  n_bundles,
+  paste(per_uc_terms, collapse = " + ")
+))
+```
+
+## Dataset Bundle Grid
+
+Each row is a unique dataset bundle (matrix + sim settings + phenotype seed).
+
+```{r preview-dataset-bundles}
+job_config$tables$dataset_bundles %>%
+  dplyr::left_join(
+    job_config$tables$data_matrices %>%
+      dplyr::select(matrix_id, data_scenario, dataset_label),
+    by = "matrix_id"
+  ) %>%
+  select(dataset_bundle_id, data_scenario, matrix_id, dataset_label,
+         y_noise, p_star, phenotype_seed) %>%
+  arrange(data_scenario, matrix_id, dataset_bundle_id) %>%
+  slice_head(n = 20) %>%
   kable()
 ```
 
@@ -245,7 +389,10 @@ job_config$tables$data_matrices %>%
 ```{r preview-runs}
 table_limit <- 100
 run_summary <- summarise_job_config(job_config) %>%
-  arrange(use_case_id, L, y_noise, p_star)
+  {
+    sort_cols <- intersect(c("use_case_id", "L", "y_noise", "p_star"), names(.))
+    dplyr::arrange(., dplyr::across(dplyr::all_of(sort_cols)))
+  }
 
 run_summary %>%
   slice_head(n = table_limit) %>%
@@ -279,7 +426,26 @@ cat("Total model runs:", total_runs, "\n")
 cat("Total SLURM tasks:", total_tasks, "\n")
 ```
 
-# 4. Write Control Files
+# 4. Local Smoke Tests
+
+For quick local validation, shrink the grid and run a single task
+locally. Two lightweight options are `grid_mode = "minimal"` (one bundle
+per scenario) or `grid_mode = "intersect"` (zipped grid across settings).
+
+```{r smoke-test-example}
+job_inputs_smoke <- modifyList(job_inputs, list(
+  grid_mode = "minimal", # or "intersect"
+  task_unit = "dataset",
+  bundles_per_task = 1,
+  seeds = 1,
+  use_cases = head(job_inputs$use_cases, 1)
+))
+```
+
+To use the smoke settings, replace `job_inputs` with `job_inputs_smoke`
+and re-run sections 2-4 before testing locally.
+
+# 5. Write Control Files
 
 Set `commit_artifacts <- TRUE` once you are satisfied with the preview.
 The chunk below writes:
@@ -367,7 +533,7 @@ for (task_id in task_ids) {
     job_root,
     config_path
   )
-  message("→ Running task ", task_id, ": ", cmd)
+  message("-> Running task ", task_id, ": ", cmd)
   status <- system(cmd)
   if (status != 0) {
     stop("Task ", task_id, " exited with status ", status, call. = FALSE)
@@ -375,7 +541,7 @@ for (task_id in task_ids) {
 }
 ```
 
-# 5. Next Steps
+# 6. Next Steps
 
 1.  Inspect the generated SLURM script at
     `output/slurm_scripts/<job_name>.slurm`.

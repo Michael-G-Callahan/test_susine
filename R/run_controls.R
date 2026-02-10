@@ -144,11 +144,11 @@ ensure_repo_root <- function(path) {
 #' @param y_noise_grid Numeric vector of noise fractions (0-1).
 #' @param prior_quality Tibble from [prior_quality_grid()].
 #' @param p_star_grid Integer vector for number of causal SNPs.
-#' @param seeds Integer vector of RNG seeds.
+#' @param seeds Integer vector of RNG seeds for phenotype simulation.
 #' @param data_scenarios Character vector naming the data sources.
 #' @param pair_L_p_star Logical; when TRUE (and `grid_mode == "full"`), the grid pairs matching
 #'   `L` and `p_star` values instead of taking their Cartesian product.
-#' @return List with elements `scenarios`, `runs`, and `tasks`.
+#' @return List with elements `dataset_bundles`, `runs`, and `tasks`.
 #' @keywords internal
 make_run_tables <- function(use_case_ids,
                             L_grid,
@@ -157,7 +157,7 @@ make_run_tables <- function(use_case_ids,
                             p_star_grid,
                             seeds,
                             data_scenarios,
-                            grid_mode = c("full", "minimal"),
+                            grid_mode = c("full", "minimal", "intersect"),
                             pair_L_p_star = FALSE,
                             data_matrix_catalog = NULL) {
   if (!is.data.frame(prior_quality) ||
@@ -172,106 +172,16 @@ make_run_tables <- function(use_case_ids,
   if (!nrow(use_cases)) {
     stop("No valid use cases selected.")
   }
-  unique_L <- unique(L_grid)
-  unique_p <- unique(p_star_grid)
 
-  build_full_grid <- function() {
-    lp_pairs <- if (isTRUE(pair_L_p_star)) {
-      if (!setequal(unique_L, unique_p)) {
-        stop("When pair_L_p_star = TRUE, L_grid and p_star_grid must have the same unique values.")
-      }
-      tibble::tibble(L = unique_L, p_star = unique_L)
-    } else {
-      tidyr::expand_grid(L = unique_L, p_star = unique_p)
-    }
-
-    base_grid <- tidyr::expand_grid(
-      data_scenario = unique(data_scenarios),
-      y_noise = unique(y_noise_grid),
-      prior_quality_id = prior_quality$prior_quality_id
+  use_cases <- use_cases %>%
+    dplyr::mutate(
+      uses_mu_annotation = .data$mu_strategy %in% c("functional", "eb_mu"),
+      uses_sigma_annotation = .data$sigma_strategy %in% c("functional", "eb_sigma"),
+      uses_gamma_shrink = .data$sigma_strategy %in% c("functional", "eb_sigma")
     )
-
-    base_grid %>%
-      dplyr::mutate(.join_key = 1L) %>%
-      dplyr::inner_join(
-        lp_pairs %>% dplyr::mutate(.join_key = 1L),
-        by = ".join_key"
-      ) %>%
-      dplyr::select(-.join_key) %>%
-      dplyr::select(data_scenario, L, y_noise, p_star, prior_quality_id, dplyr::everything()) %>%
-      dplyr::left_join(prior_quality, by = "prior_quality_id") %>%
-      dplyr::arrange(data_scenario, L, y_noise, p_star, prior_quality_id) %>%
-      dplyr::mutate(scenario_id = dplyr::row_number())
-  }
-
-  build_minimal_grid <- function() {
-    ann_vals <- unique(prior_quality$annotation_r2)
-    inflate_vals <- unique(prior_quality$inflate_match)
-    gamma_vals <- unique(prior_quality$gamma_shrink)
-    if (!length(ann_vals)) ann_vals <- NA_real_
-    if (!length(inflate_vals)) inflate_vals <- NA_real_
-    if (!length(gamma_vals)) gamma_vals <- NA_real_
-
-    candidate_matrices <- data_matrix_catalog %>%
-      dplyr::filter(.data$data_scenario %in% unique(data_scenarios)) %>%
-      dplyr::arrange(.data$data_scenario, .data$matrix_id) %>%
-      dplyr::pull(.data$matrix_id)
-    if (!length(candidate_matrices)) {
-      stop("No matrix metadata found for the requested scenarios.")
-    }
-
-    values <- list(
-      data_scenario = unique(data_scenarios),
-      L = unique(L_grid),
-      y_noise = unique(y_noise_grid),
-      p_star = unique(p_star_grid),
-      annotation_r2 = ann_vals,
-      inflate_match = inflate_vals,
-      gamma_shrink = gamma_vals,
-      matrix_id = unique(candidate_matrices)
-    )
-    lengths <- vapply(values, length, integer(1))
-    n_rows <- max(c(lengths, length(candidate_matrices)))
-
-    tibble::tibble(
-      data_scenario = rep_len(values$data_scenario, n_rows),
-      L = rep_len(values$L, n_rows),
-      y_noise = rep_len(values$y_noise, n_rows),
-      p_star = rep_len(values$p_star, n_rows),
-      annotation_r2 = rep_len(values$annotation_r2, n_rows),
-      inflate_match = rep_len(values$inflate_match, n_rows),
-      gamma_shrink = rep_len(values$gamma_shrink, n_rows),
-      matrix_id = rep_len(candidate_matrices, n_rows),
-      prior_quality_id = seq_len(n_rows)
-    ) %>%
-      dplyr::mutate(scenario_id = seq_along(data_scenario))
-  }
-
-  scenarios <- if (grid_mode == "minimal") {
-    build_minimal_grid()
-  } else {
-    build_full_grid()
-  }
 
   matrix_catalog_subset <- dplyr::filter(data_matrix_catalog, .data$data_scenario %in% unique(data_scenarios))
-
-  scenario_matrix_map <- if ("matrix_id" %in% names(scenarios)) {
-    scenarios %>%
-      dplyr::select(scenario_id, data_scenario, matrix_id) %>%
-      dplyr::inner_join(
-        matrix_catalog_subset,
-        by = c("data_scenario", "matrix_id")
-      )
-  } else {
-    scenarios %>%
-      dplyr::select(scenario_id, data_scenario) %>%
-      dplyr::inner_join(
-        matrix_catalog_subset,
-        by = "data_scenario"
-      )
-  }
-
-  if (!nrow(scenario_matrix_map)) {
+  if (!nrow(matrix_catalog_subset)) {
     stop("No matrix metadata found for the requested scenarios.")
   }
 
@@ -280,173 +190,168 @@ make_run_tables <- function(use_case_ids,
     stop("At least one seed must be supplied.")
   }
 
-  # Offset seeds by matrix_id so each dataset has its own unique seed set.
+  build_dataset_bundles <- function() {
+    scenario_vals <- unique(data_scenarios)
+    y_vals <- unique(y_noise_grid)
+    p_vals <- unique(p_star_grid)
+    candidate_matrices <- matrix_catalog_subset %>%
+      dplyr::arrange(.data$data_scenario, .data$matrix_id) %>%
+      dplyr::pull(.data$matrix_id)
 
-  # E.g., if seeds = 1:5, matrix_id 1 gets seeds 1-5, matrix_id 2 gets 6-10, etc.
-  n_seeds <- length(seed_values)
-  offset_seeds_for_matrix <- function(base_seeds, mat_id) {
-    base_seeds + (mat_id - 1L) * n_seeds
+    if (grid_mode == "minimal") {
+      # Single bundle per scenario (first matrix, first y_noise, first p_star, first seed).
+      matrix_ids <- matrix_catalog_subset %>%
+        dplyr::group_by(.data$data_scenario) %>%
+        dplyr::slice_head(n = 1) %>%
+        dplyr::ungroup() %>%
+        dplyr::pull(.data$matrix_id)
+      bundles <- tibble::tibble(
+        matrix_id = matrix_ids,
+        y_noise = y_vals[1],
+        p_star = p_vals[1],
+        phenotype_seed = seed_values[1]
+      )
+      return(bundles)
+    }
+
+    if (grid_mode == "intersect") {
+      values <- list(
+        y_noise = y_vals,
+        p_star = p_vals,
+        phenotype_seed = seed_values,
+        matrix_id = candidate_matrices
+      )
+      lengths <- vapply(values, length, integer(1))
+      n_rows <- max(lengths)
+      bundles <- tibble::tibble(
+        y_noise = rep_len(values$y_noise, n_rows),
+        p_star = rep_len(values$p_star, n_rows),
+        phenotype_seed = rep_len(values$phenotype_seed, n_rows),
+        matrix_id = rep_len(values$matrix_id, n_rows)
+      )
+      return(bundles)
+    }
+
+    # Full grid
+    bundles <- tidyr::expand_grid(
+      matrix_id = candidate_matrices,
+      y_noise = y_vals,
+      p_star = p_vals,
+      phenotype_seed = seed_values
+    )
+    bundles
   }
 
-  seed_first <- seed_values[1]
+  dataset_bundles <- build_dataset_bundles() %>%
+    dplyr::mutate(
+      dataset_bundle_id = dplyr::row_number(),
+      phenotype_seed = dplyr::row_number()
+    )
 
-  runs <- if (grid_mode == "minimal") {
-    scenario_matrix_map %>%
-      dplyr::mutate(
-        use_case_id = rep_len(use_cases$use_case_id, dplyr::n()),
-        seed = offset_seeds_for_matrix(seed_first, matrix_id)
-      )
-  } else {
-    # Expand grid per scenario_matrix_index, then compute offset seeds per matrix_id
-    tidyr::expand_grid(
-      scenario_matrix_index = seq_len(nrow(scenario_matrix_map)),
-      use_case_id = use_cases$use_case_id,
-      seed_base = seed_values
-    ) %>%
-      dplyr::left_join(
-        scenario_matrix_map %>%
-          dplyr::mutate(scenario_matrix_index = dplyr::row_number()),
-        by = "scenario_matrix_index"
-      ) %>%
-      dplyr::mutate(
-        seed = offset_seeds_for_matrix(seed_base, matrix_id)
-      ) %>%
-      dplyr::select(-scenario_matrix_index, -seed_base)
+  if (!nrow(dataset_bundles)) {
+    stop("No dataset bundles created.")
   }
 
-  scenario_join <- dplyr::select(
-    scenarios,
-    dplyr::all_of(setdiff(names(scenarios), c("data_scenario", "matrix_id")))
-  )
+  unique_L <- unique(L_grid)
+  unique_p <- unique(p_star_grid)
+  if (isTRUE(pair_L_p_star) && !setequal(unique_L, unique_p)) {
+    stop("When pair_L_p_star = TRUE, L_grid and p_star_grid must have the same unique values.")
+  }
 
-  runs <- runs %>%
-    dplyr::left_join(scenario_join, by = "scenario_id") %>%
-    dplyr::left_join(
-      dplyr::select(use_cases, use_case_id, requires_prior_quality, mu_strategy, sigma_strategy),
-      by = "use_case_id"
-    )
-
-  runs <- runs %>%
+  L_by_bundle <- dataset_bundles %>%
+    dplyr::distinct(dataset_bundle_id, p_star) %>%
     dplyr::mutate(
-      needs_annotation = requires_prior_quality,
-      needs_gamma = requires_prior_quality & sigma_strategy == "functional"
+      L_vals = if (isTRUE(pair_L_p_star)) list(.data$p_star) else list(unique_L)
     ) %>%
-    {\(df) {
-      if (grid_mode == "minimal") {
-        gamma_pool <- prior_quality$gamma_shrink
-        gamma_pool <- gamma_pool[!is.na(gamma_pool)]
-        gamma_default <- if (length(gamma_pool)) gamma_pool[1] else 0
-        df %>%
-          dplyr::mutate(
-            annotation_r2 = dplyr::if_else(needs_annotation, annotation_r2, NA_real_),
-            inflate_match = dplyr::if_else(needs_annotation, inflate_match, NA_real_),
-            gamma_shrink = dplyr::case_when(
-              needs_gamma ~ dplyr::coalesce(gamma_shrink, gamma_default),
-              needs_annotation & !needs_gamma ~ NA_real_,
-              TRUE ~ NA_real_
-            )
-          )
-      } else {
-        df
-      }
-    }}() %>%
-    dplyr::filter(
-      !needs_annotation |
-        (needs_gamma & !is.na(gamma_shrink)) |
-        (!needs_gamma & is.na(gamma_shrink))
-    )
+    tidyr::unnest(cols = "L_vals") %>%
+    dplyr::rename(L = L_vals) %>%
+    dplyr::select(.data$dataset_bundle_id, .data$L)
 
-  default_scenarios <- scenarios %>%
-    dplyr::group_by(data_scenario, L, y_noise, p_star) %>%
-    dplyr::summarise(default_scenario_id = dplyr::first(scenario_id), .groups = "drop")
+  annotation_grid_for_use_case <- function(uc_row) {
+    if (!isTRUE(uc_row$uses_mu_annotation) && !isTRUE(uc_row$uses_sigma_annotation)) {
+      return(tibble::tibble(annotation_r2 = NA_real_, inflate_match = NA_real_, gamma_shrink = NA_real_))
+    }
+    grid <- prior_quality %>% dplyr::select(annotation_r2, inflate_match, gamma_shrink)
+    if (!isTRUE(uc_row$uses_gamma_shrink)) {
+      grid <- grid %>%
+        dplyr::mutate(gamma_shrink = NA_real_) %>%
+        dplyr::distinct()
+    }
+    grid
+  }
 
-  runs <- runs %>%
-    dplyr::left_join(default_scenarios,
-      by = c("data_scenario", "L", "y_noise", "p_star")
-    ) %>%
-    dplyr::mutate(
-      scenario_id = dplyr::if_else(
-        requires_prior_quality,
-        scenario_id,
-        default_scenario_id
-      ),
-      prior_quality_id = dplyr::if_else(
-        requires_prior_quality,
-        prior_quality_id,
-        as.integer(NA)
-      ),
-      annotation_r2 = dplyr::if_else(
-        requires_prior_quality,
-        annotation_r2,
-        as.numeric(NA)
-      ),
-      inflate_match = dplyr::if_else(
-        requires_prior_quality,
-        inflate_match,
-        as.numeric(NA)
-      ),
-      gamma_shrink = dplyr::if_else(
-        needs_gamma,
-        gamma_shrink,
-        as.numeric(NA)
-      )
-    ) %>%
-    dplyr::select(-default_scenario_id, -needs_annotation, -needs_gamma, -mu_strategy, -sigma_strategy) %>%
-    dplyr::distinct() %>%
-    dplyr::arrange(scenario_id, use_case_id, seed) %>%
+  runs <- purrr::map_dfr(seq_len(nrow(use_cases)), function(i) {
+    uc <- use_cases[i, ]
+    ann_grid <- annotation_grid_for_use_case(uc)
+    base <- dataset_bundles %>%
+      dplyr::inner_join(L_by_bundle, by = "dataset_bundle_id") %>%
+      dplyr::mutate(use_case_id = uc$use_case_id)
+    tidyr::crossing(base, ann_grid)
+  }) %>%
+    dplyr::arrange(.data$dataset_bundle_id, .data$use_case_id, .data$L, .data$phenotype_seed) %>%
     dplyr::mutate(run_id = dplyr::row_number())
 
-  scenarios <- dplyr::semi_join(scenarios, runs, by = "scenario_id")
-
   list(
-    scenarios = scenarios,
+    dataset_bundles = dataset_bundles,
     data_matrices = data_matrix_catalog,
     runs = runs,
     use_cases = use_cases
   )
 }
 
-#' Attach task identifiers to the run table.
+#' Attach task identifiers by dataset bundle.
 #'
-#' @param runs Run tibble from [make_run_tables()].
-#' @param runs_per_task Integer number of runs assigned to each SLURM task.
-#' @param shuffle_seed Optional seed for reproducible shuffling (default: NULL for random).
-#' @param shuffle Logical; when FALSE, assign runs to tasks in run_id order (no shuffling).
-#' @return Tibble with `task_id` and `shuffled_order` columns added, and supporting task summary.
+#' Ensures all runs for a given dataset_bundle_id are assigned to the same task.
+#'
+#' @param runs Run tibble containing a dataset bundle column.
+#' @param bundle_id_col Column name containing the dataset bundle id.
+#' @param bundles_per_task Integer number of bundles assigned to each task.
+#' @param shuffle_seed Optional seed for reproducible shuffling.
+#' @param shuffle Logical; when FALSE, assign bundles to tasks in id order.
+#' @return List with `runs` (task_id assigned) and `tasks` summary.
 #' @keywords internal
-assign_task_ids <- function(runs,
-                            runs_per_task,
-                            shuffle_seed = NULL,
-                            shuffle = TRUE) {
-  if (runs_per_task < 1) {
-    stop("runs_per_task must be >= 1")
+assign_task_ids_by_bundle <- function(runs,
+                                      bundle_id_col = "dataset_bundle_id",
+                                      bundles_per_task = 1,
+                                      shuffle_seed = NULL,
+                                      shuffle = TRUE) {
+  if (bundles_per_task < 1) {
+    stop("bundles_per_task must be >= 1")
+  }
+  if (!bundle_id_col %in% names(runs)) {
+    stop("bundle_id_col not found in runs: ", bundle_id_col)
   }
 
-  n_runs <- nrow(runs)
+  bundles <- runs %>%
+    dplyr::distinct(.data[[bundle_id_col]]) %>%
+    dplyr::rename(bundle_id = !!bundle_id_col)
 
   if (isTRUE(shuffle)) {
     if (!is.null(shuffle_seed)) {
       set.seed(shuffle_seed)
     }
-    shuffled_idx <- sample(n_runs)
-    runs_shuffled <- runs %>%
-      dplyr::mutate(shuffled_order = shuffled_idx) %>%
-      dplyr::arrange(shuffled_order) %>%
-      dplyr::mutate(task_id = ((dplyr::row_number() - 1L) %/% as.integer(runs_per_task)) + 1L) %>%
-      dplyr::arrange(run_id)
+    bundles <- bundles %>%
+      dplyr::mutate(shuffled_order = sample(n())) %>%
+      dplyr::arrange(.data$shuffled_order)
   } else {
-    runs_shuffled <- runs %>%
-      dplyr::mutate(shuffled_order = seq_len(n_runs)) %>%
-      dplyr::arrange(run_id) %>%
-      dplyr::mutate(task_id = ((dplyr::row_number() - 1L) %/% as.integer(runs_per_task)) + 1L)
+    bundles <- bundles %>% dplyr::arrange(.data$bundle_id)
   }
 
-  tasks_summary <- runs_shuffled %>%
-    dplyr::group_by(task_id) %>%
-    dplyr::summarise(runs_per_task = dplyr::n(), .groups = "drop") %>%
-    dplyr::arrange(task_id)
+  bundles <- bundles %>%
+    dplyr::mutate(
+      task_id = ((dplyr::row_number() - 1L) %/% as.integer(bundles_per_task)) + 1L
+    )
 
-  list(runs = runs_shuffled, tasks = tasks_summary)
+  runs_out <- runs %>%
+    dplyr::left_join(bundles %>% dplyr::select(.data$bundle_id, .data$task_id),
+                     by = setNames("bundle_id", bundle_id_col))
+
+  tasks_summary <- bundles %>%
+    dplyr::group_by(.data$task_id) %>%
+    dplyr::summarise(bundles_per_task = dplyr::n(), .groups = "drop") %>%
+    dplyr::arrange(.data$task_id)
+
+  list(runs = runs_out, tasks = tasks_summary)
 }
 
 #' Create an in-memory job configuration.
@@ -457,9 +362,11 @@ assign_task_ids <- function(runs,
 #' @param y_noise_grid Numeric vector of noise fractions.
 #' @param prior_quality Tibble with prior noise settings.
 #' @param p_star_grid Integer vector.
-#' @param seeds Integer vector of RNG seeds.
+#' @param seeds Integer vector of RNG seeds for phenotype simulation.
 #' @param data_scenarios Character vector.
-#' @param runs_per_task Integer number of runs assigned to each SLURM task.
+#' @param task_unit One of "dataset" or "run"; controls how tasks are assigned.
+#' @param bundles_per_task Integer number of dataset bundles assigned to each task.
+#' @param runs_per_task Integer number of runs assigned to each SLURM task (used when task_unit = "run").
 #' @param email Notification email address.
 #' @param output_root Root directory for outputs (default `output`).
 #' @param credible_set_rho Credible set cumulative PIP threshold.
@@ -478,10 +385,12 @@ assign_task_ids <- function(runs,
 #'   prior means (`mu_0`). Only use cases with `mu_strategy == "functional"`
 #'   receive these values; all other runs are assigned `NA`. When NULL or empty,
 #'   defaults to a single value of 1 (no scaling).
-#' @param anneal_settings Named list for tempering runs.
+#' @param anneal_settings Named list for tempering runs. Set to NULL to omit
+#'   annealing config from the job config.
 #' @param model_average_settings Named list for model averaging runs.
 #' @param pair_L_p_star Logical; when TRUE, the full grid pairs `L` and `p_star` values 1-1
 #'   instead of expanding their Cartesian product.
+#' @param task_assignment_seed Optional integer seed to make task assignment reproducible.
 #'
 #' @return Job configuration list ready to serialize.
 #' @export
@@ -499,15 +408,20 @@ make_job_config <- function(job_name,
                             repo_root = ".",
                             sampled_scenario_summary = NULL,
                             data_matrix_catalog = NULL,
+                            task_unit = c("dataset", "run"),
+                            bundles_per_task = 1,
                             runs_per_task = 150,
                             email = "mgc5166@psu.edu",
                             output_root = "output",
                             credible_set_rho = 0.95,
                             purity_threshold = 0.5,
                             write_legacy_snp_csv = FALSE,
+                            write_snps_parquet = TRUE,
+                            write_confusion_bins = TRUE,
                             verbose_file_output = TRUE,
                             buffer_flush_interval = 300L,
-                            grid_mode = c("full", "minimal"),
+                            task_assignment_seed = NULL,
+                            grid_mode = c("full", "minimal", "intersect"),
                             pair_L_p_star = FALSE,
                             sigma_0_2_scalars = NULL,
                             annotation_scales = NULL,
@@ -519,9 +433,23 @@ make_job_config <- function(job_name,
                             model_average_settings = list(
                               n_inits = 5,
                               init_sd = 0.05
+                            ),
+                            restart_settings = list(
+                              n_inits = 5,
+                              alpha_concentration = 1
+                            ),
+                            aggregation_methods = c("softmax_elbo"),
+                            metrics_settings = list(
+                              pip_bucket_width = 0.01,
+                              z_top_k = 10,
+                              jsd_threshold = 0.171661
                             )) {
 
   grid_mode <- match.arg(grid_mode)
+  task_unit <- match.arg(task_unit)
+  if (task_unit != "dataset") {
+    stop("task_unit must be 'dataset' (run-based task assignment is disabled).")
+  }
   repo_root <- normalizePath(repo_root, winslash = "/", mustWork = TRUE)
   repo_root <- ensure_repo_root(repo_root)
   if (is.null(data_matrix_catalog)) {
@@ -569,8 +497,7 @@ make_job_config <- function(job_name,
   }
 
   tables$runs <- dplyr::bind_rows(runs_functional, runs_non_functional) %>%
-    dplyr::arrange(.data$scenario_id, .data$use_case_id, .data$seed, .data$annotation_scale) %>%
-    dplyr::mutate(run_id = dplyr::row_number())
+    dplyr::arrange(.data$dataset_bundle_id, .data$use_case_id, .data$L, .data$phenotype_seed, .data$annotation_scale)
 
   # Expand sigma_0_2_scalars across runs with naive sigma strategy
   # Only applies to use cases with sigma_strategy == "naive"
@@ -589,15 +516,15 @@ make_job_config <- function(job_name,
       runs_expanded <- runs_to_expand %>%
         tidyr::crossing(sigma_0_2_scalar = as.character(sigma_0_2_scalars))
       
-      tables$runs <- dplyr::bind_rows(runs_expanded, runs_no_expand) %>%
-        dplyr::arrange(
-          .data$scenario_id,
-          .data$use_case_id,
-          .data$seed,
-          .data$annotation_scale,
-          .data$sigma_0_2_scalar
-        ) %>%
-        dplyr::mutate(run_id = dplyr::row_number())
+        tables$runs <- dplyr::bind_rows(runs_expanded, runs_no_expand) %>%
+          dplyr::arrange(
+            .data$dataset_bundle_id,
+            .data$use_case_id,
+            .data$L,
+            .data$phenotype_seed,
+            .data$annotation_scale,
+            .data$sigma_0_2_scalar
+          )
     } else {
       tables$runs <- runs_no_expand
     }
@@ -607,30 +534,112 @@ make_job_config <- function(job_name,
       dplyr::mutate(sigma_0_2_scalar = NA_character_)
   }
 
+  # Attach annotation seeds (unique per dataset bundle x annotation setting)
+  runs <- tables$runs
+  ann_key <- ifelse(
+    is.na(runs$annotation_r2) & is.na(runs$inflate_match),
+    NA_character_,
+    paste0("r2=", runs$annotation_r2, "|inflate=", runs$inflate_match)
+  )
+  ann_lookup <- tibble::tibble(
+    dataset_bundle_id = runs$dataset_bundle_id,
+    ann_key = ann_key
+  ) %>%
+    dplyr::distinct() %>%
+    dplyr::filter(!is.na(.data$ann_key)) %>%
+    dplyr::mutate(annotation_seed = dplyr::row_number())
+  runs <- runs %>%
+    dplyr::mutate(ann_key = ann_key) %>%
+    dplyr::left_join(ann_lookup, by = c("dataset_bundle_id", "ann_key")) %>%
+    dplyr::select(-.data$ann_key)
+
+  # Expand restart runs (one row per restart_id)
+  restart_ids <- use_cases$use_case_id[use_cases$extra_compute == "restart_alpha"]
+  if (length(restart_ids)) {
+    n_inits <- restart_settings$n_inits %||% 5L
+    restart_runs <- runs %>%
+      dplyr::filter(.data$use_case_id %in% restart_ids) %>%
+      tidyr::crossing(restart_id = seq_len(n_inits))
+    non_restart_runs <- runs %>%
+      dplyr::filter(!(.data$use_case_id %in% restart_ids)) %>%
+      dplyr::mutate(restart_id = NA_integer_)
+    runs <- dplyr::bind_rows(restart_runs, non_restart_runs)
+  } else {
+    runs <- runs %>% dplyr::mutate(restart_id = NA_integer_)
+  }
+
+  format_group_val <- function(x) {
+    ifelse(is.na(x), "NA", format(x, digits = 6, scientific = FALSE))
+  }
+
+  runs <- runs %>%
+    dplyr::mutate(
+      group_key = paste0(
+        "L=", as.integer(.data$L),
+        "|r2=", format_group_val(.data$annotation_r2),
+        "|inflate=", format_group_val(.data$inflate_match)
+      )
+    ) %>%
+    dplyr::arrange(
+      .data$dataset_bundle_id,
+      .data$use_case_id,
+      .data$L,
+      .data$phenotype_seed,
+      .data$annotation_scale,
+      .data$sigma_0_2_scalar,
+      .data$restart_id
+    ) %>%
+    dplyr::mutate(.row_id = dplyr::row_number())
+
+  restart_lookup <- runs %>%
+    dplyr::filter(!is.na(.data$restart_id)) %>%
+    dplyr::mutate(restart_seed = dplyr::row_number()) %>%
+    dplyr::select(.data$.row_id, .data$restart_seed)
+
+  runs <- runs %>%
+    dplyr::left_join(restart_lookup, by = ".row_id") %>%
+    dplyr::mutate(run_id = dplyr::row_number()) %>%
+    dplyr::select(-.data$.row_id)
+
+  tables$runs <- runs
+
   shuffle_runs <- TRUE
-  runs_tasks <- assign_task_ids(
+  runs_tasks <- assign_task_ids_by_bundle(
     tables$runs,
-    runs_per_task = runs_per_task,
-    shuffle_seed = NULL,
+    bundle_id_col = "dataset_bundle_id",
+    bundles_per_task = bundles_per_task,
+    shuffle_seed = task_assignment_seed,
     shuffle = shuffle_runs
   )
 
-  list(
-    job = list(
+    compute_list <- list(
+      model_average = model_average_settings,
+      restart = restart_settings,
+      aggregation_methods = aggregation_methods
+    )
+    if (!is.null(anneal_settings)) {
+      compute_list$anneal <- anneal_settings
+    }
+
+    list(
+      job = list(
       name = job_name,
       HPC = HPC,
       email = email,
       created_at = timestamp_utc(),
-      runs_per_task = runs_per_task,
-      credible_set_rho = credible_set_rho,
-      purity_threshold = purity_threshold,
-      verbose_file_output = isTRUE(verbose_file_output),
-      write_legacy_snp_csv = isTRUE(write_legacy_snp_csv),
-      buffer_flush_interval = as.integer(buffer_flush_interval),
-      compute = list(
-        anneal = anneal_settings,
-        model_average = model_average_settings
-      ),
+        task_unit = task_unit,
+        bundles_per_task = bundles_per_task,
+        runs_per_task = runs_per_task,
+        credible_set_rho = credible_set_rho,
+        purity_threshold = purity_threshold,
+        verbose_file_output = isTRUE(verbose_file_output),
+        write_legacy_snp_csv = isTRUE(write_legacy_snp_csv),
+        write_snps_parquet = isTRUE(write_snps_parquet),
+        write_confusion_bins = isTRUE(write_confusion_bins),
+        buffer_flush_interval = as.integer(buffer_flush_interval),
+        task_assignment_seed = task_assignment_seed,
+          compute = compute_list,
+        metrics = metrics_settings,
       slurm = list(
         time = time,
         mem = mem,
@@ -648,7 +657,7 @@ make_job_config <- function(job_name,
       slurm_scripts_dir = file.path(output_root, "slurm_scripts")
     ),
     tables = list(
-      scenarios = tables$scenarios,
+      dataset_bundles = tables$dataset_bundles,
       data_matrices = tables$data_matrices,
       runs = runs_tasks$runs,
       tasks = runs_tasks$tasks,
@@ -688,8 +697,8 @@ write_job_artifacts <- function(job_config,
   run_table_path <- file.path(paths$temp_dir, "run_table.csv")
   readr::write_csv(job_config$tables$runs, run_table_path)
 
-  scenario_path <- file.path(paths$temp_dir, "scenario_table.csv")
-  readr::write_csv(job_config$tables$scenarios, scenario_path)
+  dataset_path <- file.path(paths$temp_dir, "dataset_bundles.csv")
+  readr::write_csv(job_config$tables$dataset_bundles, dataset_path)
 
   data_matrix_path <- file.path(paths$temp_dir, "data_matrices.csv")
   readr::write_csv(job_config$tables$data_matrices, data_matrix_path)
@@ -709,7 +718,7 @@ write_job_artifacts <- function(job_config,
   list(
     job_config = job_json_path,
     run_table = run_table_path,
-    scenarios = scenario_path,
+    dataset_bundles = dataset_path,
     use_cases = use_case_path,
     tasks = task_path,
     slurm_script = slurm_path
@@ -824,10 +833,11 @@ summarise_job_config <- function(job_config) {
       "p_star",
       "annotation_r2",
       "inflate_match",
-      "gamma_shrink",
-      "annotation_scale",
-      "sigma_0_2_scalar"
-    ),
+        "gamma_shrink",
+        "annotation_scale",
+        "sigma_0_2_scalar",
+        "restart_id"
+      ),
     names(runs)
   )
   runs %>%

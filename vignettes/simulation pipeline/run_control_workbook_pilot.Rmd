@@ -1,0 +1,326 @@
+---
+title: "SuSiNE Pilot Run Control (Restarts vs c-grid)"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+Summary: Builds SLURM-ready control files for the pilot study comparing
+SuSiE random restarts against SuSiNE's annotation-scale grid. It
+previews dataset bundles/run tables and writes job artifacts (config
+JSON + SLURM script) used by `inst/scripts/run_task.R`.
+
+```{r setup, message=FALSE}
+here::i_am("vignettes/simulation pipeline/run_control_workbook_pilot.Rmd")
+library(here)
+here()
+
+library(devtools)
+devtools::load_all(".")
+susine_path <- here("..", "susine")
+if (file.exists(file.path(susine_path, "DESCRIPTION"))) {
+  devtools::load_all(susine_path)
+} else {
+  warning("susine package not found at: ", susine_path)
+}
+
+library(dplyr)
+library(tidyr)
+library(readr)
+library(knitr)
+```
+
+# 1. Specify the Job
+
+This workbook is tuned for the pilot study:
+- SuSiE baseline + random restarts (`a_i`, `a_i_restart`)
+- SuSiNE functional mu across annotation scales (`b_ii`)
+- Aggregation via softmax-ELBO
+
+Update the grid and matrix selection before running.
+
+```{r job-inputs}
+job_inputs <- list(
+  job_name = "pilot_restarts_vs_cgrid",
+  HPC = TRUE,
+  mem = "8G",
+  time = "23:59:59",
+  email = "mgc5166@psu.edu",
+  output_root = here("output"),
+
+  # Grid mode: use "full" for the pilot, "minimal"/"intersect" for local tests
+  grid_mode = "full",
+
+  # Use cases for the pilot
+  use_cases = c("a_i", "a_i_restart", "b_ii"),
+
+  # Simulation settings
+  L_grid = c(10),
+  y_noise = c(0.6, 0.8, 0.9, 0.95),
+  p_star_grid = c(1, 2, 3, 4, 5, 10),
+  pair_L_p_star = FALSE,
+
+  # Annotation settings (only used by functional mu use cases)
+  annotation_r2 = c(0.3, 0.6),
+  inflate_match = c(1),
+  gamma_shrink = c(0.4, 0.8),
+  annotation_scales = c(0, 0.2, 0.4, 0.6, 0.8),
+
+  # SuSiE prior variance (fixed for pilot)
+  sigma_0_2_scalars = c(0.2),
+
+  # Seeds per matrix
+  seeds = 1:5,
+
+  # Task assignment (run-based assignment is disabled)
+  task_unit = "dataset",
+  bundles_per_task = 3,
+  task_assignment_seed = 1L,
+  # runs_per_task = 200,        # legacy (ignored)
+  # buffer_flush_interval = 300 # legacy (ignored)
+
+  data_scenarios = c("scenario_1"),
+  repo_root = here(),
+  sampled_scenario_summary = here("data", "sampled_simulated_genotypes", "scenario_sampling_summary.csv"),
+  
+  # Pilot matrix selection
+  pilot_selection_mode = "M1_stratified", # "M1_stratified", "csv", or "all"
+  pilot_n_matrices = 10,
+  pilot_matrix_ids_path = here("data", "pilot_matrix_ids.csv"),
+  pilot_m1_cache_path = here("output", "pilot_m1_metrics.csv"),
+  pilot_catalog_with_m1_path = here("data", "sampled_simulated_genotypes", "scenario_sampling_summary_with_m1.csv"),
+
+  credible_set_rho = 0.95,
+  purity_threshold = 0.50,
+  verbose_file_output = FALSE,
+  write_legacy_snp_csv = FALSE,
+  write_snps_parquet = TRUE,
+  write_confusion_bins = TRUE,
+
+  aggregation_methods = c("softmax_elbo"),
+  metrics_settings = list(
+    pip_bucket_width = 0.01,
+    z_top_k = 10,
+    jsd_threshold = 0.171661
+  ),
+
+  restart_settings = list(
+    n_inits = 5,
+    alpha_concentration = 0.001,
+    debug_alpha = TRUE
+  ),
+
+  # Set to NULL to strip annealing config from the job config
+  anneal_settings = NULL
+)
+```
+
+# 2. (Optional) Restrict to Pilot Matrices
+
+For the pilot, restrict to the 10 selected matrices (e.g., stratified by
+M1). Choose a selection mode:
+- `"M1_stratified"`: compute M1 for all matrices and pick evenly across
+  the sorted M1 range.
+- `"csv"`: supply a CSV with a `matrix_id` column.
+- `"all"`: use every matrix (no downsampling).
+
+```{r pilot-matrix-selection}
+data_matrix_catalog_full <- test_susine:::build_data_matrix_catalog(
+  requested_scenarios = unique(job_inputs$data_scenarios),
+  repo_root = job_inputs$repo_root,
+  summary_path = job_inputs$sampled_scenario_summary
+)
+
+pilot_mode <- job_inputs$pilot_selection_mode
+
+if (pilot_mode == "csv") {
+  pilot_matrix_ids <- readr::read_csv(job_inputs$pilot_matrix_ids_path, show_col_types = FALSE)
+  data_matrix_catalog <- data_matrix_catalog_full %>%
+    dplyr::semi_join(pilot_matrix_ids, by = "matrix_id")
+} else if (pilot_mode == "M1_stratified") {
+  if (file.exists(job_inputs$pilot_catalog_with_m1_path)) {
+    catalog_with_m1 <- readr::read_csv(job_inputs$pilot_catalog_with_m1_path, show_col_types = FALSE)
+    if (!"matrix_id" %in% names(catalog_with_m1)) {
+      if ("gene" %in% names(catalog_with_m1) && !"dataset_label" %in% names(catalog_with_m1)) {
+        catalog_with_m1 <- dplyr::rename(catalog_with_m1, dataset_label = gene)
+      }
+      if ("dataset_label" %in% names(catalog_with_m1)) {
+        catalog_with_m1 <- catalog_with_m1 %>%
+          dplyr::left_join(
+            data_matrix_catalog_full %>% dplyr::select(matrix_id, dataset_label),
+            by = "dataset_label"
+          )
+      }
+    }
+  } else {
+    m1_tbl <- test_susine::build_x_metrics_table(
+      matrix_paths_df = data_matrix_catalog_full %>% dplyr::select(matrix_id, matrix_path),
+      base_dir = job_inputs$repo_root
+    ) %>%
+      dplyr::select(matrix_id, M1)
+
+    catalog_with_m1 <- data_matrix_catalog_full %>%
+      dplyr::left_join(m1_tbl, by = "matrix_id")
+
+    dir.create(dirname(job_inputs$pilot_catalog_with_m1_path), recursive = TRUE, showWarnings = FALSE)
+    readr::write_csv(catalog_with_m1, job_inputs$pilot_catalog_with_m1_path)
+
+    if (!is.null(job_inputs$pilot_m1_cache_path)) {
+      readr::write_csv(m1_tbl, job_inputs$pilot_m1_cache_path)
+    }
+  }
+
+  catalog_with_m1 <- catalog_with_m1 %>%
+    dplyr::filter(!is.na(M1)) %>%
+    dplyr::arrange(M1)
+
+  n_target <- min(job_inputs$pilot_n_matrices, nrow(catalog_with_m1))
+  if (n_target < 1) stop("No matrices available after M1 filtering.")
+
+  idx <- unique(round(seq(1, nrow(catalog_with_m1), length.out = n_target)))
+  selected <- catalog_with_m1[idx, , drop = FALSE]
+
+  data_matrix_catalog <- data_matrix_catalog_full %>%
+    dplyr::semi_join(selected %>% dplyr::select(matrix_id), by = "matrix_id")
+} else {
+  data_matrix_catalog <- data_matrix_catalog_full
+}
+
+cat("Pilot matrix selection mode:", pilot_mode, "\n")
+cat("Matrices selected:", nrow(data_matrix_catalog), "\n")
+```
+
+# 3. Build the Run Tables
+
+```{r build-config}
+prior_quality <- prior_quality_grid(
+  annotation_r2_levels = job_inputs$annotation_r2,
+  inflate_match_levels = job_inputs$inflate_match,
+  gamma_shrink_levels = job_inputs$gamma_shrink
+)
+
+job_config <- make_job_config(
+  job_name = job_inputs$job_name,
+  HPC = job_inputs$HPC,
+  time = job_inputs$time,
+  mem = job_inputs$mem,
+  task_unit = job_inputs$task_unit,
+  bundles_per_task = job_inputs$bundles_per_task,
+  use_case_ids = job_inputs$use_cases,
+  L_grid = job_inputs$L_grid,
+  y_noise_grid = job_inputs$y_noise,
+  prior_quality = prior_quality,
+  p_star_grid = job_inputs$p_star_grid,
+  seeds = job_inputs$seeds,
+  data_scenarios = job_inputs$data_scenarios,
+  repo_root = job_inputs$repo_root,
+  sampled_scenario_summary = job_inputs$sampled_scenario_summary,
+  data_matrix_catalog = data_matrix_catalog,
+  runs_per_task = job_inputs$runs_per_task,
+  buffer_flush_interval = job_inputs$buffer_flush_interval,
+  email = job_inputs$email,
+  output_root = job_inputs$output_root,
+  credible_set_rho = job_inputs$credible_set_rho,
+  purity_threshold = job_inputs$purity_threshold,
+  verbose_file_output = job_inputs$verbose_file_output,
+  write_legacy_snp_csv = job_inputs$write_legacy_snp_csv,
+  write_snps_parquet = job_inputs$write_snps_parquet,
+  write_confusion_bins = job_inputs$write_confusion_bins,
+  task_assignment_seed = job_inputs$task_assignment_seed,
+  grid_mode = job_inputs$grid_mode,
+  pair_L_p_star = job_inputs$pair_L_p_star,
+  sigma_0_2_scalars = job_inputs$sigma_0_2_scalars,
+  annotation_scales = job_inputs$annotation_scales,
+  aggregation_methods = job_inputs$aggregation_methods,
+  metrics_settings = job_inputs$metrics_settings,
+  restart_settings = job_inputs$restart_settings,
+  anneal_settings = job_inputs$anneal_settings
+)
+```
+
+# 4. Inspect the Design
+
+## Run Accounting Preview
+
+```{r preview-run-accounting}
+runs_tbl <- job_config$tables$runs
+bundles_tbl <- job_config$tables$dataset_bundles
+lines <- test_susine::run_accounting_lines(
+  job_config,
+  seeds_per_matrix = length(unique(job_inputs$seeds)),
+  use_case_ids = job_inputs$use_cases
+)
+cat(paste(lines, collapse = "\n"), "\n")
+```
+
+```{r preview- tables}
+View(as.data.frame(job_config$tables$dataset_bundles))
+# View(as.data.frame(job_config$tables$data_matrices))
+# View(as.data.frame(job_config$tables$use_cases))
+View(as.data.frame(job_config$tables$runs))
+View(as.data.frame(job_config$tables$tasks))
+```
+
+# 5. Write Control Files
+
+```{r write-artifacts}
+commit_artifacts <- TRUE
+
+if (commit_artifacts) {
+  artifacts <- write_job_artifacts(job_config, run_task_script = here("inst", "scripts", "run_task.R"))
+  str(artifacts)
+}
+```
+
+# 7. Run Locally (Single Task)
+
+```{r test-the-first-task}
+run_task_script <- here("inst", "scripts", "run_task.R")
+job_name <- job_inputs$job_name
+task_id <- "1"
+job_root <- here("output")
+config_path <- here("output", "temp", job_name, "job_config.json")
+
+command <- sprintf(
+  'Rscript "%s" --job-name "%s" --task-id "%s" --job-root "%s" --config-path "%s"',
+  run_task_script,
+  job_name,
+  task_id,
+  job_root,
+  config_path
+)
+print(command)
+Sys.setenv(SUSINE_DEV = "1")
+system(command)
+```
+
+# 8. Next Steps
+
+1. Inspect the generated SLURM script at `output/slurm_scripts/<job_name>.slurm`.
+2. Submit the array job from the cluster: `sbatch output/slurm_scripts/<job_name>.slurm`.
+3. Monitor progress via `output/slurm_prints/<job_name>/`.
+
+```{r alpha debug}
+library(arrow)
+p <- "C:/Users/mgcal/OneDrive/Documents/School/Research/Genetics/cTWAS Generalization/Code/test_susine/output/slurm_output/local_test/task-001/flush-001_snps.parquet"
+
+df <- as.data.frame(read_parquet(p))
+
+# Compare PIPs across restart_id for one dataset/use_case
+sub <- df %>%
+  dplyr::filter(run_id %in% 12898:12902,
+                dataset_bundle_id == 807)
+
+# compute max absolute diff between any two restarts
+pips_by_run <- split(sub$pip, sub$run_id)
+max_diff <- max(sapply(pips_by_run, function(p1)
+  max(sapply(pips_by_run, function(p2) max(abs(p1 - p2))))))
+max_diff
+
+
+```
