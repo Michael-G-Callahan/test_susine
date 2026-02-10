@@ -793,6 +793,7 @@ render_slurm_script <- function(job_config, run_task_script) {
     "# --- export job info for R to compute run-specific output dirs ---",
     'export SUSINE_JOB_NAME="${JOBNAME}"',
     'export SUSINE_PARENT_ID="${PARENT_ID}"',
+    'export SUSINE_DEV="1"',
     "# --- site/module setup ---",
     hpc_setup,
     "",
