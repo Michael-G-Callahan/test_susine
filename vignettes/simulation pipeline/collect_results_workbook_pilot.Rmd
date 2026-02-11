@@ -1,0 +1,315 @@
+---
+title: "SuSiNE Simulation Results Collection - Pilot Restarts vs Grid"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+Summary: This notebook aggregates results from the `pilot_restarts_vs_cgrid` simulation run. It validates task outputs, combines metrics files (dataset, effect, model, multimodal), and aggregates confusion bins.
+
+# Section 1: Setup
+
+Load necessary libraries and define paths.
+
+```{r setup, message=FALSE}
+here::i_am("vignettes/simulation pipeline/collect_results_workbook_pilot_refactored.Rmd")
+library(here)
+library(dplyr)
+library(readr)
+library(purrr)
+library(fs)
+library(stringr)
+library(arrow)
+
+# --- Configuration ---
+job_name <- "pilot_restarts_vs_cgrid"
+job_id   <- "48397861"
+output_root <- here("output")
+
+# Construct Paths
+run_history_dir <- file.path(output_root, "run_history", job_name, job_id)
+slurm_output_dir <- file.path(output_root, "slurm_output", job_name, job_id)
+aggregated_dir <- file.path(slurm_output_dir, "aggregated") 
+
+# Create aggregated directory if not exists
+if (!dir.exists(aggregated_dir)) {
+  dir.create(aggregated_dir, recursive = TRUE)
+}
+
+# --- Validation ---
+if (!dir.exists(run_history_dir)) stop("Run history dir not found: ", run_history_dir)
+if (!dir.exists(slurm_output_dir)) stop("Slurm output dir not found: ", slurm_output_dir)
+
+cat("Job:", job_name, "/", job_id, "\n")
+cat("Run history dir:", run_history_dir, "\n")
+cat("Slurm output dir:", slurm_output_dir, "\n")
+cat("Aggregated dir:", aggregated_dir, "\n")
+```
+
+## 1.1 Load Run Table
+
+```{r load-run-table}
+run_table_path <- file.path(run_history_dir, "run_table.csv")
+if (file.exists(run_table_path)) {
+  run_table <- read_csv(run_table_path, show_col_types = FALSE)
+  cat("Loaded run_table with", nrow(run_table), "rows\n")
+} else {
+  stop("run_table.csv not found!")
+}
+```
+
+---
+
+# Section 2: Validation
+
+Scan all `task-*` folders for validation files (`*_validation.csv`) to ensure all tasks completed successfully.
+
+```{r validation}
+# Find all validation files recursively
+validation_files <- list.files(slurm_output_dir, pattern = "_validation\\.csv$", recursive = TRUE, full.names = TRUE)
+
+cat("Found", length(validation_files), "validation files.\n")
+
+if (length(validation_files) > 0) {
+  # Read and bind all validation files (named flush-XXX_validation.csv)
+  # Using map_dfr is efficient for many small CSVs
+  validation_df <- validation_files %>%
+    map_dfr(read_csv, show_col_types = FALSE, .id = "file_path_index")
+  
+  # Check for failures using 'has_issues' column
+  if ("has_issues" %in% names(validation_df)) {
+    failures <- validation_df %>% filter(has_issues)
+    
+    if (nrow(failures) > 0) {
+      warning("Found ", nrow(failures), " failed tasks!")
+      print(head(failures))
+      
+      # Optional: Print specific issues if available
+      if ("issues" %in% names(failures)) {
+         cat("\nSample issues:\n")
+         print(head(failures$issues[!is.na(failures$issues)]))
+      }
+    } else {
+      cat("All validation checks passed (no issues reported).\n")
+    }
+  } else if ("success" %in% names(validation_df)) {
+    # Fallback for older format
+    failures <- validation_df %>% filter(!success)
+    if (nrow(failures) > 0) {
+      warning("Found ", nrow(failures), " failed tasks!")
+      print(head(failures))
+    } else {
+      cat("All validation checks passed.\n")
+    }
+  } else {
+    cat("Validation files read. Inspecting first few rows:\n")
+    print(head(validation_df))
+  }
+} else {
+  warning("No validation files found! Check path or file naming conventions.")
+}
+```
+
+---
+
+# Section 3: Aggregate Metrics
+
+We need to aggregate:
+1. `dataset_metrics.csv`
+2. `effect_metrics.csv`
+3. `model_metrics.csv`
+4. `multimodal_metrics.csv`
+
+The following chunk defines a helper function and runs the aggregation for each type.
+
+```{r aggregate-metrics}
+# Helper to aggregate a specific file type
+aggregate_file_type <- function(base_dir, file_suffix, out_path) {
+  cat("--- Aggregating *", file_suffix, " ---\n", sep="")
+  
+  files <- list.files(base_dir, pattern = paste0(file_suffix, "$"), recursive = TRUE, full.names = TRUE)
+  
+  if (length(files) == 0) {
+    cat("  No files found for suffix:", file_suffix, "\n")
+    return(NULL)
+  }
+  
+  cat("  Found", length(files), "files. Reading...\n")
+  
+  # Read and bind
+  combined_df <- files %>%
+    map_dfr(~ read_csv(.x, show_col_types = FALSE, col_types = cols(.default = "?")))
+    
+  # Write to aggregated dir
+  write_csv(combined_df, out_path)
+  cat("  Written to:", out_path, "(Rows:", nrow(combined_df), ")\n")
+  
+  return(combined_df)
+}
+
+# --- Execute Aggregation ---
+
+processed_metrics <- list()
+
+# 1. Dataset Metrics
+processed_metrics$dataset <- aggregate_file_type(
+  slurm_output_dir, 
+  "_dataset_metrics.csv", 
+  file.path(aggregated_dir, "dataset_metrics.csv")
+)
+
+# 2. Effect Metrics
+processed_metrics$effect <- aggregate_file_type(
+  slurm_output_dir, 
+  "_effect_metrics.csv", 
+  file.path(aggregated_dir, "effect_metrics.csv")
+)
+
+# 3. Model Metrics
+processed_metrics$model <- aggregate_file_type(
+  slurm_output_dir, 
+  "_model_metrics.csv", 
+  file.path(aggregated_dir, "model_metrics.csv")
+)
+
+# 4. Multimodal Metrics
+processed_metrics$multimodal <- aggregate_file_type(
+  slurm_output_dir, 
+  "_multimodal_metrics.csv", 
+  file.path(aggregated_dir, "multimodal_metrics.csv")
+)
+```
+
+---
+
+# Section 4: Aggregate Confusion Bins
+
+Confusion bins need aggregation across all runs. Additionally, we collapse across `phenotype_seed` to get summary statistics (sum of TP, FP, FN, TN) for unique model settings.
+
+```{r aggregate-confusion}
+# 1. Collect all raw confusion bin files
+cat("--- Aggregating confusion bins ---\n")
+confusion_files <- list.files(slurm_output_dir, pattern = "_confusion_bins\\.csv$", recursive = TRUE, full.names = TRUE)
+
+if (length(confusion_files) > 0) {
+  # 1. Process files in chunks to save memory and speed up
+  # We read a batch of files, join with run table, aggregate, and store the result.
+  # Finally we aggregate the chunks.
+  
+  if (exists("run_table")) {
+     # Prepare run_table for joining (select only necessary columns)
+     cols_to_join <- c("run_id", "matrix_id", "y_noise", "p_star", "phenotype_seed")
+     cols_to_join <- intersect(cols_to_join, names(run_table))
+     rt_slim <- run_table %>% select(all_of(cols_to_join))
+  }
+  
+  # Chunk size
+  chunk_size <- 100 
+  file_chunks <- split(confusion_files, ceiling(seq_along(confusion_files)/chunk_size))
+  
+  cat("  Processing", length(confusion_files), "files in", length(file_chunks), "chunks...\n")
+  
+  # Initialize results list
+  results_list <- list()
+  
+  # Progress bar
+  pb <- txtProgressBar(min = 0, max = length(file_chunks), style = 3)
+  
+  for (i in seq_along(file_chunks)) {
+    chunk_files <- file_chunks[[i]]
+    
+    # Read chunk
+    chunk_df <- chunk_files %>%
+      map_dfr(~ read_csv(.x, show_col_types = FALSE, col_types = cols(.default = "?")), .id = NULL)
+    
+    # Validation/Cleanup of column types if mixed (optional but good practice)
+    # chunk_df <- chunk_df %>% mutate(across(everything(), as.character)) %>% type_convert()
+      
+    # Join with run_table info if available
+    if (exists("rt_slim")) {
+       chunk_df <- chunk_df %>% left_join(rt_slim, by = "run_id")
+    }
+    
+    # Identify grouping cols (dynamic based on first chunk, assumed consistent)
+    if (i == 1) {
+       count_cols <- c("n_causal_at_bucket", "n_noncausal_at_bucket")
+       cols_to_drop <- c(count_cols, "run_id", "dataset_bundle_id", "task_id", "flush_id", 
+                         "phenotype_seed", "annotation_seed", "restart_seed", "restart_id", "variant_id", "file_path_index")
+       group_cols <- setdiff(names(chunk_df), cols_to_drop)
+    }
+
+    # Pre-aggregate the chunk
+    # This reduces size drastically before binding
+    if (all(count_cols %in% names(chunk_df))) {
+        chunk_agg <- chunk_df %>%
+          group_by(across(any_of(group_cols))) %>%
+          summarise(across(all_of(count_cols), sum, na.rm = TRUE), .groups = "drop")
+        
+        results_list[[i]] <- chunk_agg
+    } else {
+        warning("Chunk ", i, " missing count columns. Skipping.")
+    }
+    
+    setTxtProgressBar(pb, i)
+  }
+  close(pb)
+  
+  cat("\n  Final aggregation of", length(results_list), "chunks...\n")
+  
+  # Bind all chunk results and aggregate one last time
+  confusion_bins_collapsed <- bind_rows(results_list) %>%
+      group_by(across(any_of(group_cols))) %>%
+      summarise(across(all_of(count_cols), sum, na.rm = TRUE), .groups = "drop")
+      
+  collapsed_path <- file.path(aggregated_dir, "confusion_bins_collapsed.csv")
+  write_csv(confusion_bins_collapsed, collapsed_path)
+  cat("  Collapsed confusion bins written to:", collapsed_path, "(Rows:", nrow(confusion_bins_collapsed), ")\n")
+
+
+} else {
+  warning("No confusion bin files found.")
+}
+```
+
+---
+
+# Section 5: Cleanup (Manual)
+
+Run this chunk **manually** to delete the raw task output folders after verifying the aggregated files.
+
+```{r cleanup, eval=FALSE}
+# DANGER: Set eval=TRUE manually to execute
+# Removes the task subdirectories in the slurm output folder
+
+# Find task directories
+task_dirs <- list.dirs(slurm_output_dir, recursive = FALSE)
+task_dirs <- task_dirs[grepl("task-", basename(task_dirs))]
+
+if (length(task_dirs) > 0) {
+  cat("Found", length(task_dirs), "task directories to delete.\n")
+  cat("Example:", head(task_dirs, 1), "\n")
+  
+  # Clean up memory to release any potential file locks
+  gc()
+  
+  # Use fs::dir_delete which is often more robust than base::unlink on Windows
+  # Uncomment to execute
+  fs::dir_delete(task_dirs)
+  
+  # Alternate robust delete for OneDrive folders (retries on EPERM)
+  purrr::walk(task_dirs, function(d) {
+     tryCatch(fs::dir_delete(d), error = function(e) {
+        warning("Could not delete ", d, ": ", e$message)
+     })
+  })
+  
+  cat("Deleted task directories.\n")
+} else {
+  cat("No task directories found.\n")
+}
+```
