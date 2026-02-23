@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c:*)",
+      "Bash(where:*)",
+      "Bash(cd:*)",
+      "Bash(jupyter nbconvert:*)",
+      "Bash(conda run:*)"
+    ]
+  }
+}
