@@ -1,0 +1,17 @@
+linters: linters_with_defaults(
+    # Enforce <- over = for assignment
+    assignment_linter(),
+    # 120-char lines (statistical code needs room for formulas)
+    line_length_linter(120),
+    # Enforce snake_case (already used throughout)
+    object_name_linter(styles = "snake_case"),
+    # Disable linters that conflict with existing patterns
+    commented_code_linter = NULL,
+    cyclocomp_linter = NULL,
+    object_usage_linter = NULL,
+    indentation_linter = NULL
+  )
+exclusions: list(
+    "R/utils-pipe.R",
+    "R/x_matrix_metrics.R"
+  )

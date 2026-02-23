@@ -1,0 +1,576 @@
+---
+title: "Pilot Visualization: Restarts vs C-grid Priors"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+Summary: Uses aggregated outputs from the pilot run (dataset metrics,
+multimodality metrics, and confusion bins) to compare random restarts
+vs. c-grid prior trust. Produces plots under the run's aggregated
+`plots_pilot_visualization` directory.
+
+# Section 1: Setup
+
+```{r setup, message=FALSE, warning=FALSE}
+here::i_am("vignettes/simulation pipeline/visualize_results_workbook_pilot.Rmd")
+library(here)
+library(devtools)
+devtools::load_all(".")
+
+library(dplyr)
+library(tidyr)
+library(readr)
+library(ggplot2)
+library(stringr)
+library(purrr)
+library(scales)
+```
+
+## 1.1 User Options
+
+```{r user-options}
+# Save plots to files instead of displaying in workbook?
+save_plots_to_file <- TRUE
+
+# Show plots in the RStudio "Plots" pane while running interactively
+show_in_rstudio_plots <- TRUE
+
+# Configure knitr devices: during render use png, during interactive use RStudioGD
+if (isTRUE(getOption("knitr.in.progress"))) {
+  knitr::opts_chunk$set(fig.ext = "png")
+} else if (show_in_rstudio_plots && interactive()) {
+  knitr::opts_chunk$set(fig.show = "hide", dev = "RStudioGD", fig.ext = "png")
+} else {
+  knitr::opts_chunk$set(fig.ext = "png")
+}
+
+# Best-effort helper to send plots to the Plots pane
+maybe_show_plot <- function(p) {
+  if (show_in_rstudio_plots && interactive()) {
+    try(print(p), silent = TRUE)
+  }
+}
+
+# Helper function to save or display a plot
+save_or_show <- function(p, filename, width = 12, height = 8, dpi = 300, subdir = "multimodal") {
+  maybe_show_plot(p)
+  if (save_plots_to_file) {
+    filepath <- file.path(plot_dirs[[subdir]], filename)
+    tryCatch(
+      {
+        ggsave(filepath, p, width = width, height = height, dpi = dpi, bg = "white")
+        cat("Saved:", filename, "\n")
+      },
+      error = function(e) {
+        cat("Error saving plot:", filename, "-", conditionMessage(e), "\n")
+      }
+    )
+  } else {
+    tryCatch(
+      print(p),
+      error = function(e) {
+        cat("Cannot display plot (no X11 display available), but save_plots_to_file is FALSE\n")
+        cat("Set save_plots_to_file = TRUE to save plots to disk instead\n")
+      }
+    )
+  }
+}
+```
+
+## 1.2 Job Configuration
+
+```{r job-config}
+job_name <- "pilot_restarts_vs_cgrid"
+parent_job_id <- "48397861"
+output_root <- here("output")
+
+paths <- test_susine::resolve_job_paths(
+  job_name = job_name,
+  parent_job_id = parent_job_id,
+  output_root = output_root
+)
+```
+
+## 1.3 Plot Directories
+
+```{r create-plot-dirs}
+plot_base_dir <- file.path(paths$aggregated_dir, "plots_pilot_visualization")
+plot_dirs <- list(
+  multimodal = file.path(plot_base_dir, "multimodal"),
+  head_to_head = file.path(plot_base_dir, "head_to_head"),
+  performance = file.path(plot_base_dir, "performance"),
+  tables = file.path(plot_base_dir, "tables")
+)
+
+for (d in plot_dirs) {
+  dir.create(d, showWarnings = FALSE, recursive = TRUE)
+}
+cat("Plot directories created under:", plot_base_dir, "\n")
+```
+
+## 1.4 Use Case Filter and Palettes
+
+```{r use-case-filter}
+use_case_filter <- c("a_i", "a_i_restart", "b_ii")
+use_case_labels <- test_susine::get_use_case_labels(use_case_filter)
+
+use_case_palette <- c(
+  "a_i" = "#08306b",
+  "a_i_restart" = "#2171b5",
+  "b_ii" = "#b35806"
+)
+
+use_case_method <- c(
+  "a_i" = "Control",
+  "a_i_restart" = "Random restarts",
+  "b_ii" = "C-grid priors"
+)
+```
+
+# Section 2: Load Data
+
+```{r load-data, message=FALSE}
+dataset_metrics_path <- file.path(paths$aggregated_dir, "dataset_metrics.csv")
+multimodal_metrics_path <- file.path(paths$aggregated_dir, "multimodal_metrics.csv")
+confusion_bins_path <- file.path(paths$aggregated_dir, "confusion_bins_collapsed.csv")
+model_metrics_path <- file.path(paths$aggregated_dir, "model_metrics.csv")
+effect_metrics_path <- file.path(paths$aggregated_dir, "effect_metrics.csv")
+
+if (!file.exists(dataset_metrics_path)) stop("Missing dataset_metrics.csv")
+if (!file.exists(multimodal_metrics_path)) stop("Missing multimodal_metrics.csv")
+if (!file.exists(confusion_bins_path)) stop("Missing confusion_bins_collapsed.csv")
+
+dataset_metrics <- readr::read_csv(dataset_metrics_path, show_col_types = FALSE)
+multimodal_metrics <- readr::read_csv(multimodal_metrics_path, show_col_types = FALSE)
+confusion_bins <- readr::read_csv(confusion_bins_path, show_col_types = FALSE)
+
+model_metrics <- if (file.exists(model_metrics_path)) {
+  readr::read_csv(model_metrics_path, show_col_types = FALSE)
+} else {
+  NULL
+}
+
+effect_metrics <- if (file.exists(effect_metrics_path)) {
+  readr::read_csv(effect_metrics_path, show_col_types = FALSE)
+} else {
+  NULL
+}
+
+cat("Loaded dataset metrics:", nrow(dataset_metrics), "rows\n")
+cat("Loaded multimodal metrics:", nrow(multimodal_metrics), "rows\n")
+cat("Loaded confusion bins:", nrow(confusion_bins), "rows\n")
+```
+
+# Section 3: Data Preparation
+
+```{r data-prep}
+dataset_metrics <- dataset_metrics %>%
+  mutate(
+    dataset_key = paste(matrix_id, y_noise, p_star, sep = "|"),
+    signal_to_noise = (1 - y_noise) / p_star
+  )
+
+dataset_metrics_ds <- dataset_metrics %>%
+  group_by(matrix_id, y_noise, p_star) %>%
+  summarise(
+    M1 = mean(M1, na.rm = TRUE),
+    z_topk_ratio = mean(z_topk_ratio, na.rm = TRUE),
+    z_max_abs = mean(z_max_abs, na.rm = TRUE),
+    z_count_abs_gt_3 = mean(z_count_abs_gt_3, na.rm = TRUE),
+    z_eff_signals = mean(z_eff_signals, na.rm = TRUE),
+    signal_to_noise = mean(signal_to_noise, na.rm = TRUE),
+    dataset_key = first(dataset_key),
+    .groups = "drop"
+  )
+
+multimodal_metrics <- multimodal_metrics %>%
+  filter(use_case_id %in% use_case_filter) %>%
+  mutate(
+    annotation_r2 = {
+      raw_val <- str_trim(str_match(group_label, "r2=([^|]+)")[, 2])
+      raw_val <- dplyr::na_if(raw_val, "NA")
+      readr::parse_number(raw_val, na = c("NA"))
+    },
+    inflate_match = {
+      raw_val <- str_trim(str_match(group_label, "inflate=([^|]+)")[, 2])
+      raw_val <- dplyr::na_if(raw_val, "NA")
+      readr::parse_number(raw_val, na = c("NA"))
+    }
+  ) %>%
+  left_join(
+    dataset_metrics %>%
+      select(dataset_bundle_id, M1, z_topk_ratio, z_max_abs, z_count_abs_gt_3, z_eff_signals, signal_to_noise),
+    by = "dataset_bundle_id"
+  ) %>%
+  mutate(
+    dataset_key = paste(matrix_id, y_noise, p_star, sep = "|"),
+    method = use_case_method[use_case_id]
+  )
+
+confusion_bins <- confusion_bins %>%
+  filter(use_case_id %in% use_case_filter) %>%
+  mutate(
+    dataset_key = paste(matrix_id, y_noise, p_star, sep = "|")
+  )
+```
+
+# Section 4: Multimodality Metrics vs Dataset Metrics
+
+```{r multimodal-setup}
+multimodal_vars <- c("mean_jsd", "median_jsd", "max_jsd", "jaccard_top10", "mean_pip_var")
+dataset_x_vars <- c("M1", "z_topk_ratio", "z_max_abs", "z_count_abs_gt_3", "z_eff_signals",
+                    "y_noise", "p_star", "signal_to_noise")
+
+multimodal_long <- multimodal_metrics %>%
+  pivot_longer(
+    cols = all_of(multimodal_vars),
+    names_to = "metric",
+    values_to = "value"
+  ) %>%
+  left_join(
+    dataset_metrics_ds,
+    by = c("matrix_id", "y_noise", "p_star")
+  ) %>%
+  {
+    df <- .
+    for (nm in dataset_x_vars) {
+      if (!nm %in% names(df)) {
+        xnm <- paste0(nm, ".x")
+        ynm <- paste0(nm, ".y")
+        if (xnm %in% names(df) || ynm %in% names(df)) {
+          df[[nm]] <- dplyr::coalesce(df[[xnm]], df[[ynm]])
+        }
+      }
+    }
+    df
+  } %>%
+  mutate(
+    metric_label = recode(
+      metric,
+      mean_jsd = "Mean JSD",
+      median_jsd = "Median JSD",
+      max_jsd = "Max JSD",
+      jaccard_top10 = "Jaccard Top-10",
+      mean_pip_var = "Mean PIP Var"
+    )
+  )
+
+bin_numeric <- function(x, n_bins = 4) {
+  if (all(is.na(x))) return(factor(x))
+  x_non_na <- x[!is.na(x)]
+  if (length(unique(x_non_na)) <= n_bins) {
+    return(factor(x))
+  }
+  breaks <- quantile(x, probs = seq(0, 1, length.out = n_bins + 1), na.rm = TRUE)
+  breaks <- unique(breaks)
+  if (length(breaks) <= 2) {
+    return(factor(x))
+  }
+  cut(x, breaks = breaks, include.lowest = TRUE, dig.lab = 4)
+}
+
+plot_multimodal_violin <- function(x_var, n_bins = 4) {
+  if (!x_var %in% names(multimodal_long)) {
+    stop("Column not found in multimodal_long: ", x_var)
+  }
+  x_vals <- multimodal_long[[x_var]]
+  use_bins <- is.numeric(x_vals) && length(unique(x_vals[!is.na(x_vals)])) > n_bins
+  x_label <- if (use_bins) sprintf("%s (binned)", x_var) else x_var
+
+  df <- multimodal_long %>%
+    mutate(
+      x_val = .data[[x_var]],
+      x_bin = if (use_bins) bin_numeric(x_val, n_bins) else factor(x_val)
+    )
+
+  ggplot(df, aes(x = x_bin, y = value, fill = use_case_id)) +
+    geom_violin(alpha = 0.6, trim = FALSE) +
+    geom_boxplot(width = 0.12, outlier.size = 0.2, alpha = 0.7) +
+    facet_wrap(~ metric_label, scales = "free_y") +
+    scale_fill_manual(values = use_case_palette, labels = use_case_labels) +
+    labs(
+      title = sprintf("Multimodality metrics by %s", x_var),
+      x = x_label,
+      y = "Metric value",
+      fill = "Model"
+    ) +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+}
+```
+
+```{r multimodal-violin-plots, message=FALSE}
+walk(dataset_x_vars, function(x_var) {
+  p <- plot_multimodal_violin(x_var, n_bins = 4)
+  save_or_show(p, sprintf("multimodal_by_%s.png", x_var), width = 14, height = 8, subdir = "multimodal")
+})
+```
+
+```{r n-clusters-barplot, message=FALSE}
+n_clusters_df <- multimodal_metrics %>%
+  mutate(
+    n_clusters = as.factor(n_clusters),
+    annotation_r2_label = if_else(is.na(annotation_r2), "NA", sprintf("%.2f", annotation_r2)),
+    use_case_display = if_else(
+      use_case_id == "b_ii",
+      paste0("b_ii (r2=", annotation_r2_label, ")"),
+      use_case_id
+    )
+  )
+
+bii_levels <- n_clusters_df %>%
+  filter(use_case_id == "b_ii") %>%
+  distinct(annotation_r2_label) %>%
+  arrange(annotation_r2_label) %>%
+  pull(annotation_r2_label)
+
+bii_palette <- setNames(
+  colorRampPalette(c("#7f2704", "#fdae6b"))(length(bii_levels)),
+  paste0("b_ii (r2=", bii_levels, ")")
+)
+
+display_palette <- c(
+  "a_i" = use_case_palette[["a_i"]],
+  "a_i_restart" = use_case_palette[["a_i_restart"]],
+  bii_palette
+)
+
+display_labels <- c(
+  "a_i" = use_case_labels[["a_i"]],
+  "a_i_restart" = use_case_labels[["a_i_restart"]],
+  setNames(
+    paste0(use_case_labels[["b_ii"]], " r2=", bii_levels),
+    paste0("b_ii (r2=", bii_levels, ")")
+  )
+)
+
+p_clusters <- ggplot(n_clusters_df, aes(x = n_clusters, fill = use_case_display)) +
+  geom_bar(position = "fill") +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  scale_fill_manual(values = display_palette, labels = display_labels) +
+  guides(fill = guide_legend(nrow = 2, byrow = TRUE)) +
+  labs(
+    title = "Cluster count distribution (b_ii split by annotation_r2)",
+    x = "Number of clusters",
+    y = "Percent of runs within cluster count",
+    fill = "Model"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    legend.text = element_text(size = 9),
+    legend.key.width = unit(1.4, "lines"),
+    plot.margin = margin(5.5, 20, 5.5, 20)
+  )
+
+save_or_show(p_clusters, "n_clusters_distribution.png", width = 11, height = 6, subdir = "multimodal")
+```
+
+# Section 5: Head-to-Head Diversity (Restarts vs C-grid)
+
+```{r head-to-head-setup}
+diversity_metric <- "mean_jsd"
+r2_focus <- c(0)
+
+restart_df <- multimodal_metrics %>%
+  filter(use_case_id == "a_i_restart") %>%
+  select(dataset_bundle_id, matrix_id, y_noise, p_star, phenotype_seed, dataset_key, all_of(diversity_metric)) %>%
+  rename(div_restart = all_of(diversity_metric))
+
+cgrid_df <- multimodal_metrics %>%
+  filter(use_case_id == "b_ii") %>%
+  filter(is.na(annotation_r2) | annotation_r2 %in% r2_focus) %>%
+  select(dataset_bundle_id, matrix_id, y_noise, p_star, phenotype_seed, dataset_key, annotation_r2, inflate_match, all_of(diversity_metric)) %>%
+  rename(div_cgrid = all_of(diversity_metric))
+
+head_to_head <- cgrid_df %>%
+  inner_join(restart_df, by = c("dataset_bundle_id", "matrix_id", "y_noise", "p_star", "phenotype_seed", "dataset_key"))
+
+head_to_head <- head_to_head %>%
+  mutate(annotation_r2_label = if_else(is.na(annotation_r2), "NA", sprintf("%.2f", annotation_r2)))
+```
+
+```{r head-to-head-plot, message=FALSE}
+p_head <- ggplot(head_to_head, aes(x = div_restart, y = div_cgrid, color = factor(p_star))) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray50") +
+  geom_point(alpha = 0.7) +
+  facet_wrap(~ annotation_r2_label) +
+  labs(
+    title = sprintf("Head-to-head diversity: %s", diversity_metric),
+    subtitle = "Above diagonal: c-grid more diverse than restarts",
+    x = "Restarts (a_i_restart)",
+    y = "C-grid priors (b_ii)",
+    color = "p*"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+save_or_show(p_head, sprintf("head_to_head_%s.png", diversity_metric), width = 12, height = 8, subdir = "head_to_head")
+```
+
+# Section 6: Performance Metrics from Confusion Bins
+
+```{r performance-metrics}
+group_vars <- c(
+  "use_case_id", "group_key", "L", "annotation_r2", "inflate_match",
+  "annotation_scale", "gamma_shrink", "sigma_0_2_scalar", "variant_type",
+  "agg_method", "matrix_id", "y_noise", "p_star"
+)
+group_vars <- intersect(group_vars, names(confusion_bins))
+
+curves <- test_susine::compute_power_fdr_curves(confusion_bins, group_vars = group_vars)
+
+power_at_fdr <- function(df, target) {
+  ok <- df$fdr <= target
+  if (!any(ok, na.rm = TRUE)) return(NA_real_)
+  max(df$power[ok], na.rm = TRUE)
+}
+
+power_summary <- curves %>%
+  group_by(across(all_of(group_vars))) %>%
+  group_modify(~ tibble::tibble(
+    power_fdr_0_1 = power_at_fdr(.x, 0.1),
+    power_fdr_0_2 = power_at_fdr(.x, 0.2)
+  )) %>%
+  ungroup()
+
+auprc_summary <- test_susine::compute_auprc_from_confusion(confusion_bins, group_vars = group_vars)
+
+performance_summary <- power_summary %>%
+  left_join(auprc_summary, by = group_vars) %>%
+  left_join(dataset_metrics_ds, by = c("matrix_id", "y_noise", "p_star")) %>%
+  mutate(
+    method = use_case_method[use_case_id]
+  )
+
+write_csv(performance_summary, file.path(plot_dirs$tables, "performance_summary.csv"))
+cat("Wrote performance_summary.csv\n")
+```
+
+```{r performance-curves-overall, message=FALSE}
+curve_by_method <- test_susine::compute_power_fdr_curves(
+  confusion_bins,
+  group_vars = c("use_case_id")
+)
+
+p_curve <- ggplot(curve_by_method, aes(x = fdr, y = power, color = use_case_id)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 0.5, alpha = 0.5) +
+  scale_color_manual(values = use_case_palette, labels = use_case_labels) +
+  labs(
+    title = "Power vs FDR (overall)",
+    x = "False Discovery Rate (1 - Precision)",
+    y = "Power (Recall)",
+    color = "Model"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+save_or_show(p_curve, "power_vs_fdr_overall.png", width = 10, height = 7, subdir = "performance")
+```
+
+# Section 7: Exploration vs Performance
+
+```{r exploration-vs-performance-prep}
+multimodal_ds <- multimodal_metrics %>%
+  group_by(use_case_id, annotation_r2, inflate_match, matrix_id, y_noise, p_star) %>%
+  summarise(
+    mean_jsd = mean(mean_jsd, na.rm = TRUE),
+    median_jsd = mean(median_jsd, na.rm = TRUE),
+    max_jsd = mean(max_jsd, na.rm = TRUE),
+    jaccard_top10 = mean(jaccard_top10, na.rm = TRUE),
+    mean_pip_var = mean(mean_pip_var, na.rm = TRUE),
+    n_clusters = mean(n_clusters, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(method = use_case_method[use_case_id])
+
+perf_vs_div <- performance_summary %>%
+  left_join(
+    multimodal_ds,
+    by = c("use_case_id", "annotation_r2", "inflate_match", "matrix_id", "y_noise", "p_star")
+  )
+```
+
+```{r exploration-vs-performance-plots, message=FALSE}
+p_auprc_jsd <- ggplot(perf_vs_div, aes(x = mean_jsd, y = AUPRC, color = use_case_id)) +
+  geom_point(alpha = 0.7) +
+  geom_smooth(method = "lm", se = FALSE, linewidth = 0.7) +
+  scale_color_manual(values = use_case_palette, labels = use_case_labels) +
+  labs(
+    title = "AUPRC vs mean JSD",
+    x = "Mean JSD (diversity)",
+    y = "AUPRC",
+    color = "Model"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+save_or_show(p_auprc_jsd, "auprc_vs_mean_jsd.png", width = 10, height = 7, subdir = "performance")
+
+p_power_jsd <- ggplot(perf_vs_div, aes(x = mean_jsd, y = power_fdr_0_1, color = use_case_id)) +
+  geom_point(alpha = 0.7) +
+  geom_smooth(method = "lm", se = FALSE, linewidth = 0.7) +
+  scale_color_manual(values = use_case_palette, labels = use_case_labels) +
+  labs(
+    title = "Power at FDR 0.1 vs mean JSD",
+    x = "Mean JSD (diversity)",
+    y = "Power at FDR 0.1",
+    color = "Model"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+save_or_show(p_power_jsd, "power_fdr_0_1_vs_mean_jsd.png", width = 10, height = 7, subdir = "performance")
+```
+
+# Section 8: Annotation Quality Effects (b_ii)
+
+```{r annotation-effects, message=FALSE}
+perf_bii <- performance_summary %>%
+  filter(use_case_id == "b_ii") %>%
+  mutate(
+    annotation_r2_label = if_else(is.na(annotation_r2), "NA", sprintf("%.2f", annotation_r2)),
+    inflate_label = if_else(is.na(inflate_match), "NA", sprintf("%.2f", inflate_match))
+  )
+
+p_auprc_r2 <- ggplot(perf_bii, aes(x = annotation_r2, y = AUPRC, color = factor(p_star))) +
+  geom_point(alpha = 0.7) +
+  geom_smooth(method = "lm", se = FALSE, linewidth = 0.7) +
+  labs(
+    title = "AUPRC vs annotation_r2 (b_ii)",
+    x = "annotation_r2",
+    y = "AUPRC",
+    color = "p*"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+save_or_show(p_auprc_r2, "auprc_vs_annotation_r2_bii.png", width = 10, height = 7, subdir = "performance")
+```
+
+# Section 9: Quick Tables
+
+```{r quick-tables}
+multimodal_summary <- multimodal_metrics %>%
+  group_by(use_case_id) %>%
+  summarise(
+    mean_jsd = mean(mean_jsd, na.rm = TRUE),
+    median_jsd = mean(median_jsd, na.rm = TRUE),
+    max_jsd = mean(max_jsd, na.rm = TRUE),
+    jaccard_top10 = mean(jaccard_top10, na.rm = TRUE),
+    mean_pip_var = mean(mean_pip_var, na.rm = TRUE),
+    n_clusters = mean(n_clusters, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(method = use_case_method[use_case_id])
+
+write_csv(multimodal_summary, file.path(plot_dirs$tables, "multimodal_summary.csv"))
+cat("Wrote multimodal_summary.csv\n")
+```

@@ -1,0 +1,1072 @@
+bioRxiv preprint doi: https://doi.org/10.1101/2025.11.25.690514; this version posted December 25, 2025. The copyright holder for this preprint
+           (which was not certified by peer review) is the author/funder. All rights reserved. No reuse allowed without permission.
+
+
+
+
+     SuSiE 2.0: improved methods and implementations for genetic
+     fine-mapping and phenotype prediction
+
+     Alexander McCreight1,2,†, Yanghyeon Cho1,3,†, Ruixi Li1, Daniel Nachun4, Hao-Yu Gan1, Peter
+     Carbonetto5, Matthew Stephens5,6,*, William R.P. Denault5,7,8,*, and Gao Wang1,2,9,*
+
+     1
+       Center for Statistical Genetics, The Gertrude H. Sergievsky Center, Columbia University, New
+     York, NY, USA
+     2
+       Department of Biostatistics, Columbia University, New York, NY, USA
+     3
+       Department of Mathematics and Statistical Science, University of Idaho, Moscow, ID, USA
+     4
+       Department of Genetics, Stanford University, Stanford, CA, USA
+     5
+       Department of Human Genetics, The University of Chicago, IL, USA
+     6
+       Department of Statistics, The University of Chicago, IL, USA
+     7
+       Data Science Institute, University of Chicago, IL, USA
+     8
+       Oslo Centre for Biostatistics and Epidemiology, Oslo University Hospital, Oslo, Norway
+     9
+       Department of Neurology, Columbia University, New York, NY, USA
+
+     *Corresponding authors:
+     wang.gao@columbia.edu, wdenault@uchicago.edu, mstephens@uchicago.edu
+
+
+     Abstract
+     Sum of Single Effects regression (SuSiE) has become widely adopted for genetic fine-mapping,
+     yet its original implementation faces architectural limitations that hinder extensibility and
+     performance. We present SuSiE 2.0, featuring a modular redesign for extensibility, up to 5x
+     speed improvements for summary statistics applications, and several useful extensions
+     including SuSiE-ash, a new method that improves calibration when strong signals coexist with
+     moderate effects. Simulations and real data benchmarks demonstrate performance across
+     diverse genetic architectures, highlighting improved calibration of SuSiE-ash for fine-mapping
+     under complex polygenic backgrounds with 1.5–3x FDR reduction while maintaining power, and
+     revealing SuSiE-based methods as effective yet underappreciated tools for TWAS prediction.
+
+
+
+     Keywords: fine-mapping, TWAS, Bayesian variable selection, eQTL, polygenic architecture, R
+     package
+
+
+     Background
+     Sum of Single Effects regression (SuSiE) [1] has emerged as a powerful Bayesian variable
+     selection tool, producing posterior inclusion probabilities (PIPs) and single-effect credible sets
+     (CSs) that quantify uncertainty in selected variables. These make SuSiE particularly suited for
+     genetic fine-mapping, where causal signals are sparse yet genetic variables are highly
+bioRxiv preprint doi: https://doi.org/10.1101/2025.11.25.690514; this version posted December 25, 2025. The copyright holder for this preprint
+           (which was not certified by peer review) is the author/funder. All rights reserved. No reuse allowed without permission.
+
+
+
+
+     correlated due to linkage disequilibrium, and capturing all potential causal effects is essential for
+     downstream biological interpretation. The susieR package has received over 180,000
+     downloads on CRAN (as of 2025), and has inspired numerous methodological extensions
+     [2–14], with integration into major analysis pipelines including COLOC [15] and large-scale
+     genetic studies such as UK Biobank [16], GTEx [17], and FinnGen [18].
+
+     However, the original susieR implementation suffers from architectural limitations that hinder
+     extensibility and performance, and many extensions exist only as standalone command-line
+     tools [2,6,14,19], making them difficult to integrate into R-based pipelines or benchmark
+     systematically. In applying SuSiE to expression QTL (eQTL) fine-mapping, we observed
+     potential calibration issues under complex genetic architectures where strong regulatory signals
+     coexist with moderate and weak effects. Existing extensions such as SuSiE-inf [2] model a
+     pervasive infinitesimal effects background, but proved overly conservative in our applications.
+
+     In this brief report we present SuSiE 2.0, a modular redesign that maintains backward
+     compatibility while enabling seamless integration of extensions and improved performance.
+     Under this framework we developed SuSiE-ash, a new method that places an adaptive
+     shrinkage prior on moderate to weak effects, which proves to improve calibration across diverse
+     genetic architectures. We also incorporate several published extensions [2,7], and demonstrate
+     that SuSiE-based methods serve as effective yet underappreciated tools for TWAS prediction.
+
+
+
+
+     Results and discussion
+     Figure 1A illustrates the SuSiE 2.0 architecture, which organizes the computational workflow
+     into four stages: interface, constructor, workhorse, and refinement. User-facing functions accept
+     individual-level data, sufficient statistics, or summary statistics, harmonized into a common
+     internal representation before executing Iterative Bayesian Stepwise Selection (IBSS). This
+     modular design uses S3 generic dispatch to separate data-type specific operations from core
+     algorithm logic, eliminating code duplication while enabling seamless integration of
+     methodological extensions, as many reduce to customizations in Bayes factor computation or
+     residual variance estimation. New features include (1) new prior on residual variance [20] for
+     improved coverage particularly in small samples [7], (2) new model SuSiE-ash using adaptive
+     shrinkage [21,22] to model moderate to weak effects (Methods and Supplementary Notes), (3)
+     SuSiE-inf for modeling infinitesimal backgrounds [2], (4) up to 5x speed improvements for
+     summary statistics with regularized LD matrices (Figure S1A), and (5) enhanced model
+     refinement algorithm (Figure S1B), flexible convergence criteria, and additional residual
+     estimation methods for greater robustness. SuSiE 2.0 includes comprehensive unit tests
+     covering 99% of code.
+
+     To assess performance, we developed simxQTL, an R package implementing diverse genetic
+     architectures for benchmarking (Methods). We evaluated SuSiE, SuSiE-ash, and SuSiE-inf
+     using power and false discovery rate (FDR) at 95% credible set (CS) coverage, ROC curves at
+     variant level, and phenotype prediction accuracy as a proxy for TWAS model performance.
+bioRxiv preprint doi: https://doi.org/10.1101/2025.11.25.690514; this version posted December 25, 2025. The copyright holder for this preprint
+           (which was not certified by peer review) is the author/funder. All rights reserved. No reuse allowed without permission.
+
+
+
+
+     Under sparse settings with k = 1–5 causal variants (n=1,000, p=5,000), all methods appear
+     reasonably calibrated (Figure 1C, Figure S2), with SuSiE achieved the highest power followed
+     closely by SuSiE-ash, while SuSiE-inf was considerably more conservative (Figure 1B). At k =
+     5, SuSiE-inf maintained the lowest FDR whereas SuSiE-ash offered a more favorable
+     power-FDR tradeoff. Prediction accuracy was nearly identical across methods, with SuSiE and
+     SuSiE-ash slightly outperforming SuSiE-inf (Figure 1D). For variant-level evaluation, SuSiE-ash
+     achieved the best ROC performance at low false positive rates (FPR), followed by SuSiE, with
+     SuSiE-inf substantially lower.
+
+     Under an oligogenic setting more representative of eQTL architecture (3 strong, 5 moderate
+     effect variants and 15 polygenic background effects; Supplementary Notes S4), SuSiE-ash
+     maintained power nearly identical to SuSiE while achieving substantially lower FDR; SuSiE-inf
+     remained the most conservative         (Figure 1F–G, Figure S3). Prediction accuracy was
+     comparable across methods, with SuSiE-ash showing a slight advantage (Figure 1H). For
+     variant-level ROC performance at low FPR, SuSiE-ash and SuSiE performed similarly, with
+     SuSiE-inf trailing behind (Figure 1I). Under settings with stronger infinitesimal backgrounds
+     (Figure S4–5), SuSiE-inf, while still conservative in power, achieved the best FDR control and
+     improved ROC performance approaching the other methods, and achieved the best prediction
+     accuracy, though closely followed by SuSiE-ash.
+
+     SuSiE’s elevated FDR under polygenic architectures can arise from synthetic associations,
+     where non-causal variants accumulate spurious signals through LD with multiple true effect
+     variants. SuSiE interprets these synthetic signals as distinct true effects (Figure S7). SuSiE-ash
+     mitigates this by modeling the polygenic background with adaptive shrinkage, attributing this
+     diffuse signal to residual variance rather than credible sets, improving its sensitivity to sparse
+     effects.
+
+     We also implemented and evaluated other proposed extensions for improving credible set
+     coverage, including attainable coverage (SparsePro [19]) and Bayesian Linear Programming
+     [23]. Attainable coverage showed limited benefit in our benchmarks (Figure S8) but is included
+     in SuSiE 2.0 as a convenient alternative for constructing credible sets at different coverage
+     levels post-analysis when LD matrices are not readily available to implement the purity filter.
+     Bayesian Linear Programming provided no improvement and is not included in SuSiE 2.0
+     (Supplementary Notes S5).
+
+     While SuSiE-ash was motivated by eQTL fine-mapping where moderate polygenic backgrounds
+     are common, different applications may warrant different approaches. For exploratory
+     genome-wide analysis prioritizing sensitivity, standard SuSiE provides the most signal and can
+     identify candidates for follow-up with SuSiE-ash or SuSiE-inf. For targeted candidate regions,
+     running all three methods helps ensure robustness. Other molecular QTLs and GWAS may
+     exhibit distinct genetic architectures, and method choice ultimately depends on the application
+     and tolerance for false discoveries.
+bioRxiv preprint doi: https://doi.org/10.1101/2025.11.25.690514; this version posted December 25, 2025. The copyright holder for this preprint
+           (which was not certified by peer review) is the author/funder. All rights reserved. No reuse allowed without permission.
+
+
+
+
+     Conclusions
+     We present SuSiE 2.0, a modular reimplementation of SuSiE that improves extensibility,
+     performance, and calibration for genetic fine-mapping and TWAS prediction. SuSiE-ash
+     addresses elevated FDR under complex genetic architectures by modeling moderate to weak
+     effects through adaptive shrinkage, achieving improved calibration without sacrificing power.
+     The four-stage architecture readily accommodates future extensions such as generalized linear
+     models or integration into a generalized IBSS framework, and developers can build directly on
+     the SuSiE 2.0 codebase to ensure compatibility with existing workflows. The software is
+     available as an R package with comprehensive documentation and unit tests.
+bioRxiv preprint doi: https://doi.org/10.1101/2025.11.25.690514; this version posted December 25, 2025. The copyright holder for this preprint
+           (which was not certified by peer review) is the author/funder. All rights reserved. No reuse allowed without permission.
+
+
+
+
+     METHODS
+
+     Overview of SuSiE-ash Model
+
+     We model the phenotype as sparse effects targeted for fine-mapping and a background of unmap-
+     pable moderate to weak effects, aiming to improve power and reduce false discovery by capturing
+     variation unexplained by the sparse component:
+
+                                            y = Xβ + Xθ + ε,                    ε ∼ N (0, σ 2 I),                                     (1)
+
+     where vector y is mean-centered and X is the standardized n × p genotype matrix. The sparse
+     component β is represented using the Sum of Single Effects model (SuSiE) [1],
+
+                                                                    L
+                                                                    !
+                                                              β=           b ℓ γℓ ,                                                   (2)
+                                                                     ℓ=1
+
+     where each γℓ = (γℓ1 , . . . , γℓp ) is a one-hot indicator putative causal variant in the ℓ-th mappable
+                             2 ) (Eqs. S2–S5 in Supplementary Notes S1).
+     effect, and bℓ ∼ N (0, σ0ℓ
+         The remaining moderate genetic effects, scaled by σ 2 , are modeled using an adaptive-shrinkage
+     mixture-of-normals prior,
+                                                     !K
+                                                θj ∼     πk N (0, σ 2 σk2 ),                              (3)
+                                                              k=1
+                                                      2 ) and mixture weights π. Together, the sparse and
+     with a fixed variance grid σθ2 = (σ12 , . . . , σK
+     unmappable components induce a marginal precision structure of the form
+                                                         "                 #−1
+                                                      Ω = σ 2 I + τ 2 XX ⊤     ,                                                      (4)
+                               $
+     where τ 2 = var(θj ) = σ 2 k πk σk2 accounts for variations that SuSiE (essentially setting τ 2 = 0)
+     cannot fine-map (See Supplementary Notes S1 for the full description).
+         Posterior inference proceeds via coordinate-ascent variational inference (VI). Under a mean-
+     field approximation,
+                                                  L
+                                                  %            p
+                                                               %
+                                        q(β, θ) =    q(β (ℓ) )   q(θj ),                              (5)
+                                                                 ℓ=1             j=1
+
+     the evidence lower bound (ELBO) (Eqs. S8–S9) decomposes into tractable subproblems corre-
+     sponding to single-effect regression (SER) updates for β and normal-means (NM) updates for θ
+     (Eqs. S13–S14), as outlined below.
+
+
+     Updating β. Different from SuSiE, SuSiE-ash updates each single-effect component under a
+     marginal likelihood that incorporates the precision matrix Ω (Eq. 4) following the same formulation
+     used in SuSiE-inf . Conditioning on the current variance components σ 2 and τ 2 , the ℓ-th effect is
+bioRxiv preprint doi: https://doi.org/10.1101/2025.11.25.690514; this version posted December 25, 2025. The copyright holder for this preprint
+           (which was not certified by peer review) is the author/funder. All rights reserved. No reuse allowed without permission.
+
+
+
+
+     updated using the leave-one-effect-out residual
+                                                                       !              ′
+                                                        r̄β,ℓ = y −             Xβ (ℓ ) ,
+                                                                       ℓ′ ̸=ℓ
+
+
+     together with a marginal likelihood involving Ω, ensuring that the SER update is performed under
+     the correct effective noise structure.
+         Given this likelihood, SuSiE-ash computes the posterior inclusion probabilities αℓj , posterior
+     means mℓj , and variances σℓj 2 for each single-effect component. This Ω-adjusted update mitigates
+
+     PIP miscalibration under non-sparse architectures and improves the recovery of strong causal
+     signals (Eqs. S13–S14).
+
+
+     Updating θ and π. Conditioned on the current sparse component, we use a data-driven ap-
+     proach to initialize variance grid σθ2 (Supplementary Notes S3) and update each θj using normal-
+     means posterior computations from Mr.ASH [22], yielding posterior mixture weights φ1jk , shrinkage-
+     adjusted means µ1jk , and variances s21jk (Eqs. S19–S21). Mixture proportions are updated as
+
+                                                                        p
+                                                                  1!
+                                                            π̃k =    φ1jk ,                                                           (6)
+                                                                  p
+                                                                       j=1
+
+
+     which yields the updated precision matrix Ω.
+        The complete SuSiE-ash procedure is summarized in Algorithm 1, with further details in Sup-
+     plementary Notes S1–S3.
+bioRxiv preprint doi: https://doi.org/10.1101/2025.11.25.690514; this version posted December 25, 2025. The copyright holder for this preprint
+           (which was not certified by peer review) is the author/funder. All rights reserved. No reuse allowed without permission.
+
+
+
+
+     Algorithm 1 Iterative Bayesian Stepwise Selection (IBSS) algorithm for SuSiE-ash
+                              2
+     Require: y, X, L, σ 2 , σ0b
+      while not converged do
+      Step 1: Update sparse effects
+         for ℓ = 1 to L do $
+                                      ′
+             r̄β,ℓ = y − X ℓ′ ̸=ℓ β̄ ℓ
+               (αℓ , mℓ1 , σ12,ℓ ) ← SER(r̄β,ℓ , X)
+               β̄ ℓ = αℓ ⊙ mℓ1
+           end $ for
+           β̄ = ℓ β̄ ℓ
+        Step 2: Convergence check using α
+                               (t)     (t−1)
+           ∆α = maxi,j |αij − αij |
+           if ∆α < tol then
+               break
+           end if
+        Step 3: Update unmappable oligogenic / polygenic effects
+           Update (σ 2 , τ02 ) using the MoM estimator for provisional variance components
+           Construct the variance grid {σk2 }K                     2
+                                                    k=1 based on τ̂0 /σ̂
+                                                                          2
+                                             2
+           Fit Mr.ASH with current σ and variance grid until convergence:
+           for j = 1 to p do           $
+               r̄θj = y − X β̄ − j ′ ̸=j xj ′ µ̄j ′
+               (µ1j , s 2 , φ ) ← NMpost (r̄ , X)
+                      $ 1j    1j               θj
+               µ̄j = k φ1jk µ1jk
+           end for$
+           π̃k = p1 j φ1jk
+        Step 4: Update variance components via Mr.ASH
+           Extract updated$       σ 2 and mixture weights π̃ = (π̃1 , . . . , π̃K )′
+                      2       2     K        2
+           Update τ = σ             k=1 π̃k σk
+           Update precision matrix Ω = (τ 2 XX T + σ 2 I)−1
+        end while
+        Output: Posterior summaries for β, θ, mixture weights π, and variance components (σ 2 , τ 2 ).
+bioRxiv preprint doi: https://doi.org/10.1101/2025.11.25.690514; this version posted December 25, 2025. The copyright holder for this preprint
+           (which was not certified by peer review) is the author/funder. All rights reserved. No reuse allowed without permission.
+
+
+
+
+     Overview of Simulation Study Design
+
+     We evaluated SuSiE, SuSiE-ash, and SuSiE-inf using genotype data from UK Biobank. Under
+     sparse settings, we varied the number of causal variants (k=1–5) with fixed per-SNP heritability.
+     Under complex genetic architectures mimicking realistic eQTL settings, we partitioned genetic ef-
+     fects into three components: sparse (3 variants with large effects), oligogenic (5–10 variants with
+     moderate effects), and polygenic background (15 variants with small effects). We also evaluated
+     settings with an infinitesimal background, where instead of polygenic background with limited vari-
+     ants, all remaining variants collectively contribute a small portion of heritability. Total heritability
+     was fixed at h2 = 0.25 across scenarios. To facilitate reproducible benchmarking, we implemented
+     these simulation designs in simxQTL, an R package providing standardized genetic architectures for
+     systematic evaluation of gene-mapping methods (https://github.com/StatFunGen/simxQTL).
+     See Supplementary Notes S4 for full simulation details.
+bioRxiv preprint doi: https://doi.org/10.1101/2025.11.25.690514; this version posted December 25, 2025. The copyright holder for this preprint
+           (which was not certified by peer review) is the author/funder. All rights reserved. No reuse allowed without permission.
+
+
+
+
+     Code Availability
+
+     SuSiE 2.0 is available in the susieR package (https://github.com/stephenslab/susieR).
+     Simulation functions are provided in the simxQTL package
+     (https://github.com/StatFunGen/simxQTL). Real-data analysis scripts and TWAS weight
+     functions are available at https://github.com/StatFunGen/xqtl-protocol and
+     https://github.com/StatFunGen/pecotmr, respectively. Scripts to reproduce all analyses are
+     available at https://github.com/alexmccreight/susieR2.0-paper.
+
+     Acknowledgements
+     We thank Angela Helfrich and Mark Bronnimann from Amazon Web Services for providing cloud
+     computing support for real-world data analysis. This work was supported in part by NIH grants
+     R01HG002585 and R35GM153249 (to M.S., P.C.), NIH grants R01AG076901 (to G.W., R.L.),
+     R01AG086467 (to A.M., Y.C.), and a grant from the Urbut Family Foundation (to G.W.). This
+     project is supported by the Eric and Wendy Schmidt AI in Science Postdoctoral Fellowship, a
+     Schmidt Sciences, LLC program. This research was conducted using data from the Religious
+     Orders Study and the Rush Memory and Aging Project (ROSMAP). We thank the participants
+     and investigators of these studies.
+
+
+     Author Contributions
+     GW conceived and designed the experiments. GW, WD and MS jointly supervised the research.
+     YC, AM developed the SuSiE-ash model, and AM developed SuSiE 2.0 package with input from
+     GW. AM implemented the numerical experiments. RL and AM performed data applications. PC,
+     HG and DN contributed to improvements on the SuSiE 2.0 package. AM, YC and GW wrote the
+     manuscript.
+
+
+
+     Competing Interests
+     The authors declare no competing interests.
+bioRxiv preprint doi: https://doi.org/10.1101/2025.11.25.690514; this version posted December 25, 2025. The copyright holder for this preprint
+           (which was not certified by peer review) is the author/funder. All rights reserved. No reuse allowed without permission.
+
+
+
+
+     References
+     [1] Wang G, Sarkar A, Carbonetto P, Stephens M. A Simple New Approach to Variable Selection
+     in Regression, with Application to Genetic Fine Mapping. Journal of the Royal Statistical Society
+     Series B: Statistical Methodology. 2020 Dec 1;82(5):1273–300.
+
+     [2] Cui R, Elzur RA, Kanai M, Ulirsch JC, Weissbrod O, Daly MJ, et al. Improving fine-mapping
+     by modeling infinitesimal effects. Nature Genetics. 2024 Jan 1;56(1):162–9.
+
+     [3] Gao B, Zhou X. MESuSiE enables scalable and powerful multi-ancestry fine-mapping of
+     causal variants in genome-wide association studies. Nature Genetics. 2024 Jan 1;56(1):170–9.
+
+     [4] Lu Z, Wang X, Carr M, Kim A, Gazal S, Mohammadi P, et al. Improved multiancestry
+     fine-mapping identifies cis-regulatory variants underlying molecular traits and disease risk.
+     Nature Genetics. 2025 Aug 1;57(8):1881–9.
+
+     [5] Zhao S, Crouse W, Qian S, Luo K, Stephens M, He X. Adjusting for genetic confounders in
+     transcriptome-wide association studies improves discovery of risk genes of complex traits.
+     Nature Genetics. 2024 Feb 1;56(2):336–47.
+
+     [6] Yuan K, Longchamps RJ, Pardiñas AF, Yu M, Chen TT, Lin SC, et al. Fine-mapping across
+     diverse ancestries drives the discovery of putative causal variants underlying human complex
+     traits and diseases. Nature Genetics. 2024 Sept 1;56(9):1841–50.
+
+     [7] Denault WRP, Carbonetto P, Li R, The Alzheimer’s Disease Functional Genomics
+     Consortium, Wang G, Stephens M. Accounting for uncertainty in residual variances improves
+     calibration for fine-mapping with small sample sizes. bioRxiv. 2025 Jan 1;2025.05.16.654543.
+
+     [8] Zou Y, Carbonetto P, Xie D, Wang G, Stephens M. Fast and flexible joint fine-mapping of
+     multiple traits via the Sum of Single Effects model. bioRxiv. 2025 Jan 1;2023.04.14.536893.
+
+     [9] Denault WRP, Sun H, Carbonetto P, Liu A, De Jager PL, Bennett D, et al. fSuSiE enables
+     fine-mapping of QTLs from genome-scale molecular profiles. bioRxiv. 2025 Jan
+     1;2025.08.17.670732.
+
+     [10] Rossen J, Shi H, Strober BJ, Zhang MJ, Kanai M, McCaw ZR, et al. MultiSuSiE improves
+     multi-ancestry fine-mapping in All of Us whole-genome sequencing data. medRxiv. 2024 Jan
+     1;2024.05.13.24307291.
+
+     [11] Weissbrod O, Hormozdiari F, Benner C, Cui R, Ulirsch J, Gazal S, et al. Functionally
+     informed fine-mapping and polygenic localization of complex trait heritability. Nature Genetics.
+     2020 Dec 1;52(12):1355–63.
+bioRxiv preprint doi: https://doi.org/10.1101/2025.11.25.690514; this version posted December 25, 2025. The copyright holder for this preprint
+           (which was not certified by peer review) is the author/funder. All rights reserved. No reuse allowed without permission.
+
+
+
+
+     [12] Zhang X, Jiang W, Zhao H. Integration of expression QTLs with fine mapping via SuSiE.
+     PLOS Genetics. 2024 Jan 25;20(1):e1010929.
+
+     [13] Zou Y, Carbonetto P, Wang G, Stephens M. Fine-mapping from summary data with the
+     “Sum of Single Effects” model. PLOS Genetics. 2022 July 19;18(7):e1010299.
+
+     [14] Strober BJ, Zhang MJ, Amariuta T, Rossen J, Price AL. Fine-mapping causal tissues and
+     genes at disease-associated loci. Nature Genetics. 2025 Jan 1;57(1):42–52.
+
+     [15] Rasooly D, Peloso GM, Giambartolomei C. Bayesian Genetic Colocalization Test of Two
+     Traits Using coloc. Current Protocols. 2022 Dec 1;2(12):e627.
+
+     [16] Sun BB, Chiou J, Traylor M, Benner C, Hsu YH, Richardson TG, et al. Plasma proteomic
+     associations with genetics and health in the UK Biobank. Nature. 2023 Oct 1;622(7982):329–38.
+
+     [17] Aguet F, Brown AA, Castel SE, Davis JR, He Y, Jo B, et al. Genetic effects on gene
+     expression across human tissues. Nature. 2017 Oct 1;550(7675):204–13.
+
+     [18] Kurki MI, Karjalainen J, Palta P, Sipilä TP, Kristiansson K, Donner KM, et al. FinnGen
+     provides genetic insights from a well-phenotyped isolated population. Nature. 2023 Jan
+     1;613(7944):508–18.
+
+     [19] Zhang W, Najafabadi H, Li Y. SparsePro: An efficient fine-mapping method integrating
+     summary statistics and functional annotations. PLOS Genetics. 2023 Dec 28;19(12):e1011104.
+
+     [20] Servin B, Stephens M. Imputation-Based Analysis of Association Studies: Candidate
+     Regions and Quantitative Traits. PLOS Genetics. 2007 July 27;3(7):e114.
+
+     [21] Stephens M. False discovery rates: a new deal. Biostatistics. 2017 Apr 1;18(2):275–94.
+
+     [22] Kim Y, Wang W, Carbonetto P, Stephens M. A flexible empirical Bayes approach to
+     multiple linear regression and connections with penalized regression. Journal of Machine
+     Learning Research. 2024;25(185):1–59.
+
+     [23] Spector A, Janson L. Controlled Discovery and Localization of Signals via Bayesian Linear
+     Programming. Journal of the American Statistical Association. 2025 Jan 2;120(549):460–71.
+bioRxiv preprint doi: https://doi.org/10.1101/2025.11.25.690514; this version posted December 25, 2025. The copyright holder for this preprint
+           (which was not certified by peer review) is the author/funder. All rights reserved. No reuse allowed without permission.
+
+
+
+
+     FIGURES
+
+
+
+
+     Figure 1. SuSiE 2.0 software architecture and performance across sparse and complex
+     genetic architectures. (A) SuSiE 2.0’s modular design unifies individual-level data, sufficient
+     statistics, and summary statistics under a single algorithmic pipeline with two approaches for
+     modeling moderate and weak effects: SuSiE-ash and SuSiE-inf. (B-E) Sparse genetic effects (K
+     = 1, 2, 3, 4, 5 causal variants; n = 1,000, p = 5,000 variants, h2snp = 0.03; 150 replicates per K).
+     (B) 95% credible set (CS) power across varying total proportion of variance explained (PVE).
+     (C) 95% CS false discovery rate (FDR) with nominal 5% FDR threshold (dotted red line). (D)
+bioRxiv preprint doi: https://doi.org/10.1101/2025.11.25.690514; this version posted December 25, 2025. The copyright holder for this preprint
+           (which was not certified by peer review) is the author/funder. All rights reserved. No reuse allowed without permission.
+
+
+
+
+     5-fold cross-validated prediction accuracy (Pearson’s R2). (E) Variant-level ROC curves pooled
+     across all values of K and replicates with 5% false positive rate (FPR) threshold (dotted red
+     line). (F-I) Oligogenic effects on polygenic background with total 23 causal variants, mimicking a
+     complex yet realistic cis-eQTL scenario (K = 3 strong effects (50% total PVE), 5 moderate
+     effects (35% total PVE),15 polygenic background (15% total PVE); n = 1,000, p = 5,000, total
+     PVE h2g = 0.25; 150 replicates). (F) 95% CS power when considering the N strongest simulated
+     effects as causal variants. (G) 95% CS FDR across top N causal variant thresholds. (H) 5-fold
+     cross-validated prediction accuracy (Pearson’s R2). (I) Variant-level ROC curve with 5% FPR
+     (dotted red line) using top 8 variants by effect size magnitude as causal (to cover the simulated
+     strong and moderate effects).
+bioRxiv preprint doi: https://doi.org/10.1101/2025.11.25.690514; this version posted December 25, 2025. The copyright holder for this preprint
+           (which was not certified by peer review) is the author/funder. All rights reserved. No reuse allowed without permission.
+
+
+
+
+     Supplementary Notes
+
+     S.1     SuSiE-ash Model and Assumptions
+
+     SuSiE-ash is a new Bayesian variable selection regression approach that improves fine-mapping
+     by combining SuSiE [1] for sparse variable selection and Mr.ASH [2] for adapative shrinkage es-
+     timation of unmappable effects. The key idea is to iteratively update the strong, sparse effect β
+     using SuSiE marginalizing over θ and ϵ, followed by updating the unmappable effects (oligogenic
+     and polygenic) θ using Mr.ASH based on the residual after removing the updated sparse effects.
+        SuSiE-ash is based upon the following model:
+
+                                                          y = Xβ + Xθ + ϵ,                                                          (S1)
+
+     where y is a centered n × 1 vector of phenotype, X = [x1 , . . . , xp ] is a standardized n × p matrix of
+     genotypes for p genetic variants in a genomic region of interest, with xj being the j-th column of X,
+     the p-vectors β and θ represent strong spare effect and oligogenic/polygenic effects, respectively,
+     which are independent of each other, and ϵ∼N (0, σ 2 I). Here, we construct β by SuSiE to model
+     the strong sparse component [1]. We assume that precisely L variants have a non-zero effect on
+     the outcome:
+                                                                      L
+                                                                      !
+                                                               β∼          β (ℓ) ,                                                  (S2)
+                                                                      ℓ=1
+                                                                       ℓ ℓ
+                                                           β (ℓ) = b γ ,                                                            (S3)
+                                                                ℓ
+                                                             γ ∼ Mult(1, p),                                                        (S4)
+                                                                           2
+                                                               bℓ ∼ N (0, σ0ℓ ),                                                    (S5)
+
+     where β (ℓ) denotes the ℓ-th single-effect vector, γ ℓ = (γ1ℓ , . . . , γpℓ )′ is a p-vector indicating the loca-
+     tion of the causal SNP in the ℓ-th single effect, with p = (p1 , . . . , pp )′ representing the prior weight
+     that sum to 1, and bℓ is a scalar representing the causal effect size in the ℓ-th single effect. Note
+     that the single-effect regression (SER) model is a special case of the above-specified model when
+     L = 1.
+         Then we construct θ using an adaptive shrinkage prior for the scaled coefficient ([2], [3]) to
+     model the remaining unmappable effects:
+
+                                                               K
+                                                               !
+                                                        θj ∼         πk N (0, σ 2 σk2 ),                                            (S6)
+                                                               k=1
+
+     where π = (π1 , ...πK )′ represents the mixture proportions (non-negative and sum to one), and
+                 2 are a non-negative, increasing, pre-specified grid of component variances such that 0 ≤
+     σ12 , ..., σK
+       2
+     σ1 , ..., σK2 < ∞ with σ 2 set to 0.
+                              1
+bioRxiv preprint doi: https://doi.org/10.1101/2025.11.25.690514; this version posted December 25, 2025. The copyright holder for this preprint
+           (which was not certified by peer review) is the author/funder. All rights reserved. No reuse allowed without permission.
+
+
+
+
+     Remark 1 (Background variance modeling). Conceptually, SuSiE-ash separates sparse ef-
+     fect localization from background variance modeling. Following SuSiE-inf , the background com-
+     ponent θ is modeled at the variant level but enters the likelihood only through its marginal variance
+     τ 2 = Var(θj ), inducing the precision structure Ω = (σ 2 I + τ 2 XX ⊤ )−1 . This formulation allows dif-
+     fuse polygenic effects to be absorbed as structured background variation while preserving a clear
+     inferential focus on sparse effects. At the same time, by modeling θ using a flexible shrinkage
+     prior, SuSiE-ash enables more accurate estimation of the residual variance σ 2 and background
+     effects, yielding a principled compromise between the overly optimistic behavior of SuSiE and the
+     overly conservative behavior of SuSiE-inf .
+         One may consider forming the likelihood using variant-specific background variances obtained
+     from fitting θ via adaptive shrinkage, yielding a precision matrix of the form (σ 2 I + XDX ⊤ )−1 ,
+     where D = diag(τ12 , . . . , τp2 ) and τj2 denotes the posterior variance of the background effect at vari-
+     ant j. However, such a formulation blurs the distinction between sparse and background effects
+     and leads to unstable iterative updates: large τj2 values may reflect either unmappable background
+     signal or moderate effects better attributed to the sparse component, while near-zero τj2 values
+     lead to numerically unstable inversion of the precision matrix. Moreover, because D is repeatedly
+     updated, such formulations preclude reuse of a fixed spectral decomposition of XX ⊤ , requiring
+     repeated large-scale matrix inversions or decompositions and incurring prohibitive computational
+     cost in high-dimensional settings. In contrast, a global background variance stabilizes the separa-
+     tion between sparse effect localization and background variation, with θ estimated for downstream
+     analyses rather than fine-mapping.
+
+
+     S.2     Variational Inference Framework for SuSiE-ash
+
+     Note that both SuSiE and Mr.ASH adopt the variational approximation (VA) method [4] to ap-
+     proximate the posterior distribution under their respective models. By assuming a fully factorized
+     variational approximation, they simplify the optimization of the evidence lower bound (ELBO) over
+     joint prior variables, making it tractable. This tractability is achieved by employing the coordinate
+     ascent algorithm [5], which converts the complex joint optimization problem into a series of simpler
+     tasks. In SuSiE, this coordinate-ascent procedure is implemented through the Iterative Bayesian
+     Stepwise Selection (IBSS) algorithm, in which each single-effect component is updated by fitting a
+     single-effect regression (SER) model to partial residuals. Likewise, Mr.ASH performs analogous
+     coordinate-wise updates for each coefficient under the normal-mean mixture model (NM).
+         In SuSiE-ash, we similarly assume that the approximation of the joint posterior q for β and θ is
+     factorized as:
+                                                                         L
+                                                                         %                  p
+                                                                                            %
+                                        q(β, θ) = qβ (β)qθ (θ) =               qβℓ (β ℓ )         qθj (θj ).                        (S7)
+                                                                         ℓ=1                j=1
+
+
+     Our proposed Algorithm is iteratively optimizing variational approximations qβ (β) and qθ (θ) by
+bioRxiv preprint doi: https://doi.org/10.1101/2025.11.25.690514; this version posted December 25, 2025. The copyright holder for this preprint
+           (which was not certified by peer review) is the author/funder. All rights reserved. No reuse allowed without permission.
+
+
+
+
+     maximizing the following ELBOs, respectively, under SuSiE-ash in Eq. (S1):
+                                                            &                    '
+                  2 2     2        n           1                1          ⊤
+          Fβ (β; σ , τ , σ0b ) = − log(2π) + log detΩ + Eqβ − (y − Xβ) Ω(y − Xβ)
+                                   2           2                2
+                                     &          '                                                                                   (S8)
+                                         gβ (β)
+                               + Eqβ log
+                                         qβ (β)
+
+     and                                                                             &                                     '
+                                                 n                                         1
+                     Fθ (θ; σ , σθ2 , π, qβ ) = − log(2πσ 2 ) + Eqθ
+                                2
+                                                                                         − 2 (r̄θ − Xθ)⊤ (r̄θ − Xθ)
+                                                         2                                2σ
+                                                             &              '                                                       (S9)
+                                                                     gθ (θ)
+                                                  + Eq θ         log          ,
+                                                                     qθ (θ)
+     where σ0b2 = (σ 2 , . . . , σ 2 )′ and σ 2 = (σ 2 , . . . , σ 2 )′ denote the vectors of single-effect and adaptive
+                      01          0L         θ      1             K
+     shrinkage variances, respectively. We define the precision matrix Ω = (τ 2 XX ⊤ + σ 2 I)−1 , with
+                          $
+     τ 2 = Var(θj ) = σ 2 K              2
+                               k=1 πk σk being the total prior variance of θ. The functions gβ and gθ denote
+     the prior distributions of β and θ, respectively. Finally, r̄θ = y − X β̄, is the residual after removing
+     the current posterior mean of β, β̄ = Eqβ [β].
+         SuSiE-ash is fitted using a generalized iterative Bayesian Stepwise-selection (GIBSS) as out-
+     lined in Algorithm 1. Implementation within an iteration loop is outlined below.
+
+
+     Update the strong mappable effect β. Given variance components σ 2 and τ 2 , we update each
+     qβℓ , ℓ = 1, . . . , L by fitting the following single-effect regression (SER) model:
+                                                           (    !     ′
+                                                                        )
+                                               r̄β,ℓ := Eqβ y −   Xβ ℓ = Xβ ℓ + ϵ̃β ,                                              (S10)
+                                                                          ′
+                                                                         ℓ ̸=ℓ
+
+
+     where ϵ̃β = Xθ + ϵ ∼ N (0, Ω−1 ). The posterior distribution for β ℓ = bℓ γ ℓ under the SER model
+     (Eq. S10) is:
+
+                                                                                    2
+                                                      γ ℓ | X, r̄β,ℓ , σ 2 , τ 2 , σ0b ∼ Mult(1, αℓ ),                             (S11)
+                                                                                                  2,ℓ
+                                                                        2
+                                           bℓ | X, r̄β,ℓ , σ 2 , τ 2 , σ0b , γjℓ = 1 ∼ N (mℓ1j , σ1j  ),                           (S12)
+
+     where αℓ = (α1ℓ , . . . , αpℓ )′ is the vector of the posterior inclusion probabilities (PIPs). Note that the
+     posterior distribution for the ℓ-th single effect can be obtained by maximizing the following simpler
+     ELBO:
+
+                                        1        *        ⊤
+                                                                                                +         *   gβ ℓ (β ℓ ) +
+                ℓ   2
+         Fℓ (β ; σ , τ   2      2
+                             , σ0b ) = − Eq ℓ        − 2r̄β,ℓ ΩXβ ℓ + (Xβ ℓ )⊤ ΩXβ ℓ ]              + Eqℓ log               + cℓ   (S13)
+                                          2                                                                   qβ ℓ (β ℓ )
+                                        p
+                                        !                                        p
+                                                                1! ℓ ⊤
+                                    =                ⊤
+                                              αjℓ (r̄β,ℓ Ωxj )mℓ1j −  αj xj Ωxj (m2,ℓ         2,ℓ
+                                                                                      1j + σ1j )
+                                                                2
+                                        j=1                       j=1
+                                                  ,         2,ℓ
+                                                                                 -
+                                          ! p
+                                              αjℓ          σ1j    m2,ℓ
+                                                                    1j  +  σ 2,ℓ
+                                                                             1j
+                                                                                     !p
+                                                                                                  pj
+                                        +           1 + log 2 −         2          +     αjℓ log ℓ + cℓ ,                          (S14)
+                                              1            σ0ℓ         σ0ℓ                        αj
+                                          j=1                                        j=1
+bioRxiv preprint doi: https://doi.org/10.1101/2025.11.25.690514; this version posted December 25, 2025. The copyright holder for this preprint
+           (which was not certified by peer review) is the author/funder. All rights reserved. No reuse allowed without permission.
+
+
+
+
+     where cℓ is the sum of terms that are not dependent on q ℓ . Then, by taking partial derivatives of
+                            2 ) with respect to parameters αℓ , mℓ = (mℓ , . . . , mℓ )′ , and σ 2,ℓ = (σ 2,ℓ , . . . , σ 2,ℓ )′ ,
+     Fℓ (β ℓ ; σ 2 , τ 2 , σ0b                                   1     11           1p          1        11              1p
+     the explicit formulas for this update are expressed as:
+                                                                  "    σℓ    m2,ℓ
+                                                                                  #
+                                                            pj exp log σ1j +  1j
+                                                                              2,ℓ
+                                                                        0ℓ                  2σ1j
+                                              αjℓ =                           "                          #                        (S15)
+                                                      $p                                 ℓ
+                                                                                        σ1j ′      m2,ℓ
+                                                                                                    1j ′
+                                                          j ′ =1 pj exp            log σ0ℓ +
+                                                                   ′                                 2,ℓ
+                                                                                                   2σ1j ′
+
+
+
+     and
+                                                                     (                 )−1
+                                            ⊤          2,ℓ      2,ℓ
+                                   mℓ1j = r̄β,ℓ Ωxj × σ1j  and σ1j  = x⊤
+                                                                       j Ωx j + 1/σ 2
+                                                                                    0ℓ     .                                      (S16)
+
+     For brevity, we introduce the following function that returns arguments of the posterior distribution
+     of β ℓ in Algorithm1:
+
+                                                  SER(r̄β,ℓ , X) = (αℓ , mℓ1 , σ12,ℓ ).                                           (S17)
+
+
+     Update the unmappable effects θ and the mixture proportion π in the shrinkage prior. To
+     update θ and π, one could theoretically work with the marginal distribution over β. However, this
+     approach is computationally demanding, particularly for large datasets. As a practical alternative,
+     we leverage the existing Mr.ASH model implementation in the R package mr.ash in a modular
+     fashion incorporated into GIBSS. This update involves fitting the Mr.ASH model to the residuals
+     after removing the updated sparse effect, β̄ = (β̄1 , . . . , β̄p )′ , from y, denoted as
+
+                                                       r̄θ = y − X β̄ = Xθ + ϵ.                                                   (S18)
+
+                                            $        (ℓ) ℓ
+     Here, each β̄j is computed as β̄j = L     ℓ=1 αj m1j .
+         In a similar manner to SuSiE, Mr.ASH employs a coordinate-ascent mean field variational in-
+                                                                                .
+     ference: (1) the variational distribution of θ is factorized as qθ (θ) = pj=1 qθj (θj ); (2) the coordinate
+     ascent update for each θj , j = 1, . . . , p, is given by computing a posterior distribution under the
+     following normal mean model:
+                                                  (      !            )
+                                    r̄θj := Eqθ−j r̄θ −      xj ′ θj ′ = xj θj + ϵ,                        (S19)
+                                                                         j ′ ̸=j
+
+
+     where (θ1 , . . . , θj−1 , θj+1 , . . . , θp )′ ∼ qθ−j . Then, by [2], the posterior distribution for θj , denoted as
+     qθj under the normal mean model is given by:
+
+                                                                         K
+                                                                         !
+                                             q(θj |θ̃j ; σ 2 , σθ2 ) =             φ1jk N (µ1jk , s21jk ),                        (S20)
+                                                                         k=1
+bioRxiv preprint doi: https://doi.org/10.1101/2025.11.25.690514; this version posted December 25, 2025. The copyright holder for this preprint
+           (which was not certified by peer review) is the author/funder. All rights reserved. No reuse allowed without permission.
+
+
+
+
+     where
+
+                                                                       σk2
+                                                         µ1jk =               θ̃j ,                                               (S21)
+                                                                    σk2 + γj2
+                                                                     σ 2 σk2 γj2
+                                                          s21jk =         ,                                                       (S22)
+                                                                σk2 + γj2
+                                                                    πk Ljk
+                                                         φ1jk = $K            ,                                                   (S23)
+                                                                   k=1 πk Ljk
+                                                                       /                         0
+     with θ̃j = (xj ′ xj )−1 x′j r̄θj , γj2 = (x′j xj )−1 , and Ljk = N θ̃j ; 0, σ 2 (σk2 + γj2 ) . For future reference,
+     we define the function NMpost , which returns the estimated parameters for the posterior distribution
+     of θj under the normal mean model:
+                                                  "                   #
+                                            NMpost r̄θj , X; σ 2 , σθ2 = (µ1j , s21j , φ1j ),                                     (S24)
+
+     where µ1j = (µ1j1 , . . . , µ1jK )′ , s21j = (s21j1 , . . . , s21jK )′ , and φ1j = (φ1j1 , . . . , φ1jK )′ . We can also
+     obtain update the mixture proportion π:
+
+                                                           π̃ = (π̃1 , . . . , π̃K )′ ,
+                   $
+     where π̃k = p1 pj=1 φ1jk .
+         Remark 2: Note that in SuSiE-ash implementation, we used Bayes factor instead of likeli-
+     hood in (S23) because the two are the same up to a constant term, and Bayes factor aligns with
+     the Mr.ASH implementation, providing a numerically stable expression for evaluating the mixture
+     components:
+
+                                                                         πk BFk
+                                                          φ1jk = $           ′      ,                                             (S25)
+                                                                         k′ πk BFk′
+
+     where
+                                       /                          0                    2          3
+                                      N θ̃j ; 0, σ 2 (σk2 + γj2 )        1               θ̃j µ1jk
+                                BFk =        /              0       =1             exp              .                             (S26)
+                                         N θ̃j ; 0, σ 2 γj2           1 + σk2 /γj2       2σ 2 γj2
+
+
+     S.3     Implementation Details: Shrinkage Grid Construction and Variance Updates
+
+     We first calculate provisional variance components, denoted as (σ̂02 , τ̂02 ), using a method-of-moments
+     (MoM) estimator following SuSiE-inf . These values are obtained by plugging the posterior mo-
+     ments of qβ , the variational posterior means and second moments of the single-effect coefficients,
+     into the MoM equations. Specifically, (σ̂02 , τ̂02 ) are computed by solving:
+                                               /         0
+                                            Eqβ ∥y − Xβ∥2 = σ 2 n + τ 2 tr(X T X),
+                                      *               +
+                                   Eqβ ∥X T (y − Xβ)∥2 = σ 2 tr(X T X) + τ 2 tr(X T X)2 .
+bioRxiv preprint doi: https://doi.org/10.1101/2025.11.25.690514; this version posted December 25, 2025. The copyright holder for this preprint
+           (which was not certified by peer review) is the author/funder. All rights reserved. No reuse allowed without permission.
+
+
+
+
+                   √
+     Here, ∥u∥ = uT u denotes the Euclidean norm.
+                                $ (i)
+        At iteration i, τ 2(i) = k π̃k σk2 and the residual variance can be updated as:
+                                                    $p     $K       (i)               2(i)   2(i)    $p        2(i)
+                           ∥r̄θ − X θ̄ (i) ∥2 +      j=1
+                                                                                 2
+                                                               k=2 φ1jk (zj + 1/σk )(µ1jk + s1jk ) −  j=1 zj θ̄j
+                σ 2(i) =                                                                                                     ,
+                                                                   n + p(1 − π1 )
+                       ′                      (i)        (i)                     $      (i) (i)
+     where zj = xj xj and θ̄ (i) = (θ̄1 , . . . , θ̄p )′ with θ̄j being              k φ1jk µ1jk , j = 1, . . . , p.
+
+
+      Data-driven variance grid for the Adaptive Shrinkage prior. To construct the variance grid
+                           2 ) for the adaptive shrinkage prior, we divide the range of plausible effect-size
+     σθ2 = (σ12 , . . . , σK
+     variances into three log-spaced regions centered around the moment-based estimate of the poly-
+     genic variance, τ̂02 . We then generate (i) a dense set of very small to near zero variances (τ̂02 /100
+     to τ̂02 /10) to capture very weak effects, (ii) a moderately dense region around τ̂02 (τ̂02 /10 to 3τ̂02 ) to
+     model average to moderate unmappable effects, and (iii) a coarse grid from 3τ̂02 up to the minimum
+     sparse-effect variance estimated by SuSiE, minℓ (σ11    2 , . . . , σ 2 ), to allow for additional larger effects
+                                                                          L1
+     not captured by SuSiE; notice that this is also the upper-bound of the grids. These grids are then
+     combined with a point mass at zero to form the final mixture variance grid used in the Mr.ASH prior
+     for each iteration.
+
+
+     S.4     Simulation Study Details
+
+      Sparse effects simulation design. We conducted extensive simulations to evaluate the per-
+     formance of SuSiE, SuSiE-ash, and SuSiE-inf under a sparse genetic architecture, with slight
+     modifications to the original SuSiE paper’s simulation design. These simulations used genotype
+     data from UK Biobank where we randomly sampled 150 LD blocks across chromosomes 1–22
+     and derived the corresponding genotype matrices to serve as the basis for our simulation. Each
+     genotype matrix, X ∈ Rn×p , has n = 1, 000 and p = 5, 000. Additionally, we required a minor allele
+     frequency greater than 1%, and a missing rate below 5% (using mean imputation for missing data).
+         We generated gene expression levels, y ∈ Rn , based upon the following linear model:
+
+                                                                y = Xβ + ϵ                                                        (S27)
+
+     where β ∈ Rp denotes the effect size vector and ϵ ∈ Rn denotes the noise vector, such that
+     ϵ ∼ N (0, σ 2 In ) where In is the n × n identity matrix. The effect size vector, β, is constructed by first
+     sampling a set of causal variant indices, S, uniformly at random from {1, ..., p}. For each causal
+     variant, j ∈ S, we set βj = 1, and for all non-causal variants, j ∈       / S, we set βj = 0. Finally, to
+                                                 2
+     achieve the desired heritability-level, h , we set the residual variance, σ 2 , to solve the following
+     equation:
+
+                                                                 (1 − h2 )var(Xβ)
+                                                         σ2 =                                                                     (S28)
+                                                                        h2
+
+         For each simulated effect, we fixed the per-snp heritability (h2snp ) = 0.03. We then generated
+bioRxiv preprint doi: https://doi.org/10.1101/2025.11.25.690514; this version posted December 25, 2025. The copyright holder for this preprint
+           (which was not certified by peer review) is the author/funder. All rights reserved. No reuse allowed without permission.
+
+
+
+
+     simulated data sets varying the number of causal variants k = {1, 2, 3, 4, 5} resulting in h2 =
+     {0.03, 0.06, 0.09, 0.12}, respectively. For each of the five scenarios, we generated 150 data sets as
+     replicates.
+
+
+     Complex genetic architecture simulation design. We also evaluated SuSiE, SuSiE-ash, and
+     SuSiE-inf under multiple complex genetic architectures to mimic a realistic eQTL architecture [6].
+     In these settings, gene expression is influenced both by a core set of variants that exert medium to
+     large effects and by a polygenic background in which i) a number of variants (≈15) each contribute
+     a small amount of phenotypic variants, or ii) all remaining variants each contribute a non-zero
+     amount of variation. We used the same preprocessed genotype matrices from the UK Biobank
+     data described in the sparse simulation design section.
+         We generated gene expression levels, y ∈ Rn , using a linear model that partitions genetic
+     effects into three distinct components: sparse, oligogenic, and polygenic. The sparse component,
+     S, includes k = 3 variants which exhibit relatively large effects. These effects are drawn from a
+     normal distribution, βj ∼ N (0, σS2 ), and then scaled to achieve the target heritability h2S .
+         The oligogenic component, O, has a small number of variants (5–10) that contribute moderate
+     effects. These effects are modeled using a two-component Gaussian mixture distribution to allow
+     for added variability in their magnitudes:
+
+                                                               βj | zj ∼ N (0, σz2j ),                                            (S29)
+                                                        zj ∼ Categorical(π1 , π2 )                                                (S30)
+
+     for j ∈ O, where zj ∈ {1, 2} denotes the mixture component assignment, σ12 and σ22 are the
+     component-specific variances with σ12 < σ22 and π1 + π2 = 1. The oligogenic effects are then scaled
+     to achieve the target heritability h2O .
+          The polygenic component, P, models the contribution of remaining causal variants. Effects for
+     this component are drawn from a normal distribution with small variance, βj ∼ N (0, σP    2 ) for j ∈ P,
+
+     and scaled to achieve the target heritability h2P . Variants not assigned to any component have
+     effects set to zero.
+          Collectively, these three mutually exclusive sets form a partition of the complete set of variants,
+     i.e., S ∪ O ∪ P = {1, ..., p}. These components comprise the effect vector β ∈ Rp to create the
+     following linear model:
+
+                                                     y = X (βS + βO + βP ) + ϵ                                                    (S31)
+
+     where X ∈ Rn×p is the standardized genotype matrix and ϵ ∈ Rn is a noise vector with ϵ ∼
+     N (0, σ 2 In ) where In is the n × n identity matrix.
+        The total heritability, h2total is partitioned among these components such that
+
+                                                        h2total = h2S + h2O + h2P                                                 (S32)
+
+     with each h2 value corresponding to the variance explained by the respective genetic component.
+bioRxiv preprint doi: https://doi.org/10.1101/2025.11.25.690514; this version posted December 25, 2025. The copyright holder for this preprint
+           (which was not certified by peer review) is the author/funder. All rights reserved. No reuse allowed without permission.
+
+
+
+
+     We scaled all effects to achieve their desired heritability proportions. Finally, the residual variance,
+     σ 2 , is chosen to ensure that the total variance of y reflects the desired total heritability.
+           In our benchmark, we evaluated three scenarios with varying genetic architectures, all with total
+     heritability h2total = 0.25 and 150 replicates. The first scenario, oligogenic effects on a polygenic
+     background (Figure 1F–1I), included 3 sparse effects (50% of h2total ), 5 oligogenic effects (35%
+     of h2total ), and 15 polygenic effects (15% of h2total ). The second scenario, oligogenic effects on a
+     moderate infinitesimal background (Figure S2 A–D), maintained the same heritability proportions
+     (50%, 35%, 15%) and variant counts for sparse and oligogenic components, but assigned the re-
+     maining heritability to all remaining variants. The third scenario, oligogenic effects on an extensive
+     infinitesimal background (Figure S2 E–H), shifted the architecture toward a stronger infinitesimal
+     contribution: 3 sparse effects (50% of h2total ), 10 oligogenic effects (15% of h2total ), and all remaining
+     variants (35% of h2total ).
+
+
+     S.5     Evaluation of Alternative Credible Set Coverage Methods
+
+     We evaluated two additional proposed approaches for improving credible set coverage: attainable
+     coverage [7] and Bayesian Linear Programming (BLiP) [8]. Attainable coverage showed limited
+     benefit in our benchmarks (Figure S8), and is included in SuSiE 2.0 as a convenient alternative
+     for constructing credible sets at different coverage levels post-analysis when LD matrices are not
+     readily available to implement the purity filter. We note that the default entropy threshold parameter
+     (ethresh = 20) performed poorly in both our sparse and complex benchmarks. We suspect this
+     default was likely tuned for sparser marker sets, whereas our simulations use dense markers (p =
+     5,000). We therefore changed the default in SuSiE 2.0 to max(100, 0.10p), where p is the number
+     of variables. BLiP provided no improvement over the default SuSiE implementation and is not
+     incorporated in SuSiE 2.0.
+
+
+
+     References for Supplementary Notes
+     [1] G. Wang, A. Sarkar, P. Carbonetto, and M. Stephens. “A simple new approach to variable
+         selection in regression, with application to genetic fine mapping”. In: Journal of the Royal
+         Statistical Society Series B: Statistical Methodology 82.5 (2020), pp. 1273–1300.
+     [2] Y. Kim, W. Wang, P. Carbonetto, and M. Stephens. “A flexible empirical Bayes approach to
+         multiple linear regression and connections with penalized regression”. In: Journal of Machine
+         Learning Research 25.185 (2024), pp. 1–59.
+     [3] M. Stephens. “False discovery rates: a new deal”. In: Biostatistics 18.2 (2017), pp. 275–294.
+     [4] D. M. Blei, A. Kucukelbir, and J. D. McAuliffe. “Variational inference: A review for statisticians”.
+         In: Journal of the American statistical Association 112.518 (2017), pp. 859–877.
+     [5] D. Bertsekas. Nonlinear Programming. Athena Scientific, 1999.
+     [6] L. R. Lloyd-Jones, A. Holloway, A. McRae, et al. “The Genetic Architecture of Gene Expression
+         in Peripheral Blood”. In: American Journal of Human Genetics 100.2 (Feb. 2017), pp. 228–
+         237.
+bioRxiv preprint doi: https://doi.org/10.1101/2025.11.25.690514; this version posted December 25, 2025. The copyright holder for this preprint
+           (which was not certified by peer review) is the author/funder. All rights reserved. No reuse allowed without permission.
+
+
+
+
+     [7] W. Zhang, H. Najafabadi, and Y. Li. “SparsePro: An efficient fine-mapping method integrat-
+         ing summary statistics and functional annotations”. In: PLOS Genetics 19.12 (Dec. 2023).
+         Publisher: Public Library of Science, e1011104.
+     [8] A. Spector and L. Janson. “Controlled Discovery and Localization of Signals via Bayesian Lin-
+         ear Programming”. In: Journal of the American Statistical Association 120.549 (Jan. 2025).
+         Publisher: ASA Website, pp. 460–471. issn: 0162-1459. doi: 10 . 1080 / 01621459 . 2024 .
+         2347667.
+bioRxiv preprint doi: https://doi.org/10.1101/2025.11.25.690514; this version posted December 25, 2025. The copyright holder for this preprint
+           (which was not certified by peer review) is the author/funder. All rights reserved. No reuse allowed without permission.
+
+
+
+
+     SUPPLEMENTARY FIGURES
+
+
+
+
+     Figure S1. Runtime comparison of SuSiE-RSS with regularized LD and refinement
+     between susieR 1.0 vs susieR 2.0. (A-B) Sparse genetic architecture simulation (K = 5 causal
+     variants; n = 1,000, p = 500, 1,000, 2,500 variants, h2snp = 0.03; 150 replicates per p). (A)
+     Performance of RSS with regularized LD. (B) Performance of refining model fit.
+bioRxiv preprint doi: https://doi.org/10.1101/2025.11.25.690514; this version posted December 25, 2025. The copyright holder for this preprint
+           (which was not certified by peer review) is the author/funder. All rights reserved. No reuse allowed without permission.
+
+
+
+
+     Figure S2. Sparse effects PIP calibration. Expected PIPs vs observed frequencies of true
+     causal variants (diagonal line represents perfect calibration).
+
+
+
+
+     Figure S3. ROC curves for oligogenic effects on a polygenic background using top N = 3
+     to 22 as causal, matching the “top N as causal” approach to assess FDR and power of 95% CS
+     in Figure 1F and 1G.
+bioRxiv preprint doi: https://doi.org/10.1101/2025.11.25.690514; this version posted December 25, 2025. The copyright holder for this preprint
+           (which was not certified by peer review) is the author/funder. All rights reserved. No reuse allowed without permission.
+
+
+
+
+     Figure S4. SuSiE 2.0 performance across complex genetic architectures with
+     infinitesimal backgrounds. (A-D) Oligogenic effects on a moderate infinitesimal background
+     (K = 3 sparse effects (50% total PVE), 5 oligogenic effects (35% total PVE), remaining variants
+     (15% total PVE); n = 1,000, p = 5,000, total PVE h2g = 0.25; 150 replicates) (A) 95% CS power
+     across top N variant thresholds. (B) 95% CS FDR across top N causal variant thresholds. (C)
+     5-fold cross-validated prediction accuracy (Pearson’s R2). (D) Variant-level ROC curve with 5%
+     FPR (dotted red line) using top 8 variants as causal (to cover simulated strong and moderate
+     effects). (E-H) Oligogenic effects on an extensive infinitesimal background (K = 3 sparse effects
+     (50% total PVE), 10 oligogenic effects (15% total PVE), remaining variants (35% total PVE); n =
+     1,000, p = 5,000, total PVE h2g = 0.25; 150 replicates). (E) 95% CS power across top N variant
+     thresholds. (F) 95% CS FDR across top N causal variant thresholds. (G) 5-fold cross-validated
+     prediction accuracy (Pearson’s R2). (H) Variant-level ROC curve with 5% FPR (dotted red line)
+     using top 13 variants as causal (to cover simulated strong and moderate effects).
+bioRxiv preprint doi: https://doi.org/10.1101/2025.11.25.690514; this version posted December 25, 2025. The copyright holder for this preprint
+           (which was not certified by peer review) is the author/funder. All rights reserved. No reuse allowed without permission.
+
+
+
+
+     Figure S5. Proportion of replicates where each method achieves the best cross-validated
+     prediction accuracy (Pearson’s R2) across sparse and complex genetic architectures. (A)
+     Sparse effects. (B) Oligogenic effects on polygenic background. (C) Oligogenic effects on
+     moderate infinitesimal background. (D) Oligogenic effects on extensive infinitesimal background.
+bioRxiv preprint doi: https://doi.org/10.1101/2025.11.25.690514; this version posted December 25, 2025. The copyright holder for this preprint
+           (which was not certified by peer review) is the author/funder. All rights reserved. No reuse allowed without permission.
+
+
+
+
+     Figure S6. Credible set size and median purity across sparse and complex genetic
+     architectures. (A) Sparse effect CS size. (B) Oligogenic effects on a polygenic background CS
+     size. (C) Oligogenic effects on a moderate infinitesimal background CS size. (D) Oligogenic
+     effects on an extensive infinitesimal background CS size. (E) Median purity across different
+     genetic effect architectures.
+bioRxiv preprint doi: https://doi.org/10.1101/2025.11.25.690514; this version posted December 25, 2025. The copyright holder for this preprint
+           (which was not certified by peer review) is the author/funder. All rights reserved. No reuse allowed without permission.
+
+
+
+
+     Figure S7. Fine-mapping performance in the presence of correlated polygenic signals.
+     (A-H) Oligogenic effects on polygenic background with total 23 causal variants, mimicking a
+     complex yet realistic cis-eQTL scenario (K = 3 strong effects (50% total PVE), 5 moderate
+     effects (35% total PVE),15 polygenic background (15% total PVE); n = 1,000, p = 5,000, total
+     PVE h2g = 0.25. (A) Absolute simulated effect sizes with causal variants highlighted in red. (B)
+     Marginal association strength (-log10 p-values). (C-E) Posterior inclusion probabilities (PIPs) for
+     SuSiE, SuSiE-inf, and SuSiE-ash, respectively; colored rings indicate credible set membership,
+     causal variants highlighted in red. (F-H) Credible sets overlaid on absolute effect sizes for
+     SuSiE, SuSiE-inf, and SuSiE-ash, respectively; colored points indicated variants captured in
+     credible sets.
+bioRxiv preprint doi: https://doi.org/10.1101/2025.11.25.690514; this version posted December 25, 2025. The copyright holder for this preprint
+           (which was not certified by peer review) is the author/funder. All rights reserved. No reuse allowed without permission.
+
+
+
+
+     Figure S8. Performance comparison of purity-based and attainable coverage credible
+     sets in sparse fine-mapping scenarios. (A-D) Sparse genetic effects (K = 1, 2, 3 causal
+     variants; n = 1,000, p = 5,000 variants, h2snp = 0.03; 150 replicates per K). (A) 95% CS power
+     across varying total PVE. (B) 95% CS FDR with nominal 5% FDR threshold (dotted red line).
+     (C) Purity (minimum absolute correlation among variants within each CS) distribution pooled
+     across K, showing many attainable coverage CS are very low in purity. (D) Credible set size
+     distribution pooled across K.
+

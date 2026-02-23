@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(Rscript *)",
+      "Bash(R --vanilla *)",
+      "Bash(R -e *)",
+      "Bash(git status*)",
+      "Bash(git log*)",
+      "Bash(git diff*)",
+      "Bash(git branch*)",
+      "Bash(git stash*)",
+      "Bash(git add *)"
+    ],
+    "deny": [
+      "Bash(rm -rf output/*)",
+      "Bash(rm -rf data/*)",
+      "Bash(git push*)",
+      "Bash(git reset --hard*)",
+      "Bash(git clean*)"
+    ]
+  }
+}
