@@ -123,6 +123,8 @@ Treat this as a first-class contribution, not a side analysis.
 5. Build a two-axis failure map (M1 on x-axis, chosen z-score metric on y-axis) and label dominant failure mode regions.
 6. Quantify how failure mode region changes expected benefit of random restarts, \(\sigma_0^2\) grids, and SuSiNE \(c\)-grids.
 
+**Key conceptual output from A0:** The vignette establishes two orthogonal failure axes: (1) *model-specification barriers* (OR-of-ANDs uncertainty that no single fit can represent → ensembling required) vs (2) *optimizer barriers* (better basin exists but greedy updates miss it → multi-start selection sufficient). It also demonstrates that EB estimation of $\sigma_0^2$ distorts ELBO-softmax ensemble weights even for symmetric basins (0.21/0.79 long-run weights vs 0.47/0.53 with fixed prior variance), motivating the fixed-prior-variance grid approach in Phase B.
+
 **Optional (supplement):**
 - A compact “failure-mode” comparison vs SuSiE-ash / SuSiE-inf to show the instability issue is not unique to vanilla SuSiE (but do not expand to full ensemble study for ash/inf unless needed).
 
@@ -156,6 +158,9 @@ Secondary/sensitivity:
 - Max-ELBO (select best model)
 - Simple PIP average
 - Optional: stacking/LOO-style weights if you can produce per-observation predictive densities reliably.
+
+**Caution — EB prior variance estimation distorts ELBO-softmax weights:**
+The pathology vignette (A0, Scenario 3) demonstrates that `estimate_prior_variance = TRUE` amplifies small numerical asymmetries between symmetric basins, producing long-run ensemble weights of 0.21/0.79 instead of the expected ~0.50/0.50. Fixing prior variance restores balance. This motivates using a fixed $\sigma_0^2$ grid (B2) rather than per-fit EB estimation when computing ELBO-softmax weights for aggregation.
 
 **Important design decision (“diagonal” vs “full grid” scoring):**
 - We do *not* want a full “score every posterior under every prior” matrix.  
@@ -321,7 +326,7 @@ For each dataset \((X,y,a)\):
 ---
 
 ## 9) Immediate next actions (concrete TODO list)
-1. **Create the "SuSiE Pathology" R notebook vignette** (simple → correlated → ambiguous → greedy trap).
+~~**Create the "SuSiE Pathology" R notebook vignette**~~ — **DONE** (`vignettes/susie_pathology.ipynb`). Introduces AND-of-ORs vs OR-of-ANDs taxonomy and model-specification vs optimizer barrier dichotomy.
 2. Confirm Bioinformatics scope/format constraints (figure limits, supplement norms).
 3. Finalize simulation harness changes:
    - alpha-based convergence for comparability

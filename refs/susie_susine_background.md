@@ -72,6 +72,19 @@ Even when SuSiE’s posterior approximation allows uncertainty *within* a compon
 This motivates **ensembling / multi-start / hyperparameter grids**:
 - Not because “SuSiE is bad,” but because the optimization landscape can contain multiple plausible explanations that a single VI optimum cannot represent simultaneously.
 
+#### (B′) Structural taxonomy: AND-of-ORs vs OR-of-ANDs
+
+SuSiE's variational posterior is a product of $L$ independent categorical distributions (one per effect component). This means a single fit naturally represents **AND-of-ORs** uncertainty — each component independently spreads mass across alternatives (e.g., a causal SNP and its LD proxy). When the true uncertainty has this structure, a single fit suffices.
+
+What a single fit *cannot* represent is **OR-of-ANDs** uncertainty — “either this complete multi-SNP configuration or that one” — because this requires *correlated* choices across components. When two sets of variables span the same column subspace (even with moderate pairwise correlations), each fit commits to one set, creating distinct posterior basins.
+
+This distinction maps to intervention type:
+
+- **Model-specification barrier** (OR-of-ANDs): ensembling across fits is necessary to represent cross-basin uncertainty.
+- **Optimizer barrier** (greedy trap): a single better basin exists; multi-start selection or `refine` suffices.
+
+See `vignettes/susie_pathology.ipynb` (Scenarios 2–4) for concrete demonstrations.
+
 #### (C) Mis-specification / “background effects” (hallucinated sparse effects)
 Vanilla SuSiE assumes the signal is well represented by a **small number** $L$ of single-SNP effects plus noise. When the true architecture includes many weak effects (polygenic background), SuSiE can:
 - Attribute diffuse background signal to a smaller number of sparse components,
