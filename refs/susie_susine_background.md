@@ -120,6 +120,9 @@ where $\beta$ is the sparse SuSiE part and $\theta$ captures diffuse moderate/we
 **Practical note for benchmarking:** SuSiE-ash is best viewed as changing **background-effect modeling and shrinkage calibration** rather than adding a fundamentally different search/exploration algorithm.
 
 #### 2.1.1 Rough implementation spec (SuSiE-ash)
+
+> **Note (2025-07-07):** SuSiE-ash is now fully implemented in upstream susieR 2.0 via `susie(X, y, unmappable_effects = "ash")`. The spec below remains useful as a conceptual reference but is no longer a porting target. See `refs/susieR_2.0_inventory.md` for the actual implementation details (C++ backend via `caisa_rcpp`, masking/unmasking pattern, individual-data only constraint).
+
 If someone needs a first working implementation, this is the minimum useful spec.
 
 **Model (individual-level):**
@@ -212,6 +215,9 @@ Summary-stat note: in an RSS implementation, replace raw $X$ operations with LD/
 - Depending on implementation details, it may be less competitive on some sparse metrics if the model is too “diffuse” relative to truth.
 
 #### 2.2.1 Rough implementation spec (SuSiE-inf)
+
+> **Note (2025-07-07):** SuSiE-inf is now fully implemented in upstream susieR 2.0 via `susie(X, y, unmappable_effects = "inf")` (individual data) and `susie_ss(unmappable_effects = "inf")` (summary stats). Uses omega-weighted SER updates and BLUP theta. See `refs/susieR_2.0_inventory.md` for details. Incompatible with RSS (λ>0).
+
 SuSiE-inf can be viewed as the same decomposition, but with a single Gaussian background prior:
 $$
 y=X\beta+X\theta+\varepsilon,\qquad \theta_j\sim\mathcal N(0,\tau^2),\qquad \varepsilon\sim\mathcal N(0,\sigma^2I_n).
@@ -377,8 +383,8 @@ SuSiE-2 emphasizes numerically stable handling of LD (e.g., regularization) to i
 These questions are here so a new collaborator/AI can quickly diagnose what remains ambiguous.
 
 1. **Primary output**: are we optimizing for (a) calibrated posterior PIPs/CSs, or (b) robust candidate selection under hyperparameter uncertainty?
-2. **Compute budget definition**: will we compare methods under a fixed number of model fits per locus, or fixed walltime?
-3. **Annotation error model**: will we include explicit sign-flip scenarios, LD-correlated annotation noise, or just R²-controlled Gaussian noise?
-4. **Role of SuSiE-ash/inf**: do we treat them as baseline “engines” (single-fit) or include them in any ensemble comparisons (even via non-ELBO pooling)?
+2. **Compute budget definition**: will we compare methods under a fixed number of model fits per locus, or fixed walltime? **→ D8 RESOLVED: fixed K (number of fits); record wall time per fit.**
+3. **Annotation error model**: will we include explicit sign-flip scenarios, LD-correlated annotation noise, or just R²-controlled Gaussian noise? **→ D14 RESOLVED: current controls sufficient, no sign flips or LD-correlated noise.**
+4. **Role of SuSiE-ash/inf**: do we treat them as baseline "engines" (single-fit) or include them in any ensemble comparisons (even via non-ELBO pooling)? **→ D3 RESOLVED: include as baseline comparison arms via susieR 2.0 (`unmappable_effects`). Zero implementation cost. See `analysis_completion_status.md` D3.**
 
 

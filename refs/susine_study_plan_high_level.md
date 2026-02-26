@@ -125,8 +125,8 @@ Treat this as a first-class contribution, not a side analysis.
 
 **Key conceptual output from A0:** The vignette establishes two orthogonal failure axes: (1) *model-specification barriers* (OR-of-ANDs uncertainty that no single fit can represent → ensembling required) vs (2) *optimizer barriers* (better basin exists but greedy updates miss it → multi-start selection sufficient). It also demonstrates that EB estimation of $\sigma_0^2$ distorts ELBO-softmax ensemble weights even for symmetric basins (0.21/0.79 long-run weights vs 0.47/0.53 with fixed prior variance), motivating the fixed-prior-variance grid approach in Phase B.
 
-**Optional (supplement):**
-- A compact “failure-mode” comparison vs SuSiE-ash / SuSiE-inf to show the instability issue is not unique to vanilla SuSiE (but do not expand to full ensemble study for ash/inf unless needed).
+**SuSiE-ash / SuSiE-inf instability comparison (supplement, previously optional — now planned):**
+- D3 RESOLVED: SuSiE-ash and SuSiE-inf are fully implemented in upstream susieR 2.0 (`unmappable_effects = "ash"` / `"inf"`) at zero implementation cost. Include as baseline comparison arms in Phase B (see B1 below). Within Phase A, include a compact failure-mode comparison showing that multimodality/instability is not unique to vanilla SuSiE.
 
 ---
 
@@ -134,12 +134,20 @@ Treat this as a first-class contribution, not a side analysis.
 **Goal:** quantify how different exploration knobs and aggregation rules trade off performance.
 
 #### B1) Define “use cases” (model families)
-Use-case IDs (from notes):
-- **A (baseline SuSiE):** zero means; one scalar prior variance \(\sigma_0^2\) per model.
-- **B (functional SuSiE via π or per-SNP variance):** encode functional information *without* mean shifts (secondary baseline; include if already implemented).
-- **C (SuSiNE):** mean vector \(\mu_0=c a\) with global \(c\); scalar \(\sigma_0^2\) per model.
 
-*(Keep the paper coherent: the central comparison is A vs C; B is optional, used only to argue “π-only is different from mean-shifts.”)*
+**[UPDATED 2025-07-07 per D1/D3 resolution — see `analysis_completion_status.md`]**
+
+5 model arms (factored design per D2):
+
+| Arm | Prior spec | Package | Notes |
+| --- | ---------- | ------- | ----- |
+| 1. Vanilla SuSiE | mu=0, fixed sigma_0^2, uniform pi | susieR 2.0 | Primary baseline |
+| 2. SuSiE + functional pi | mu=0, fixed sigma_0^2, pi=softmax(\|a_j\|/tau) | susieR 2.0 | D5: shows pi-only is different from mean-shifts |
+| 3. SuSiNE | mu_0 = c*a, fixed sigma_0^2, uniform pi | susine | Central method |
+| 4. SuSiE-ash | vanilla SuSiE + Mr.ASH background | susieR 2.0 | D3: `unmappable_effects = "ash"`, individual data only |
+| 5. SuSiE-inf | vanilla SuSiE + infinitesimal background | susieR 2.0 | D3: `unmappable_effects = "inf"`, individual + SS |
+
+*(Central comparison remains Arms 1 vs 3. Arms 4-5 are free baseline comparison arms showing that background-effect models address a complementary problem to directional priors. Arm 2 isolates the value of mean-shifts vs pi-only functional information.)*
 
 #### B2) Exploration mechanisms (how we generate \(K\) candidate fits per locus)
 Under a fixed budget \(K\):
@@ -162,9 +170,10 @@ Secondary/sensitivity:
 **Caution — EB prior variance estimation distorts ELBO-softmax weights:**
 The pathology vignette (A0, Scenario 3) demonstrates that `estimate_prior_variance = TRUE` amplifies small numerical asymmetries between symmetric basins, producing long-run ensemble weights of 0.21/0.79 instead of the expected ~0.50/0.50. Fixing prior variance restores balance. This motivates using a fixed $\sigma_0^2$ grid (B2) rather than per-fit EB estimation when computing ELBO-softmax weights for aggregation.
 
-**Important design decision (“diagonal” vs “full grid” scoring):**
-- We do *not* want a full “score every posterior under every prior” matrix.  
-- Instead, for each prior spec, we take the **best fit under that spec** (or a small inner aggregation across random restarts), then combine across prior specs (“diagonal BMA”).
+**Aggregation design decision (RESOLVED — see `analysis_completion_status.md` D6):**
+- All aggregation methods operate on a **flattened pool** of fits for a given (dataset, model_spec). Each fit's ELBO is evaluated under its own prior only (no cross-prior re-scoring).
+- Primary methods: Max ELBO, Uniform, ELBO softmax, and **Cluster-then-weight (Method A)** — which importance-corrects for optimizer frequency bias via JSD-based clustering.
+- Grid structure matters at the *exploration* stage (what fits to generate), not at the *aggregation* stage.
 
 ---
 
@@ -318,10 +327,13 @@ For each dataset \((X,y,a)\):
 ---
 
 ## 8) Scope control (to keep the paper finishable)
-1. **Do not implement SuSiNE-ash/inf** unless absolutely necessary.
-2. Keep the “functional SuSiE via π” baseline minimal (only if already implemented / cheap).
-3. Prefer a small, interpretable \(c\)-grid (and small \(\sigma_0^2\)-grid) over a huge Cartesian product.
-4. Treat SuSiE refinement as an exploration competitor only if it fits cleanly into the compute-budget accounting.
+
+**[UPDATED 2025-07-07 per D1/D3/D4/D5 resolution — see `analysis_completion_status.md`]**
+
+1. ~~Do not implement SuSiNE-ash/inf unless absolutely necessary.~~ **D3 RESOLVED:** SuSiE-ash/inf are free baseline arms via susieR 2.0 (`unmappable_effects`). Include them.
+2. ~~Keep the "functional SuSiE via π" baseline minimal.~~ **D5 RESOLVED:** Implement functional pi as `softmax(|a_j| / tau)` with tau-grid exploration (D15).
+3. Prefer a small, interpretable \(c\)-grid (and small \(\sigma_0^2\)-grid) over a huge Cartesian product. *(unchanged)*
+4. ~~Treat SuSiE refinement as an exploration competitor only if it fits cleanly.~~ **D4 RESOLVED:** Refinement is included. susieR 2.0 `refine=TRUE` for SuSiE baselines; harness-level BFS refinement for all models.
 
 ---
 
@@ -331,9 +343,9 @@ For each dataset \((X,y,a)\):
 3. Finalize simulation harness changes:
    - alpha-based convergence for comparability
    - consistent genotype QC filters (MAF, missingness)
-3. Implement diagonal-BMA workflow:
-   - multiple random starts per prior spec → pick best per spec
-   - ELBO-softmax across specs
+3. Implement flatten-based aggregation pipeline (see `analysis_completion_status.md` D6):
+   - save all per-fit PIP vectors + ELBOs
+   - post-hoc: flatten all fits per (dataset, model_spec), apply four aggregation methods
 4. Implement dataset difficulty metrics (M1 + full z-score metric family).
 5. Implement multimodality metrics (JSD, clustering, top-k Jaccard, PIP variance).
 6. Run metric-screening analysis to choose one primary z-score metric for main text.
@@ -350,7 +362,7 @@ For each dataset \((X,y,a)\):
 - **M1:** LD complexity metric \(\sum_{i<j} |r_{ij}|(1-|r_{ij}|)\).
 - **Z-primary metric:** selected z-score-only difficulty metric used with M1 to stratify failure modes.
 - **JSD:** Jensen–Shannon divergence between PIP vectors (diversity proxy).
-- **Diagonal BMA:** choose best model within each prior spec, then weight across specs (avoid full cross-scoring).
+- **Flatten-based aggregation:** pool all fits per (dataset, model_spec); aggregate via Max ELBO, Uniform, ELBO softmax, or Cluster-then-weight (Method A). See `analysis_completion_status.md` D6.
 
 
 
