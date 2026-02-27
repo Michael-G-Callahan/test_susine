@@ -163,24 +163,30 @@ Controlled by existing parameters in `simulate_priors()`:
 
 ### 3.1 susine Package Updates
 
-| # | Task | Priority | Effort | Details |
-|---|------|----------|--------|---------|
-| S1 | Computational speedups | MEDIUM | Medium | 5 specific optimizations identified (see 3.1.1 below). ~40-50% wall-clock improvement expected. |
-| S2 | Alpha/PIP convergence option | HIGH | Low | Add `convergence_method = c("elbo", "alpha")` parameter. Set default to match susieR 2.0's default. Track `max(abs(alpha_new - alpha_old))` per iteration. Files: `susine.R`, `susine_ss.R`. |
-| S3 | LD regularization for SS/RSS | LOW (sim) / MED (real data) | Low-Med | Basic PSD projection + spectral shrinkage. Only needed for Phase D real data. Files: `susine_rss.R`, `initialize.R`. |
-| S4 | Confirm baseline matching to susieR | HIGH | Low | Run susine and susieR on identical inputs (mu=0, fixed sigma_0^2, uniform pi, same init) and verify PIP/ELBO agreement. This validates use cases #1/#4, #5/#6, #7/#8 equivalence. |
-| S5 | Verify non-uniform pi flows correctly | HIGH | Low | Test that `prior_inclusion_weights` parameter in susine is properly used in SER updates and not overwritten by defaults. Needed for functional pi use cases. |
+| # | Task | Priority | Effort | Status | Details |
+|---|------|----------|--------|--------|---------|
+| S1 | Computational speedups | MEDIUM | Medium | **COMPLETED (2026-02-27)** | Implemented S1a-S1d in `susine` core paths (cached `Xty` into `BF`, cached `Xb` into `SER_ERSS`, single ERSS pass per iteration for ELBO+sigma updates, residual carry-forward). |
+| S2 | Alpha/PIP convergence option | HIGH | Low | **COMPLETED (2026-02-27)** | Added `convergence_method = c("elbo","alpha")` to `susine`, `susine_ss`, and `susine_rss`; tracks `model_fit$alpha_diff` and supports alpha-delta stopping. |
+| S3 | LD regularization for SS/RSS | LOW (sim) / MED (real data) | Low-Med | **COMPLETED (2026-02-27)** | Added `regularize_ld_matrix()` (PSD projection + shrinkage) and wired RSS options: `ld_regularization`, `ld_shrinkage`, `ld_min_eig`. |
+| S4 | Confirm baseline matching to susieR | HIGH | Low | **COMPLETED (2026-02-27)** | Baseline check script passes with fixed prior variance 0.2, EB prior updates off, residual variance estimated in both engines. |
+| S5 | Verify non-uniform pi flows correctly | HIGH | Low | **COMPLETED (2026-02-27)** | Added explicit test confirming `prior_inclusion_weights` propagate through SER alpha updates (no silent overwrite by uniform defaults). |
 
 #### 3.1.1 Computational Speedups (S1 detail)
 
 | Sub-task | Description | Impact |
 |----------|-------------|--------|
-| S1a | Eliminate redundant `compute_Xty` in `BF()` — pass `Xty` from `SER()` | ~25% wall-clock (largest single win) |
+| S1a | Eliminate redundant `compute_Xty` in `BF()` - pass `Xty` from `SER()` | ~25% wall-clock (largest single win) |
 | S1b | Compute ERSS once per effect, reuse for ELBO + variance update | Eliminates ~L redundant O(np) products |
-| S1c | Eliminate redundant `Xb` in `SER_ERSS()` — pass from `SER()` | Eliminates ~L redundant O(np) products |
+| S1c | Eliminate redundant `Xb` in `SER_ERSS()` - pass from `SER()` | Eliminates ~L redundant O(np) products |
 | S1d | Carry residual forward across outer iterations (incremental update) | Minor per-iteration savings |
-| S1e | Audit `diag(X'X)` caching — verify no redundant column-norm recomputation | Likely already handled; verify |
+| S1e | Audit `diag(X'X)` caching - verify no redundant column-norm recomputation | Verified existing `diag(X'X)` handling in SS/RSS paths; no additional change needed. |
 
+#### 3.1.2 Completion Log (2026-02-27)
+
+- Implemented code changes in `susine/R`: `SER.R`, `ERSS.R`, `ERSS_ss.R`, `susine.R`, `susine_ss.R`, `susine_rss.R`, `initialize.R`, `finalize.R`.
+- Added focused status tests: `susine/tests/testthat/test-susine-status-updates.R`.
+- Validation run: `devtools::test("susine")` -> **PASS 27, FAIL 0**.
+- Baseline equivalence rerun: `test_susine/vignettes/one_off_validations/test_susine_susieR_baseline_match.R` -> **6/6 checks passed**; PIP corr `0.99983733`, max |PIP diff| `0.008644`, relative ELBO diff `0.000147`.
 ### 3.2 test_susine Package Updates
 
 | # | Task | Priority | Effort | Details |
@@ -210,9 +216,9 @@ Controlled by existing parameters in `simulate_priors()`:
 
 ```
 Phase 0 (prerequisite):
-  S4 (confirm susine matches susieR) — gates all verification use cases
-  S2 (alpha convergence) — for cross-method comparability
-  S5 (verify non-uniform pi) — gates functional pi use cases
+  S4 (confirm susine matches susieR) - COMPLETE 2026-02-27
+  S2 (alpha convergence) - COMPLETE 2026-02-27
+  S5 (verify non-uniform pi) - COMPLETE 2026-02-27
 
 Phase 1 (core harness):
   T1 + T2 + T12 — ONE COUPLED REFACTOR. Do not implement independently.
@@ -232,7 +238,7 @@ Phase 3 (pre-pilot validation):
   T18 (seed management review) — must pass before submitting HPC jobs
   T20 (2-locus smoke test) — must pass before pilot
   T14 (LD count metric) — low priority
-  S3 (LD regularization) — only for Phase D
+  S3 (LD regularization) - COMPLETE 2026-02-27 (available for Phase D)
 ```
 
 ---
