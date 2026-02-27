@@ -5,7 +5,8 @@
       "Bash(where:*)",
       "Bash(cd:*)",
       "Bash(jupyter nbconvert:*)",
-      "Bash(conda run:*)"
+      "Bash(conda run:*)",
+      "Bash(xargs grep -l \"init_alpha\\\\|warm_start\")"
     ]
   }
 }
