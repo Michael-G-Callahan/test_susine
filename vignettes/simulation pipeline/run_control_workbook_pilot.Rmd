@@ -1,4 +1,4 @@
-﻿---
+---
 title: "SuSiNE Pilot Run Control"
 output:
   html_document:
@@ -39,7 +39,7 @@ library(knitr)
 
 ```{r job-inputs}
 job_inputs <- list(
-  job_name = "pilot_all_methods_k12_l10",
+  job_name = "pilot_study_smoke_test",
   HPC = TRUE,
   mem = "12G",
   time = "23:59:59",
@@ -47,12 +47,13 @@ job_inputs <- list(
   output_root = here("output"),
 
   # Full pilot grid with M1-stratified matrix downsampling.
-  grid_mode = "full",
+  grid_mode = "minimal",
 
   # All pilot use cases from project_status.md Section 2.1
   use_case_ids = c(
     "susie_vanilla",
-    "susie_ash",
+    "susie_ash_fixed",
+    "susie_ash_eb",
     "susie_inf",
     "susine_vanilla",
     "susie_eb",
@@ -65,29 +66,29 @@ job_inputs <- list(
   # All exploration methods, budgeted in separate mode.
   exploration_methods = c("single", "restart", "tau_grid", "c_grid", "refine"),
   exploration_mode = "separate",
-  K = 12L,
+  K = 3L,
 
   # Core simulation settings for pilot.
   L_grid = 10L,
-  y_noise_grid = c(0.5, 0.8, 0.95),
-  p_star_grid = c(1L, 3L, 5L),
+  y_noise_grid = c(0.5, 0.7), #c(0.5, 0.8, 0.95),
+  p_star_grid = c(5L, 10L), #c(1L, 3L, 5L, 10L, 20L),
   architecture_grid = c("sparse"),
   pair_L_p_star = FALSE,
 
   # Annotation quality grid.
-  annotation_r2 = c(0.0, 0.1, 0.3, 0.5),
-  inflate_match = c(0.0, 0.5, 1.0),
+  annotation_r2 = c(0.3, 0.5), #c(0.0, 0.1, 0.3, 0.5),
+  inflate_match = c(1.0), #c(0.8, 1.0, 1.2),
 
   # Exploration grids/settings (must align with K in separate mode).
-  c_grid_values = seq(0, 1.1, by = 0.1),
-  tau_grid_values = seq(0.25, 3.0, length.out = 12),
+  c_grid_values = seq(0, 1.1, length.out = 3),
+  tau_grid_values = seq(0.25, 3.0, length.out = 3),
   restart_settings = list(
-    n_inits = 12L,
-    alpha_concentration = 0.1,
+    n_inits = 3L,
+    alpha_concentration = 0.001,
     debug_alpha = FALSE
   ),
   refine_settings = list(
-    n_steps = 12L,
+    n_steps = 3L,
     cs_source = "filtered"
   ),
 
@@ -97,7 +98,7 @@ job_inputs <- list(
   # Seeds and task packing.
   seeds = 1:3,
   task_unit = "dataset",
-  bundles_per_task = 2L,
+  bundles_per_task = 1L,
   task_assignment_seed = 1L,
 
   # Data source and matrix catalog.
@@ -121,7 +122,7 @@ job_inputs <- list(
   purity_threshold = 0.50,
   verbose_file_output = FALSE,
   write_legacy_snp_csv = FALSE,
-  write_snps_parquet = TRUE,
+  write_snps_parquet = FALSE,
   write_confusion_bins = TRUE,
 
   # All aggregation methods + full per-dataset global pool.
@@ -311,3 +312,4 @@ run_task(
   quiet = TRUE
 )
 ```
+

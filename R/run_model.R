@@ -217,6 +217,124 @@ get_priors_cached <- function(cache_env,
   priors
 }
 
+normalize_blocked_idx <- function(blocked_idx, p) {
+  idx <- unique(as.integer(blocked_idx))
+  idx <- idx[is.finite(idx) & idx >= 1L & idx <= as.integer(p)]
+  sort(idx)
+}
+
+resolve_primary_init_type <- function(run_row) {
+  restart_id <- suppressWarnings(as.integer(run_row$restart_id %||% NA_integer_))
+  init_type <- as.character(run_row$init_type %||% NA_character_)
+  if (is.na(init_type) || !nzchar(init_type)) {
+    init_type <- if (!is.na(restart_id) && restart_id > 1L) "warm" else "default"
+  }
+  init_type
+}
+
+resolve_restart_seed <- function(run_row, restart_id = NA_integer_) {
+  restart_seed <- suppressWarnings(as.integer(run_row$restart_seed %||% NA_integer_))
+  if (is.na(restart_seed)) {
+    seed_bump <- ifelse(is.na(restart_id), 1L, restart_id)
+    restart_seed <- as.integer(run_row$phenotype_seed %||% 1L) + seed_bump
+  }
+  as.integer(restart_seed)
+}
+
+infer_primary_variant_meta <- function(run_row, wall_time_sec = NA_real_) {
+  restart_id <- suppressWarnings(as.integer(run_row$restart_id %||% NA_integer_))
+  refine_step <- suppressWarnings(as.integer(run_row$refine_step %||% NA_integer_))
+  init_type <- resolve_primary_init_type(run_row)
+  is_refine <- !is.na(refine_step)
+  list(
+    variant_type = if (is_refine) "refine" else if (!is.na(restart_id)) "restart" else "base",
+    variant_id = if (is_refine) refine_step else if (!is.na(restart_id)) restart_id else NA_integer_,
+    init_type = init_type,
+    is_restart = !is.na(restart_id),
+    is_agg = FALSE,
+    wall_time_sec = as.numeric(wall_time_sec)
+  )
+}
+
+execution_cache_key <- function(use_case,
+                                run_row,
+                                data_bundle,
+                                job_config,
+                                blocked_idx = integer(0)) {
+  use_case <- tibble::as_tibble(use_case)
+  p <- ncol(data_bundle$X)
+  L <- as.integer(run_row$L)
+  backend <- as.character(use_case$backend[[1]] %||% NA_character_)
+  prior_mean_strategy <- as.character(use_case$prior_mean_strategy[[1]] %||% NA_character_)
+  prior_variance_strategy <- as.character(use_case$prior_variance_strategy[[1]] %||% NA_character_)
+  inclusion_prior_strategy <- as.character(use_case$inclusion_prior_strategy[[1]] %||% NA_character_)
+  unmappable_effects <- as.character(use_case$unmappable_effects[[1]] %||% "none")
+
+  fmt_num <- function(x) {
+    x <- as.numeric(x)[1]
+    if (!is.finite(x)) return("NA")
+    format(x, digits = 16, scientific = FALSE, trim = TRUE)
+  }
+  fmt_chr <- function(x) {
+    x <- as.character(x)[1]
+    if (is.na(x) || !nzchar(x)) return("NA")
+    x
+  }
+  fmt_int <- function(x) {
+    x <- as.integer(x)[1]
+    if (!is.finite(x)) return("NA")
+    as.character(x)
+  }
+
+  init_type <- resolve_primary_init_type(run_row)
+  restart_id <- suppressWarnings(as.integer(run_row$restart_id %||% NA_integer_))
+  warm_seed <- if (identical(init_type, "warm")) resolve_restart_seed(run_row, restart_id) else NA_integer_
+  alpha_conc <- job_config$job$compute$restart$alpha_concentration %||% 1
+
+  annotation_active <- prior_mean_strategy == "functional_mu" || inclusion_prior_strategy == "functional_pi"
+  ann_r2_key <- if (annotation_active) fmt_num(run_row$annotation_r2) else "NA"
+  inflate_key <- if (annotation_active) fmt_num(run_row$inflate_match) else "NA"
+  ann_seed_key <- if (annotation_active) fmt_int(run_row$annotation_seed) else "NA"
+
+  c_value <- as.numeric(run_row$c_value %||% NA_real_)
+  if (!is.finite(c_value)) c_value <- 1
+  c_key <- if (prior_mean_strategy == "functional_mu") fmt_num(c_value) else "NA"
+
+  tau_value <- as.numeric(run_row$tau_value %||% NA_real_)
+  if (!is.finite(tau_value) || tau_value <= 0) tau_value <- 1
+  tau_key <- if (inclusion_prior_strategy == "functional_pi") fmt_num(tau_value) else "NA"
+
+  var_y <- stats::var(data_bundle$y)
+  sigma_scalar <- parse_sigma_0_2_scalar(run_row[["sigma_0_2_scalar"]], var_y, L)
+  sigma_scalar_fixed <- if (prior_variance_strategy == "fixed") sigma_scalar %||% 0.2 else sigma_scalar
+  sigma_key <- if (identical(prior_variance_strategy, "fixed")) fmt_num(sigma_scalar_fixed) else "eb"
+
+  blocked_norm <- normalize_blocked_idx(blocked_idx, p)
+  blocked_key <- if (length(blocked_norm)) paste(blocked_norm, collapse = ",") else "none"
+
+  paste(
+    paste0("bundle=", fmt_int(run_row$dataset_bundle_id)),
+    paste0("use_case=", fmt_chr(run_row$use_case_id)),
+    paste0("backend=", fmt_chr(backend)),
+    paste0("pm=", fmt_chr(prior_mean_strategy)),
+    paste0("pv=", fmt_chr(prior_variance_strategy)),
+    paste0("pi=", fmt_chr(inclusion_prior_strategy)),
+    paste0("unmap=", fmt_chr(unmappable_effects)),
+    paste0("L=", fmt_int(L)),
+    paste0("init=", fmt_chr(init_type)),
+    paste0("warm_seed=", fmt_int(warm_seed)),
+    paste0("alpha_conc=", if (identical(init_type, "warm")) fmt_num(alpha_conc) else "NA"),
+    paste0("ann_r2=", ann_r2_key),
+    paste0("inflate=", inflate_key),
+    paste0("ann_seed=", ann_seed_key),
+    paste0("c=", c_key),
+    paste0("tau=", tau_key),
+    paste0("sigma=", sigma_key),
+    paste0("blocked=", blocked_key),
+    sep = "|"
+  )
+}
+
 #' Execute a single run row: simulate data, fit model, and persist outputs.
 #' @keywords internal
 execute_single_run <- function(run_row, job_config, quiet = FALSE, buffer_ctx = NULL) {
@@ -428,6 +546,9 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
   global_primary_pips <- list()
   global_primary_elbos <- c()
   global_run_template <- NULL
+  execution_cache <- new.env(parent = emptyenv())
+  execution_cache_hits <- 0L
+  execution_cache_misses <- 0L
 
   use_case_ids <- unique(bundle_runs$use_case_id)
   for (uc_id in use_case_ids) {
@@ -442,35 +563,71 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
                                group_key,
                                blocked_idx = integer(0),
                                meta_override = list()) {
-      model_result <- run_use_case(
+      cache_key <- execution_cache_key(
         use_case = use_case,
         run_row = run_row,
         data_bundle = data_bundle,
         job_config = job_config,
         blocked_idx = blocked_idx
       )
-      fit <- model_result$fits[[1]]
-      meta <- model_result$fit_meta[[1]]
+
+      cache_hit <- exists(cache_key, envir = execution_cache, inherits = FALSE)
+      if (cache_hit) {
+        cached <- get(cache_key, envir = execution_cache, inherits = FALSE)
+        fit <- cached$fit
+        eval_res <- cached$evaluation
+        run_data_bundle <- cached$run_data_bundle
+        meta <- infer_primary_variant_meta(run_row, wall_time_sec = 0)
+        meta$model_call_executed <- FALSE
+        meta$cache_source_run_id <- as.integer(cached$source_run_id)
+        execution_cache_hits <<- execution_cache_hits + 1L
+      } else {
+        model_result <- run_use_case(
+          use_case = use_case,
+          run_row = run_row,
+          data_bundle = data_bundle,
+          job_config = job_config,
+          blocked_idx = blocked_idx
+        )
+        fit <- model_result$fits[[1]]
+        meta <- model_result$fit_meta[[1]]
+        eval_res <- evaluate_model(
+          fit = fit,
+          X = data_bundle$X,
+          y = data_bundle$y,
+          causal_idx = data_bundle$causal_idx,
+          rho = job_config$job$credible_set_rho %||% 0.95,
+          purity_threshold = job_config$job$purity_threshold %||% 0.5,
+          compute_curves = FALSE
+        )
+
+        run_data_bundle <- data_bundle
+        if (!is.null(model_result$mu_0)) {
+          run_data_bundle$mu_0 <- model_result$mu_0
+        }
+        if (!is.null(model_result$sigma_0_2)) {
+          run_data_bundle$sigma_0_2 <- model_result$sigma_0_2
+        }
+        assign(
+          cache_key,
+          list(
+            fit = fit,
+            evaluation = eval_res,
+            run_data_bundle = run_data_bundle,
+            source_run_id = as.integer(run_row$run_id)
+          ),
+          envir = execution_cache
+        )
+        meta$model_call_executed <- TRUE
+        meta$cache_source_run_id <- as.integer(run_row$run_id)
+        execution_cache_misses <<- execution_cache_misses + 1L
+      }
       if (length(meta_override)) {
         meta[names(meta_override)] <- meta_override
       }
-      eval_res <- evaluate_model(
-        fit = fit,
-        X = data_bundle$X,
-        y = data_bundle$y,
-        causal_idx = data_bundle$causal_idx,
-        rho = job_config$job$credible_set_rho %||% 0.95,
-        purity_threshold = job_config$job$purity_threshold %||% 0.5,
-        compute_curves = FALSE
-      )
-
-      run_data_bundle <- data_bundle
-      if (!is.null(model_result$mu_0)) {
-        run_data_bundle$mu_0 <- model_result$mu_0
-      }
-      if (!is.null(model_result$sigma_0_2)) {
-        run_data_bundle$sigma_0_2 <- model_result$sigma_0_2
-      }
+      meta$init_type <- as.character(meta$init_type %||% resolve_primary_init_type(run_row))
+      meta$model_call_executed <- isTRUE(meta$model_call_executed)
+      meta$cache_source_run_id <- as.integer(meta$cache_source_run_id %||% run_row$run_id)
       write_run_outputs(
         run_row = run_row,
         job_config = job_config,
@@ -502,6 +659,8 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
         phenotype_seed = run_row$phenotype_seed,
         variant_type = meta$variant_type,
         variant_id = meta$variant_id,
+        model_call_executed = as.logical(meta$model_call_executed %||% NA),
+        cache_source_run_id = as.integer(meta$cache_source_run_id %||% NA_integer_),
         power = eval_res$model_filtered$power,
         mean_size = eval_res$model_filtered$mean_size,
         mean_purity = eval_res$model_filtered$mean_purity
@@ -731,6 +890,17 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
     )
   }
 
+  if (!quiet && execution_cache_hits > 0L) {
+    message(
+      sprintf(
+        "Execution cache reused %d fit(s) in bundle %s (computed %d unique fit(s)).",
+        execution_cache_hits,
+        as.integer(bundle_id),
+        execution_cache_misses
+      )
+    )
+  }
+
   if (length(summary_rows)) {
     return(dplyr::bind_rows(summary_rows))
   }
@@ -868,25 +1038,16 @@ run_use_case <- function(use_case, run_row, data_bundle, job_config, blocked_idx
   }
 
   restart_id <- suppressWarnings(as.integer(run_row$restart_id %||% NA_integer_))
-  restart_seed <- suppressWarnings(as.integer(run_row$restart_seed %||% NA_integer_))
   refine_step <- suppressWarnings(as.integer(run_row$refine_step %||% NA_integer_))
-  init_type <- as.character(run_row$init_type %||% NA_character_)
-  if (is.na(init_type)) {
-    init_type <- if (!is.na(restart_id) && restart_id > 1L) "warm" else "default"
-  }
+  init_type <- resolve_primary_init_type(run_row)
 
   prior_weights <- base_prior_weights
   if (identical(init_type, "warm")) {
-    if (!is.na(restart_seed)) {
-      set.seed(restart_seed)
-    } else {
-      seed_bump <- ifelse(is.na(restart_id), 1L, restart_id)
-      set.seed(as.integer(run_row$phenotype_seed %||% 1L) + seed_bump)
-    }
+    restart_seed <- resolve_restart_seed(run_row, restart_id)
+    set.seed(restart_seed)
     prior_weights <- as.numeric(dirichlet_matrix(1L, rep(alpha_conc, p)))
   }
-  blocked_idx <- unique(as.integer(blocked_idx))
-  blocked_idx <- blocked_idx[is.finite(blocked_idx) & blocked_idx >= 1L & blocked_idx <= p]
+  blocked_idx <- normalize_blocked_idx(blocked_idx, p)
   if (length(blocked_idx)) {
     prior_weights[blocked_idx] <- 0
     if (sum(prior_weights) <= 0) {
@@ -911,7 +1072,7 @@ run_use_case <- function(use_case, run_row, data_bundle, job_config, blocked_idx
   }
 
   sigma_scalar <- parse_sigma_0_2_scalar(run_row[["sigma_0_2_scalar"]], var_y, L)
-  sigma_scalar <- sigma_scalar %||% 0.2
+  sigma_scalar_fixed <- if (prior_variance_strategy == "fixed") sigma_scalar %||% 0.2 else sigma_scalar
 
   fit <- NULL
   wall_time_sec <- NA_real_
@@ -926,7 +1087,7 @@ run_use_case <- function(use_case, run_row, data_bundle, job_config, blocked_idx
       verbose = FALSE
     )
     if (prior_variance_strategy == "fixed") {
-      args$sigma_0_2 <- as.numeric(sigma_scalar) * var_y
+      args$sigma_0_2 <- as.numeric(sigma_scalar_fixed) * var_y
       args$prior_update_method <- "none"
     } else {
       args$prior_update_method <- "var"
@@ -943,11 +1104,13 @@ run_use_case <- function(use_case, run_row, data_bundle, job_config, blocked_idx
       y = data_bundle$y,
       L = L,
       prior_weights = prior_weights,
-      scaled_prior_variance = as.numeric(sigma_scalar),
       estimate_prior_variance = identical(prior_variance_strategy, "eb"),
       estimate_residual_variance = TRUE,
       verbose = FALSE
     )
+    if (prior_variance_strategy == "fixed") {
+      args$scaled_prior_variance <- as.numeric(sigma_scalar_fixed)
+    }
     if ("convergence_method" %in% susie_formals) {
       args$convergence_method <- "elbo"
     }
@@ -967,22 +1130,14 @@ run_use_case <- function(use_case, run_row, data_bundle, job_config, blocked_idx
   sigma_0_2_truth <- NULL
   if (prior_variance_strategy == "fixed") {
     if (backend == "susine") {
-      sigma_0_2_truth <- rep(as.numeric(sigma_scalar) * var_y, p)
+      sigma_0_2_truth <- rep(as.numeric(sigma_scalar_fixed) * var_y, p)
     } else {
-      sigma_0_2_truth <- rep(as.numeric(sigma_scalar), p)
+      sigma_0_2_truth <- rep(as.numeric(sigma_scalar_fixed), p)
     }
   }
 
   fits <- list(fit)
-  is_refine <- !is.na(refine_step)
-  fit_meta <- list(list(
-    variant_type = if (is_refine) "refine" else if (!is.na(restart_id)) "restart" else "base",
-    variant_id = if (is_refine) refine_step else if (!is.na(restart_id)) restart_id else NA_integer_,
-    init_type = init_type,
-    is_restart = !is.na(restart_id),
-    is_agg = FALSE,
-    wall_time_sec = as.numeric(wall_time_sec)
-  ))
+  fit_meta <- list(infer_primary_variant_meta(run_row, wall_time_sec = wall_time_sec))
 
   list(
     fits = fits,
@@ -1231,7 +1386,9 @@ write_run_outputs <- function(run_row,
     variant_type = as.character(variant_meta$variant_type %||% "base"),
     variant_id = as.character(variant_meta$variant_id %||% NA_character_),
     agg_method = as.character(variant_meta$agg_method %||% NA_character_),
-    wall_time_sec = as.numeric(variant_meta$wall_time_sec %||% NA_real_)
+    wall_time_sec = as.numeric(variant_meta$wall_time_sec %||% NA_real_),
+    model_call_executed = as.logical(variant_meta$model_call_executed %||% NA),
+    cache_source_run_id = as.integer(variant_meta$cache_source_run_id %||% NA_integer_)
   )
 
   elbo_vals <- evaluation$traces$elbo
@@ -1623,4 +1780,6 @@ load_sampled_matrix <- function(matrix_row, repo_root) {
   storage.mode(X) <- "numeric"
   X
 }
+
+
 

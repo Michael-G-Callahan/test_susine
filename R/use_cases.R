@@ -10,7 +10,8 @@ prior_spec_catalog <- function() {
   tibble::tribble(
     ~prior_spec_id, ~use_case_id, ~label, ~backend, ~prior_mean_strategy, ~prior_variance_strategy, ~inclusion_prior_strategy, ~unmappable_effects,
     "susie_vanilla",      "susie_vanilla",       "SuSiE vanilla (susieR)",               "susieR", "zero",          "fixed", "uniform",      "none",
-    "susie_ash",          "susie_ash",           "SuSiE-ash (susieR)",                   "susieR", "zero",          "fixed", "uniform",      "ash",
+    "susie_ash_fixed",    "susie_ash_fixed",     "SuSiE-ash fixed prior var (susieR)",   "susieR", "zero",          "fixed", "uniform",      "ash",
+    "susie_ash_eb",       "susie_ash_eb",        "SuSiE-ash EB prior var (susieR)",      "susieR", "zero",          "eb",    "uniform",      "ash",
     "susie_inf",          "susie_inf",           "SuSiE-inf (susieR)",                   "susieR", "zero",          "fixed", "uniform",      "inf",
     "susine_vanilla",     "susine_vanilla",      "SuSiE vanilla (susine)",               "susine", "zero",          "fixed", "uniform",      "none",
     "susie_eb",           "susie_eb",            "SuSiE EB prior var (susieR)",          "susieR", "zero",          "eb",    "uniform",      "none",
@@ -131,3 +132,4 @@ resolve_use_cases <- function(ids = NULL) {
   }
   dplyr::filter(catalog, .data$prior_spec_id %in% ids | .data$use_case_id %in% ids)
 }
+

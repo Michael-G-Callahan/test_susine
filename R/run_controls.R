@@ -302,9 +302,6 @@ make_run_tables <- function(use_case_ids,
                                     allow_infer_restart = FALSE,
                                     other_prod = 1L) {
     if (method == "single") {
-      if (k != 1L) {
-        stop("Exploration 'single' requires K = 1.")
-      }
       return(tibble::tibble())
     }
     if (method == "restart") {
@@ -456,9 +453,6 @@ make_run_tables <- function(use_case_ids,
       )
     }
     if (!length(axis_list)) {
-      if (K != 1L) {
-        stop("Intersect mode with no active axes requires K = 1.")
-      }
       axis_tbl <- tibble::tibble(.axis_stub = 1L)
     } else {
       # Use unnamed inputs so crossing splices columns instead of creating list-cols.
