@@ -5,6 +5,13 @@
 
 ---
 
+## Planning Artifacts
+
+- **2026-02-27 detailed refactor scope (planning only):** `test_susine_refactor_scope_plan.md`
+- Notes: This artifact expands T1-T20 into file-level scope, dependency constraints, and recommended execution order. No code implementation changes are included in that plan.
+
+---
+
 ## Agent Implementation Protocol
 
 Before implementing any task item (S* or T*), an agent must:
@@ -189,60 +196,75 @@ Controlled by existing parameters in `simulate_priors()`:
 - Baseline equivalence rerun: `test_susine/vignettes/one_off_validations/test_susine_susieR_baseline_match.R` -> **6/6 checks passed**; PIP corr `0.99983733`, max |PIP diff| `0.008644`, relative ELBO diff `0.000147`.
 ### 3.2 test_susine Package Updates
 
-| # | Task | Priority | Effort | Details |
-|---|------|----------|--------|---------|
-| T1 | Wire susieR use cases into harness | HIGH | Medium | The harness currently only calls `susine()`. Need a dispatch layer that calls `susieR::susie()` for use cases 1-3, 5, 7. **Key argument mapping:** susine's `prior_inclusion_weights` = susieR's `prior_weights`; susine takes raw `sigma_0_2` while susieR uses `scaled_prior_variance` (fraction of `var(y)`, default 0.2); susine's `init_alpha` = susieR's `model_init` (but format differs — susieR expects a full susie fit object); susine's `eb_prior_mode` maps to susieR's `estimate_prior_variance`. Read both packages' function signatures before implementing. |
-| T2 | Refactor use case catalog | HIGH | Medium | Replace the 14-entry `use_case_catalog()` with a factored design. **New structure:** three independent lookup tables — `prior_spec_catalog()` (rows: susie, susie_fpi, susine, susie_ash, susie_inf, susie_eb, susine_eb, susie_fpi_susine, etc. — one per use case in Section 2.1), `exploration_catalog()` (rows: single, restart, c_grid, tau_grid, refine), `aggregation_catalog()` (rows: max_elbo, uniform, elbo_softmax, cluster_weight). Plus a `valid_exploration_for_prior()` constraint function (c_grid only for susine specs, tau_grid only for fpi specs, restarts for all). Run-control pipeline accepts these as independent arguments and crosses them, filtering by validity. Old 14-entry catalog is retired with no backward-compatibility shim. |
-| T3 | Implement oligogenic architecture | MEDIUM | Medium | Per SuSiE-2 paper: three-tier effect partition (sparse: k_S large N(0, sigma_S^2) effects; oligogenic: k_O moderate effects from 2-component Gaussian mixture; polygenic: k_P small effects OR infinitesimal on all remaining variants). Each tier scaled to its h^2 target. New `simulate_effect_sizes_oligogenic()` or `architecture` flag. Annotation simulation should reflect tiered structure. |
-| T4 | Implement refinement exploration mode | MEDIUM | Low-Med | BFS refinement in the test_susine harness — model-agnostic, budget-controlled, works with both `susine()` and `susieR::susie()` outputs. We do NOT use susieR's built-in `refine = TRUE`; all refinement is harness-level. Algorithm: from a fitted model, extract CSs, zero out CS SNPs in pi, refit, repeat as BFS tree up to budget K. Saves all fits for ensembling. ~80-120 lines. See BFS algorithm spec in `d1_package_architecture_analysis.md` Section A1. |
-| T5 | Implement tau-grid exploration for functional pi | HIGH | Low | Analogous to existing c-grid (`annotation_scales`). Add `tau_grid` parameter to `make_job_config()` that expands functional-pi runs across tau values. |
-| T6 | Implement cluster-then-ELBO-softmax aggregation (Method A) | HIGH | Low-Med | Clustering infra exists (JSD + hclust). Need: importance-corrected weights w_m ~ exp(ELBO_m) / f_m, representative selection per cluster, ESS diagnostic. |
-| T7 | Label default vs warm start fits | LOW | Low | Tag each fit in the output with `init_type = "default"` or `"warm"`. Ensure the first fit in each restart group uses default initialization (no init_alpha). |
-| T8 | Pass warm start K through run control workbook | HIGH | Low | K (budget = number of fits per exploration group) should be a top-level parameter in the run control workbook, flowing through `make_job_config()`. |
-| T9 | Deprecate `gamma_shrink` in `simulate_priors()` | LOW | Low | `gamma_shrink` was used to construct functional prior *variances* from annotations (old b_i/b_iv use cases, dropped per D5). Add deprecation warning; remove from new run configurations. Existing `annotation_r2` and `inflate_match` already cover the notes' PVE_causal and causal-to-noncausal variance ratio specs. |
-| T10 | Add overall per-dataset aggregation option | MEDIUM | Low | Pool all fits across use cases for a given dataset and apply aggregation methods. Wire as a run control option. |
-| T11 | Allow exploration composability | MEDIUM | Medium | Each (exploration, prior_spec) pair is independently valid. Allow interacting explorations (e.g., 5 random starts x 3 c-values = 15 fits). Current grid expansion partially supports this but not fully exposed. |
-| T12 | Separate exploration/aggregation control from use cases | HIGH | Medium | Use cases define model specs only. Explorations and aggregations are specified separately in the run control workbook. Related to T2. |
-| T13 | Verify all metrics are collected and saved | HIGH | Low | Audit that model metrics, CS metrics, dataset metrics, and multimodal metrics from Section 2.7 are all computed and written to output during HPC runs. |
-| T14 | Add high-LD-count metric | LOW | Low | Count of \|r\| > 0.95 off-diagonal in LD matrix (expected singleton bandits). Consider transformation to "expected number of singleton bandits per column." |
-| T15 | Ensure per-fit PIP vectors are saved | HIGH | Low | Needed for post-hoc aggregation flexibility. Verify that individual fit PIPs and ELBOs are written, not just within-group aggregates. |
-| T16 | Wire softmax temperature through job config to aggregation | MEDIUM | Low | ELBO softmax temperature exists in susine's `aggregate_susine_fits()` but is NOT exposed in test_susine job config. Need to thread it through `make_job_config()` and the aggregation call path. |
-| T17 | Add wall time recording per fit | HIGH | Low | Record wall time per model fit in HPC outputs (per D8). Needed to verify per-fit cost is comparable across methods and for compute budgeting. |
-| T18 | Seed management review | HIGH | Low | Before pilot HPC runs: verify reproducibility, confirm seed propagation through the full pipeline (phenotype generation, initialization, restart seeds, annotation draws). Set number of replicates. Per D16. |
-| T19 | Consider complete vs average linkage for JSD clustering | LOW | Low | Multimodality metrics currently use average linkage in `compute_multimodal_metrics()`. `pip_ensemble_methods.md` recommends complete linkage for Method A (ensures all fits within a cluster are mutually close). Evaluate whether to switch. |
-| T20 | Run 2-locus pipeline smoke test | HIGH | Low | Before pilot: run the full pipeline end-to-end on 2 matrices with minimal grid settings to catch integration bugs. Not a benchmarking run — just validation that all pieces connect. |
+| # | Task | Priority | Effort | Status | Details |
+|---|------|----------|--------|--------|---------|
+| T1 | Wire susieR use cases into harness | HIGH | Medium | COMPLETED (2026-02-27) | Added backend dispatch in run_use_case() for susine and susieR; mapped fixed/EB prior variance settings; added compatibility guard for older susieR formals. |
+| T2 | Refactor use case catalog | HIGH | Medium | COMPLETED (2026-02-27) | Added prior_spec_catalog(), exploration_catalog(), aggregation_catalog(), and valid_exploration_for_prior(); run controls now use factored catalogs. |
+| T3 | Implement oligogenic architecture | MEDIUM | Medium | PENDING | Not yet implemented. Current simulation path remains sparse architecture. |
+| T4 | Implement refinement exploration mode | MEDIUM | Low-Med | PENDING | refine exists in catalog but intentionally errors in run-table expansion; BFS harness logic not yet added. |
+| T5 | Implement tau-grid exploration for functional pi | HIGH | Low | COMPLETED (2026-02-27) | Added tau_grid_values to make_job_config() / run-table expansion and validity-constrained crossing. |
+| T6 | Implement cluster-then-ELBO-softmax aggregation (Method A) | HIGH | Low-Med | COMPLETED (2026-02-27) | Implemented cluster_weight aggregation with JSD clustering, representative selection, importance correction, and ESS output. |
+| T7 | Label default vs warm start fits | LOW | Low | COMPLETED (2026-02-27) | Added init_type propagation (default/warm) through run table and output artifacts. |
+| T8 | Pass warm start K through run control workbook | HIGH | Low | COMPLETED (2026-02-27) | K now drives exploration group expansion semantics in separate/intersect modes and is threaded in workbook usage. |
+| T9 | Deprecate gamma_shrink in simulate_priors() | LOW | Low | COMPLETED (2026-02-27) | gamma_shrink now emits deprecation warning and is ignored in simulation generation path. |
+| T10 | Add overall per-dataset aggregation option | MEDIUM | Low | COMPLETED (2026-02-27) | Added global per-dataset pooling with configurable overall_aggregation_methods and include_overall_pool. |
+| T11 | Allow exploration composability | MEDIUM | Medium | COMPLETED (2026-02-27) | Exploration axes now compose by dataset x use_case x exploration group, with separate/intersect expansion and validity filtering. |
+| T12 | Separate exploration/aggregation control from use cases | HIGH | Medium | COMPLETED (2026-02-27) | Use cases now define prior specs only; explorations and aggregations are independent run-control inputs. |
+| T13 | Verify all metrics are collected and saved | HIGH | Low | PARTIAL (core paths validated) | Core persistence paths validated by smoke tests (model/effect/dataset/confusion/multimodal/snp outputs). Full checklist audit against every Section 2.7 field is still pending. |
+| T14 | Add high-LD-count metric | LOW | Low | COMPLETED (2026-02-27) | Added high_ld_count_095 and high_ld_count_095_per_snp dataset metrics. |
+| T15 | Ensure per-fit PIP vectors are saved | HIGH | Low | COMPLETED (2026-02-27) | Per-fit SNP/PIP parquet persistence and downstream aggregated snps_dataset generation verified in buffered aggregation smoke path. |
+| T16 | Wire softmax temperature through job config to aggregation | MEDIUM | Low | COMPLETED (2026-02-27) | Added softmax_temperature to job config and wired through elbo_softmax/cluster_weight aggregation calls. |
+| T17 | Add wall time recording per fit | HIGH | Low | COMPLETED (2026-02-27) | Added per-fit wall-clock timing (wall_time_sec) into fit metadata and output tables. |
+| T18 | Seed management review | HIGH | Low | PENDING | A dedicated reproducibility audit and seed-policy signoff is still required before pilot HPC submissions. |
+| T19 | Consider complete vs average linkage for JSD clustering | LOW | Low | PARTIAL | Method A clustering uses complete linkage; multimodal summary clustering currently still uses average linkage and needs explicit final decision. |
+| T20 | Run 2-locus pipeline smoke test | HIGH | Low | PENDING | Single-locus and aggregation smoke checks pass; required 2-locus end-to-end smoke run has not yet been executed. |
+
+#### 3.2.1 Functional Validation Snapshot (2026-02-27)
+
+- Restart exploration smoke check: K=4, restart produced expected split default=1, warm=3, and run_task() completed.
+- Intersect exploration smoke check: exploration_methods = c("single","restart"), exploration_mode = "intersect", K=2 completed after fixing a list-column expansion bug in run controls.
+- Buffered staging + aggregation smoke check: with verbose_file_output = FALSE, index_staging_outputs() indexed 6 files and aggregate_staging_outputs() wrote expected outputs (model_metrics.csv, effect_metrics.csv, validation.csv, dataset_metrics.csv, confusion_bins.csv, snps_dataset/...).
+- Known packaging blocker: devtools::check() is currently blocked by malformed package name in DESCRIPTION (pre-existing project issue).
+
+#### 3.2.2 Remaining Work for test_susine
+
+1. T3: implement oligogenic architecture simulation path.
+2. T4: implement harness-level BFS refinement exploration.
+3. T13 (final pass): complete a strict field-by-field metrics audit vs Section 2.7 (not only smoke-level presence checks).
+4. T18: run and document seed-management reproducibility review.
+5. T19 (final decision): either switch multimodal cluster-count linkage to complete, or explicitly retain average with rationale.
+6. T20: execute and record the required 2-locus full pipeline smoke run.
 
 ### 3.3 Dependency: Implementation Order
 
-```
-Phase 0 (prerequisite):
+Phase 0 (prerequisite) - COMPLETE:
   S4 (confirm susine matches susieR) - COMPLETE 2026-02-27
   S2 (alpha convergence) - COMPLETE 2026-02-27
   S5 (verify non-uniform pi) - COMPLETE 2026-02-27
 
-Phase 1 (core harness):
-  T1 + T2 + T12 — ONE COUPLED REFACTOR. Do not implement independently.
-  T5 (tau-grid) + T8 (K through run control) + T16 (softmax temp) + T17 (wall time) — wiring
-  T6 (Method A aggregation) + T19 (linkage consideration) — aggregation
-  T13 (verify metrics) + T15 (per-fit PIPs)
+Phase 1 (core harness) - mostly COMPLETE:
+  T1 + T2 + T12 - COMPLETE 2026-02-27
+  T5 + T8 + T16 + T17 - COMPLETE 2026-02-27
+  T6 - COMPLETE 2026-02-27
+  T13 - PARTIAL (final checklist pending)
+  T15 - COMPLETE 2026-02-27
 
 Phase 2 (enhancements):
-  T3 (oligogenic) — meaningful new simulation function
-  T4 (refinement) — nice to have for pilot
-  T7 (label fits) — quality of life
-  T9 (deprecate gamma_shrink) — cleanup
-  T10 (overall aggregation) + T11 (composability)
-  S1 (speedups) — reduces wall-clock for full study
+  T7 - COMPLETE 2026-02-27
+  T9 - COMPLETE 2026-02-27
+  T10 + T11 - COMPLETE 2026-02-27
+  T3 - PENDING
+  T4 - PENDING
+  T19 - PARTIAL (Method A complete-linkage done; multimodal linkage choice pending)
+  S1 (speedups) - COMPLETE 2026-02-27
 
-Phase 3 (pre-pilot validation):
-  T18 (seed management review) — must pass before submitting HPC jobs
-  T20 (2-locus smoke test) — must pass before pilot
-  T14 (LD count metric) — low priority
+Phase 3 (pre-pilot validation) - REQUIRED before pilot:
+  T18 (seed management review) - PENDING
+  T20 (2-locus smoke test) - PENDING
+  T14 (LD count metric) - COMPLETE 2026-02-27
   S3 (LD regularization) - COMPLETE 2026-02-27 (available for Phase D)
-```
 
 ---
-
 ## Appendix: Resolved Decisions (Summary)
 
 All 17 critical decisions (D1-D17) from analysis_completion_status.md are resolved. Key outcomes:
@@ -266,3 +288,5 @@ All 17 critical decisions (D1-D17) from analysis_completion_status.md are resolv
 | D15 Softmax temperature | tau-grid is exploration knob for functional-pi specs |
 | D16 Seeds | Seed management review before pilot HPC runs |
 | D17 Grid values | Defer to run control workbook |
+
+

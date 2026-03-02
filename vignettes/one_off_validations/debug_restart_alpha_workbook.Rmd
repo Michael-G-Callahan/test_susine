@@ -40,7 +40,7 @@ minimal run table and data bundle for debugging.
 
 ```{r mini-config}
 job_inputs <- list(
-  use_case_id = "a_i_restart",
+  use_case_id = "susie_vanilla",
   L = 10,
   y_noise = 0.6,
   p_star = 10,
@@ -48,8 +48,6 @@ job_inputs <- list(
   sigma_0_2_scalar = "0.2",
   annotation_r2 = NA_real_,
   inflate_match = NA_real_,
-  gamma_shrink = NA_real_,
-  annotation_scale = NA_real_,
   restart_id = 1,
   alpha_concentration = 0.001,
   n_inits = 5,
@@ -61,12 +59,14 @@ job_inputs <- list(
 job_config <- test_susine::make_job_config(
   job_name = "debug_restart_alpha",
   use_case_ids = job_inputs$use_case_id,
+  exploration_methods = c("restart"),
+  exploration_mode = "separate",
+  K = job_inputs$n_inits,
   L_grid = job_inputs$L,
   y_noise_grid = job_inputs$y_noise,
   prior_quality = test_susine::prior_quality_grid(
     annotation_r2_levels = job_inputs$annotation_r2,
-    inflate_match_levels = job_inputs$inflate_match,
-    gamma_shrink_levels = job_inputs$gamma_shrink
+    inflate_match_levels = job_inputs$inflate_match
   ),
   p_star_grid = job_inputs$p_star,
   seeds = job_inputs$seed,
@@ -76,7 +76,6 @@ job_config <- test_susine::make_job_config(
   task_unit = "dataset",
   bundles_per_task = 1,
   sigma_0_2_scalars = job_inputs$sigma_0_2_scalar,
-  annotation_scales = if (is.na(job_inputs$annotation_scale)) NULL else job_inputs$annotation_scale,
   restart_settings = list(
     n_inits = job_inputs$n_inits,
     alpha_concentration = job_inputs$alpha_concentration
@@ -162,7 +161,7 @@ in the susine code path.
 
 ```{r compare-restarts}
 restart_rows <- run_table %>%
-  filter(use_case_id == "a_i_restart",
+  filter(use_case_id == "susie_vanilla",
          dataset_bundle_id == restart_row$dataset_bundle_id,
          group_key == restart_row$group_key) %>%
   arrange(restart_id) %>%

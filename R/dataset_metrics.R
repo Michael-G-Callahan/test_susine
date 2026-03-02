@@ -193,6 +193,18 @@ high_ld_mass <- function(R, gamma = 2) {
   mean(A2g[upper.tri(A2g)]) * 2
 }
 
+#' Count high-LD off-diagonal pairs.
+#'
+#' @param R Correlation matrix.
+#' @param threshold Absolute-correlation threshold.
+#' @return Number of off-diagonal pairs with |r| > threshold.
+#' @keywords internal
+high_ld_count <- function(R, threshold = 0.95) {
+  A <- abs(R)
+  diag(A) <- 0
+  sum(A[upper.tri(A)] > threshold, na.rm = TRUE)
+}
+
 #' Compute top-k eigenvalue fraction
 #'
 #' Fraction of variance captured by top k eigenvalues.
@@ -1361,8 +1373,12 @@ compute_dataset_metrics <- function(X, y, top_k = 10L) {
   stopifnot(is.matrix(X), length(y) == nrow(X))
   R <- suppressWarnings(stats::cor(X, use = "pairwise.complete.obs"))
   z <- compute_marginal_z(X, y)
+  hl_count <- high_ld_count(R, threshold = 0.95)
+  p <- ncol(X)
   tibble::tibble(
-    M1 = mid_energy_M1(R)
+    M1 = mid_energy_M1(R),
+    high_ld_count_095 = hl_count,
+    high_ld_count_095_per_snp = if (p > 0) (2 * hl_count) / p else NA_real_
   ) %>%
     dplyr::bind_cols(z_score_metrics(z, top_k = top_k))
 }

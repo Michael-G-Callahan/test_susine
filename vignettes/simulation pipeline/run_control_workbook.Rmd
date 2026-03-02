@@ -91,8 +91,11 @@ job_inputs <- list(
   # "intersect" for a zipped grid (rep_len across values)
   grid_mode = "full",
 
-  # Which predefined model variants to include (see use_case_catalog())
-  use_cases = c("a_i", "b_i", "b_ii"),
+  # Which prior specs to include (see prior_spec_catalog())
+  use_cases = c("susie_vanilla", "susie_functional_pi", "susine_functional_mu"),
+  exploration_methods = c("restart", "c_grid", "tau_grid"),
+  exploration_mode = "separate",
+  K = 5,
 
   # Simulation settings (vectorised; full factorial is taken)
   L_grid = c(10),
@@ -103,9 +106,9 @@ job_inputs <- list(
   # Prior quality grid parameters
   annotation_r2 = c(0.2, 0.4, 0.6, 0.8),
   inflate_match = c(0.5, 1, 1.5),
-  gamma_shrink = c(0.4, 0.8),
-  # Scalar multipliers for functional prior means (mu_0)
-  annotation_scales = c(1),
+  # Exploration grids
+  c_grid_values = c(0, 0.25, 0.5, 0.75, 1.0),
+  tau_grid_values = c(0.25, 0.5, 1, 2, 4),
   
   # sigma_0_2 prior variance scalars to test (only for naive sigma use cases)
   # Formats: "X" = X * var(y), "X/L" = X/L * var(y)
@@ -146,7 +149,7 @@ job_inputs <- list(
   write_confusion_bins = TRUE,
   
   # Aggregation + metrics controls
-  aggregation_methods = c("softmax_elbo"),
+  aggregation_methods = c("elbo_softmax", "cluster_weight"),
   metrics_settings = list(
     pip_bucket_width = 0.01,
     z_top_k = 10,
@@ -188,8 +191,7 @@ Convert the user inputs into the tidy tables that power the task runner.
 ```{r build-config}
 prior_quality <- prior_quality_grid(
   annotation_r2_levels = job_inputs$annotation_r2,
-  inflate_match_levels = job_inputs$inflate_match,
-  gamma_shrink_levels = job_inputs$gamma_shrink
+  inflate_match_levels = job_inputs$inflate_match
 )
 
 job_config <- make_job_config(
@@ -200,6 +202,9 @@ job_config <- make_job_config(
   task_unit = job_inputs$task_unit,
   bundles_per_task = job_inputs$bundles_per_task,
   use_case_ids = job_inputs$use_cases,
+  exploration_methods = job_inputs$exploration_methods,
+  exploration_mode = job_inputs$exploration_mode,
+  K = job_inputs$K,
   L_grid = job_inputs$L_grid,
   y_noise_grid = job_inputs$y_noise,
   prior_quality = prior_quality,
@@ -222,7 +227,8 @@ job_config <- make_job_config(
   grid_mode = job_inputs$grid_mode,
   pair_L_p_star = job_inputs$pair_L_p_star,
   sigma_0_2_scalars = job_inputs$sigma_0_2_scalars,
-  annotation_scales = job_inputs$annotation_scales,
+  c_grid_values = job_inputs$c_grid_values,
+  tau_grid_values = job_inputs$tau_grid_values,
   aggregation_methods = job_inputs$aggregation_methods,
   metrics_settings = job_inputs$metrics_settings,
   restart_settings = job_inputs$restart_settings
@@ -236,7 +242,7 @@ job_config <- make_job_config(
 ```{r preview-use-cases}
 job_config$tables$use_cases %>%
   filter(use_case_id %in% job_inputs$use_cases) %>%
-  select(use_case_id, label, mu_strategy, sigma_strategy, extra_compute) %>%
+  select(use_case_id, label, backend, prior_mean_strategy, prior_variance_strategy, inclusion_prior_strategy) %>%
   kable()
 ```
 
@@ -265,82 +271,12 @@ use_cases_tbl <- job_config$tables$use_cases %>%
   filter(use_case_id %in% job_inputs$use_cases)
 n_use_cases <- nrow(use_cases_tbl)
 
-count_or_one <- function(x) {
-  val <- dplyr::n_distinct(x[!is.na(x)])
-  ifelse(val < 1, 1L, val)
-}
-
-uc_counts <- runs_tbl %>%
-  group_by(use_case_id) %>%
-  summarise(
-    n_L = dplyr::n_distinct(L),
-    n_ann_r2 = count_or_one(annotation_r2),
-    n_inflate = count_or_one(inflate_match),
-    n_gamma = count_or_one(gamma_shrink),
-    n_scale = count_or_one(annotation_scale),
-    n_sigma = count_or_one(sigma_0_2_scalar),
-    n_restart = count_or_one(restart_id),
-    .groups = "drop"
-  ) %>%
-  mutate(
-    groups_per_bundle = n_L * n_ann_r2 * n_inflate,
-    runs_per_group = n_gamma * n_scale * n_sigma * n_restart
-  )
-
-group_counts <- runs_tbl %>%
-  group_by(use_case_id, dataset_bundle_id) %>%
-  summarise(n_groups = dplyr::n_distinct(group_key), .groups = "drop") %>%
-  group_by(use_case_id) %>%
-  summarise(min_groups = min(n_groups), max_groups = max(n_groups), .groups = "drop")
-
-run_counts <- runs_tbl %>%
-  group_by(use_case_id, dataset_bundle_id, group_key) %>%
-  summarise(n_runs = dplyr::n(), .groups = "drop") %>%
-  group_by(use_case_id) %>%
-  summarise(min_runs = min(n_runs), max_runs = max(n_runs), .groups = "drop")
-
-uc_counts <- uc_counts %>%
-  left_join(group_counts, by = "use_case_id") %>%
-  left_join(run_counts, by = "use_case_id")
-
-cat(sprintf("Number of dataset bundles: %d %s\n", n_bundles, bundles_formula))
-cat(sprintf("Number of tasks: %d %s\n", n_tasks, tasks_formula))
-cat(sprintf("# of use cases: %d\n", n_use_cases))
-
-for (i in seq_len(nrow(uc_counts))) {
-  row <- uc_counts[i, ]
-  uc <- row$use_case_id
-  groups_line <- sprintf(
-    "Groups per bundle (%s): %d (= %d L x %d annotation_r2 x %d inflate_match)",
-    uc, row$groups_per_bundle, row$n_L, row$n_ann_r2, row$n_inflate
-  )
-  if (!is.na(row$min_groups) && row$min_groups != row$max_groups) {
-    groups_line <- paste0(groups_line, sprintf(" [observed range: %d-%d]", row$min_groups, row$max_groups))
-  }
-  cat(groups_line, "\n")
-
-  runs_line <- sprintf(
-    "Runs per group (%s): %d (= %d gamma_shrink x %d annotation_scale x %d sigma_0_2_scalar x %d restart_id)",
-    uc, row$runs_per_group, row$n_gamma, row$n_scale, row$n_sigma, row$n_restart
-  )
-  if (!is.na(row$min_runs) && row$min_runs != row$max_runs) {
-    runs_line <- paste0(runs_line, sprintf(" [observed range: %d-%d]", row$min_runs, row$max_runs))
-  }
-  cat(runs_line, "\n")
-}
-
-total_runs <- nrow(runs_tbl)
-per_uc_terms <- uc_counts %>%
-  mutate(term = sprintf("%s: %d groups x %d runs = %d",
-                        use_case_id, groups_per_bundle, runs_per_group,
-                        groups_per_bundle * runs_per_group)) %>%
-  pull(term)
-cat(sprintf(
-  "Total runs: %d (= %d bundles x (%s))\n",
-  total_runs,
-  n_bundles,
-  paste(per_uc_terms, collapse = " + ")
-))
+lines <- test_susine::run_accounting_lines(
+  job_config,
+  seeds_per_matrix = length(unique(job_inputs$seeds)),
+  use_case_ids = job_inputs$use_cases
+)
+cat(paste(lines, collapse = "\n"), "\n")
 ```
 
 ## Dataset Bundle Grid

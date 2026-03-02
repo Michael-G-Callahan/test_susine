@@ -57,7 +57,10 @@ job_inputs <- list(
   grid_mode = "full",
 
   # Use cases for the pilot
-  use_cases = c("a_i", "a_i_restart", "b_ii"),
+  use_cases = c("susie_vanilla", "susine_functional_mu"),
+  exploration_methods = c("restart", "c_grid"),
+  exploration_mode = "separate",
+  K = 5,
 
   # Simulation settings
   L_grid = c(10),
@@ -68,8 +71,7 @@ job_inputs <- list(
   # Annotation settings (only used by functional mu use cases)
   annotation_r2 = c(0.3, 0.6),
   inflate_match = c(1),
-  gamma_shrink = c(0.4, 0.8),
-  annotation_scales = c(0, 0.2, 0.4, 0.6, 0.8),
+  c_grid_values = c(0, 0.2, 0.4, 0.6, 0.8),
 
   # SuSiE prior variance (fixed for pilot)
   sigma_0_2_scalars = c(0.2),
@@ -102,7 +104,7 @@ job_inputs <- list(
   write_snps_parquet = TRUE,
   write_confusion_bins = TRUE,
 
-  aggregation_methods = c("softmax_elbo"),
+  aggregation_methods = c("elbo_softmax", "cluster_weight"),
   metrics_settings = list(
     pip_bucket_width = 0.01,
     z_top_k = 10,
@@ -200,8 +202,7 @@ cat("Matrices selected:", nrow(data_matrix_catalog), "\n")
 ```{r build-config}
 prior_quality <- prior_quality_grid(
   annotation_r2_levels = job_inputs$annotation_r2,
-  inflate_match_levels = job_inputs$inflate_match,
-  gamma_shrink_levels = job_inputs$gamma_shrink
+  inflate_match_levels = job_inputs$inflate_match
 )
 
 job_config <- make_job_config(
@@ -212,6 +213,9 @@ job_config <- make_job_config(
   task_unit = job_inputs$task_unit,
   bundles_per_task = job_inputs$bundles_per_task,
   use_case_ids = job_inputs$use_cases,
+  exploration_methods = job_inputs$exploration_methods,
+  exploration_mode = job_inputs$exploration_mode,
+  K = job_inputs$K,
   L_grid = job_inputs$L_grid,
   y_noise_grid = job_inputs$y_noise,
   prior_quality = prior_quality,
@@ -235,11 +239,10 @@ job_config <- make_job_config(
   grid_mode = job_inputs$grid_mode,
   pair_L_p_star = job_inputs$pair_L_p_star,
   sigma_0_2_scalars = job_inputs$sigma_0_2_scalars,
-  annotation_scales = job_inputs$annotation_scales,
+  c_grid_values = job_inputs$c_grid_values,
   aggregation_methods = job_inputs$aggregation_methods,
   metrics_settings = job_inputs$metrics_settings,
-  restart_settings = job_inputs$restart_settings,
-  anneal_settings = job_inputs$anneal_settings
+  restart_settings = job_inputs$restart_settings
 )
 ```
 

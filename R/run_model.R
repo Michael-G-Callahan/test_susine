@@ -88,6 +88,9 @@ load_job_config <- function(path, task_id_filter = NULL) {
   if ("sigma_0_2_scalar" %in% names(runs_tbl)) {
     runs_tbl$sigma_0_2_scalar <- as.character(runs_tbl$sigma_0_2_scalar)
   }
+  if (!"prior_spec_id" %in% names(runs_tbl) && "use_case_id" %in% names(runs_tbl)) {
+    runs_tbl$prior_spec_id <- runs_tbl$use_case_id
+  }
 
   if (!is.null(task_id_filter)) {
     runs_tbl <- dplyr::filter(runs_tbl, task_id == !!as.integer(task_id_filter))
@@ -123,6 +126,9 @@ load_job_config <- function(path, task_id_filter = NULL) {
   }
   cfg$tables$tasks <- tibble::as_tibble(cfg$tables$tasks)
   cfg$tables$use_cases <- tibble::as_tibble(cfg$tables$use_cases)
+  if (!"prior_spec_id" %in% names(cfg$tables$use_cases) && "use_case_id" %in% names(cfg$tables$use_cases)) {
+    cfg$tables$use_cases$prior_spec_id <- cfg$tables$use_cases$use_case_id
+  }
 
   if (!is.null(cfg$tables$dataset_bundles)) {
     if (!"phenotype_seed" %in% names(cfg$tables$dataset_bundles) && "seed" %in% names(cfg$tables$dataset_bundles)) {
@@ -146,7 +152,10 @@ load_job_config <- function(path, task_id_filter = NULL) {
 #' Retrieve metadata row for a given use case ID.
 #' @keywords internal
 lookup_use_case <- function(job_config, use_case_id) {
-  dplyr::filter(job_config$tables$use_cases, use_case_id == !!use_case_id)
+  dplyr::filter(
+    job_config$tables$use_cases,
+    .data$use_case_id == !!use_case_id | .data$prior_spec_id == !!use_case_id
+  )
 }
 
 # Compute confusion bins for a PIP vector.
@@ -169,11 +178,10 @@ compute_confusion_bins <- function(pip, causal, pip_bucket_width = 0.01) {
     )
 }
 
-prior_cache_key <- function(annotation_r2, inflate_match, gamma_shrink, annotation_seed = NA_integer_) {
-  sprintf("r2=%s|inflate=%s|gamma=%s|seed=%s",
+prior_cache_key <- function(annotation_r2, inflate_match, annotation_seed = NA_integer_) {
+  sprintf("r2=%s|inflate=%s|seed=%s",
           format(annotation_r2, digits = 6, scientific = FALSE),
           format(inflate_match, digits = 6, scientific = FALSE),
-          format(gamma_shrink, digits = 6, scientific = FALSE),
           format(annotation_seed, digits = 10, scientific = FALSE))
 }
 
@@ -181,11 +189,10 @@ get_priors_cached <- function(cache_env,
                               beta,
                               annotation_r2,
                               inflate_match,
-                              gamma_shrink,
                               base_sigma2,
                               effect_sd,
                               annotation_seed = NA_integer_) {
-  key <- prior_cache_key(annotation_r2, inflate_match, gamma_shrink, annotation_seed)
+  key <- prior_cache_key(annotation_r2, inflate_match, annotation_seed)
   if (exists(key, envir = cache_env, inherits = FALSE)) {
     return(get(key, envir = cache_env, inherits = FALSE))
   }
@@ -193,7 +200,6 @@ get_priors_cached <- function(cache_env,
     beta = beta,
     annotation_r2 = annotation_r2,
     inflate_match = inflate_match,
-    gamma_shrink = gamma_shrink,
     base_sigma2 = base_sigma2,
     effect_sd = effect_sd,
     seed = annotation_seed
@@ -219,9 +225,11 @@ execute_single_run <- function(run_row, job_config, quiet = FALSE, buffer_ctx = 
     data_bundle = data_bundle,
     job_config = job_config
   )
+  fit <- model_result$fits[[1]]
+  meta <- model_result$fit_meta[[1]]
 
   eval_res <- evaluate_model(
-    fit = model_result$fit,
+    fit = fit,
     X = data_bundle$X,
     y = data_bundle$y,
     causal_idx = data_bundle$causal_idx,
@@ -243,8 +251,9 @@ execute_single_run <- function(run_row, job_config, quiet = FALSE, buffer_ctx = 
     job_config = job_config,
     evaluation = eval_res,
     data_bundle = run_data_bundle,
-    model_result = model_result,
-    buffer_ctx = buffer_ctx
+    model_result = list(fit = fit, extra = NULL),
+    buffer_ctx = buffer_ctx,
+    variant_meta = meta
   )
 
   if (!quiet) {
@@ -291,7 +300,6 @@ generate_data_for_run <- function(run_row, job_config) {
       y_noise = as.numeric(run_row$y_noise),
       annotation_r2 = as.numeric(run_row$annotation_r2),
       inflate_match = as.numeric(run_row$inflate_match),
-      gamma_shrink = as.numeric(run_row$gamma_shrink),
       effect_sd = run_row[["effect_sd"]] %||% 1
     )
     return(generate_simulation_data(spec))
@@ -304,7 +312,6 @@ generate_data_for_run <- function(run_row, job_config) {
     y_noise = as.numeric(run_row$y_noise),
     annotation_r2 = as.numeric(run_row$annotation_r2),
     inflate_match = as.numeric(run_row$inflate_match),
-    gamma_shrink = as.numeric(run_row$gamma_shrink),
     effect_sd = run_row[["effect_sd"]] %||% 1
   )
   generate_simulation_data(spec, base_X = X_mat)
@@ -394,6 +401,9 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
   write_dataset_metrics(bundle_row = bundle_row, job_config = job_config, dataset_metrics = ds_metrics, buffer_ctx = buffer_ctx)
 
   summary_rows <- list()
+  global_primary_pips <- list()
+  global_primary_elbos <- c()
+  global_run_template <- NULL
 
   use_case_ids <- unique(bundle_runs$use_case_id)
   for (uc_id in use_case_ids) {
@@ -458,6 +468,11 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
         if (!isTRUE(meta$is_agg)) {
           primary_pips_by_group[[group_key]] <- c(primary_pips_by_group[[group_key]], list(fit$model_fit$PIPs))
           primary_elbos_by_group[[group_key]] <- c(primary_elbos_by_group[[group_key]], tail(fit$model_fit$elbo, 1))
+          global_primary_pips[[length(global_primary_pips) + 1L]] <- fit$model_fit$PIPs
+          global_primary_elbos <- c(global_primary_elbos, tail(fit$model_fit$elbo, 1))
+          if (is.null(global_run_template)) {
+            global_run_template <- run_row
+          }
         }
 
         summary_rows[[length(summary_rows) + 1L]] <- tibble::tibble(
@@ -477,19 +492,27 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
 
     # Aggregation across fits (per use case)
     agg_methods <- job_config$job$compute$aggregation_methods %||% character(0)
+    softmax_temperature <- as.numeric(job_config$job$compute$softmax_temperature %||% 1)
     group_keys <- names(primary_pips_by_group)
     if (length(group_keys) > 0 && length(agg_methods)) {
       for (group_key in group_keys) {
         group_pips <- primary_pips_by_group[[group_key]]
         group_elbos <- primary_elbos_by_group[[group_key]]
         if (length(group_pips) > 1) {
-          agg_results <- aggregate_use_case_pips(group_pips, group_elbos, methods = agg_methods)
+          agg_results <- aggregate_use_case_pips(
+            pip_list = group_pips,
+            elbo_vec = group_elbos,
+            methods = agg_methods,
+            softmax_temperature = softmax_temperature,
+            jsd_threshold = job_config$job$metrics$jsd_threshold %||% 0.171661
+          )
           for (m in names(agg_results)) {
             agg_pip <- agg_results[[m]]
             agg_meta <- list(
               variant_type = "aggregation",
               variant_id = m,
               agg_method = m,
+              agg_ess = as.numeric(attr(agg_pip, "ess") %||% NA_real_),
               is_restart = FALSE,
               is_agg = TRUE
             )
@@ -499,8 +522,10 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
               pip_bucket_width = job_config$job$metrics$pip_bucket_width %||% 0.01
             )
             agg_run_row <- group_run_map[[group_key]] %||% uc_runs[1, , drop = FALSE]
-            agg_run_row$gamma_shrink <- NA_real_
-            agg_run_row$annotation_scale <- NA_real_
+            agg_run_row$restart_id <- NA_integer_
+            agg_run_row$init_type <- NA_character_
+            agg_run_row$c_value <- NA_real_
+            agg_run_row$tau_value <- NA_real_
             agg_run_row$sigma_0_2_scalar <- NA_character_
             write_confusion_bins(
               run_row = agg_run_row,
@@ -529,6 +554,63 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
       }
     }
 
+  }
+
+  # Overall per-dataset aggregation across all fits/use-cases.
+  include_overall <- isTRUE(job_config$job$compute$include_overall_pool %||% FALSE)
+  overall_methods <- job_config$job$compute$overall_aggregation_methods %||% character(0)
+  if (include_overall && length(global_primary_pips) > 1 && length(overall_methods) > 0) {
+    softmax_temperature <- as.numeric(job_config$job$compute$softmax_temperature %||% 1)
+    overall_agg <- aggregate_use_case_pips(
+      pip_list = global_primary_pips,
+      elbo_vec = global_primary_elbos,
+      methods = overall_methods,
+      softmax_temperature = softmax_temperature,
+      jsd_threshold = job_config$job$metrics$jsd_threshold %||% 0.171661
+    )
+    global_row <- global_run_template %||% bundle_runs[1, , drop = FALSE]
+    global_row$use_case_id <- "global_pool"
+    global_row$prior_spec_id <- "global_pool"
+    global_row$restart_id <- NA_integer_
+    global_row$init_type <- NA_character_
+    global_row$c_value <- NA_real_
+    global_row$tau_value <- NA_real_
+    global_row$sigma_0_2_scalar <- NA_character_
+    for (m in names(overall_agg)) {
+      agg_pip <- overall_agg[[m]]
+      conf_bins <- compute_confusion_bins(
+        agg_pip,
+        as.integer(seq_along(data_bundle$beta) %in% data_bundle$causal_idx),
+        pip_bucket_width = job_config$job$metrics$pip_bucket_width %||% 0.01
+      )
+      write_confusion_bins(
+        run_row = global_row,
+        job_config = job_config,
+        conf_bins = conf_bins,
+        buffer_ctx = buffer_ctx,
+        variant_meta = list(
+          variant_type = "overall_aggregation",
+          variant_id = m,
+          agg_method = m,
+          agg_ess = as.numeric(attr(agg_pip, "ess") %||% NA_real_),
+          is_restart = FALSE,
+          is_agg = TRUE
+        )
+      )
+    }
+
+    mm_global <- compute_multimodal_metrics(
+      global_primary_pips,
+      jsd_threshold = job_config$job$metrics$jsd_threshold %||% 0.171661
+    )
+    write_multimodal_metrics(
+      bundle_row = bundle_row,
+      use_case_id = "global_pool",
+      group_label = "overall_pool",
+      metrics = mm_global,
+      job_config = job_config,
+      buffer_ctx = buffer_ctx
+    )
   }
 
   if (length(summary_rows)) {
@@ -585,209 +667,258 @@ dirichlet_matrix <- function(n, alpha_vec) {
   draws / rowSums(draws)
 }
 
-#' Fit a use case with the susine backend, handling optional annealing/model averaging.
+normalize_susier_fit <- function(fit_raw, X, L) {
+  alpha <- as.matrix(fit_raw$alpha)
+  if (!nrow(alpha)) {
+    stop("susieR fit has empty alpha matrix.")
+  }
+  if (is.null(L) || !is.finite(L)) {
+    L <- nrow(alpha)
+  }
+  pip <- fit_raw$pip
+  if (is.null(pip)) {
+    pip <- 1 - apply(1 - alpha, 2, prod)
+  }
+  mu <- fit_raw$mu
+  beta <- rep(0, ncol(X))
+  if (!is.null(mu)) {
+    beta <- colSums(alpha * as.matrix(mu))
+  }
+  sigma2 <- fit_raw$sigma2 %||% fit_raw$residual_variance %||% NA_real_
+  list(
+    settings = list(L = L),
+    effect_fits = list(alpha = alpha),
+    model_fit = list(
+      PIPs = as.numeric(pip),
+      elbo = fit_raw$elbo %||% NA_real_,
+      sigma_2 = sigma2,
+      coef = as.numeric(beta),
+      std_coef = as.numeric(beta),
+      fitted_y = as.vector(X %*% beta)
+    ),
+    raw = fit_raw
+  )
+}
+
+#' Fit one run row under a prior spec (susine or susieR backend).
 #' @keywords internal
 run_use_case <- function(use_case, run_row, data_bundle, job_config) {
   L <- as.integer(run_row$L)
-  mu_strategy <- use_case$mu_strategy[[1]]
-  sigma_strategy <- use_case$sigma_strategy[[1]]
-
-  annotation_scale <- NA_real_
-  if ("annotation_scale" %in% names(run_row)) {
-    annotation_scale <- suppressWarnings(as.numeric(run_row$annotation_scale))
-  }
+  backend <- as.character(use_case$backend[[1]])
+  prior_mean_strategy <- as.character(use_case$prior_mean_strategy[[1]])
+  prior_variance_strategy <- as.character(use_case$prior_variance_strategy[[1]])
+  inclusion_prior_strategy <- as.character(use_case$inclusion_prior_strategy[[1]])
+  unmappable_effects <- as.character(use_case$unmappable_effects[[1]] %||% "none")
 
   annotation_r2 <- as.numeric(run_row$annotation_r2 %||% NA_real_)
   inflate_match <- as.numeric(run_row$inflate_match %||% NA_real_)
-  gamma_shrink <- as.numeric(run_row$gamma_shrink %||% NA_real_)
+  c_value <- as.numeric(run_row$c_value %||% NA_real_)
+  tau_value <- as.numeric(run_row$tau_value %||% NA_real_)
+  if (!is.finite(c_value)) c_value <- 1
+  if (!is.finite(tau_value) || tau_value <= 0) tau_value <- 1
 
-  uses_mu_ann <- mu_strategy %in% c("functional", "eb_mu")
-  uses_sigma_ann <- sigma_strategy %in% c("functional", "eb_sigma")
+  p <- ncol(data_bundle$X)
+  var_y <- stats::var(data_bundle$y)
+  restart_cfg <- job_config$job$compute$restart %||% list()
+  alpha_conc <- restart_cfg$alpha_concentration %||% 1
 
-  mu_0 <- 0
-  sigma_0_2 <- NULL
-
-  if (uses_mu_ann || uses_sigma_ann) {
+  annotation_vec <- NULL
+  if (prior_mean_strategy == "functional_mu" || inclusion_prior_strategy == "functional_pi") {
     annotation_seed <- run_row$annotation_seed %||% NA_integer_
     priors <- get_priors_cached(
       cache_env = data_bundle$priors_cache,
       beta = data_bundle$beta,
       annotation_r2 = annotation_r2,
       inflate_match = inflate_match,
-      gamma_shrink = gamma_shrink,
       base_sigma2 = stats::var(data_bundle$y),
       effect_sd = data_bundle$effect_sd,
       annotation_seed = annotation_seed
     )
-    if (uses_mu_ann) {
-      mu_0 <- priors$mu_0
-      if (mu_strategy == "functional") {
-        scale_val <- annotation_scale
-        if (is.null(scale_val) || length(scale_val) == 0 || is.na(scale_val) || !is.finite(scale_val)) {
-          scale_val <- 1
-        }
-        mu_0 <- mu_0 * scale_val
-      }
+    annotation_vec <- priors$mu_0
+  }
+
+  base_prior_weights <- rep(1 / p, p)
+  if (inclusion_prior_strategy == "functional_pi") {
+    if (is.null(annotation_vec)) {
+      stop("Functional pi strategy requires annotation vector.")
     }
-    if (uses_sigma_ann) {
-      sigma_0_2 <- priors$sigma_0_2
+    scaled <- abs(as.numeric(annotation_vec)) / tau_value
+    scaled <- scaled - max(scaled, na.rm = TRUE)
+    pw <- exp(scaled)
+    pw <- pw / sum(pw)
+    base_prior_weights <- as.numeric(pw)
+  }
+
+  restart_id <- suppressWarnings(as.integer(run_row$restart_id %||% NA_integer_))
+  restart_seed <- suppressWarnings(as.integer(run_row$restart_seed %||% NA_integer_))
+  init_type <- as.character(run_row$init_type %||% NA_character_)
+  if (is.na(init_type)) {
+    init_type <- if (!is.na(restart_id) && restart_id > 1L) "warm" else "default"
+  }
+
+  prior_weights <- base_prior_weights
+  if (identical(init_type, "warm")) {
+    if (!is.na(restart_seed)) {
+      set.seed(restart_seed)
+    } else {
+      seed_bump <- ifelse(is.na(restart_id), 1L, restart_id)
+      set.seed(as.integer(run_row$phenotype_seed %||% 1L) + seed_bump)
     }
+    prior_weights <- as.numeric(dirichlet_matrix(1L, rep(alpha_conc, p)))
   }
 
-  if (sigma_strategy == "naive" && !is.null(run_row[["sigma_0_2_scalar"]])) {
-    var_y <- var(data_bundle$y)
-    sigma_0_2 <- parse_sigma_0_2_scalar(run_row[["sigma_0_2_scalar"]], var_y, L)
-  } else if (!uses_sigma_ann) {
-    sigma_0_2 <- NULL
-  }
-
-  extra <- use_case$extra_compute[[1]]
-  if (length(extra) && is.na(extra)) {
-    extra <- NULL
-  }
-  anneal <- job_config$job$compute$anneal
-  model_avg <- job_config$job$compute$model_average
-  restart_cfg <- job_config$job$compute$restart
-
-  base_args <- list(
-    L = L,
-    X = data_bundle$X,
-    y = data_bundle$y,
-    mu_0 = mu_0,
-    sigma_0_2 = sigma_0_2,
-    prior_update_method = use_case$prior_update_method[[1]],
-    verbose = FALSE
-  )
-  if (resolve_flag(use_case$auto_scale_mu[[1]], FALSE)) {
-    base_args$auto_scale_mu_0 <- TRUE
-  }
-  if (resolve_flag(use_case$auto_scale_sigma[[1]], FALSE)) {
-    base_args$auto_scale_sigma_0_2 <- TRUE
-  }
-
-  if (identical(extra, "anneal")) {
-    base_args$anneal_start_T <- anneal$anneal_start_T %||% 5
-    base_args$anneal_schedule_type <- anneal$anneal_schedule_type %||% "geometric"
-    base_args$anneal_burn_in <- anneal$anneal_burn_in %||% 5
-  }
-
-  fits <- list()
-  fit_meta <- list()
-
-  if (identical(extra, "restart_alpha")) {
-    alpha_conc <- restart_cfg$alpha_concentration %||% 1
-    p <- ncol(data_bundle$X)
-    alpha_vec <- rep(alpha_conc, p)
-    restart_id <- suppressWarnings(as.integer(run_row$restart_id %||% NA_integer_))
-    restart_seed <- suppressWarnings(as.integer(run_row$restart_seed %||% NA_integer_))
-
-    if (!is.na(restart_id)) {
-      if (!is.na(restart_seed)) {
-        set.seed(restart_seed)
-      } else {
-        set.seed(as.integer(run_row$phenotype_seed) + restart_id)
-      }
-      init_alpha <- dirichlet_matrix(L, alpha_vec)
-      base_args$init_alpha <- init_alpha
-      fit <- do.call(susine::susine, base_args)
-      fit$settings$L <- fit$settings$L %||% L
-      fits[[1]] <- fit
-      fit_meta[[1]] <- list(
-        variant_type = "restart",
-        variant_id = restart_id,
-        is_restart = TRUE,
-        is_agg = FALSE
-      )
-      return(list(fits = fits, fit_meta = fit_meta, mu_0 = mu_0, sigma_0_2 = sigma_0_2))
+  mu_0 <- 0
+  if (prior_mean_strategy == "functional_mu") {
+    if (is.null(annotation_vec)) {
+      stop("Functional mu_0 strategy requires annotation vector.")
     }
-
-    # Backward-compatible fallback (single run row drives multiple restarts)
-    n_inits <- restart_cfg$n_inits %||% 5
-    for (i in seq_len(n_inits)) {
-      set.seed(as.integer(run_row$phenotype_seed) + i)
-      init_alpha <- dirichlet_matrix(L, alpha_vec)
-      base_args$init_alpha <- init_alpha
-      fit <- do.call(susine::susine, base_args)
-      fit$settings$L <- fit$settings$L %||% L
-      fits[[length(fits) + 1L]] <- fit
-      fit_meta[[length(fit_meta) + 1L]] <- list(
-        variant_type = "restart",
-        variant_id = i,
-        is_restart = TRUE,
-        is_agg = FALSE
-      )
-    }
-    return(list(fits = fits, fit_meta = fit_meta, mu_0 = mu_0, sigma_0_2 = sigma_0_2))
+    mu_0 <- as.numeric(c_value) * as.numeric(annotation_vec)
   }
 
-  if (!identical(extra, "model_avg")) {
-    fit <- do.call(susine::susine, base_args)
-    fit$settings$L <- fit$settings$L %||% L
-    fits[[1]] <- fit
-    fit_meta[[1]] <- list(
-      variant_type = "base",
-      variant_id = NA_integer_,
-      is_restart = FALSE,
-      is_agg = FALSE
+  sigma_scalar <- parse_sigma_0_2_scalar(run_row[["sigma_0_2_scalar"]], var_y, L)
+  sigma_scalar <- sigma_scalar %||% 0.2
+
+  fit <- NULL
+  wall_time_sec <- NA_real_
+  started <- proc.time()[["elapsed"]]
+  if (backend == "susine") {
+    args <- list(
+      L = L,
+      X = data_bundle$X,
+      y = data_bundle$y,
+      mu_0 = mu_0,
+      prior_inclusion_weights = prior_weights,
+      verbose = FALSE
     )
-    return(list(fits = fits, fit_meta = fit_meta, mu_0 = mu_0, sigma_0_2 = sigma_0_2))
+    if (prior_variance_strategy == "fixed") {
+      args$sigma_0_2 <- as.numeric(sigma_scalar) * var_y
+      args$prior_update_method <- "none"
+    } else {
+      args$prior_update_method <- "var"
+    }
+    fit <- do.call(susine::susine, args)
+    fit$settings$L <- fit$settings$L %||% L
+  } else if (backend == "susieR") {
+    if (!requireNamespace("susieR", quietly = TRUE)) {
+      stop("susieR backend requested but package 'susieR' is not installed.")
+    }
+    susie_formals <- names(formals(susieR::susie))
+    args <- list(
+      X = data_bundle$X,
+      y = data_bundle$y,
+      L = L,
+      prior_weights = prior_weights,
+      scaled_prior_variance = as.numeric(sigma_scalar),
+      estimate_prior_variance = identical(prior_variance_strategy, "eb"),
+      estimate_residual_variance = TRUE,
+      verbose = FALSE
+    )
+    if ("convergence_method" %in% susie_formals) {
+      args$convergence_method <- "elbo"
+    }
+    if ("unmappable_effects" %in% susie_formals) {
+      args$unmappable_effects <- unmappable_effects %||% "none"
+    } else if (!is.null(unmappable_effects) && unmappable_effects %in% c("ash", "inf")) {
+      stop("Current susieR installation does not support `unmappable_effects`; install susieR >= 2.0.")
+    }
+    args <- args[intersect(names(args), susie_formals)]
+    fit_raw <- do.call(susieR::susie, args)
+    fit <- normalize_susier_fit(fit_raw, X = data_bundle$X, L = L)
+  } else {
+    stop("Unknown backend: ", backend)
+  }
+  wall_time_sec <- proc.time()[["elapsed"]] - started
+
+  sigma_0_2_truth <- NULL
+  if (prior_variance_strategy == "fixed") {
+    if (backend == "susine") {
+      sigma_0_2_truth <- rep(as.numeric(sigma_scalar) * var_y, p)
+    } else {
+      sigma_0_2_truth <- rep(as.numeric(sigma_scalar), p)
+    }
   }
 
-  n_inits <- model_avg$n_inits %||% 5
-  init_sd <- model_avg$init_sd %||% 0.05
-  subfits <- vector("list", n_inits)
-  pips_mat <- matrix(0, nrow = n_inits, ncol = length(data_bundle$beta))
-  coef_mat <- matrix(0, nrow = n_inits, ncol = length(data_bundle$beta))
+  fits <- list(fit)
+  fit_meta <- list(list(
+    variant_type = if (!is.na(restart_id)) "restart" else "base",
+    variant_id = if (!is.na(restart_id)) restart_id else NA_integer_,
+    init_type = init_type,
+    is_restart = !is.na(restart_id),
+    is_agg = FALSE,
+    wall_time_sec = as.numeric(wall_time_sec)
+  ))
 
-  for (i in seq_len(n_inits)) {
-    base_args$init_random <- TRUE
-    base_args$init_seed <- as.integer(run_row$phenotype_seed) + i
-    base_args$init_random_sd <- init_sd
-    subfits[[i]] <- do.call(susine::susine, base_args)
-    pips_mat[i, ] <- subfits[[i]]$model_fit$PIPs
-    coef_mat[i, ] <- subfits[[i]]$model_fit$coef
-  }
-
-  agg_fit <- subfits[[1]]
-  agg_fit$model_fit$PIPs <- colMeans(pips_mat)
-  agg_fit$model_fit$coef <- colMeans(coef_mat)
-  agg_fit$settings$L <- agg_fit$settings$L %||% L
-  agg_fit$model_fit$std_coef <- colMeans(vapply(subfits, function(sf) sf$model_fit$std_coef, numeric(ncol(coef_mat))))
-  agg_fit$model_fit$fitted_y <- as.vector(data_bundle$X %*% agg_fit$model_fit$coef)
-
-  fits[[1]] <- agg_fit
-  fit_meta[[1]] <- list(
-    variant_type = "model_avg",
-    variant_id = NA_integer_,
-    is_restart = FALSE,
-    is_agg = FALSE
+  list(
+    fits = fits,
+    fit_meta = fit_meta,
+    mu_0 = if (length(mu_0) == 1L) rep(mu_0, p) else mu_0,
+    sigma_0_2 = sigma_0_2_truth
   )
-
-  list(fits = fits, fit_meta = fit_meta, mu_0 = mu_0, sigma_0_2 = sigma_0_2)
 }
 
-softmax_weights <- function(x) {
+softmax_weights <- function(x, temperature = 1) {
   x <- as.numeric(x)
+  temperature <- as.numeric(temperature %||% 1)
+  if (!is.finite(temperature) || temperature <= 0) {
+    temperature <- 1
+  }
+  x <- x / temperature
   x <- x - max(x, na.rm = TRUE)
   w <- exp(x)
   w / sum(w)
 }
 
-aggregate_use_case_pips <- function(pip_list, elbo_vec, methods = c("softmax_elbo")) {
-  methods <- unique(methods)
+aggregate_use_case_pips <- function(pip_list,
+                                    elbo_vec,
+                                    methods = c("elbo_softmax"),
+                                    softmax_temperature = 1,
+                                    jsd_threshold = 0.171661) {
+  methods <- unique(as.character(methods))
+  methods[methods == "softmax_elbo"] <- "elbo_softmax"
+  methods[methods == "mean"] <- "uniform"
   res <- list()
   if (!length(pip_list)) return(res)
   pips_mat <- do.call(rbind, lapply(pip_list, as.numeric))
-  if ("mean" %in% methods) {
-    res$mean <- colMeans(pips_mat)
+  if ("uniform" %in% methods) {
+    res$uniform <- colMeans(pips_mat)
   }
   if ("max_elbo" %in% methods && length(elbo_vec)) {
     idx <- which.max(elbo_vec)
     res$max_elbo <- pips_mat[idx, ]
   }
-  if ("softmax_elbo" %in% methods && length(elbo_vec)) {
-    w <- softmax_weights(elbo_vec)
-    res$softmax_elbo <- as.numeric(crossprod(w, pips_mat))
+  if ("elbo_softmax" %in% methods && length(elbo_vec)) {
+    w <- softmax_weights(elbo_vec, temperature = softmax_temperature)
+    res$elbo_softmax <- as.numeric(crossprod(w, pips_mat))
+  }
+  if ("cluster_weight" %in% methods && length(elbo_vec) > 1 && nrow(pips_mat) > 1) {
+    n <- nrow(pips_mat)
+    jsd_mat <- matrix(0, n, n)
+    for (i in 1:(n - 1)) {
+      for (j in (i + 1):n) {
+        d <- js_distance(pips_mat[i, ], pips_mat[j, ])
+        jsd_mat[i, j] <- d
+        jsd_mat[j, i] <- d
+      }
+    }
+    hc <- stats::hclust(stats::as.dist(jsd_mat), method = "complete")
+    clusters <- stats::cutree(hc, h = jsd_threshold)
+    cl_levels <- sort(unique(clusters))
+    rep_idx <- integer(length(cl_levels))
+    freq <- numeric(length(cl_levels))
+    elbo_rep <- numeric(length(cl_levels))
+    for (k in seq_along(cl_levels)) {
+      cid <- cl_levels[[k]]
+      idxs <- which(clusters == cid)
+      freq[k] <- length(idxs) / n
+      pick <- idxs[which.max(elbo_vec[idxs])]
+      rep_idx[k] <- pick
+      elbo_rep[k] <- elbo_vec[pick]
+    }
+    w_rep <- softmax_weights(elbo_rep, temperature = softmax_temperature) / freq
+    w_rep <- w_rep / sum(w_rep)
+    ens <- as.numeric(crossprod(w_rep, pips_mat[rep_idx, , drop = FALSE]))
+    attr(ens, "ess") <- as.numeric(1 / sum(w_rep^2))
+    res$cluster_weight <- ens
   }
   res
 }
@@ -904,16 +1035,19 @@ write_confusion_bins <- function(run_row, job_config, conf_bins, buffer_ctx = NU
     run_id = if (is_agg) NA_integer_ else run_row$run_id,
     dataset_bundle_id = run_row$dataset_bundle_id,
     use_case_id = run_row$use_case_id,
+    prior_spec_id = run_row$prior_spec_id %||% run_row$use_case_id,
     group_key = run_row$group_key %||% NA_character_,
     L = run_row$L,
     annotation_r2 = run_row$annotation_r2,
     inflate_match = run_row$inflate_match,
-    gamma_shrink = run_row$gamma_shrink,
-    annotation_scale = run_row$annotation_scale %||% NA_real_,
     sigma_0_2_scalar = run_row$sigma_0_2_scalar %||% NA_character_,
+    c_value = run_row$c_value %||% NA_real_,
+    tau_value = run_row$tau_value %||% NA_real_,
+    init_type = as.character(variant_meta$init_type %||% run_row$init_type %||% NA_character_),
     variant_type = as.character(variant_meta$variant_type %||% "base"),
     variant_id = as.character(variant_meta$variant_id %||% NA_character_),
-    agg_method = as.character(variant_meta$agg_method %||% NA_character_)
+    agg_method = as.character(variant_meta$agg_method %||% NA_character_),
+    agg_ess = as.numeric(variant_meta$agg_ess %||% NA_real_)
   )
   out <- dplyr::bind_cols(meta, conf_bins)
   verbose_output <- isTRUE(job_config$job$verbose_file_output)
@@ -952,9 +1086,12 @@ write_run_outputs <- function(run_row,
   }
   meta_tbl <- tibble::tibble(
     dataset_bundle_id = run_row$dataset_bundle_id,
+    prior_spec_id = run_row$prior_spec_id %||% run_row$use_case_id,
+    init_type = as.character(variant_meta$init_type %||% run_row$init_type %||% NA_character_),
     variant_type = as.character(variant_meta$variant_type %||% "base"),
     variant_id = as.character(variant_meta$variant_id %||% NA_character_),
-    agg_method = as.character(variant_meta$agg_method %||% NA_character_)
+    agg_method = as.character(variant_meta$agg_method %||% NA_character_),
+    wall_time_sec = as.numeric(variant_meta$wall_time_sec %||% NA_real_)
   )
 
   elbo_vals <- evaluation$traces$elbo
@@ -1251,6 +1388,8 @@ write_compact_snp_parquet <- function(snp_tbl, path) {
     run_id = as.integer(run_id),
     task_id = as.integer(task_id),
     dataset_bundle_id = as.integer(dataset_bundle_id %||% NA_integer_),
+    prior_spec_id = as.character(prior_spec_id %||% NA_character_),
+    init_type = as.character(init_type %||% NA_character_),
     snp_index = as.integer(snp_index),
     pip = as.numeric(pip),
     beta = as.numeric(beta),
@@ -1267,6 +1406,8 @@ write_compact_snp_parquet <- function(snp_tbl, path) {
     run_id = arrow::int32(),
     task_id = arrow::int32(),
     dataset_bundle_id = arrow::int32(),
+    prior_spec_id = arrow::utf8(),
+    init_type = arrow::utf8(),
     snp_index = arrow::int32(),
     pip = arrow::float32(),
     beta = arrow::float32(),

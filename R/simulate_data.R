@@ -61,7 +61,7 @@ simulate_effect_sizes <- function(p,
 #'   theoretical causal annotation variance. inflate_match = 0 -> no non-causal annotations;
 #'   inflate_match = 1 -> non-causal variance equals theoretical causal variance;
 #'   inflate_match = 2 -> non-causal variance is 2x the theoretical causal variance.
-#' @param gamma_shrink Optional shrinkage slope used when converting annotations to prior variances.
+#' @param gamma_shrink Deprecated. Ignored when provided.
 #' @param base_sigma2 Optional baseline prior variance.
 #' @param effect_sd Nominal standard deviation used for causal effects (fallback when beta variance is zero).
 #' @param seed Optional seed for reproducibility of annotation draws.
@@ -77,6 +77,9 @@ simulate_priors <- function(beta,
                             seed = NULL) {
   if (!is.null(seed) && is.finite(seed)) {
     set.seed(as.integer(seed))
+  }
+  if (!is.null(gamma_shrink) && is.finite(gamma_shrink)) {
+    warning("`gamma_shrink` is deprecated and ignored.")
   }
   p <- length(beta)
   causal_idx <- which(beta != 0)
@@ -137,12 +140,7 @@ simulate_priors <- function(beta,
     base_sigma2 <- effect_sd^2
   }
 
-  if (!is.null(gamma_shrink) && is.finite(gamma_shrink)) {
-    scale <- if (effect_sd > 0) effect_sd else sqrt(causal_var)
-    sigma_0_2 <- base_sigma2 * exp(-gamma_shrink * abs(mu_0) / scale)
-  } else {
-    sigma_0_2 <- rep(base_sigma2, p)
-  }
+  sigma_0_2 <- rep(base_sigma2, p)
 
   list(
     mu_0 = mu_0,
@@ -184,7 +182,7 @@ simulate_phenotype <- function(X, beta, noise_fraction, seed = NULL) {
 #'
 #' @param spec Named list or data.frame row containing simulation controls.
 #'   Required fields: `phenotype_seed`, `p_star`, `y_noise`. Optional prior controls:
-#'   `annotation_r2`, `inflate_match`, `gamma_shrink`. Additional optional inputs:
+#'   `annotation_r2`, `inflate_match`. Additional optional inputs:
 #'   `effect_sd`, `standardize_X`.
 #' @param base_X Optional matrix to reuse instead of loading the package data.
 #'
@@ -236,7 +234,6 @@ generate_simulation_data <- function(spec,
     causal_idx = effects$causal_idx,
     annotation_r2_observed = priors$observed_r2,
     annotation_r2_target = spec$annotation_r2 %||% NA_real_,
-    inflate_match = spec$inflate_match %||% NA_real_,
-    gamma_shrink = spec$gamma_shrink %||% NA_real_
+    inflate_match = spec$inflate_match %||% NA_real_
   )
 }

@@ -41,21 +41,24 @@ run_accounting_lines <- function(job_config,
     ifelse(val < 1, 1L, val)
   }
 
+  required_cols <- c("annotation_r2", "inflate_match", "sigma_0_2_scalar", "c_value", "tau_value", "restart_id")
+  for (nm in required_cols) {
+    if (!nm %in% names(runs_tbl)) {
+      runs_tbl[[nm]] <- NA
+    }
+  }
+
   uc_counts <- runs_tbl %>%
     dplyr::group_by(use_case_id) %>%
     dplyr::summarise(
       n_L = dplyr::n_distinct(L),
       n_ann_r2 = count_or_one(annotation_r2),
       n_inflate = count_or_one(inflate_match),
-      n_gamma = count_or_one(gamma_shrink),
-      n_scale = count_or_one(annotation_scale),
       n_sigma = count_or_one(sigma_0_2_scalar),
+      n_c = count_or_one(c_value),
+      n_tau = count_or_one(tau_value),
       n_restart = count_or_one(restart_id),
       .groups = "drop"
-    ) %>%
-    dplyr::mutate(
-      groups_per_bundle = n_L * n_ann_r2 * n_inflate,
-      runs_per_group = n_gamma * n_scale * n_sigma * n_restart
     )
 
   group_counts <- runs_tbl %>%
@@ -76,14 +79,8 @@ run_accounting_lines <- function(job_config,
 
   lines <- c(
     sprintf("Number of dataset bundles: %d %s", n_bundles, bundles_formula),
-    sprintf("Distinct phenotype_seed values: %d (= %d dataset bundles)",
-            n_seed_values_total, n_bundles)
+    sprintf("Distinct phenotype_seed values: %d", n_seed_values_total)
   )
-  expected_pheno <- n_bundles
-  if (n_seed_values_total != expected_pheno) {
-    lines <- c(lines, sprintf("  WARNING: phenotype_seed distinct count mismatch (%d vs %d)",
-                              n_seed_values_total, expected_pheno))
-  }
 
   restart_seeds_tbl <- runs_tbl %>% dplyr::filter(!is.na(restart_id))
   n_restart_seeds_total <- dplyr::n_distinct(restart_seeds_tbl$restart_seed, na.rm = TRUE)
@@ -129,46 +126,53 @@ run_accounting_lines <- function(job_config,
       row <- uc_counts[i, ]
       uc <- row$use_case_id
       groups_line <- sprintf(
-        "Groups per bundle (%s): %d (= %d L x %d annotation_r2 x %d inflate_match)",
-        uc, row$groups_per_bundle, row$n_L, row$n_ann_r2, row$n_inflate
+        "Groups per bundle (%s): observed %d-%d",
+        uc, row$min_groups, row$max_groups
       )
-      if (!is.na(row$min_groups) && row$min_groups != row$max_groups) {
-        groups_line <- paste0(groups_line, sprintf(" [observed range: %d-%d]", row$min_groups, row$max_groups))
-      }
       lines <- c(lines, groups_line)
 
       runs_line <- sprintf(
-        "Runs per group (%s): %d (= %d gamma_shrink x %d annotation_scale x %d sigma_0_2_scalar x %d restart_id)",
-        uc, row$runs_per_group, row$n_gamma, row$n_scale, row$n_sigma, row$n_restart
+        "Runs per group (%s): observed %d-%d (= %d c-values x %d tau-values x %d sigma-values x %d restarts)",
+        uc, row$min_runs, row$max_runs, row$n_c, row$n_tau, row$n_sigma, row$n_restart
       )
-      if (!is.na(row$min_runs) && row$min_runs != row$max_runs) {
-        runs_line <- paste0(runs_line, sprintf(" [observed range: %d-%d]", row$min_runs, row$max_runs))
-      }
       lines <- c(lines, runs_line)
     }
   }
 
   total_runs <- nrow(runs_tbl)
-  total_runs_per_bundle <- sum(uc_counts$groups_per_bundle * uc_counts$runs_per_group)
-  per_uc_bundle_terms <- uc_counts %>%
-    dplyr::mutate(term = sprintf("%s: %d x %d = %d",
-                                  use_case_id, groups_per_bundle, runs_per_group,
-                                  groups_per_bundle * runs_per_group)) %>%
-    pull(term)
+  per_uc_bundle <- runs_tbl %>%
+    dplyr::group_by(use_case_id, dataset_bundle_id) %>%
+    dplyr::summarise(n_runs = dplyr::n(), .groups = "drop") %>%
+    dplyr::group_by(use_case_id) %>%
+    dplyr::summarise(
+      min_bundle_runs = min(n_runs),
+      max_bundle_runs = max(n_runs),
+      .groups = "drop"
+    )
+  total_runs_per_bundle <- runs_tbl %>%
+    dplyr::group_by(dataset_bundle_id) %>%
+    dplyr::summarise(n_runs = dplyr::n(), .groups = "drop") %>%
+    dplyr::summarise(total = dplyr::first(n_runs), .groups = "drop") %>%
+    dplyr::pull(total)
+  if (!length(total_runs_per_bundle)) {
+    total_runs_per_bundle <- 0L
+  }
+  per_uc_bundle_terms <- per_uc_bundle %>%
+    dplyr::mutate(term = sprintf("%s: %d-%d per bundle", use_case_id, min_bundle_runs, max_bundle_runs)) %>%
+    dplyr::pull(term)
   lines <- c(lines, sprintf(
-    "Total runs per bundle: %d (= %s)",
+    "Total runs per bundle: %d (observed; %s)",
     total_runs_per_bundle,
     paste(per_uc_bundle_terms, collapse = " + ")
   ))
-  per_uc_terms <- uc_counts %>%
-    dplyr::mutate(term = sprintf("%s: %d groups x %d runs = %d",
-                                  use_case_id, groups_per_bundle, runs_per_group,
-                                  groups_per_bundle * runs_per_group)) %>%
+  per_uc_terms <- runs_tbl %>%
+    dplyr::group_by(use_case_id) %>%
+    dplyr::summarise(total = dplyr::n(), .groups = "drop") %>%
+    dplyr::mutate(term = sprintf("%s: %d runs", use_case_id, total)) %>%
     pull(term)
   lines <- c(lines, sprintf(
-    "Total runs: %d (= %d bundles x (%s))",
+    "Total runs: %d (= %s)",
     total_runs,
-    n_bundles,
     paste(per_uc_terms, collapse = " + ")
   ))
 

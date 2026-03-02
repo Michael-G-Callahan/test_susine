@@ -74,8 +74,18 @@ index_staging_outputs <- function(job_name,
       path = files
     ) %>%
       dplyr::filter(!is.na(.data$type))
-  }) %>%
-    dplyr::arrange(.data$task_id, .data$flush_id, .data$type)
+  }) -> out
+
+  if (is.null(out) || !nrow(out) || !all(c("task_id", "flush_id", "type", "path") %in% names(out))) {
+    return(tibble::tibble(
+      task_id = integer(),
+      flush_id = character(),
+      type = character(),
+      path = character()
+    ))
+  }
+
+  out %>% dplyr::arrange(.data$task_id, .data$flush_id, .data$type)
 }
 
 #' Validate that staging files are readable.
@@ -94,6 +104,9 @@ validate_staging_outputs <- function(file_index) {
       model_metrics = function(p) readr::read_csv(p, show_col_types = FALSE),
       effect_metrics = function(p) readr::read_csv(p, show_col_types = FALSE),
       validation = function(p) readr::read_csv(p, show_col_types = FALSE),
+      confusion_bins = function(p) readr::read_csv(p, show_col_types = FALSE),
+      dataset_metrics = function(p) readr::read_csv(p, show_col_types = FALSE),
+      multimodal_metrics = function(p) readr::read_csv(p, show_col_types = FALSE),
       snps = function(p) arrow::read_parquet(p),
       function(p) stop("Unknown type: ", type)
     )

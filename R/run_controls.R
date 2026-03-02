@@ -4,23 +4,16 @@
 #'
 #' @param annotation_r2_levels Numeric vector of target annotation R^2 values for causal SNPs.
 #' @param inflate_match_levels Numeric vector indicating how strongly to inflate non-causal annotations.
-#' @param gamma_shrink_levels Numeric vector of shrinkage slopes for variance-informed runs.
-#' @return Tibble with columns `annotation_r2`, `inflate_match`, `gamma_shrink`, and
+#' @return Tibble with columns `annotation_r2`, `inflate_match`, and
 #'   `prior_quality_id`.
 #' @export
 prior_quality_grid <- function(annotation_r2_levels = c(0.25, 0.5, 0.75),
-                               inflate_match_levels = c(0, 0.5, 1),
-                               gamma_shrink_levels = c(0.4, 0.8)) {
+                               inflate_match_levels = c(0, 0.5, 1)) {
   ann_vals <- unique(annotation_r2_levels)
   inflate_vals <- unique(inflate_match_levels)
-  gamma_vals <- unique(gamma_shrink_levels)
-  if (!any(is.na(gamma_vals))) {
-    gamma_vals <- c(gamma_vals, NA_real_)
-  }
   grid <- tidyr::expand_grid(
     annotation_r2 = ann_vals,
-    inflate_match = inflate_vals,
-    gamma_shrink = gamma_vals
+    inflate_match = inflate_vals
   )
   dplyr::mutate(grid, prior_quality_id = dplyr::row_number())
 }
@@ -151,6 +144,9 @@ ensure_repo_root <- function(path) {
 #' @return List with elements `dataset_bundles`, `runs`, and `tasks`.
 #' @keywords internal
 make_run_tables <- function(use_case_ids,
+                            exploration_methods = c("single"),
+                            exploration_mode = c("separate", "intersect"),
+                            K = 1L,
                             L_grid,
                             y_noise_grid,
                             prior_quality,
@@ -159,26 +155,34 @@ make_run_tables <- function(use_case_ids,
                             data_scenarios,
                             grid_mode = c("full", "minimal", "intersect"),
                             pair_L_p_star = FALSE,
-                            data_matrix_catalog = NULL) {
+                            data_matrix_catalog = NULL,
+                            c_grid_values = NULL,
+                            tau_grid_values = NULL,
+                            restart_settings = list()) {
   if (!is.data.frame(prior_quality) ||
-      !all(c("annotation_r2", "inflate_match", "gamma_shrink") %in% names(prior_quality))) {
-    stop("prior_quality must contain annotation_r2, inflate_match, and gamma_shrink columns.")
+      !all(c("annotation_r2", "inflate_match") %in% names(prior_quality))) {
+    stop("prior_quality must contain annotation_r2 and inflate_match columns.")
   }
   if (is.null(data_matrix_catalog) || !nrow(data_matrix_catalog)) {
     stop("data_matrix_catalog must be supplied with one row per available matrix.")
   }
   grid_mode <- match.arg(grid_mode)
-  use_cases <- resolve_use_cases(use_case_ids)
-  if (!nrow(use_cases)) {
-    stop("No valid use cases selected.")
+  exploration_mode <- match.arg(exploration_mode)
+  K <- as.integer(K)
+  if (!is.finite(K) || K < 1L) {
+    stop("K must be a positive integer.")
+  }
+  exploration_methods <- unique(as.character(exploration_methods))
+  valid_exploration_ids <- exploration_catalog()$exploration_id
+  bad_methods <- setdiff(exploration_methods, valid_exploration_ids)
+  if (length(bad_methods)) {
+    stop("Unknown exploration method(s): ", paste(bad_methods, collapse = ", "))
   }
 
-  use_cases <- use_cases %>%
-    dplyr::mutate(
-      uses_mu_annotation = .data$mu_strategy %in% c("functional", "eb_mu"),
-      uses_sigma_annotation = .data$sigma_strategy %in% c("functional", "eb_sigma"),
-      uses_gamma_shrink = .data$sigma_strategy %in% c("functional", "eb_sigma")
-    )
+  prior_specs <- resolve_use_cases(use_case_ids)
+  if (!nrow(prior_specs)) {
+    stop("No valid prior specs selected.")
+  }
 
   matrix_catalog_subset <- dplyr::filter(data_matrix_catalog, .data$data_scenario %in% unique(data_scenarios))
   if (!nrow(matrix_catalog_subset)) {
@@ -243,10 +247,7 @@ make_run_tables <- function(use_case_ids,
   }
 
   dataset_bundles <- build_dataset_bundles() %>%
-    dplyr::mutate(
-      dataset_bundle_id = dplyr::row_number(),
-      phenotype_seed = dplyr::row_number()
-    )
+    dplyr::mutate(dataset_bundle_id = dplyr::row_number())
 
   if (!nrow(dataset_bundles)) {
     stop("No dataset bundles created.")
@@ -267,35 +268,219 @@ make_run_tables <- function(use_case_ids,
     dplyr::rename(L = L_vals) %>%
     dplyr::select(.data$dataset_bundle_id, .data$L)
 
-  annotation_grid_for_use_case <- function(uc_row) {
-    if (!isTRUE(uc_row$uses_mu_annotation) && !isTRUE(uc_row$uses_sigma_annotation)) {
-      return(tibble::tibble(annotation_r2 = NA_real_, inflate_match = NA_real_, gamma_shrink = NA_real_))
+  annotation_grid_for_spec <- function(spec_row) {
+    if (!isTRUE(spec_row$supports_annotation)) {
+      return(tibble::tibble(annotation_r2 = NA_real_, inflate_match = NA_real_))
     }
-    grid <- prior_quality %>% dplyr::select(annotation_r2, inflate_match, gamma_shrink)
-    if (!isTRUE(uc_row$uses_gamma_shrink)) {
-      grid <- grid %>%
-        dplyr::mutate(gamma_shrink = NA_real_) %>%
-        dplyr::distinct()
-    }
-    grid
+    dplyr::distinct(dplyr::select(prior_quality, .data$annotation_r2, .data$inflate_match))
   }
 
-  runs <- purrr::map_dfr(seq_len(nrow(use_cases)), function(i) {
-    uc <- use_cases[i, ]
-    ann_grid <- annotation_grid_for_use_case(uc)
+  make_default_grid <- function(what, k) {
+    if (what == "c_grid") {
+      return(seq(0, 1.1, length.out = k))
+    }
+    if (what == "tau_grid") {
+      return(seq(0.25, 3, length.out = k))
+    }
+    stop("Unsupported default grid type: ", what)
+  }
+
+  axis_table_for_method <- function(method,
+                                    mode,
+                                    k,
+                                    c_vals,
+                                    tau_vals,
+                                    restart_n = NULL,
+                                    allow_infer_restart = FALSE,
+                                    other_prod = 1L) {
+    if (method == "single") {
+      if (k != 1L) {
+        stop("Exploration 'single' requires K = 1.")
+      }
+      return(tibble::tibble())
+    }
+    if (method == "restart") {
+      n_restart <- restart_n %||% NA_integer_
+      if (!is.finite(n_restart)) {
+        if (mode == "separate") {
+          n_restart <- k
+        } else if (isTRUE(allow_infer_restart)) {
+          if (k %% as.integer(other_prod) != 0L) {
+            stop("Cannot infer restart count: K is not divisible by non-restart axis product.")
+          }
+          n_restart <- as.integer(k / as.integer(other_prod))
+        } else {
+          stop("restart_settings$n_inits must be set for intersect mode when restart is included.")
+        }
+      }
+      n_restart <- as.integer(n_restart)
+      if (mode == "separate" && n_restart != as.integer(k)) {
+        stop("For separate-mode restart exploration, restart_settings$n_inits must equal K.")
+      }
+      if (n_restart < 1L) {
+        stop("restart count must be >= 1.")
+      }
+      return(tibble::tibble(
+        restart_id = seq_len(n_restart),
+        init_type = dplyr::if_else(seq_len(n_restart) == 1L, "default", "warm")
+      ))
+    }
+    if (method == "c_grid") {
+      vals <- c_vals
+      if (is.null(vals) || !length(vals)) {
+        vals <- make_default_grid("c_grid", if (mode == "separate") k else 1L)
+      }
+      vals <- as.numeric(vals)
+      if (mode == "separate" && length(vals) != k) {
+        stop("c_grid values must have length K for separate mode.")
+      }
+      return(tibble::tibble(c_value = vals))
+    }
+    if (method == "tau_grid") {
+      vals <- tau_vals
+      if (is.null(vals) || !length(vals)) {
+        vals <- make_default_grid("tau_grid", if (mode == "separate") k else 1L)
+      }
+      vals <- as.numeric(vals)
+      if (mode == "separate" && length(vals) != k) {
+        stop("tau_grid values must have length K for separate mode.")
+      }
+      return(tibble::tibble(tau_value = vals))
+    }
+    if (method == "refine") {
+      stop("Exploration 'refine' is cataloged but not yet implemented in run-table expansion.")
+    }
+    stop("Unsupported exploration method: ", method)
+  }
+
+  build_exploration_groups <- function(spec_row) {
+    validity <- valid_exploration_for_prior(
+      prior_spec_ids = spec_row$prior_spec_id,
+      exploration_ids = exploration_methods
+    )
+    methods_for_spec <- validity$exploration_id[validity$valid]
+    if (!length(methods_for_spec)) {
+      stop("No valid exploration methods for prior spec: ", spec_row$prior_spec_id)
+    }
+
+    if (exploration_mode == "separate") {
+      group_rows <- purrr::map_dfr(methods_for_spec, function(m) {
+        axis_tbl <- axis_table_for_method(
+          method = m,
+          mode = "separate",
+          k = K,
+          c_vals = c_grid_values,
+          tau_vals = tau_grid_values,
+          restart_n = restart_settings$n_inits %||% NULL
+        )
+        if (!nrow(axis_tbl)) {
+          axis_tbl <- tibble::tibble(.axis_stub = 1L)
+        }
+        axis_tbl %>%
+          dplyr::mutate(
+            exploration_mode = "separate",
+            exploration_methods = m
+          )
+      })
+      return(group_rows %>%
+        dplyr::group_by(.data$exploration_mode, .data$exploration_methods) %>%
+        dplyr::mutate(.exploration_row = dplyr::row_number()) %>%
+        dplyr::ungroup())
+    }
+
+    # Intersect mode
+    methods_intersect <- methods_for_spec
+    non_restart_prod <- 1L
+    if ("c_grid" %in% methods_intersect) {
+      c_vals <- c_grid_values
+      if (is.null(c_vals) || !length(c_vals)) {
+        stop("c_grid_values must be provided for intersect mode when c_grid is used.")
+      }
+      non_restart_prod <- non_restart_prod * length(c_vals)
+    }
+    if ("tau_grid" %in% methods_intersect) {
+      t_vals <- tau_grid_values
+      if (is.null(t_vals) || !length(t_vals)) {
+        stop("tau_grid_values must be provided for intersect mode when tau_grid is used.")
+      }
+      non_restart_prod <- non_restart_prod * length(t_vals)
+    }
+    if ("single" %in% methods_intersect && length(methods_intersect) > 1L) {
+      methods_intersect <- setdiff(methods_intersect, "single")
+    }
+
+    axis_list <- list()
+    for (m in methods_intersect) {
+      axis_list[[m]] <- axis_table_for_method(
+        method = m,
+        mode = "intersect",
+        k = K,
+        c_vals = c_grid_values,
+        tau_vals = tau_grid_values,
+        restart_n = restart_settings$n_inits %||% NULL,
+        allow_infer_restart = TRUE,
+        other_prod = non_restart_prod
+      )
+    }
+    if (!length(axis_list)) {
+      if (K != 1L) {
+        stop("Intersect mode with no active axes requires K = 1.")
+      }
+      axis_tbl <- tibble::tibble(.axis_stub = 1L)
+    } else {
+      # Use unnamed inputs so crossing splices columns instead of creating list-cols.
+      axis_tbl <- do.call(tidyr::crossing, unname(axis_list))
+    }
+    if (nrow(axis_tbl) != K) {
+      stop(
+        "Intersect exploration produced ", nrow(axis_tbl),
+        " fits but K = ", K, ". Provide axis sizes whose product equals K."
+      )
+    }
+    axis_tbl %>%
+      dplyr::mutate(
+        exploration_mode = "intersect",
+        exploration_methods = paste(sort(methods_intersect), collapse = "x"),
+        .exploration_row = dplyr::row_number()
+      )
+  }
+
+  runs <- purrr::map_dfr(seq_len(nrow(prior_specs)), function(i) {
+    spec <- prior_specs[i, ]
+    ann_grid <- annotation_grid_for_spec(spec)
+    exploration_grid <- build_exploration_groups(spec)
     base <- dataset_bundles %>%
       dplyr::inner_join(L_by_bundle, by = "dataset_bundle_id") %>%
-      dplyr::mutate(use_case_id = uc$use_case_id)
-    tidyr::crossing(base, ann_grid)
+      dplyr::mutate(
+        prior_spec_id = spec$prior_spec_id,
+        use_case_id = spec$prior_spec_id
+      )
+    tidyr::crossing(base, ann_grid, exploration_grid)
   }) %>%
-    dplyr::arrange(.data$dataset_bundle_id, .data$use_case_id, .data$L, .data$phenotype_seed) %>%
-    dplyr::mutate(run_id = dplyr::row_number())
+    dplyr::mutate(
+      group_key = paste0(
+        "L=", as.integer(.data$L),
+        "|r2=", ifelse(is.na(.data$annotation_r2), "NA", format(.data$annotation_r2, digits = 6, scientific = FALSE)),
+        "|inflate=", ifelse(is.na(.data$inflate_match), "NA", format(.data$inflate_match, digits = 6, scientific = FALSE)),
+        "|explore=", .data$exploration_mode, ":", .data$exploration_methods
+      )
+    ) %>%
+    dplyr::arrange(
+      .data$dataset_bundle_id,
+      .data$prior_spec_id,
+      .data$L,
+      .data$phenotype_seed,
+      .data$group_key,
+      .data$.exploration_row
+    ) %>%
+    dplyr::mutate(run_id = dplyr::row_number()) %>%
+    dplyr::select(-dplyr::any_of(c(".axis_stub", ".exploration_row")))
 
   list(
     dataset_bundles = dataset_bundles,
     data_matrices = data_matrix_catalog,
     runs = runs,
-    use_cases = use_cases
+    use_cases = prior_specs
   )
 }
 
@@ -330,8 +515,9 @@ assign_task_ids_by_bundle <- function(runs,
     if (!is.null(shuffle_seed)) {
       set.seed(shuffle_seed)
     }
+    n_bundle <- nrow(bundles)
     bundles <- bundles %>%
-      dplyr::mutate(shuffled_order = sample(n())) %>%
+      dplyr::mutate(shuffled_order = sample.int(n_bundle)) %>%
       dplyr::arrange(.data$shuffled_order)
   } else {
     bundles <- bundles %>% dplyr::arrange(.data$bundle_id)
@@ -357,7 +543,10 @@ assign_task_ids_by_bundle <- function(runs,
 #' Create an in-memory job configuration.
 #'
 #' @param job_name Character scalar.
-#' @param use_case_ids Character vector of selected use cases.
+#' @param use_case_ids Character vector of selected prior spec ids (or aliases).
+#' @param exploration_methods Character vector of exploration ids.
+#' @param exploration_mode One of `separate` or `intersect`.
+#' @param K Integer fit budget per dataset x use_case x exploration_group.
 #' @param L_grid Integer vector of L values.
 #' @param y_noise_grid Numeric vector of noise fractions.
 #' @param prior_quality Tibble with prior noise settings.
@@ -376,18 +565,18 @@ assign_task_ids_by_bundle <- function(runs,
 #' @param write_legacy_snp_csv Logical; when TRUE, retain the legacy per-run
 #'   `pip.csv` and `truth.csv` files alongside the new compact SNP table.
 #' @param sigma_0_2_scalars Character or numeric vector of sigma_0_2 prior variance
-#'   scalars to test. Only applies to use cases with `sigma_strategy == "naive"`.
+#'   scalars to test for fixed-variance prior specs.
 #'   Supported formats:
 #'   - Numeric values (e.g., 0.1, 0.2, 0.4): multiplier of var(y)
 #'   - Strings with /L suffix (e.g., "1/L", "0.5/L", "2/L"): multiplier/L of var(y)
-#'   When NULL (default), uses susine's internal default (1/L * var_y).
-#' @param annotation_scales Numeric vector of multipliers applied to functional
-#'   prior means (`mu_0`). Only use cases with `mu_strategy == "functional"`
-#'   receive these values; all other runs are assigned `NA`. When NULL or empty,
-#'   defaults to a single value of 1 (no scaling).
-#' @param anneal_settings Named list for tempering runs. Set to NULL to omit
-#'   annealing config from the job config.
-#' @param model_average_settings Named list for model averaging runs.
+#'   When NULL, defaults to `0.2`.
+#' @param c_grid_values Numeric vector of c values for c-grid exploration.
+#' @param tau_grid_values Numeric vector of tau values for tau-grid exploration.
+#' @param restart_settings List controlling restart exploration.
+#' @param aggregation_methods Character vector of per-group aggregation methods.
+#' @param overall_aggregation_methods Character vector of global-pool aggregation methods.
+#' @param include_overall_pool Logical; include full per-dataset global pool aggregation.
+#' @param softmax_temperature Numeric temperature for ELBO softmax weighting.
 #' @param pair_L_p_star Logical; when TRUE, the full grid pairs `L` and `p_star` values 1-1
 #'   instead of expanding their Cartesian product.
 #' @param task_assignment_seed Optional integer seed to make task assignment reproducible.
@@ -399,6 +588,9 @@ make_job_config <- function(job_name,
                             time = "02:59:00",
                             mem = "2G",
                             use_case_ids,
+                            exploration_methods = c("single"),
+                            exploration_mode = c("separate", "intersect"),
+                            K = 1L,
                             L_grid,
                             y_noise_grid,
                             prior_quality,
@@ -424,21 +616,16 @@ make_job_config <- function(job_name,
                             grid_mode = c("full", "minimal", "intersect"),
                             pair_L_p_star = FALSE,
                             sigma_0_2_scalars = NULL,
-                            annotation_scales = NULL,
-                            anneal_settings = list(
-                              anneal_start_T = 5,
-                              anneal_schedule_type = "geometric",
-                              anneal_burn_in = 5
-                            ),
-                            model_average_settings = list(
-                              n_inits = 5,
-                              init_sd = 0.05
-                            ),
+                            c_grid_values = NULL,
+                            tau_grid_values = NULL,
                             restart_settings = list(
-                              n_inits = 5,
+                              n_inits = NULL,
                               alpha_concentration = 1
                             ),
-                            aggregation_methods = c("softmax_elbo"),
+                            aggregation_methods = c("elbo_softmax"),
+                            overall_aggregation_methods = NULL,
+                            include_overall_pool = TRUE,
+                            softmax_temperature = 1,
                             metrics_settings = list(
                               pip_bucket_width = 0.01,
                               z_top_k = 10,
@@ -446,10 +633,12 @@ make_job_config <- function(job_name,
                             )) {
 
   grid_mode <- match.arg(grid_mode)
+  exploration_mode <- match.arg(exploration_mode)
   task_unit <- match.arg(task_unit)
   if (task_unit != "dataset") {
     stop("task_unit must be 'dataset' (run-based task assignment is disabled).")
   }
+
   repo_root <- normalizePath(repo_root, winslash = "/", mustWork = TRUE)
   repo_root <- ensure_repo_root(repo_root)
   if (is.null(data_matrix_catalog)) {
@@ -462,6 +651,9 @@ make_job_config <- function(job_name,
 
   tables <- make_run_tables(
     use_case_ids = use_case_ids,
+    exploration_methods = exploration_methods,
+    exploration_mode = exploration_mode,
+    K = K,
     L_grid = L_grid,
     y_noise_grid = y_noise_grid,
     prior_quality = prior_quality,
@@ -470,72 +662,32 @@ make_job_config <- function(job_name,
     data_scenarios = data_scenarios,
     grid_mode = grid_mode,
     pair_L_p_star = pair_L_p_star,
-    data_matrix_catalog = data_matrix_catalog
+    data_matrix_catalog = data_matrix_catalog,
+    c_grid_values = c_grid_values,
+    tau_grid_values = tau_grid_values,
+    restart_settings = restart_settings
   )
 
-  use_cases <- tables$use_cases
-
-  # Expand annotation scales across runs that use functional prior means
-  functional_mu_ids <- use_cases$use_case_id[use_cases$mu_strategy == "functional"]
-  scale_values <- annotation_scales
-  if (is.null(scale_values) || length(scale_values) == 0) {
-    scale_values <- 1
-  }
-  scale_values <- as.numeric(scale_values)
-
-  runs_functional <- tables$runs %>%
-    dplyr::filter(.data$use_case_id %in% functional_mu_ids)
-  runs_non_functional <- tables$runs %>%
-    dplyr::filter(!(.data$use_case_id %in% functional_mu_ids)) %>%
-    dplyr::mutate(annotation_scale = NA_real_)
-
-  if (nrow(runs_functional) > 0) {
-    runs_functional <- runs_functional %>%
-      tidyr::crossing(annotation_scale = scale_values)
-  } else {
-    runs_functional <- dplyr::mutate(runs_functional, annotation_scale = numeric(0))
-  }
-
-  tables$runs <- dplyr::bind_rows(runs_functional, runs_non_functional) %>%
-    dplyr::arrange(.data$dataset_bundle_id, .data$use_case_id, .data$L, .data$phenotype_seed, .data$annotation_scale)
-
-  # Expand sigma_0_2_scalars across runs with naive sigma strategy
-  # Only applies to use cases with sigma_strategy == "naive"
-  if (!is.null(sigma_0_2_scalars) && length(sigma_0_2_scalars) > 0) {
-    naive_sigma_ids <- use_cases$use_case_id[use_cases$sigma_strategy == "naive"]
-    
-    # Split runs into those that need expansion and those that don't
-    runs_to_expand <- tables$runs %>%
-      dplyr::filter(.data$use_case_id %in% naive_sigma_ids)
-    runs_no_expand <- tables$runs %>%
-      dplyr::filter(!(.data$use_case_id %in% naive_sigma_ids)) %>%
-      dplyr::mutate(sigma_0_2_scalar = NA_character_)
-    
-    if (nrow(runs_to_expand) > 0) {
-      # Expand runs with each sigma_0_2_scalar value
-      runs_expanded <- runs_to_expand %>%
-        tidyr::crossing(sigma_0_2_scalar = as.character(sigma_0_2_scalars))
-      
-        tables$runs <- dplyr::bind_rows(runs_expanded, runs_no_expand) %>%
-          dplyr::arrange(
-            .data$dataset_bundle_id,
-            .data$use_case_id,
-            .data$L,
-            .data$phenotype_seed,
-            .data$annotation_scale,
-            .data$sigma_0_2_scalar
-          )
-    } else {
-      tables$runs <- runs_no_expand
-    }
-  } else {
-    # No sigma_0_2_scalars specified - add column with NA
-    tables$runs <- tables$runs %>%
-      dplyr::mutate(sigma_0_2_scalar = NA_character_)
-  }
-
-  # Attach annotation seeds (unique per dataset bundle x annotation setting)
+  prior_specs <- tables$use_cases
   runs <- tables$runs
+
+  if (is.null(sigma_0_2_scalars) || !length(sigma_0_2_scalars)) {
+    sigma_0_2_scalars <- 0.2
+  }
+
+  fixed_ids <- prior_specs$prior_spec_id[prior_specs$prior_variance_strategy == "fixed"]
+  runs_fixed <- runs %>% dplyr::filter(.data$prior_spec_id %in% fixed_ids)
+  runs_non_fixed <- runs %>%
+    dplyr::filter(!(.data$prior_spec_id %in% fixed_ids)) %>%
+    dplyr::mutate(sigma_0_2_scalar = NA_character_)
+  if (nrow(runs_fixed)) {
+    runs_fixed <- runs_fixed %>%
+      tidyr::crossing(sigma_0_2_scalar = as.character(sigma_0_2_scalars))
+  } else {
+    runs_fixed <- dplyr::mutate(runs_fixed, sigma_0_2_scalar = character(0))
+  }
+  runs <- dplyr::bind_rows(runs_fixed, runs_non_fixed)
+
   ann_key <- ifelse(
     is.na(runs$annotation_r2) & is.na(runs$inflate_match),
     NA_character_,
@@ -553,93 +705,83 @@ make_job_config <- function(job_name,
     dplyr::left_join(ann_lookup, by = c("dataset_bundle_id", "ann_key")) %>%
     dplyr::select(-.data$ann_key)
 
-  # Expand restart runs (one row per restart_id)
-  restart_ids <- use_cases$use_case_id[use_cases$extra_compute == "restart_alpha"]
-  if (length(restart_ids)) {
-    n_inits <- restart_settings$n_inits %||% 5L
-    restart_runs <- runs %>%
-      dplyr::filter(.data$use_case_id %in% restart_ids) %>%
-      tidyr::crossing(restart_id = seq_len(n_inits))
-    non_restart_runs <- runs %>%
-      dplyr::filter(!(.data$use_case_id %in% restart_ids)) %>%
-      dplyr::mutate(restart_id = NA_integer_)
-    runs <- dplyr::bind_rows(restart_runs, non_restart_runs)
-  } else {
-    runs <- runs %>% dplyr::mutate(restart_id = NA_integer_)
+  if (!"restart_id" %in% names(runs)) {
+    runs$restart_id <- NA_integer_
+  }
+  if (!"init_type" %in% names(runs)) {
+    runs$init_type <- NA_character_
+  }
+  if (!"c_value" %in% names(runs)) {
+    runs$c_value <- NA_real_
+  }
+  if (!"tau_value" %in% names(runs)) {
+    runs$tau_value <- NA_real_
   }
 
-  format_group_val <- function(x) {
-    ifelse(is.na(x), "NA", format(x, digits = 6, scientific = FALSE))
-  }
-
-  runs <- runs %>%
-    dplyr::mutate(
-      group_key = paste0(
-        "L=", as.integer(.data$L),
-        "|r2=", format_group_val(.data$annotation_r2),
-        "|inflate=", format_group_val(.data$inflate_match)
-      )
-    ) %>%
-    dplyr::arrange(
-      .data$dataset_bundle_id,
-      .data$use_case_id,
-      .data$L,
-      .data$phenotype_seed,
-      .data$annotation_scale,
-      .data$sigma_0_2_scalar,
-      .data$restart_id
-    ) %>%
-    dplyr::mutate(.row_id = dplyr::row_number())
-
+  runs <- runs %>% dplyr::mutate(.run_key = dplyr::row_number())
   restart_lookup <- runs %>%
     dplyr::filter(!is.na(.data$restart_id)) %>%
     dplyr::mutate(restart_seed = dplyr::row_number()) %>%
-    dplyr::select(.data$.row_id, .data$restart_seed)
+    dplyr::select(.data$.run_key, .data$restart_seed)
 
   runs <- runs %>%
-    dplyr::left_join(restart_lookup, by = ".row_id") %>%
+    dplyr::left_join(restart_lookup, by = ".run_key") %>%
+    dplyr::arrange(
+      .data$dataset_bundle_id,
+      .data$prior_spec_id,
+      .data$L,
+      .data$phenotype_seed,
+      .data$group_key,
+      dplyr::coalesce(.data$restart_id, 0L),
+      .data$c_value,
+      .data$tau_value
+    ) %>%
     dplyr::mutate(run_id = dplyr::row_number()) %>%
-    dplyr::select(-.data$.row_id)
+    dplyr::select(-.data$.run_key)
 
   tables$runs <- runs
 
-  shuffle_runs <- TRUE
   runs_tasks <- assign_task_ids_by_bundle(
     tables$runs,
     bundle_id_col = "dataset_bundle_id",
     bundles_per_task = bundles_per_task,
     shuffle_seed = task_assignment_seed,
-    shuffle = shuffle_runs
+    shuffle = TRUE
   )
 
-    compute_list <- list(
-      model_average = model_average_settings,
-      restart = restart_settings,
-      aggregation_methods = aggregation_methods
-    )
-    if (!is.null(anneal_settings)) {
-      compute_list$anneal <- anneal_settings
-    }
+  if (is.null(overall_aggregation_methods)) {
+    overall_aggregation_methods <- aggregation_methods
+  }
+  compute_list <- list(
+    restart = restart_settings,
+    K = as.integer(K),
+    exploration_methods = exploration_methods,
+    exploration_mode = exploration_mode,
+    aggregation_methods = aggregation_methods,
+    overall_aggregation_methods = overall_aggregation_methods,
+    include_overall_pool = isTRUE(include_overall_pool),
+    softmax_temperature = as.numeric(softmax_temperature)
+  )
 
-    list(
-      job = list(
+  list(
+    job = list(
       name = job_name,
       HPC = HPC,
       email = email,
       created_at = timestamp_utc(),
-        task_unit = task_unit,
-        bundles_per_task = bundles_per_task,
-        runs_per_task = runs_per_task,
-        credible_set_rho = credible_set_rho,
-        purity_threshold = purity_threshold,
-        verbose_file_output = isTRUE(verbose_file_output),
-        write_legacy_snp_csv = isTRUE(write_legacy_snp_csv),
-        write_snps_parquet = isTRUE(write_snps_parquet),
-        write_confusion_bins = isTRUE(write_confusion_bins),
-        buffer_flush_interval = as.integer(buffer_flush_interval),
-        task_assignment_seed = task_assignment_seed,
-          compute = compute_list,
-        metrics = metrics_settings,
+      task_unit = task_unit,
+      bundles_per_task = bundles_per_task,
+      runs_per_task = runs_per_task,
+      credible_set_rho = credible_set_rho,
+      purity_threshold = purity_threshold,
+      verbose_file_output = isTRUE(verbose_file_output),
+      write_legacy_snp_csv = isTRUE(write_legacy_snp_csv),
+      write_snps_parquet = isTRUE(write_snps_parquet),
+      write_confusion_bins = isTRUE(write_confusion_bins),
+      buffer_flush_interval = as.integer(buffer_flush_interval),
+      task_assignment_seed = task_assignment_seed,
+      compute = compute_list,
+      metrics = metrics_settings,
       slurm = list(
         time = time,
         mem = mem,
@@ -661,7 +803,7 @@ make_job_config <- function(job_name,
       data_matrices = tables$data_matrices,
       runs = runs_tasks$runs,
       tasks = runs_tasks$tasks,
-      use_cases = tables$use_cases
+      use_cases = prior_specs
     )
   )
 }
@@ -829,16 +971,21 @@ summarise_job_config <- function(job_config) {
       "data_scenario",
       "matrix_id",
       "use_case_id",
+      "prior_spec_id",
       "L",
       "y_noise",
       "p_star",
       "annotation_r2",
       "inflate_match",
-        "gamma_shrink",
-        "annotation_scale",
-        "sigma_0_2_scalar",
-        "restart_id"
-      ),
+      "sigma_0_2_scalar",
+      "restart_id",
+      "init_type",
+      "c_value",
+      "tau_value",
+      "exploration_mode",
+      "exploration_methods",
+      "group_key"
+    ),
     names(runs)
   )
   runs %>%
