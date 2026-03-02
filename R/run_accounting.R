@@ -41,7 +41,7 @@ run_accounting_lines <- function(job_config,
     ifelse(val < 1, 1L, val)
   }
 
-  required_cols <- c("annotation_r2", "inflate_match", "sigma_0_2_scalar", "c_value", "tau_value", "restart_id")
+  required_cols <- c("annotation_r2", "inflate_match", "sigma_0_2_scalar", "c_value", "tau_value", "restart_id", "refine_step")
   for (nm in required_cols) {
     if (!nm %in% names(runs_tbl)) {
       runs_tbl[[nm]] <- NA
@@ -58,6 +58,7 @@ run_accounting_lines <- function(job_config,
       n_c = count_or_one(c_value),
       n_tau = count_or_one(tau_value),
       n_restart = count_or_one(restart_id),
+      n_refine = count_or_one(refine_step),
       .groups = "drop"
     )
 
@@ -132,8 +133,8 @@ run_accounting_lines <- function(job_config,
       lines <- c(lines, groups_line)
 
       runs_line <- sprintf(
-        "Runs per group (%s): observed %d-%d (= %d c-values x %d tau-values x %d sigma-values x %d restarts)",
-        uc, row$min_runs, row$max_runs, row$n_c, row$n_tau, row$n_sigma, row$n_restart
+        "Runs per group (%s): observed %d-%d (= %d c-values x %d tau-values x %d sigma-values x %d restarts x %d refine-steps)",
+        uc, row$min_runs, row$max_runs, row$n_c, row$n_tau, row$n_sigma, row$n_restart, row$n_refine
       )
       lines <- c(lines, runs_line)
     }

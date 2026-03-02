@@ -1,6 +1,6 @@
 # SuSiNE Project Status
 
-**Last updated:** 2026-02-27
+**Last updated:** 2026-03-02
 **Supersedes:** `analysis_completion_status.md` (which remains as archival reference for resolved decisions D1-D17)
 
 ---
@@ -200,8 +200,8 @@ Controlled by existing parameters in `simulate_priors()`:
 |---|------|----------|--------|--------|---------|
 | T1 | Wire susieR use cases into harness | HIGH | Medium | COMPLETED (2026-02-27) | Added backend dispatch in run_use_case() for susine and susieR; mapped fixed/EB prior variance settings; added compatibility guard for older susieR formals. |
 | T2 | Refactor use case catalog | HIGH | Medium | COMPLETED (2026-02-27) | Added prior_spec_catalog(), exploration_catalog(), aggregation_catalog(), and valid_exploration_for_prior(); run controls now use factored catalogs. |
-| T3 | Implement oligogenic architecture | MEDIUM | Medium | PENDING | Not yet implemented. Current simulation path remains sparse architecture. |
-| T4 | Implement refinement exploration mode | MEDIUM | Low-Med | PENDING | refine exists in catalog but intentionally errors in run-table expansion; BFS harness logic not yet added. |
+| T3 | Implement oligogenic architecture | MEDIUM | Medium | COMPLETED (2026-03-02) | Added `simulate_effect_sizes_oligogenic()` and wired `architecture_grid`/`architecture` through run controls and simulation data generation. |
+| T4 | Implement refinement exploration mode | MEDIUM | Low-Med | COMPLETED (2026-03-02) | Implemented harness-level BFS refinement exploration with per-step prior-masking and `refine_step` run-table expansion. |
 | T5 | Implement tau-grid exploration for functional pi | HIGH | Low | COMPLETED (2026-02-27) | Added tau_grid_values to make_job_config() / run-table expansion and validity-constrained crossing. |
 | T6 | Implement cluster-then-ELBO-softmax aggregation (Method A) | HIGH | Low-Med | COMPLETED (2026-02-27) | Implemented cluster_weight aggregation with JSD clustering, representative selection, importance correction, and ESS output. |
 | T7 | Label default vs warm start fits | LOW | Low | COMPLETED (2026-02-27) | Added init_type propagation (default/warm) through run table and output artifacts. |
@@ -210,30 +210,29 @@ Controlled by existing parameters in `simulate_priors()`:
 | T10 | Add overall per-dataset aggregation option | MEDIUM | Low | COMPLETED (2026-02-27) | Added global per-dataset pooling with configurable overall_aggregation_methods and include_overall_pool. |
 | T11 | Allow exploration composability | MEDIUM | Medium | COMPLETED (2026-02-27) | Exploration axes now compose by dataset x use_case x exploration group, with separate/intersect expansion and validity filtering. |
 | T12 | Separate exploration/aggregation control from use cases | HIGH | Medium | COMPLETED (2026-02-27) | Use cases now define prior specs only; explorations and aggregations are independent run-control inputs. |
-| T13 | Verify all metrics are collected and saved | HIGH | Low | PARTIAL (core paths validated) | Core persistence paths validated by smoke tests (model/effect/dataset/confusion/multimodal/snp outputs). Full checklist audit against every Section 2.7 field is still pending. |
+| T13 | Verify all metrics are collected and saved | HIGH | Low | COMPLETED (2026-03-02) | Added `validate_metrics_coverage()` automated schema/file checks and validated model/effect/dataset/confusion/multimodal/validation/snp outputs in strict smoke tests. |
 | T14 | Add high-LD-count metric | LOW | Low | COMPLETED (2026-02-27) | Added high_ld_count_095 and high_ld_count_095_per_snp dataset metrics. |
 | T15 | Ensure per-fit PIP vectors are saved | HIGH | Low | COMPLETED (2026-02-27) | Per-fit SNP/PIP parquet persistence and downstream aggregated snps_dataset generation verified in buffered aggregation smoke path. |
 | T16 | Wire softmax temperature through job config to aggregation | MEDIUM | Low | COMPLETED (2026-02-27) | Added softmax_temperature to job config and wired through elbo_softmax/cluster_weight aggregation calls. |
 | T17 | Add wall time recording per fit | HIGH | Low | COMPLETED (2026-02-27) | Added per-fit wall-clock timing (wall_time_sec) into fit metadata and output tables. |
-| T18 | Seed management review | HIGH | Low | PENDING | A dedicated reproducibility audit and seed-policy signoff is still required before pilot HPC submissions. |
-| T19 | Consider complete vs average linkage for JSD clustering | LOW | Low | PARTIAL | Method A clustering uses complete linkage; multimodal summary clustering currently still uses average linkage and needs explicit final decision. |
-| T20 | Run 2-locus pipeline smoke test | HIGH | Low | PENDING | Single-locus and aggregation smoke checks pass; required 2-locus end-to-end smoke run has not yet been executed. |
+| T18 | Seed management review | HIGH | Low | COMPLETED (2026-03-02) | Added `seed_management_report()` and validated seed propagation/uniqueness checks in the two-locus smoke workflow. |
+| T19 | Consider complete vs average linkage for JSD clustering | LOW | Low | COMPLETED (2026-03-02) | Switched multimodal cluster counting to complete linkage for consistency with Method A clustering assumptions. |
+| T20 | Run 2-locus pipeline smoke test | HIGH | Low | COMPLETED (2026-03-02) | Added `run_two_locus_smoke_test()` and executed strict pass (2 bundles, staged aggregation, metrics/seed checks). |
 
-#### 3.2.1 Functional Validation Snapshot (2026-02-27)
+#### 3.2.1 Functional Validation Snapshot (2026-03-02)
 
 - Restart exploration smoke check: K=4, restart produced expected split default=1, warm=3, and run_task() completed.
 - Intersect exploration smoke check: exploration_methods = c("single","restart"), exploration_mode = "intersect", K=2 completed after fixing a list-column expansion bug in run controls.
 - Buffered staging + aggregation smoke check: with verbose_file_output = FALSE, index_staging_outputs() indexed 6 files and aggregate_staging_outputs() wrote expected outputs (model_metrics.csv, effect_metrics.csv, validation.csv, dataset_metrics.csv, confusion_bins.csv, snps_dataset/...).
+- Refine exploration smoke check: exploration_methods = "refine", K=3 completed with BFS prior-masking flow and per-step outputs.
+- Oligogenic architecture smoke check: architecture_grid = "oligogenic" completed end-to-end through run_task().
+- Two-locus strict smoke check: `run_two_locus_smoke_test()` passed with required multimodal metrics and seed management checks.
 - Known packaging blocker: devtools::check() is currently blocked by malformed package name in DESCRIPTION (pre-existing project issue).
 
 #### 3.2.2 Remaining Work for test_susine
 
-1. T3: implement oligogenic architecture simulation path.
-2. T4: implement harness-level BFS refinement exploration.
-3. T13 (final pass): complete a strict field-by-field metrics audit vs Section 2.7 (not only smoke-level presence checks).
-4. T18: run and document seed-management reproducibility review.
-5. T19 (final decision): either switch multimodal cluster-count linkage to complete, or explicitly retain average with rationale.
-6. T20: execute and record the required 2-locus full pipeline smoke run.
+1. No open T3-T20 implementation items remain.
+2. Pre-existing package metadata blocker remains: malformed package name in DESCRIPTION prevents `devtools::check()`.
 
 ### 3.3 Dependency: Implementation Order
 
@@ -242,25 +241,25 @@ Phase 0 (prerequisite) - COMPLETE:
   S2 (alpha convergence) - COMPLETE 2026-02-27
   S5 (verify non-uniform pi) - COMPLETE 2026-02-27
 
-Phase 1 (core harness) - mostly COMPLETE:
+Phase 1 (core harness) - COMPLETE:
   T1 + T2 + T12 - COMPLETE 2026-02-27
   T5 + T8 + T16 + T17 - COMPLETE 2026-02-27
   T6 - COMPLETE 2026-02-27
-  T13 - PARTIAL (final checklist pending)
+  T13 - COMPLETE 2026-03-02
   T15 - COMPLETE 2026-02-27
 
-Phase 2 (enhancements):
+Phase 2 (enhancements) - COMPLETE:
   T7 - COMPLETE 2026-02-27
   T9 - COMPLETE 2026-02-27
   T10 + T11 - COMPLETE 2026-02-27
-  T3 - PENDING
-  T4 - PENDING
-  T19 - PARTIAL (Method A complete-linkage done; multimodal linkage choice pending)
+  T3 - COMPLETE 2026-03-02
+  T4 - COMPLETE 2026-03-02
+  T19 - COMPLETE 2026-03-02
   S1 (speedups) - COMPLETE 2026-02-27
 
-Phase 3 (pre-pilot validation) - REQUIRED before pilot:
-  T18 (seed management review) - PENDING
-  T20 (2-locus smoke test) - PENDING
+Phase 3 (pre-pilot validation) - COMPLETE:
+  T18 (seed management review) - COMPLETE 2026-03-02
+  T20 (2-locus smoke test) - COMPLETE 2026-03-02
   T14 (LD count metric) - COMPLETE 2026-02-27
   S3 (LD regularization) - COMPLETE 2026-02-27 (available for Phase D)
 

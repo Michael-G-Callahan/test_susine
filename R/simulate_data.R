@@ -53,6 +53,89 @@ simulate_effect_sizes <- function(p,
   list(beta = beta, causal_idx = causal_idx)
 }
 
+scale_tier_to_energy <- function(beta, idx, target_energy) {
+  if (!length(idx) || !is.finite(target_energy) || target_energy <= 0) {
+    return(beta)
+  }
+  current <- sum(beta[idx]^2)
+  if (!is.finite(current) || current <= 0) {
+    return(beta)
+  }
+  beta[idx] <- beta[idx] * sqrt(target_energy / current)
+  beta
+}
+
+#' Simulate oligogenic effect sizes with sparse/oligogenic/polygenic tiers.
+#'
+#' The generator allocates effects across three tiers and rescales each tier to
+#' a target L2-energy fraction. This keeps tier strength interpretable while
+#' preserving random draw variability within each tier.
+#'
+#' @param p Number of SNPs.
+#' @param p_star Baseline sparse-causal count (used to size tiers).
+#' @param effect_sd Baseline effect SD.
+#' @param seed Optional seed.
+#' @param tier_h2 Named numeric vector of target tier fractions.
+#'
+#' @return List with `beta`, `causal_idx`, and `effect_tier` labels.
+#' @keywords internal
+simulate_effect_sizes_oligogenic <- function(p,
+                                             p_star,
+                                             effect_sd = 1,
+                                             seed = NULL,
+                                             tier_h2 = c(sparse = 0.6, oligogenic = 0.3, polygenic = 0.1)) {
+  stopifnot(p > 0, p_star >= 0)
+  if (!is.null(seed)) {
+    set.seed(seed)
+  }
+  all_idx <- seq_len(p)
+  p_star <- as.integer(max(1L, min(as.integer(p_star), p)))
+  remaining <- all_idx
+
+  sparse_idx <- sort(sample(remaining, size = p_star, replace = FALSE))
+  remaining <- setdiff(remaining, sparse_idx)
+
+  n_oligo <- min(length(remaining), max(1L, as.integer(ceiling(p_star / 2))))
+  oligo_idx <- if (n_oligo > 0L) sort(sample(remaining, size = n_oligo, replace = FALSE)) else integer(0)
+  remaining <- setdiff(remaining, oligo_idx)
+
+  n_poly <- min(length(remaining), max(1L, as.integer(ceiling(1.5 * p_star))))
+  poly_idx <- if (n_poly > 0L) sort(sample(remaining, size = n_poly, replace = FALSE)) else integer(0)
+
+  beta <- numeric(p)
+  if (length(sparse_idx)) {
+    beta[sparse_idx] <- stats::rnorm(length(sparse_idx), mean = 0, sd = effect_sd)
+  }
+  if (length(oligo_idx)) {
+    mix <- stats::rbinom(length(oligo_idx), size = 1, prob = 0.35)
+    sd_vec <- ifelse(mix == 1L, effect_sd * 0.8, effect_sd * 0.25)
+    beta[oligo_idx] <- stats::rnorm(length(oligo_idx), mean = 0, sd = sd_vec)
+  }
+  if (length(poly_idx)) {
+    beta[poly_idx] <- stats::rnorm(length(poly_idx), mean = 0, sd = effect_sd * 0.08)
+  }
+
+  frac <- as.numeric(tier_h2)
+  names(frac) <- names(tier_h2)
+  frac <- frac / sum(frac)
+  total_energy <- sum(beta^2)
+  if (!is.finite(total_energy) || total_energy <= 0) {
+    total_energy <- effect_sd^2 * max(length(sparse_idx), 1L)
+  }
+
+  beta <- scale_tier_to_energy(beta, sparse_idx, frac["sparse"] * total_energy)
+  beta <- scale_tier_to_energy(beta, oligo_idx, frac["oligogenic"] * total_energy)
+  beta <- scale_tier_to_energy(beta, poly_idx, frac["polygenic"] * total_energy)
+
+  effect_tier <- rep("none", p)
+  effect_tier[sparse_idx] <- "sparse"
+  effect_tier[oligo_idx] <- "oligogenic"
+  effect_tier[poly_idx] <- "polygenic"
+  causal_idx <- sort(c(sparse_idx, oligo_idx, poly_idx))
+
+  list(beta = beta, causal_idx = causal_idx, effect_tier = effect_tier)
+}
+
 #' Construct mu_0 and sigma_0_2 priors from effect sizes using annotation knobs.
 #'
 #' @param beta Numeric vector of true effects.
@@ -183,7 +266,7 @@ simulate_phenotype <- function(X, beta, noise_fraction, seed = NULL) {
 #' @param spec Named list or data.frame row containing simulation controls.
 #'   Required fields: `phenotype_seed`, `p_star`, `y_noise`. Optional prior controls:
 #'   `annotation_r2`, `inflate_match`. Additional optional inputs:
-#'   `effect_sd`, `standardize_X`.
+#'   `effect_sd`, `standardize_X`, `architecture`.
 #' @param base_X Optional matrix to reuse instead of loading the package data.
 #'
 #' @return List with design matrix, phenotype, ground-truth beta, priors, and
@@ -202,12 +285,22 @@ generate_simulation_data <- function(spec,
   }
 
   seed <- spec$phenotype_seed %||% spec$seed %||% 1L
-  effects <- simulate_effect_sizes(
-    p = ncol(X),
-    p_star = spec$p_star %||% 5L,
-    effect_sd = spec$effect_sd %||% 1,
-    seed = seed
-  )
+  architecture <- as.character(spec$architecture %||% "sparse")
+  effects <- if (identical(architecture, "oligogenic")) {
+    simulate_effect_sizes_oligogenic(
+      p = ncol(X),
+      p_star = spec$p_star %||% 5L,
+      effect_sd = spec$effect_sd %||% 1,
+      seed = seed
+    )
+  } else {
+    simulate_effect_sizes(
+      p = ncol(X),
+      p_star = spec$p_star %||% 5L,
+      effect_sd = spec$effect_sd %||% 1,
+      seed = seed
+    )
+  }
   phenotype <- simulate_phenotype(
     X = X,
     beta = effects$beta,
@@ -232,6 +325,8 @@ generate_simulation_data <- function(spec,
     mu_0 = priors$mu_0,
     sigma_0_2 = priors$sigma_0_2,
     causal_idx = effects$causal_idx,
+    effect_tier = effects$effect_tier %||% rep("sparse", ncol(X)),
+    architecture = architecture,
     annotation_r2_observed = priors$observed_r2,
     annotation_r2_target = spec$annotation_r2 %||% NA_real_,
     inflate_match = spec$inflate_match %||% NA_real_

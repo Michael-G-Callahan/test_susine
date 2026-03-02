@@ -1,19 +1,18 @@
----
-title: "SuSiNE Pilot Run Control (Restarts vs c-grid)"
+﻿---
+title: "SuSiNE Pilot Run Control"
 output:
   html_document:
     toc: true
     toc_depth: 2
     number_sections: true
-editor_options: 
-  markdown: 
+editor_options:
+  markdown:
     wrap: 72
 ---
 
-Summary: Builds SLURM-ready control files for the pilot study comparing
-SuSiE random restarts against SuSiNE's annotation-scale grid. It
-previews dataset bundles/run tables and writes job artifacts (config
-JSON + SLURM script) used by `inst/scripts/run_task.R`.
+Summary: Builds job artifacts for the current pilot design under the
+refactored harness. Prefilled for all use cases, all exploration methods,
+and all aggregation methods at K = 12 and L = 10.
 
 ```{r setup, message=FALSE}
 here::i_am("vignettes/simulation pipeline/run_control_workbook_pilot.Rmd")
@@ -22,6 +21,7 @@ here()
 
 library(devtools)
 devtools::load_all(".")
+
 susine_path <- here("..", "susine")
 if (file.exists(file.path(susine_path, "DESCRIPTION"))) {
   devtools::load_all(susine_path)
@@ -35,68 +35,88 @@ library(readr)
 library(knitr)
 ```
 
-# 1. Specify the Job
-
-This workbook is tuned for the pilot study:
-- SuSiE baseline + random restarts (`a_i`, `a_i_restart`)
-- SuSiNE functional mu across annotation scales (`b_ii`)
-- Aggregation via softmax-ELBO
-
-Update the grid and matrix selection before running.
+# 1. Pilot Inputs
 
 ```{r job-inputs}
 job_inputs <- list(
-  job_name = "pilot_restarts_vs_cgrid",
+  job_name = "pilot_all_methods_k12_l10",
   HPC = TRUE,
-  mem = "8G",
+  mem = "12G",
   time = "23:59:59",
   email = "mgc5166@psu.edu",
   output_root = here("output"),
 
-  # Grid mode: use "full" for the pilot, "minimal"/"intersect" for local tests
+  # Full pilot grid with M1-stratified matrix downsampling.
   grid_mode = "full",
 
-  # Use cases for the pilot
-  use_cases = c("susie_vanilla", "susine_functional_mu"),
-  exploration_methods = c("restart", "c_grid"),
-  exploration_mode = "separate",
-  K = 5,
+  # All pilot use cases from project_status.md Section 2.1
+  use_case_ids = c(
+    "susie_vanilla",
+    "susie_ash",
+    "susie_inf",
+    "susine_vanilla",
+    "susie_eb",
+    "susine_eb",
+    "susie_functional_pi",
+    "susine_functional_pi",
+    "susine_functional_mu"
+  ),
 
-  # Simulation settings
-  L_grid = c(10),
-  y_noise = c(0.6, 0.8, 0.9, 0.95),
-  p_star_grid = c(1, 2, 3, 4, 5, 10),
+  # All exploration methods, budgeted in separate mode.
+  exploration_methods = c("single", "restart", "tau_grid", "c_grid", "refine"),
+  exploration_mode = "separate",
+  K = 12L,
+
+  # Core simulation settings for pilot.
+  L_grid = 10L,
+  y_noise_grid = c(0.5, 0.8, 0.95),
+  p_star_grid = c(1L, 3L, 5L),
+  architecture_grid = c("sparse"),
   pair_L_p_star = FALSE,
 
-  # Annotation settings (only used by functional mu use cases)
-  annotation_r2 = c(0.3, 0.6),
-  inflate_match = c(1),
-  c_grid_values = c(0, 0.2, 0.4, 0.6, 0.8),
+  # Annotation quality grid.
+  annotation_r2 = c(0.0, 0.1, 0.3, 0.5),
+  inflate_match = c(0.0, 0.5, 1.0),
 
-  # SuSiE prior variance (fixed for pilot)
+  # Exploration grids/settings (must align with K in separate mode).
+  c_grid_values = seq(0, 1.1, by = 0.1),
+  tau_grid_values = seq(0.25, 3.0, length.out = 12),
+  restart_settings = list(
+    n_inits = 12L,
+    alpha_concentration = 0.1,
+    debug_alpha = FALSE
+  ),
+  refine_settings = list(
+    n_steps = 12L,
+    cs_source = "filtered"
+  ),
+
+  # Prior variance settings.
   sigma_0_2_scalars = c(0.2),
 
-  # Seeds per matrix
-  seeds = 1:5,
-
-  # Task assignment (run-based assignment is disabled)
+  # Seeds and task packing.
+  seeds = 1:3,
   task_unit = "dataset",
-  bundles_per_task = 3,
+  bundles_per_task = 2L,
   task_assignment_seed = 1L,
-  # runs_per_task = 200,        # legacy (ignored)
-  # buffer_flush_interval = 300 # legacy (ignored)
 
+  # Data source and matrix catalog.
   data_scenarios = c("scenario_1"),
   repo_root = here(),
-  sampled_scenario_summary = here("data", "sampled_simulated_genotypes", "scenario_sampling_summary.csv"),
-  
-  # Pilot matrix selection
-  pilot_selection_mode = "M1_stratified", # "M1_stratified", "csv", or "all"
-  pilot_n_matrices = 10,
+  sampled_scenario_summary = here(
+    "data", "sampled_simulated_genotypes", "scenario_sampling_summary.csv"
+  ),
+
+  # Pilot matrix selection (M1-stratified 5-10; default 10).
+  pilot_selection_mode = "M1_stratified", # "M1_stratified", "csv", "all"
+  pilot_n_matrices = 10L,
   pilot_matrix_ids_path = here("data", "pilot_matrix_ids.csv"),
   pilot_m1_cache_path = here("output", "pilot_m1_metrics.csv"),
-  pilot_catalog_with_m1_path = here("data", "sampled_simulated_genotypes", "scenario_sampling_summary_with_m1.csv"),
+  pilot_catalog_with_m1_path = here(
+    "data", "sampled_simulated_genotypes", "scenario_sampling_summary_with_m1.csv"
+  ),
 
+  # Output/control flags.
   credible_set_rho = 0.95,
   purity_threshold = 0.50,
   verbose_file_output = FALSE,
@@ -104,32 +124,26 @@ job_inputs <- list(
   write_snps_parquet = TRUE,
   write_confusion_bins = TRUE,
 
-  aggregation_methods = c("elbo_softmax", "cluster_weight"),
+  # All aggregation methods + full per-dataset global pool.
+  aggregation_methods = c("max_elbo", "uniform", "elbo_softmax", "cluster_weight"),
+  include_overall_pool = TRUE,
+  overall_aggregation_methods = c("max_elbo", "uniform", "elbo_softmax", "cluster_weight"),
+  softmax_temperature = 1,
+
   metrics_settings = list(
     pip_bucket_width = 0.01,
     z_top_k = 10,
     jsd_threshold = 0.171661
-  ),
-
-  restart_settings = list(
-    n_inits = 5,
-    alpha_concentration = 0.001,
-    debug_alpha = TRUE
-  ),
-
-  # Set to NULL to strip annealing config from the job config
-  anneal_settings = NULL
+  )
 )
+
+stopifnot(length(job_inputs$c_grid_values) == job_inputs$K)
+stopifnot(length(job_inputs$tau_grid_values) == job_inputs$K)
+stopifnot(job_inputs$restart_settings$n_inits == job_inputs$K)
+stopifnot(job_inputs$refine_settings$n_steps == job_inputs$K)
 ```
 
 # 2. (Optional) Restrict to Pilot Matrices
-
-For the pilot, restrict to the 10 selected matrices (e.g., stratified by
-M1). Choose a selection mode:
-- `"M1_stratified"`: compute M1 for all matrices and pick evenly across
-  the sorted M1 range.
-- `"csv"`: supply a CSV with a `matrix_id` column.
-- `"all"`: use every matrix (no downsampling).
 
 ```{r pilot-matrix-selection}
 data_matrix_catalog_full <- test_susine:::build_data_matrix_catalog(
@@ -197,7 +211,7 @@ cat("Pilot matrix selection mode:", pilot_mode, "\n")
 cat("Matrices selected:", nrow(data_matrix_catalog), "\n")
 ```
 
-# 3. Build the Run Tables
+# 3. Build Job Config
 
 ```{r build-config}
 prior_quality <- prior_quality_grid(
@@ -210,23 +224,22 @@ job_config <- make_job_config(
   HPC = job_inputs$HPC,
   time = job_inputs$time,
   mem = job_inputs$mem,
-  task_unit = job_inputs$task_unit,
-  bundles_per_task = job_inputs$bundles_per_task,
-  use_case_ids = job_inputs$use_cases,
+  use_case_ids = job_inputs$use_case_ids,
   exploration_methods = job_inputs$exploration_methods,
   exploration_mode = job_inputs$exploration_mode,
   K = job_inputs$K,
   L_grid = job_inputs$L_grid,
-  y_noise_grid = job_inputs$y_noise,
+  y_noise_grid = job_inputs$y_noise_grid,
   prior_quality = prior_quality,
   p_star_grid = job_inputs$p_star_grid,
   seeds = job_inputs$seeds,
+  architecture_grid = job_inputs$architecture_grid,
   data_scenarios = job_inputs$data_scenarios,
   repo_root = job_inputs$repo_root,
   sampled_scenario_summary = job_inputs$sampled_scenario_summary,
   data_matrix_catalog = data_matrix_catalog,
-  runs_per_task = job_inputs$runs_per_task,
-  buffer_flush_interval = job_inputs$buffer_flush_interval,
+  task_unit = job_inputs$task_unit,
+  bundles_per_task = job_inputs$bundles_per_task,
   email = job_inputs$email,
   output_root = job_inputs$output_root,
   credible_set_rho = job_inputs$credible_set_rho,
@@ -240,90 +253,61 @@ job_config <- make_job_config(
   pair_L_p_star = job_inputs$pair_L_p_star,
   sigma_0_2_scalars = job_inputs$sigma_0_2_scalars,
   c_grid_values = job_inputs$c_grid_values,
+  tau_grid_values = job_inputs$tau_grid_values,
+  restart_settings = job_inputs$restart_settings,
+  refine_settings = job_inputs$refine_settings,
   aggregation_methods = job_inputs$aggregation_methods,
-  metrics_settings = job_inputs$metrics_settings,
-  restart_settings = job_inputs$restart_settings
+  overall_aggregation_methods = job_inputs$overall_aggregation_methods,
+  include_overall_pool = job_inputs$include_overall_pool,
+  softmax_temperature = job_inputs$softmax_temperature,
+  metrics_settings = job_inputs$metrics_settings
 )
 ```
 
-# 4. Inspect the Design
+# 4. Inspect Run Design
 
-## Run Accounting Preview
-
-```{r preview-run-accounting}
-runs_tbl <- job_config$tables$runs
-bundles_tbl <- job_config$tables$dataset_bundles
+```{r run-accounting}
 lines <- test_susine::run_accounting_lines(
   job_config,
   seeds_per_matrix = length(unique(job_inputs$seeds)),
-  use_case_ids = job_inputs$use_cases
+  use_case_ids = job_inputs$use_case_ids
 )
 cat(paste(lines, collapse = "\n"), "\n")
 ```
 
-```{r preview- tables}
+```{r preview-tables}
 View(as.data.frame(job_config$tables$dataset_bundles))
-# View(as.data.frame(job_config$tables$data_matrices))
-# View(as.data.frame(job_config$tables$use_cases))
 View(as.data.frame(job_config$tables$runs))
 View(as.data.frame(job_config$tables$tasks))
 ```
 
-# 5. Write Control Files
+# 5. Write Job Artifacts
 
 ```{r write-artifacts}
 commit_artifacts <- TRUE
-
 if (commit_artifacts) {
-  artifacts <- write_job_artifacts(job_config, run_task_script = here("inst", "scripts", "run_task.R"))
+  artifacts <- write_job_artifacts(
+    job_config,
+    run_task_script = here("inst", "scripts", "run_task.R")
+  )
   str(artifacts)
 }
 ```
 
-# 7. Run Locally (Single Task)
+# 6. Submit / Local Smoke
 
-```{r test-the-first-task}
-run_task_script <- here("inst", "scripts", "run_task.R")
-job_name <- job_inputs$job_name
-task_id <- "1"
-job_root <- here("output")
-config_path <- here("output", "temp", job_name, "job_config.json")
-
-command <- sprintf(
-  'Rscript "%s" --job-name "%s" --task-id "%s" --job-root "%s" --config-path "%s"',
-  run_task_script,
-  job_name,
-  task_id,
-  job_root,
-  config_path
-)
-print(command)
-Sys.setenv(SUSINE_DEV = "1")
-system(command)
+```{r submit-hpc, eval=FALSE}
+# On cluster:
+# sbatch output/slurm_scripts/pilot_all_methods_k12_l10.slurm
 ```
 
-# 8. Next Steps
-
-1. Inspect the generated SLURM script at `output/slurm_scripts/<job_name>.slurm`.
-2. Submit the array job from the cluster: `sbatch output/slurm_scripts/<job_name>.slurm`.
-3. Monitor progress via `output/slurm_prints/<job_name>/`.
-
-```{r alpha debug}
-library(arrow)
-p <- "C:/Users/mgcal/OneDrive/Documents/School/Research/Genetics/cTWAS Generalization/Code/test_susine/output/slurm_output/local_test/task-001/flush-001_snps.parquet"
-
-df <- as.data.frame(read_parquet(p))
-
-# Compare PIPs across restart_id for one dataset/use_case
-sub <- df %>%
-  dplyr::filter(run_id %in% 12898:12902,
-                dataset_bundle_id == 807)
-
-# compute max absolute diff between any two restarts
-pips_by_run <- split(sub$pip, sub$run_id)
-max_diff <- max(sapply(pips_by_run, function(p1)
-  max(sapply(pips_by_run, function(p2) max(abs(p1 - p2))))))
-max_diff
-
-
+```{r local-smoke-single-task, eval=FALSE}
+# Optional local smoke run for task 1 (can still be slow).
+run_task(
+  job_name = job_inputs$job_name,
+  task_id = 1L,
+  job_root = here("output"),
+  config_path = here("output", "temp", job_inputs$job_name, "job_config.json"),
+  quiet = TRUE
+)
 ```

@@ -152,13 +152,15 @@ make_run_tables <- function(use_case_ids,
                             prior_quality,
                             p_star_grid,
                             seeds,
+                            architecture_grid = c("sparse"),
                             data_scenarios,
                             grid_mode = c("full", "minimal", "intersect"),
                             pair_L_p_star = FALSE,
                             data_matrix_catalog = NULL,
                             c_grid_values = NULL,
                             tau_grid_values = NULL,
-                            restart_settings = list()) {
+                            restart_settings = list(),
+                            refine_settings = list()) {
   if (!is.data.frame(prior_quality) ||
       !all(c("annotation_r2", "inflate_match") %in% names(prior_quality))) {
     stop("prior_quality must contain annotation_r2 and inflate_match columns.")
@@ -198,6 +200,7 @@ make_run_tables <- function(use_case_ids,
     scenario_vals <- unique(data_scenarios)
     y_vals <- unique(y_noise_grid)
     p_vals <- unique(p_star_grid)
+    arch_vals <- unique(as.character(architecture_grid %||% "sparse"))
     candidate_matrices <- matrix_catalog_subset %>%
       dplyr::arrange(.data$data_scenario, .data$matrix_id) %>%
       dplyr::pull(.data$matrix_id)
@@ -213,7 +216,8 @@ make_run_tables <- function(use_case_ids,
         matrix_id = matrix_ids,
         y_noise = y_vals[1],
         p_star = p_vals[1],
-        phenotype_seed = seed_values[1]
+        phenotype_seed = seed_values[1],
+        architecture = arch_vals[1]
       )
       return(bundles)
     }
@@ -223,6 +227,7 @@ make_run_tables <- function(use_case_ids,
         y_noise = y_vals,
         p_star = p_vals,
         phenotype_seed = seed_values,
+        architecture = arch_vals,
         matrix_id = candidate_matrices
       )
       lengths <- vapply(values, length, integer(1))
@@ -231,6 +236,7 @@ make_run_tables <- function(use_case_ids,
         y_noise = rep_len(values$y_noise, n_rows),
         p_star = rep_len(values$p_star, n_rows),
         phenotype_seed = rep_len(values$phenotype_seed, n_rows),
+        architecture = rep_len(values$architecture, n_rows),
         matrix_id = rep_len(values$matrix_id, n_rows)
       )
       return(bundles)
@@ -241,7 +247,8 @@ make_run_tables <- function(use_case_ids,
       matrix_id = candidate_matrices,
       y_noise = y_vals,
       p_star = p_vals,
-      phenotype_seed = seed_values
+      phenotype_seed = seed_values,
+      architecture = arch_vals
     )
     bundles
   }
@@ -291,6 +298,7 @@ make_run_tables <- function(use_case_ids,
                                     c_vals,
                                     tau_vals,
                                     restart_n = NULL,
+                                    refine_n = NULL,
                                     allow_infer_restart = FALSE,
                                     other_prod = 1L) {
     if (method == "single") {
@@ -348,7 +356,30 @@ make_run_tables <- function(use_case_ids,
       return(tibble::tibble(tau_value = vals))
     }
     if (method == "refine") {
-      stop("Exploration 'refine' is cataloged but not yet implemented in run-table expansion.")
+      n_refine <- refine_n %||% NA_integer_
+      if (!is.finite(n_refine)) {
+        if (mode == "separate") {
+          n_refine <- k
+        } else if (isTRUE(allow_infer_restart)) {
+          if (k %% as.integer(other_prod) != 0L) {
+            stop("Cannot infer refine count: K is not divisible by non-refine axis product.")
+          }
+          n_refine <- as.integer(k / as.integer(other_prod))
+        } else {
+          stop("refine_settings$n_steps must be set for intersect mode when refine is included.")
+        }
+      }
+      n_refine <- as.integer(n_refine)
+      if (mode == "separate" && n_refine != as.integer(k)) {
+        stop("For separate-mode refine exploration, refine_settings$n_steps must equal K.")
+      }
+      if (n_refine < 1L) {
+        stop("refine count must be >= 1.")
+      }
+      return(tibble::tibble(
+        refine_step = seq_len(n_refine),
+        init_type = rep("default", n_refine)
+      ))
     }
     stop("Unsupported exploration method: ", method)
   }
@@ -371,7 +402,8 @@ make_run_tables <- function(use_case_ids,
           k = K,
           c_vals = c_grid_values,
           tau_vals = tau_grid_values,
-          restart_n = restart_settings$n_inits %||% NULL
+          restart_n = restart_settings$n_inits %||% NULL,
+          refine_n = refine_settings$n_steps %||% NULL
         )
         if (!nrow(axis_tbl)) {
           axis_tbl <- tibble::tibble(.axis_stub = 1L)
@@ -418,6 +450,7 @@ make_run_tables <- function(use_case_ids,
         c_vals = c_grid_values,
         tau_vals = tau_grid_values,
         restart_n = restart_settings$n_inits %||% NULL,
+        refine_n = refine_settings$n_steps %||% NULL,
         allow_infer_restart = TRUE,
         other_prod = non_restart_prod
       )
@@ -596,6 +629,7 @@ make_job_config <- function(job_name,
                             prior_quality,
                             p_star_grid,
                             seeds,
+                            architecture_grid = c("sparse"),
                             data_scenarios = "simulation_n3",
                             repo_root = ".",
                             sampled_scenario_summary = NULL,
@@ -621,6 +655,10 @@ make_job_config <- function(job_name,
                             restart_settings = list(
                               n_inits = NULL,
                               alpha_concentration = 1
+                            ),
+                            refine_settings = list(
+                              n_steps = NULL,
+                              cs_source = "filtered"
                             ),
                             aggregation_methods = c("elbo_softmax"),
                             overall_aggregation_methods = NULL,
@@ -659,13 +697,15 @@ make_job_config <- function(job_name,
     prior_quality = prior_quality,
     p_star_grid = p_star_grid,
     seeds = seeds,
+    architecture_grid = architecture_grid,
     data_scenarios = data_scenarios,
     grid_mode = grid_mode,
     pair_L_p_star = pair_L_p_star,
     data_matrix_catalog = data_matrix_catalog,
     c_grid_values = c_grid_values,
     tau_grid_values = tau_grid_values,
-    restart_settings = restart_settings
+    restart_settings = restart_settings,
+    refine_settings = refine_settings
   )
 
   prior_specs <- tables$use_cases
@@ -717,6 +757,12 @@ make_job_config <- function(job_name,
   if (!"tau_value" %in% names(runs)) {
     runs$tau_value <- NA_real_
   }
+  if (!"refine_step" %in% names(runs)) {
+    runs$refine_step <- NA_integer_
+  }
+  if (!"architecture" %in% names(runs)) {
+    runs$architecture <- "sparse"
+  }
 
   runs <- runs %>% dplyr::mutate(.run_key = dplyr::row_number())
   restart_lookup <- runs %>%
@@ -733,6 +779,7 @@ make_job_config <- function(job_name,
       .data$phenotype_seed,
       .data$group_key,
       dplyr::coalesce(.data$restart_id, 0L),
+      dplyr::coalesce(.data$refine_step, 0L),
       .data$c_value,
       .data$tau_value
     ) %>%
@@ -754,6 +801,7 @@ make_job_config <- function(job_name,
   }
   compute_list <- list(
     restart = restart_settings,
+    refine = refine_settings,
     K = as.integer(K),
     exploration_methods = exploration_methods,
     exploration_mode = exploration_mode,
@@ -975,10 +1023,12 @@ summarise_job_config <- function(job_config) {
       "L",
       "y_noise",
       "p_star",
+      "architecture",
       "annotation_r2",
       "inflate_match",
       "sigma_0_2_scalar",
       "restart_id",
+      "refine_step",
       "init_type",
       "c_value",
       "tau_value",
