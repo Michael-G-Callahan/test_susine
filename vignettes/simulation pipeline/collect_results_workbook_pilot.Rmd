@@ -125,6 +125,14 @@ if (run_aggregation) {
 
   cat("Indexed", nrow(staging_index), "staging files across",
       dplyr::n_distinct(staging_index$task_id), "tasks\n")
+  type_counts <- staging_index %>%
+    dplyr::count(type, sort = TRUE)
+  print(type_counts)
+  n_validation_files <- sum(staging_index$type == "validation")
+  cat("Validation staging files:", n_validation_files, "\n")
+  if (n_validation_files == 0) {
+    warning("No validation staging files were indexed. Aggregated validation.csv will be missing.")
+  }
 
   validation <- test_susine::validate_staging_outputs(staging_index)
   bad <- dplyr::filter(validation, !ok)

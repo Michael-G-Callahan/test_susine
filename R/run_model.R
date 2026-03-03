@@ -39,6 +39,9 @@ run_task <- function(job_name,
     buffer_ctx$base_output <- determine_base_output(job_config)
     buffer_ctx$task_id <- task_id
     buffer_ctx$flush_index <- 0L
+    # Reruns should start from a clean task staging directory to avoid
+    # stale/duplicate flush files and overwrite-lock surprises.
+    prepare_task_staging_dir(buffer_ctx$base_output, task_id)
   }
 
   if (!quiet) {
@@ -61,6 +64,44 @@ run_task <- function(job_name,
 
   if (!is.null(buffer_ctx)) {
     flush_task_buffers(buffer_ctx)
+  }
+
+  if (!verbose_output && !is.null(buffer_ctx)) {
+    staging_dir <- file.path(
+      buffer_ctx$base_output,
+      sprintf("task-%03d", as.integer(task_id))
+    )
+    if (!dir.exists(staging_dir)) {
+      warning("Expected staging directory not found after task flush: ", staging_dir)
+    } else {
+      staged_files <- list.files(staging_dir, pattern = "^flush-[0-9]+_", full.names = FALSE)
+      if (!length(staged_files)) {
+        warning("No flush files found in staging directory after task flush: ", staging_dir)
+      } else {
+        type_labels <- sub("^flush-[0-9]+_", "", staged_files)
+        type_labels <- sub("\\.(csv|parquet)$", "", type_labels)
+        type_counts <- table(type_labels)
+        if (!quiet) {
+          message(
+            sprintf(
+              "Task %s staged file counts: %s",
+              task_id,
+              paste0(names(type_counts), "=", as.integer(type_counts), collapse = ", ")
+            )
+          )
+        }
+        has_validation <- any(grepl("_validation\\.csv$", staged_files))
+        if (!has_validation) {
+          warning(
+            sprintf(
+              "No validation flush CSV detected for task %s in %s. This will prevent aggregated validation.csv from being produced.",
+              task_id,
+              staging_dir
+            )
+          )
+        }
+      }
+    }
   }
 
   invisible(results)
@@ -223,13 +264,13 @@ normalize_blocked_idx <- function(blocked_idx, p) {
   sort(idx)
 }
 
-resolve_primary_init_type <- function(run_row) {
+resolve_run_type <- function(run_row) {
   restart_id <- suppressWarnings(as.integer(run_row$restart_id %||% NA_integer_))
-  init_type <- as.character(run_row$init_type %||% NA_character_)
-  if (is.na(init_type) || !nzchar(init_type)) {
-    init_type <- if (!is.na(restart_id) && restart_id > 1L) "warm" else "default"
+  run_type <- as.character(run_row$run_type %||% run_row$init_type %||% NA_character_)
+  if (is.na(run_type) || !nzchar(run_type)) {
+    run_type <- if (!is.na(restart_id) && restart_id > 1L) "warm" else "default"
   }
-  init_type
+  run_type
 }
 
 resolve_restart_seed <- function(run_row, restart_id = NA_integer_) {
@@ -244,12 +285,12 @@ resolve_restart_seed <- function(run_row, restart_id = NA_integer_) {
 infer_primary_variant_meta <- function(run_row, wall_time_sec = NA_real_) {
   restart_id <- suppressWarnings(as.integer(run_row$restart_id %||% NA_integer_))
   refine_step <- suppressWarnings(as.integer(run_row$refine_step %||% NA_integer_))
-  init_type <- resolve_primary_init_type(run_row)
+  run_type <- resolve_run_type(run_row)
   is_refine <- !is.na(refine_step)
   list(
-    variant_type = if (is_refine) "refine" else if (!is.na(restart_id)) "restart" else "base",
+    explore_method = if (is_refine) "refine" else if (!is.na(restart_id)) "restart" else "base",
     variant_id = if (is_refine) refine_step else if (!is.na(restart_id)) restart_id else NA_integer_,
-    init_type = init_type,
+    run_type = run_type,
     is_restart = !is.na(restart_id),
     is_agg = FALSE,
     wall_time_sec = as.numeric(wall_time_sec)
@@ -286,9 +327,9 @@ execution_cache_key <- function(use_case,
     as.character(x)
   }
 
-  init_type <- resolve_primary_init_type(run_row)
+  run_type <- resolve_run_type(run_row)
   restart_id <- suppressWarnings(as.integer(run_row$restart_id %||% NA_integer_))
-  warm_seed <- if (identical(init_type, "warm")) resolve_restart_seed(run_row, restart_id) else NA_integer_
+  warm_seed <- if (identical(run_type, "warm")) resolve_restart_seed(run_row, restart_id) else NA_integer_
   alpha_conc <- job_config$job$compute$restart$alpha_concentration %||% 1
 
   annotation_active <- prior_mean_strategy == "functional_mu" || inclusion_prior_strategy == "functional_pi"
@@ -321,9 +362,9 @@ execution_cache_key <- function(use_case,
     paste0("pi=", fmt_chr(inclusion_prior_strategy)),
     paste0("unmap=", fmt_chr(unmappable_effects)),
     paste0("L=", fmt_int(L)),
-    paste0("init=", fmt_chr(init_type)),
+    paste0("init=", fmt_chr(run_type)),
     paste0("warm_seed=", fmt_int(warm_seed)),
-    paste0("alpha_conc=", if (identical(init_type, "warm")) fmt_num(alpha_conc) else "NA"),
+    paste0("alpha_conc=", if (identical(run_type, "warm")) fmt_num(alpha_conc) else "NA"),
     paste0("ann_r2=", ann_r2_key),
     paste0("inflate=", inflate_key),
     paste0("ann_seed=", ann_seed_key),
@@ -530,15 +571,14 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
 
   # Dataset-level metrics (computed once)
   z_top_k <- job_config$job$metrics$z_top_k %||% 10L
+  # Slim dataset_metrics: only dataset_bundle_id + data_scenario + metrics.
+  # Bundle-level columns (matrix_id, architecture, y_noise, p_star,
+  # phenotype_seed) are stripped — re-attached during aggregation via
+  # join on dataset_bundle_id to dataset_bundles.
   ds_metrics <- compute_dataset_metrics(data_bundle$X, data_bundle$y, top_k = z_top_k) %>%
     dplyr::mutate(
       dataset_bundle_id = bundle_id,
-      data_scenario = data_bundle$data_scenario,
-      matrix_id = data_bundle$matrix_id,
-      architecture = data_bundle$architecture %||% (bundle_row$architecture %||% "sparse"),
-      y_noise = bundle_row$y_noise,
-      p_star = bundle_row$p_star,
-      phenotype_seed = bundle_row$phenotype_seed
+      data_scenario = data_bundle$data_scenario
     )
   write_dataset_metrics(bundle_row = bundle_row, job_config = job_config, dataset_metrics = ds_metrics, buffer_ctx = buffer_ctx)
 
@@ -625,7 +665,7 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
       if (length(meta_override)) {
         meta[names(meta_override)] <- meta_override
       }
-      meta$init_type <- as.character(meta$init_type %||% resolve_primary_init_type(run_row))
+      meta$run_type <- as.character(meta$run_type %||% resolve_run_type(run_row))
       meta$model_call_executed <- isTRUE(meta$model_call_executed)
       meta$cache_source_run_id <- as.integer(meta$cache_source_run_id %||% run_row$run_id)
       write_run_outputs(
@@ -657,7 +697,7 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
         dataset_bundle_id = bundle_id,
         use_case_id = run_row$use_case_id,
         phenotype_seed = run_row$phenotype_seed,
-        variant_type = meta$variant_type,
+        explore_method = meta$explore_method,
         variant_id = meta$variant_id,
         model_call_executed = as.logical(meta$model_call_executed %||% NA),
         cache_source_run_id = as.integer(meta$cache_source_run_id %||% NA_integer_),
@@ -726,9 +766,9 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
           group_key = gk,
           blocked_idx = node$blocked,
           meta_override = list(
-            variant_type = "refine",
+            explore_method = "refine",
             variant_id = step_id,
-            init_type = ifelse(step_id <= 1L, "default", "warm"),
+            run_type = ifelse(step_id <= 1L, "default", "warm"),
             is_restart = FALSE
           )
         )
@@ -781,12 +821,12 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
             elbo_vec = group_elbos,
             methods = agg_methods,
             softmax_temperature = softmax_temperature,
-            jsd_threshold = job_config$job$metrics$jsd_threshold %||% 0.171661
+            jsd_threshold = job_config$job$metrics$jsd_threshold %||% 0.15
           )
           for (m in names(agg_results)) {
             agg_pip <- agg_results[[m]]
             agg_meta <- list(
-              variant_type = "aggregation",
+              explore_method = "aggregation",
               variant_id = m,
               agg_method = m,
               agg_ess = as.numeric(attr(agg_pip, "ess") %||% NA_real_),
@@ -800,7 +840,7 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
             )
             agg_run_row <- group_run_map[[group_key]] %||% uc_runs[1, , drop = FALSE]
             agg_run_row$restart_id <- NA_integer_
-            agg_run_row$init_type <- NA_character_
+            agg_run_row$run_type <- NA_character_
             agg_run_row$c_value <- NA_real_
             agg_run_row$tau_value <- NA_real_
             agg_run_row$sigma_0_2_scalar <- NA_character_
@@ -819,11 +859,14 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
     for (group_key in names(primary_pips_by_group)) {
       group_pips <- primary_pips_by_group[[group_key]]
       if (length(group_pips) > 1) {
-        mm <- compute_multimodal_metrics(group_pips, jsd_threshold = job_config$job$metrics$jsd_threshold %||% 0.171661)
+        mm <- compute_multimodal_metrics(group_pips, jsd_threshold = job_config$job$metrics$jsd_threshold %||% 0.15)
+        # Extract explore method from group_key (e.g., "L=10|...|explore=separate:restart" -> "restart")
+        gk_explore <- sub(".*explore=[^:]*:", "", group_key)
         write_multimodal_metrics(
           bundle_row = bundle_row,
           use_case_id = uc_id,
           group_label = paste0("model_grid|", group_key),
+          explore_method = gk_explore,
           metrics = mm,
           job_config = job_config,
           buffer_ctx = buffer_ctx
@@ -843,13 +886,13 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
       elbo_vec = global_primary_elbos,
       methods = overall_methods,
       softmax_temperature = softmax_temperature,
-      jsd_threshold = job_config$job$metrics$jsd_threshold %||% 0.171661
+      jsd_threshold = job_config$job$metrics$jsd_threshold %||% 0.15
     )
     global_row <- global_run_template %||% bundle_runs[1, , drop = FALSE]
     global_row$use_case_id <- "global_pool"
     global_row$prior_spec_id <- "global_pool"
     global_row$restart_id <- NA_integer_
-    global_row$init_type <- NA_character_
+    global_row$run_type <- NA_character_
     global_row$c_value <- NA_real_
     global_row$tau_value <- NA_real_
     global_row$sigma_0_2_scalar <- NA_character_
@@ -866,7 +909,7 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
         conf_bins = conf_bins,
         buffer_ctx = buffer_ctx,
         variant_meta = list(
-          variant_type = "overall_aggregation",
+          explore_method = "overall_aggregation",
           variant_id = m,
           agg_method = m,
           agg_ess = as.numeric(attr(agg_pip, "ess") %||% NA_real_),
@@ -878,12 +921,13 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
 
     mm_global <- compute_multimodal_metrics(
       global_primary_pips,
-      jsd_threshold = job_config$job$metrics$jsd_threshold %||% 0.171661
+      jsd_threshold = job_config$job$metrics$jsd_threshold %||% 0.15
     )
     write_multimodal_metrics(
       bundle_row = bundle_row,
       use_case_id = "global_pool",
-      group_label = "overall_pool",
+      group_label = "global_pool|all_use_cases",
+      explore_method = "all",
       metrics = mm_global,
       job_config = job_config,
       buffer_ctx = buffer_ctx
@@ -1039,10 +1083,10 @@ run_use_case <- function(use_case, run_row, data_bundle, job_config, blocked_idx
 
   restart_id <- suppressWarnings(as.integer(run_row$restart_id %||% NA_integer_))
   refine_step <- suppressWarnings(as.integer(run_row$refine_step %||% NA_integer_))
-  init_type <- resolve_primary_init_type(run_row)
+  run_type <- resolve_run_type(run_row)
 
   prior_weights <- base_prior_weights
-  if (identical(init_type, "warm")) {
+  if (identical(run_type, "warm")) {
     restart_seed <- resolve_restart_seed(run_row, restart_id)
     set.seed(restart_seed)
     prior_weights <- as.numeric(dirichlet_matrix(1L, rep(alpha_conc, p)))
@@ -1163,7 +1207,7 @@ aggregate_use_case_pips <- function(pip_list,
                                     elbo_vec,
                                     methods = c("elbo_softmax"),
                                     softmax_temperature = 1,
-                                    jsd_threshold = 0.171661) {
+                                    jsd_threshold = 0.15) {
   methods <- unique(as.character(methods))
   methods[methods == "softmax_elbo"] <- "elbo_softmax"
   methods[methods == "mean"] <- "uniform"
@@ -1222,7 +1266,7 @@ js_distance <- function(p, q, eps = 1e-12) {
   0.5 * kl(p, m) + 0.5 * kl(q, m)
 }
 
-compute_multimodal_metrics <- function(pip_list, jsd_threshold = 0.171661, top_k = 10L) {
+compute_multimodal_metrics <- function(pip_list, jsd_threshold = 0.15, top_k = 10L) {
   n <- length(pip_list)
   if (n < 2) {
     return(tibble::tibble(
@@ -1294,18 +1338,19 @@ write_dataset_metrics <- function(bundle_row, job_config, dataset_metrics, buffe
   }
 }
 
-write_multimodal_metrics <- function(bundle_row, use_case_id, group_label, metrics, job_config, buffer_ctx = NULL) {
+write_multimodal_metrics <- function(bundle_row, use_case_id, group_label, explore_method = NA_character_,
+                                     metrics, job_config, buffer_ctx = NULL) {
   if (is.null(metrics) || !nrow(metrics)) return(invisible(NULL))
+  # Slim multimodal_metrics: only dataset_bundle_id + use_case_id +
+  # group_label + explore_method + metrics. Bundle-level columns
+  # (data_scenario, matrix_id, y_noise, p_star, phenotype_seed) are
+  # stripped — re-attached during aggregation.
   out <- metrics %>%
     dplyr::mutate(
       dataset_bundle_id = bundle_row$dataset_bundle_id,
-      data_scenario = bundle_row$data_scenario,
-      matrix_id = bundle_row$matrix_id,
-      y_noise = bundle_row$y_noise,
-      p_star = bundle_row$p_star,
-      phenotype_seed = bundle_row$phenotype_seed,
       use_case_id = use_case_id,
-      group_label = group_label
+      group_label = group_label,
+      explore_method = as.character(explore_method)
     )
   verbose_output <- isTRUE(job_config$job$verbose_file_output)
   if (verbose_output) {
@@ -1321,23 +1366,15 @@ write_multimodal_metrics <- function(bundle_row, use_case_id, group_label, metri
 
 write_confusion_bins <- function(run_row, job_config, conf_bins, buffer_ctx = NULL, variant_meta = NULL) {
   if (is.null(conf_bins) || !nrow(conf_bins)) return(invisible(NULL))
-  is_agg <- isTRUE(variant_meta$is_agg %||% FALSE)
+  # Slim confusion_bins: run_id always set (agg_method discriminates aggregated
+
+  # rows). Run-table columns (dataset_bundle_id, architecture, use_case_id,
+  # group_key, L, annotation_r2, inflate_match, sigma_0_2_scalar, refine_step,
+  # c_value, tau_value, run_type) are stripped — re-attached during aggregation
+  # via join on run_id.
   meta <- tibble::tibble(
-    run_id = if (is_agg) NA_integer_ else run_row$run_id,
-    dataset_bundle_id = run_row$dataset_bundle_id,
-    architecture = as.character(run_row$architecture %||% NA_character_),
-    use_case_id = run_row$use_case_id,
-    prior_spec_id = run_row$prior_spec_id %||% run_row$use_case_id,
-    group_key = run_row$group_key %||% NA_character_,
-    L = run_row$L,
-    annotation_r2 = run_row$annotation_r2,
-    inflate_match = run_row$inflate_match,
-    sigma_0_2_scalar = run_row$sigma_0_2_scalar %||% NA_character_,
-    refine_step = as.integer(run_row$refine_step %||% NA_integer_),
-    c_value = run_row$c_value %||% NA_real_,
-    tau_value = run_row$tau_value %||% NA_real_,
-    init_type = as.character(variant_meta$init_type %||% run_row$init_type %||% NA_character_),
-    variant_type = as.character(variant_meta$variant_type %||% "base"),
+    run_id = as.integer(run_row$run_id),
+    explore_method = as.character(variant_meta$explore_method %||% "base"),
     variant_id = as.character(variant_meta$variant_id %||% NA_character_),
     agg_method = as.character(variant_meta$agg_method %||% NA_character_),
     agg_ess = as.numeric(variant_meta$agg_ess %||% NA_real_)
@@ -1375,20 +1412,24 @@ write_run_outputs <- function(run_row,
   }
 
   if (is.null(variant_meta)) {
-    variant_meta <- list(variant_type = "base", variant_id = NA, agg_method = NA)
+    variant_meta <- list(explore_method = "base", variant_id = NA, agg_method = NA)
   }
+  # Runtime-derived columns NOT recoverable from run_table via run_id.
+  # Run-table columns (task_id, use_case_id, phenotype_seed, dataset_bundle_id,
+  # architecture, refine_step, run_type) are stripped here and re-attached
+  # during aggregation via join on run_id.
   meta_tbl <- tibble::tibble(
-    dataset_bundle_id = run_row$dataset_bundle_id,
-    architecture = as.character(run_row$architecture %||% NA_character_),
-    prior_spec_id = run_row$prior_spec_id %||% run_row$use_case_id,
-    refine_step = as.integer(run_row$refine_step %||% NA_integer_),
-    init_type = as.character(variant_meta$init_type %||% run_row$init_type %||% NA_character_),
-    variant_type = as.character(variant_meta$variant_type %||% "base"),
+    explore_method = as.character(variant_meta$explore_method %||% "base"),
     variant_id = as.character(variant_meta$variant_id %||% NA_character_),
     agg_method = as.character(variant_meta$agg_method %||% NA_character_),
     wall_time_sec = as.numeric(variant_meta$wall_time_sec %||% NA_real_),
     model_call_executed = as.logical(variant_meta$model_call_executed %||% NA),
     cache_source_run_id = as.integer(variant_meta$cache_source_run_id %||% NA_integer_)
+  )
+  # Slim version for effect_metrics — drop run-level accounting fields
+  effect_meta_tbl <- dplyr::select(
+    meta_tbl,
+    -dplyr::any_of(c("wall_time_sec", "model_call_executed", "cache_source_run_id"))
   )
 
   elbo_vals <- evaluation$traces$elbo
@@ -1405,9 +1446,6 @@ write_run_outputs <- function(run_row,
       dplyr::mutate(evaluation$model_filtered, filtering = "purity_filtered")
     ),
     run_id = run_row$run_id,
-    task_id = run_row$task_id,
-    use_case_id = run_row$use_case_id,
-    phenotype_seed = run_row$phenotype_seed,
     elbo_final = elbo_final
   ) %>% dplyr::bind_cols(meta_tbl)
   if (verbose_output) {
@@ -1418,11 +1456,8 @@ write_run_outputs <- function(run_row,
   if (!is.null(evaluation$effects_filtered) && nrow(evaluation$effects_filtered)) {
     effect_metrics <- dplyr::mutate(
       dplyr::select(evaluation$effects_filtered, -dplyr::any_of("indices")),
-      run_id = run_row$run_id,
-      task_id = run_row$task_id,
-      use_case_id = run_row$use_case_id,
-      phenotype_seed = run_row$phenotype_seed
-    ) %>% dplyr::bind_cols(meta_tbl)
+      run_id = run_row$run_id
+    ) %>% dplyr::bind_cols(effect_meta_tbl)
   }
   if (!is.null(effect_metrics) && nrow(effect_metrics) && verbose_output) {
     readr::write_csv(effect_metrics, file.path(run_dir, "effect_metrics.csv"))
@@ -1543,6 +1578,34 @@ determine_base_output <- function(job_config) {
   }
 }
 
+prepare_task_staging_dir <- function(base_output, task_id) {
+  staging_dir <- file.path(
+    base_output,
+    sprintf("task-%03d", as.integer(task_id))
+  )
+  ensure_dir(staging_dir)
+  stale_flush_files <- list.files(
+    staging_dir,
+    pattern = "^flush-[0-9]+_",
+    full.names = TRUE
+  )
+  if (!length(stale_flush_files)) {
+    return(invisible(staging_dir))
+  }
+  rm_ok <- file.remove(stale_flush_files)
+  if (!all(rm_ok)) {
+    failed <- stale_flush_files[!rm_ok]
+    stop(
+      "Unable to clear existing flush files for task ",
+      as.integer(task_id),
+      ". One or more files are likely open/locked by another process. ",
+      "Close those files and rerun.\n",
+      paste(failed, collapse = "\n")
+    )
+  }
+  invisible(staging_dir)
+}
+
 build_validation_row <- function(run_row) {
   tibble::tibble(
     run_id = run_row$run_id,
@@ -1606,18 +1669,36 @@ flush_task_buffers <- function(buffer_ctx) {
   ensure_dir(staging_dir)
   flush_label <- sprintf("flush-%03d", as.integer(buffer_ctx$flush_index))
 
-    write_flush_outputs(
-      staging_dir = staging_dir,
-      flush_label = flush_label,
-      task_id = buffer_ctx$task_id,
-      model_metrics = if (length(buf$model)) dplyr::bind_rows(buf$model) else NULL,
-      effect_metrics = if (length(buf$effect)) dplyr::bind_rows(buf$effect) else NULL,
-      snp_tbl = if (length(buf$snps)) dplyr::bind_rows(buf$snps) else NULL,
-      validation_row = if (length(buf$validation)) dplyr::bind_rows(buf$validation) else NULL,
-      confusion_bins = if (length(buf$confusion)) dplyr::bind_rows(buf$confusion) else NULL,
-      dataset_metrics = if (length(buf$dataset_metrics)) dplyr::bind_rows(buf$dataset_metrics) else NULL,
-      multimodal_metrics = if (length(buf$multimodal)) dplyr::bind_rows(buf$multimodal) else NULL
+  model_tbl <- if (length(buf$model)) dplyr::bind_rows(buf$model) else NULL
+  effect_tbl <- if (length(buf$effect)) dplyr::bind_rows(buf$effect) else NULL
+  snp_tbl <- if (length(buf$snps)) dplyr::bind_rows(buf$snps) else NULL
+  validation_tbl <- if (length(buf$validation)) dplyr::bind_rows(buf$validation) else NULL
+  confusion_tbl <- if (length(buf$confusion)) dplyr::bind_rows(buf$confusion) else NULL
+  dataset_tbl <- if (length(buf$dataset_metrics)) dplyr::bind_rows(buf$dataset_metrics) else NULL
+  multimodal_tbl <- if (length(buf$multimodal)) dplyr::bind_rows(buf$multimodal) else NULL
+
+  write_flush_outputs(
+    staging_dir = staging_dir,
+    flush_label = flush_label,
+    task_id = buffer_ctx$task_id,
+    model_metrics = model_tbl,
+    effect_metrics = effect_tbl,
+    snp_tbl = snp_tbl,
+    validation_row = validation_tbl,
+    confusion_bins = confusion_tbl,
+    dataset_metrics = dataset_tbl,
+    multimodal_metrics = multimodal_tbl
+  )
+
+  if (is.null(validation_tbl) || !nrow(validation_tbl)) {
+    warning(
+      sprintf(
+        "Flush %s has no validation rows; %s_validation.csv was not written.",
+        flush_label,
+        flush_label
+      )
     )
+  }
 
   buffer_ctx$buffers <- list(
     model = list(),
@@ -1673,22 +1754,15 @@ write_flush_outputs <- function(staging_dir,
 
 # Write SNP parquet with reduced precision for numeric columns to cut size.
 write_compact_snp_parquet <- function(snp_tbl, path) {
-  # Ensure task/flush metadata exist even if caller did not add them.
-  if (!"task_id" %in% names(snp_tbl)) {
-    snp_tbl$task_id <- NA_integer_
-  }
+  # Ensure flush_id exists even if caller did not add it.
   if (!"flush_id" %in% names(snp_tbl)) {
     snp_tbl$flush_id <- NA_character_
   }
+  # Slim parquet: run-table columns (task_id, dataset_bundle_id, architecture,
+  # refine_step, run_type) stripped — recoverable via run_id join.
   snp_tbl <- dplyr::mutate(
     snp_tbl,
     run_id = as.integer(run_id),
-    task_id = as.integer(task_id),
-    dataset_bundle_id = as.integer(dataset_bundle_id %||% NA_integer_),
-    architecture = as.character(architecture %||% NA_character_),
-    prior_spec_id = as.character(prior_spec_id %||% NA_character_),
-    refine_step = as.integer(refine_step %||% NA_integer_),
-    init_type = as.character(init_type %||% NA_character_),
     snp_index = as.integer(snp_index),
     pip = as.numeric(pip),
     beta = as.numeric(beta),
@@ -1696,19 +1770,13 @@ write_compact_snp_parquet <- function(snp_tbl, path) {
     sigma_0_2 = as.numeric(sigma_0_2),
     causal = as.integer(causal),
     flush_id = as.character(flush_id),
-    variant_type = as.character(variant_type %||% NA_character_),
+    explore_method = as.character(explore_method %||% variant_type %||% NA_character_),
     variant_id = as.character(variant_id %||% NA_character_),
     agg_method = as.character(agg_method %||% NA_character_)
   )
-  # Fixed schema that includes task/flush metadata and keeps floats compact.
+  # Fixed schema — slim (run-table cols stripped).
   snp_schema <- arrow::schema(
     run_id = arrow::int32(),
-    task_id = arrow::int32(),
-    dataset_bundle_id = arrow::int32(),
-    architecture = arrow::utf8(),
-    prior_spec_id = arrow::utf8(),
-    refine_step = arrow::int32(),
-    init_type = arrow::utf8(),
     snp_index = arrow::int32(),
     pip = arrow::float32(),
     beta = arrow::float32(),
@@ -1716,7 +1784,7 @@ write_compact_snp_parquet <- function(snp_tbl, path) {
     sigma_0_2 = arrow::float32(),
     causal = arrow::int8(),
     flush_id = arrow::utf8(),
-    variant_type = arrow::utf8(),
+    explore_method = arrow::utf8(),
     variant_id = arrow::utf8(),
     agg_method = arrow::utf8()
   )
@@ -1780,6 +1848,5 @@ load_sampled_matrix <- function(matrix_row, repo_root) {
   storage.mode(X) <- "numeric"
   X
 }
-
 
 

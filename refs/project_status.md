@@ -159,10 +159,10 @@ Controlled by existing parameters in `simulate_priors()`:
 - LD metrics: M1, count of |r| > 0.95 off-diagonal (expected singleton bandits proxy), related transformations
 
 **Multimodal metrics (per multi-fit group, truth-agnostic):**
-- mean_jsd, median_jsd, max_jsd (pairwise Jensen-Shannon divergence)
+- mean_jsd, median_jsd, max_jsd (pairwise Jensen-Shannon style divergence on raw model-wide PIP vectors; no /L normalization in current code)
 - jaccard_top10 (top-10 PIP overlap)
 - mean_pip_var (per-SNP PIP variance across fits)
-- n_clusters (hierarchical clustering at JSD threshold)
+- n_clusters (hierarchical clustering at JSD threshold; threshold is interpreted on the same raw JSD scale above)
 
 ---
 

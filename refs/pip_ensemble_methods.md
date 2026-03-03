@@ -62,8 +62,9 @@ This preserves the joint correlation structure across SNPs (e.g., LD-driven mutu
 
 1. **Run K restarts.** Collect $\{(\text{PIP}_i, \text{ELBO}_i)\}_{i=1}^K$.
 
-2. **Compute pairwise JSD matrix.** Normalize PIP vectors by $L$ (number of single effects) to place them on the simplex:
-$$D_{ij} = \text{JSD}(\text{PIP}_i / L,\; \text{PIP}_j / L)$$
+2. **Compute pairwise JSD-like matrix on raw model-wide PIPs.** Use the model-wide PIP vectors directly (no division by $L$):
+$$D_{ij} = \text{JSD}(\text{PIP}_i,\; \text{PIP}_j)$$
+In current pipeline code this is computed directly on raw PIPs, so values are on a raw scale and are not interpreted as simplex-normalized JSD.
 
 3. **Cluster into modes.** Hierarchical clustering with complete linkage on $D$. Complete linkage defines cluster diameter by the maximum internal pairwise distance, ensuring all fits within a cluster are mutually close. Cut the dendrogram at a natural gap (with K = 5–20, this is typically visually obvious).
 
@@ -92,7 +93,9 @@ The importance correction assumes the best ELBO found per cluster is a good prox
 
 **When to use:** Large numbers of restarts where you have enough samples to estimate the proposal density nonparametrically. Avoids the discrete clustering step entirely.
 
-#### Information-Geometric Foundation
+#### Information-Geometric Foundation (optional normalized variant)
+
+This section describes an optional normalized-PIP variant (divide by $L$ first). It is not the current default in the simulation pipeline, which uses raw PIP vectors for JSD-style distances.
 
 PIP vectors normalized by $L$ live on the probability simplex. The natural Riemannian metric on the simplex is the Fisher information metric, under which $\sqrt{\text{JSD}}$ is proportional to the geodesic (Fisher-Rao) distance. The **heat kernel** — the fundamental solution to the diffusion equation on the manifold — is the unique geometrically principled kernel. Under Varadhan's approximation:
 

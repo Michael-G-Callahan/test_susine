@@ -134,7 +134,7 @@ job_inputs <- list(
   metrics_settings = list(
     pip_bucket_width = 0.01,
     z_top_k = 10,
-    jsd_threshold = 0.171661
+    jsd_threshold = 0.15
   )
 )
 

@@ -26,10 +26,10 @@ validate_metrics_coverage <- function(aggregated_dir, require_multimodal = TRUE)
   required <- list(
     model_metrics = c("run_id", "use_case_id", "filtering", "power", "mean_size", "mean_purity", "AUPRC", "cross_entropy", "hg2", "elbo_final"),
     effect_metrics = c("run_id", "use_case_id", "effect", "size", "purity", "coverage"),
-    dataset_metrics = c("dataset_bundle_id", "M1", "z_topk_ratio", "z_max_abs", "z_count_abs_gt_3", "z_eff_signals", "high_ld_count_095", "high_ld_count_095_per_snp"),
-    confusion_bins = c("pip_threshold", "n_causal_at_bucket", "n_noncausal_at_bucket"),
+    dataset_metrics = c("dataset_bundle_id", "M1", "z_topk_ratio", "z_max_abs", "z_count_abs_gt_3", "z_eff_signals", "high_ld_count_095", "high_ld_count_095_per_snp", "high_ld_frac_095"),
+    confusion_bins = c("run_id", "pip_threshold", "n_causal_at_bucket", "n_noncausal_at_bucket"),
     validation = c("run_id", "task_id", "has_issues"),
-    multimodal_metrics = c("use_case_id", "group_label", "mean_jsd", "median_jsd", "max_jsd", "jaccard_top10", "mean_pip_var", "n_clusters")
+    multimodal_metrics = c("use_case_id", "group_label", "explore_method", "mean_jsd", "median_jsd", "max_jsd", "jaccard_top10", "mean_pip_var", "n_clusters")
   )
 
   files <- c(
@@ -90,21 +90,28 @@ seed_management_report <- function(job_config) {
 
   run_id_ok <- dplyr::n_distinct(runs$run_id) == nrow(runs)
 
+  n_bundles <- nrow(bundles)
+  n_unique_seeds <- dplyr::n_distinct(bundles$phenotype_seed)
+  seed_globally_unique_ok <- n_unique_seeds == n_bundles
+
   tibble::tibble(
     check = c(
       "bundle_has_single_phenotype_seed",
+      "phenotype_seed_globally_unique",
       "annotation_seed_unique_per_bundle_annotation_setting",
       "restart_seed_unique_per_restart_row",
       "run_id_unique"
     ),
     pass = c(
       isTRUE(bundle_seed_ok$ok[[1]]),
+      seed_globally_unique_ok,
       ann_ok,
       restart_ok,
       run_id_ok
     ),
     detail = c(
       as.character(bundle_seed_ok$detail[[1]]),
+      paste0("unique phenotype_seeds=", n_unique_seeds, "; bundles=", n_bundles),
       paste0("observed=", ann_observed, "; expected=", ann_expected),
       paste0("observed=", restart_observed, "; expected=", restart_expected),
       paste0("observed unique run_id=", dplyr::n_distinct(runs$run_id), "; rows=", nrow(runs))

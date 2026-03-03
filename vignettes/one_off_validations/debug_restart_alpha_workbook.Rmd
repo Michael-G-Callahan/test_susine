@@ -224,7 +224,7 @@ fits <- lapply(seq_len(n_inits), function(i) {
 pips <- lapply(fits, function(fit) fit$model_fit$PIPs)
 mm <- test_susine:::compute_multimodal_metrics(
   pips,
-  jsd_threshold = job_config$job$metrics$jsd_threshold %||% 0.171661,
+  jsd_threshold = job_config$job$metrics$jsd_threshold %||% 0.15,
   top_k = 10L
 )
 

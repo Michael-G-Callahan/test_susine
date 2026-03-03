@@ -254,7 +254,11 @@ make_run_tables <- function(use_case_ids,
   }
 
   dataset_bundles <- build_dataset_bundles() %>%
-    dplyr::mutate(dataset_bundle_id = dplyr::row_number())
+    dplyr::mutate(
+      dataset_bundle_id = dplyr::row_number(),
+      base_seed = phenotype_seed,
+      phenotype_seed = as.integer(phenotype_seed * 10007L + dataset_bundle_id)
+    )
 
   if (!nrow(dataset_bundles)) {
     stop("No dataset bundles created.")
@@ -327,7 +331,7 @@ make_run_tables <- function(use_case_ids,
       }
       return(tibble::tibble(
         restart_id = seq_len(n_restart),
-        init_type = dplyr::if_else(seq_len(n_restart) == 1L, "default", "warm")
+        run_type = dplyr::if_else(seq_len(n_restart) == 1L, "default", "warm")
       ))
     }
     if (method == "c_grid") {
@@ -375,7 +379,7 @@ make_run_tables <- function(use_case_ids,
       }
       return(tibble::tibble(
         refine_step = seq_len(n_refine),
-        init_type = rep("default", n_refine)
+        run_type = rep("default", n_refine)
       ))
     }
     stop("Unsupported exploration method: ", method)
@@ -487,8 +491,8 @@ make_run_tables <- function(use_case_ids,
     dplyr::mutate(
       group_key = paste0(
         "L=", as.integer(.data$L),
-        "|r2=", ifelse(is.na(.data$annotation_r2), "NA", format(.data$annotation_r2, digits = 6, scientific = FALSE)),
-        "|inflate=", ifelse(is.na(.data$inflate_match), "NA", format(.data$inflate_match, digits = 6, scientific = FALSE)),
+        "|r2=", ifelse(is.na(.data$annotation_r2), "NA", trimws(format(.data$annotation_r2, digits = 6, scientific = FALSE))),
+        "|inflate=", ifelse(is.na(.data$inflate_match), "NA", trimws(format(.data$inflate_match, digits = 6, scientific = FALSE))),
         "|explore=", .data$exploration_mode, ":", .data$exploration_methods
       )
     ) %>%
@@ -661,7 +665,7 @@ make_job_config <- function(job_name,
                             metrics_settings = list(
                               pip_bucket_width = 0.01,
                               z_top_k = 10,
-                              jsd_threshold = 0.171661
+                              jsd_threshold = 0.15
                             )) {
 
   grid_mode <- match.arg(grid_mode)
@@ -742,8 +746,8 @@ make_job_config <- function(job_name,
   if (!"restart_id" %in% names(runs)) {
     runs$restart_id <- NA_integer_
   }
-  if (!"init_type" %in% names(runs)) {
-    runs$init_type <- NA_character_
+  if (!"run_type" %in% names(runs)) {
+    runs$run_type <- if ("init_type" %in% names(runs)) runs$init_type else NA_character_
   }
   if (!"c_value" %in% names(runs)) {
     runs$c_value <- NA_real_
@@ -1023,7 +1027,7 @@ summarise_job_config <- function(job_config) {
       "sigma_0_2_scalar",
       "restart_id",
       "refine_step",
-      "init_type",
+      "run_type",
       "c_value",
       "tau_value",
       "exploration_mode",

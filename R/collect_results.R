@@ -159,9 +159,9 @@ aggregate_staging_outputs <- function(job_name,
   }
   ensure_dir(output_dir)
 
-  # Resolve run_table_path: check temp first, then run_history
+  # Resolve dimension table paths: check temp first, then run_history
 
-if (is.null(run_table_path)) {
+  if (is.null(run_table_path)) {
     temp_path <- file.path(output_root, "temp", job_name, "run_table.csv")
     history_path <- file.path(output_root, "run_history", job_name, parent_job_id, "run_table.csv")
     if (file.exists(temp_path)) {
@@ -169,6 +169,15 @@ if (is.null(run_table_path)) {
     } else if (file.exists(history_path)) {
       run_table_path <- history_path
     }
+  }
+
+  dataset_bundles_path <- NULL
+  temp_db_path <- file.path(output_root, "temp", job_name, "dataset_bundles.csv")
+  history_db_path <- file.path(output_root, "run_history", job_name, parent_job_id, "dataset_bundles.csv")
+  if (file.exists(temp_db_path)) {
+    dataset_bundles_path <- temp_db_path
+  } else if (file.exists(history_db_path)) {
+    dataset_bundles_path <- history_db_path
   }
 
   current_mem_gb <- function() {
@@ -193,6 +202,47 @@ if (is.null(run_table_path)) {
     } else {
       message(msg)
     }
+  }
+
+  # Load dimension tables for join-enrichment of slim flush files.
+  # Flush files carry only run_id or dataset_bundle_id as join keys;
+  # dimension columns are re-attached here so aggregated CSVs stay
+  # analysis-ready.
+  run_lookup <- NULL
+  if (!is.null(run_table_path) && file.exists(run_table_path)) {
+    run_lookup <- readr::read_csv(run_table_path, show_col_types = FALSE) %>%
+      dplyr::mutate(run_id = as.integer(.data$run_id)) %>%
+      dplyr::distinct(.data$run_id, .keep_all = TRUE)
+    log_progress(sprintf("Loaded run_lookup (%d rows) for enrichment", nrow(run_lookup)))
+  }
+
+  bundle_lookup <- NULL
+  if (!is.null(dataset_bundles_path) && file.exists(dataset_bundles_path)) {
+    bundle_lookup <- readr::read_csv(dataset_bundles_path, show_col_types = FALSE) %>%
+      dplyr::mutate(dataset_bundle_id = as.integer(.data$dataset_bundle_id)) %>%
+      dplyr::distinct(.data$dataset_bundle_id, .keep_all = TRUE)
+    log_progress(sprintf("Loaded bundle_lookup (%d rows) for enrichment", nrow(bundle_lookup)))
+  }
+
+  # Helper: enrich a data frame by joining dimension columns that were
+  # stripped from flush files. Only adds columns specified by `cols`;
+  # skips columns already present in df.
+  enrich_from_run_table <- function(df, cols = NULL) {
+    if (is.null(run_lookup) || !"run_id" %in% names(df)) return(df)
+    available <- setdiff(names(run_lookup), c("run_id", names(df)))
+    if (!is.null(cols)) available <- intersect(available, cols)
+    if (!length(available)) return(df)
+    lookup_slim <- dplyr::select(run_lookup, dplyr::all_of(c("run_id", available)))
+    dplyr::left_join(df, lookup_slim, by = "run_id")
+  }
+
+  enrich_from_bundle_table <- function(df, cols = NULL) {
+    if (is.null(bundle_lookup) || !"dataset_bundle_id" %in% names(df)) return(df)
+    available <- setdiff(names(bundle_lookup), c("dataset_bundle_id", names(df)))
+    if (!is.null(cols)) available <- intersect(available, cols)
+    if (!length(available)) return(df)
+    lookup_slim <- dplyr::select(bundle_lookup, dplyr::all_of(c("dataset_bundle_id", available)))
+    dplyr::left_join(df, lookup_slim, by = "dataset_bundle_id")
   }
 
   read_csv_safe <- function(paths, idx_tbl) {
@@ -221,15 +271,27 @@ if (is.null(run_table_path)) {
   multimodal_files <- dplyr::filter(idx, .data$type == "multimodal_metrics")$path
   snp_files <- dplyr::filter(idx, .data$type == "snps")$path
 
+  # Column lists for join-enrichment — match the original aggregated schemas.
+  run_enrich_core <- c("use_case_id", "phenotype_seed", "dataset_bundle_id",
+                       "architecture", "refine_step", "run_type")
+  run_enrich_full <- c(run_enrich_core, "group_key", "L", "annotation_r2",
+                       "inflate_match", "sigma_0_2_scalar", "c_value", "tau_value",
+                       "matrix_id", "y_noise", "p_star", "exploration_mode",
+                       "exploration_methods", "exploration_group")
+  bundle_enrich_cols <- c("matrix_id", "architecture", "y_noise", "p_star",
+                          "phenotype_seed")
+
   if (length(model_files)) {
-    model_tbl <- read_csv_safe(model_files, idx)
+    model_tbl <- read_csv_safe(model_files, idx) %>%
+      enrich_from_run_table(cols = run_enrich_core)
     readr::write_csv(model_tbl, file.path(output_dir, "model_metrics.csv"))
     log_progress("Wrote model_metrics.csv")
     rm(model_tbl, model_files)
     gc()
   }
   if (length(effect_files)) {
-    effect_tbl <- read_csv_safe(effect_files, idx)
+    effect_tbl <- read_csv_safe(effect_files, idx) %>%
+      enrich_from_run_table(cols = run_enrich_core)
     readr::write_csv(effect_tbl, file.path(output_dir, "effect_metrics.csv"))
     log_progress("Wrote effect_metrics.csv")
     rm(effect_tbl, effect_files)
@@ -243,21 +305,24 @@ if (is.null(run_table_path)) {
     gc()
   }
   if (length(confusion_files)) {
-    conf_tbl <- read_csv_safe(confusion_files, idx)
+    conf_tbl <- read_csv_safe(confusion_files, idx) %>%
+      enrich_from_run_table(cols = run_enrich_full)
     readr::write_csv(conf_tbl, file.path(output_dir, "confusion_bins.csv"))
     log_progress("Wrote confusion_bins.csv")
     rm(conf_tbl, confusion_files)
     gc()
   }
   if (length(dataset_files)) {
-    dataset_tbl <- read_csv_safe(dataset_files, idx)
+    dataset_tbl <- read_csv_safe(dataset_files, idx) %>%
+      enrich_from_bundle_table(cols = bundle_enrich_cols)
     readr::write_csv(dataset_tbl, file.path(output_dir, "dataset_metrics.csv"))
     log_progress("Wrote dataset_metrics.csv")
     rm(dataset_tbl, dataset_files)
     gc()
   }
   if (length(multimodal_files)) {
-    multimodal_tbl <- read_csv_safe(multimodal_files, idx)
+    multimodal_tbl <- read_csv_safe(multimodal_files, idx) %>%
+      enrich_from_bundle_table(cols = bundle_enrich_cols)
     readr::write_csv(multimodal_tbl, file.path(output_dir, "multimodal_metrics.csv"))
     log_progress("Wrote multimodal_metrics.csv")
     rm(multimodal_tbl, multimodal_files)
@@ -267,29 +332,30 @@ if (is.null(run_table_path)) {
     log_progress(sprintf("Writing SNP dataset from %d parquet fragment(s)...", length(snp_files)))
     snp_dataset <- arrow::open_dataset(snp_files, format = "parquet")
 
-    # Check if use_case_id is already in the dataset
-    has_use_case_id <- "use_case_id" %in% names(snp_dataset)
-
-    if (!has_use_case_id) {
-      # Join with run_table to get use_case_id from run_id
-      if (is.null(run_table_path) || !file.exists(run_table_path)) {
-        stop(
-          "SNP parquet files lack 'use_case_id' and no run_table found to map it. ",
-          "Provide run_table_path or ensure run_table.csv exists in temp/ or run_history/."
-        )
+    # Enrich slim parquet with run-table dimension columns.
+    # Slim parquet carries only run_id as join key; stripped cols
+    # (use_case_id, task_id, dataset_bundle_id, architecture, refine_step,
+    # run_type) are re-attached here. use_case_id is required for partitioning.
+    snp_enrich_cols <- c("use_case_id", "task_id", "dataset_bundle_id",
+                         "architecture", "refine_step", "run_type")
+    if (!is.null(run_lookup)) {
+      snp_cols <- names(snp_dataset)
+      needed_cols <- setdiff(intersect(snp_enrich_cols, names(run_lookup)), snp_cols)
+      if (length(needed_cols)) {
+        snp_lookup <- dplyr::select(run_lookup, dplyr::all_of(c("run_id", needed_cols))) %>%
+          dplyr::distinct()
+        snp_lookup_arrow <- arrow::Table$create(snp_lookup)
+        log_progress("Joining run-table columns into SNP dataset...")
+        snp_dataset <- snp_dataset %>%
+          dplyr::left_join(snp_lookup_arrow, by = "run_id")
+        rm(snp_lookup, snp_lookup_arrow)
+        gc()
       }
-      log_progress("Joining use_case_id from run_table...")
-      run_lookup <- readr::read_csv(run_table_path, show_col_types = FALSE) %>%
-        dplyr::select(run_id, use_case_id) %>%
-        dplyr::mutate(run_id = as.integer(run_id)) %>%
-        dplyr::distinct()
-      # Convert to Arrow Table for efficient join
-      run_lookup_arrow <- arrow::Table$create(run_lookup)
-      # Perform the join lazily via dplyr
-      snp_dataset <- snp_dataset %>%
-        dplyr::left_join(run_lookup_arrow, by = "run_id")
-      rm(run_lookup, run_lookup_arrow)
-      gc()
+    } else if (!"use_case_id" %in% names(snp_dataset)) {
+      stop(
+        "SNP parquet files lack 'use_case_id' and no run_table found to map it. ",
+        "Provide run_table_path or ensure run_table.csv exists in temp/ or run_history/."
+      )
     }
 
     snp_out_dir <- file.path(output_dir, "snps_dataset")
@@ -343,6 +409,34 @@ build_confusion_matrix <- function(snps_dataset_path,
                                    stream = FALSE,
                                    confusion_bins_path = NULL,
                                    confusion_bins_files = NULL) {
+  add_compat_aliases <- function(df) {
+    if (is.null(df) || !nrow(df)) return(df)
+    if (!"explore_method" %in% names(df) && "variant_type" %in% names(df)) {
+      df$explore_method <- df$variant_type
+    }
+    if (!"variant_type" %in% names(df) && "explore_method" %in% names(df)) {
+      df$variant_type <- df$explore_method
+    }
+    if (!"run_type" %in% names(df) && "init_type" %in% names(df)) {
+      df$run_type <- df$init_type
+    }
+    if (!"init_type" %in% names(df) && "run_type" %in% names(df)) {
+      df$init_type <- df$run_type
+    }
+    if (!"exploration_group" %in% names(df) && "group_key" %in% names(df)) {
+      df$exploration_group <- df$group_key
+    }
+    if (!"group_key" %in% names(df) && "exploration_group" %in% names(df)) {
+      df$group_key <- df$exploration_group
+    }
+    df
+  }
+
+  run_table <- add_compat_aliases(run_table)
+  if ("run_id" %in% names(run_table)) {
+    run_table <- dplyr::mutate(run_table, run_id = as.integer(.data$run_id))
+  }
+
   has_conf_bins <- (!is.null(confusion_bins_path) && file.exists(confusion_bins_path)) ||
     (!is.null(confusion_bins_files) && length(confusion_bins_files))
   if (has_conf_bins) {
@@ -351,6 +445,24 @@ build_confusion_matrix <- function(snps_dataset_path,
     } else {
       dplyr::bind_rows(lapply(confusion_bins_files, readr::read_csv, show_col_types = FALSE))
     }
+    conf_tbl <- add_compat_aliases(conf_tbl)
+    if ("run_id" %in% names(conf_tbl)) {
+      conf_tbl <- dplyr::mutate(conf_tbl, run_id = as.integer(.data$run_id))
+    }
+
+    if ("run_id" %in% names(conf_tbl)) {
+      missing_grouping <- setdiff(grouping_vars, names(conf_tbl))
+      join_cols <- intersect(missing_grouping, names(run_table))
+      if (length(join_cols)) {
+        run_join <- run_table %>%
+          dplyr::select(.data$run_id, dplyr::all_of(join_cols)) %>%
+          dplyr::distinct()
+        conf_tbl <- conf_tbl %>%
+          dplyr::left_join(run_join, by = "run_id")
+        conf_tbl <- add_compat_aliases(conf_tbl)
+      }
+    }
+
     available_grouping <- intersect(grouping_vars, names(conf_tbl))
     if (!length(available_grouping)) {
       stop("None of the specified grouping_vars found in confusion_bins data.")
@@ -362,9 +474,13 @@ build_confusion_matrix <- function(snps_dataset_path,
         n_noncausal_at_bucket = sum(.data$n_noncausal_at_bucket, na.rm = TRUE),
         .groups = "drop"
       )
+    run_id_cols <- intersect(c("run_id", "explore_method", "variant_id", "agg_method"), names(conf_tbl))
+    if (!length(run_id_cols)) {
+      stop("Cannot compute n_runs from confusion_bins: missing run identity columns.")
+    }
     n_runs_per_group <- conf_tbl %>%
-      dplyr::group_by(dplyr::across(dplyr::all_of(available_grouping))) %>%
-      dplyr::summarise(n_runs = dplyr::n_distinct(.data$run_id, .data$variant_type, .data$variant_id, .data$agg_method), .groups = "drop")
+      dplyr::distinct(dplyr::across(dplyr::all_of(c(available_grouping, run_id_cols)))) %>%
+      dplyr::count(dplyr::across(dplyr::all_of(available_grouping)), name = "n_runs")
     confusion_matrix_table <- conf_agg %>%
       dplyr::left_join(n_runs_per_group, by = available_grouping)
     readr::write_csv(confusion_matrix_table, output_path)

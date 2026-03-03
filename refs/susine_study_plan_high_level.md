@@ -59,10 +59,10 @@ Because **c is not identifiable** from the data in realistic settings, we treat 
 ### H6 — Failure modes are predictable from LD-only + z-score-only diagnostics
 - M1 and z-score shape metrics explain a meaningful portion of between-dataset variation in the following operational failure endpoints (matching current code outputs):
   - **Instability / multimodality endpoints** from `compute_multimodal_metrics` (`R/run_model.R`):
-    - `mean_jsd`, `median_jsd`, `max_jsd` (pairwise Jensen-Shannon divergence across fit PIP vectors),
+    - `mean_jsd`, `median_jsd`, `max_jsd` (pairwise Jensen-Shannon style divergence across fit PIP vectors, computed on raw model-wide PIPs without `/L` normalization),
     - `jaccard_top10` (mean pairwise Jaccard overlap of top-10 PIP SNP sets),
     - `mean_pip_var` (mean per-SNP variance of PIPs across fits),
-    - `n_clusters` (hierarchical clustering count at JSD cutoff `jsd_threshold`, default `0.171661`).
+    - `n_clusters` (hierarchical clustering count at JSD cutoff `jsd_threshold`, default `0.15`, interpreted on the same raw JSD scale above).
   - **Baseline fit quality endpoints** from `evaluate_model` (`R/evaluation_metrics.R`):
     - `AUPRC` (primary),
     - plus sensitivity endpoints such as `power`, `mean_purity`, `mean_size`, and `cross_entropy`.
@@ -361,9 +361,7 @@ For each dataset \((X,y,a)\):
 - **CS:** credible set per effect; intended to contain one causal variant per effect.
 - **M1:** LD complexity metric \(\sum_{i<j} |r_{ij}|(1-|r_{ij}|)\).
 - **Z-primary metric:** selected z-score-only difficulty metric used with M1 to stratify failure modes.
-- **JSD:** Jensen–Shannon divergence between PIP vectors (diversity proxy).
+- **JSD:** Jensen–Shannon style divergence between PIP vectors (diversity proxy), currently computed on raw model-wide PIPs in `run_model.R`.
 - **Flatten-based aggregation:** pool all fits per (dataset, model_spec); aggregate via Max ELBO, Uniform, ELBO softmax, or Cluster-then-weight (Method A). See `analysis_completion_status.md` D6.
-
-
 
 

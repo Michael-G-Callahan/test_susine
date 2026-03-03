@@ -1378,7 +1378,8 @@ compute_dataset_metrics <- function(X, y, top_k = 10L) {
   tibble::tibble(
     M1 = mid_energy_M1(R),
     high_ld_count_095 = hl_count,
-    high_ld_count_095_per_snp = if (p > 0) (2 * hl_count) / p else NA_real_
+    high_ld_count_095_per_snp = if (p > 0) (2 * hl_count) / p else NA_real_,
+    high_ld_frac_095 = if (p > 1) hl_count / (p * (p - 1) / 2) else NA_real_
   ) %>%
     dplyr::bind_cols(z_score_metrics(z, top_k = top_k))
 }
