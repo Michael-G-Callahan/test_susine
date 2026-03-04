@@ -116,24 +116,35 @@ if [ -n "$TOTAL_BUNDLES" ] && [ "$FLUSH_COUNT" -gt 0 ] && [ -n "$ELAPSED" ]; the
   ETA="$(printf '~%dh %02dm' $((ETA_SEC/3600)) $(((ETA_SEC%3600)/60)))"
 fi
 
+# --- compute percentages ---
+BUNDLE_PCT=""
+if [ -n "$TOTAL_BUNDLES" ] && [ "$TOTAL_BUNDLES" -gt 0 ]; then
+  BUNDLE_PCT=$((FLUSH_COUNT * 100 / TOTAL_BUNDLES))
+fi
+
+TASK_PCT=""
+if [ -n "$N_TASKS" ] && [ "$N_TASKS" != "0" ] && [ "$N_TASKS" != "?" ]; then
+  TASK_PCT=$((COMPLETED_TASKS * 100 / N_TASKS))
+  TASKDIR_PCT=$((N_TASK_DIRS * 100 / N_TASKS))
+fi
+
 # --- print summary ---
 echo "=============================================="
 echo "  SuSiNE Job Monitor: ${JOB_NAME} / ${PARENT_ID}"
 echo "=============================================="
 echo ""
-echo "  Bundles completed:  ${FLUSH_COUNT}${TOTAL_BUNDLES:+ / ${TOTAL_BUNDLES}}"
-if [ -n "$TOTAL_BUNDLES" ] && [ "$TOTAL_BUNDLES" -gt 0 ]; then
-  PCT=$((FLUSH_COUNT * 100 / TOTAL_BUNDLES))
+echo "  Bundles completed:  ${FLUSH_COUNT}${TOTAL_BUNDLES:+ / ${TOTAL_BUNDLES}}${BUNDLE_PCT:+ (${BUNDLE_PCT}%)}"
+if [ -n "$BUNDLE_PCT" ]; then
   # Simple progress bar
   BAR_LEN=30
-  FILLED=$((PCT * BAR_LEN / 100))
+  FILLED=$((BUNDLE_PCT * BAR_LEN / 100))
   EMPTY=$((BAR_LEN - FILLED))
   BAR=$(printf '%0.s#' $(seq 1 $FILLED 2>/dev/null) || true)
   BAR="${BAR}$(printf '%0.s-' $(seq 1 $EMPTY 2>/dev/null) || true)"
-  echo "  Progress:           [${BAR}] ${PCT}%"
+  echo "  Progress:           [${BAR}] ${BUNDLE_PCT}%"
 fi
-echo "  Tasks completed:    ${COMPLETED_TASKS} / ${N_TASKS:-?}"
-echo "  Task dirs created:  ${N_TASK_DIRS}"
+echo "  Tasks completed:    ${COMPLETED_TASKS} / ${N_TASKS:-?}${TASK_PCT:+ (${TASK_PCT}%)}"
+echo "  Task dirs created:  ${N_TASK_DIRS} / ${N_TASKS:-?}${TASKDIR_PCT:+ (${TASKDIR_PCT}%)}"
 echo ""
 if [ -n "$ELAPSED" ]; then
   echo "  Elapsed:            ${ELAPSED}"
@@ -143,22 +154,15 @@ if [ -n "$ETA" ]; then
 fi
 echo ""
 
-# --- per-task detail ---
-echo "  Per-task flush counts:"
-echo "  ----------------------"
+# --- per-task flush summary (histogram of flush counts) ---
+echo "  Per-task flush distribution:"
+echo "  ----------------------------"
 if [ -n "$TASK_DIRS" ] && [ "$N_TASK_DIRS" -gt 0 ]; then
+  # Build a flush count per task, then summarize
   echo "$TASK_DIRS" | while read -r tdir; do
-    tname=$(basename "$tdir")
-    tflush=$(find "$tdir" -name "flush-*_model_metrics.csv" 2>/dev/null | wc -l)
-    # Check if task is done
-    tid=$(echo "$tname" | sed 's/task-0*//')
-    done_marker=""
-    if [ -d "$PRINTS_DIR" ] && [ -f "$PRINTS_DIR/${tid}.out" ]; then
-      if grep -q "Completed task" "$PRINTS_DIR/${tid}.out" 2>/dev/null; then
-        done_marker=" [DONE]"
-      fi
-    fi
-    printf "    %-12s %d flushes%s\n" "$tname" "$tflush" "$done_marker"
+    find "$tdir" -name "flush-*_model_metrics.csv" 2>/dev/null | wc -l
+  done | sort -n | uniq -c | while read -r count flushes; do
+    printf "    %3d tasks with %d flushes\n" "$count" "$flushes"
   done
 else
   echo "    (no task directories found yet)"
