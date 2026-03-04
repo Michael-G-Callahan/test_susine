@@ -8,7 +8,7 @@
 #   bash monitor_job.sh pilot_phase_a 49012345
 #   bash monitor_job.sh pilot_phase_a 49012345 /storage/work/mgc5166/SuSiNE\ -\ 2.0/test_susine/output
 
-set -euo pipefail
+set -u
 
 # --- arguments ---
 JOB_NAME="${1:?Usage: monitor_job.sh <job_name> <parent_job_id> [output_root]}"
@@ -45,7 +45,9 @@ fi
 
 # --- helper: extract a single integer from grep output (first match only) ---
 extract_int() {
-  head -1 | tr -dc '0-9'
+  local val
+  val=$(head -1 | tr -dc '0-9')
+  echo "${val:-0}"
 }
 
 # --- get expected totals from config JSON ---
@@ -58,7 +60,8 @@ fi
 
 # Fall back to SLURM if config didn't have n_tasks
 if [ "$N_TASKS" = "0" ] || [ -z "$N_TASKS" ]; then
-  N_TASKS=$(scontrol show job "$PARENT_ID" 2>/dev/null | grep -oP 'ArrayTaskId=\K[0-9]+-[0-9]+' | awk -F- '{print $2}' || echo 0)
+  N_TASKS=$(scontrol show job "$PARENT_ID" 2>/dev/null | grep -oP 'ArrayTaskId=\K[0-9]+-[0-9]+' | awk -F- '{print $2}' || true)
+  N_TASKS=$(echo "$N_TASKS" | extract_int)
 fi
 N_TASKS=${N_TASKS:-0}
 BUNDLES_PER_TASK=${BUNDLES_PER_TASK:-0}
@@ -79,6 +82,7 @@ FLUSH_COUNT=$(find "$STAGING_DIR" -name "flush-*_model_metrics.csv" 2>/dev/null 
 COMPLETED_TASKS=0
 if [ -d "$PRINTS_DIR" ]; then
   COMPLETED_TASKS=$(grep -rl "Completed task" "$PRINTS_DIR"/ 2>/dev/null | wc -l | tr -d ' ')
+  COMPLETED_TASKS=${COMPLETED_TASKS:-0}
 fi
 
 # --- get job start time from SLURM ---
@@ -123,8 +127,13 @@ if [ "$TOTAL_BUNDLES" -gt 0 ]; then
   BAR_LEN=30
   FILLED=$((BUNDLE_PCT * BAR_LEN / 100))
   EMPTY=$((BAR_LEN - FILLED))
-  BAR=$(printf '%0.s#' $(seq 1 $FILLED 2>/dev/null) || true)
-  BAR="${BAR}$(printf '%0.s-' $(seq 1 $EMPTY 2>/dev/null) || true)"
+  BAR=""
+  if [ "$FILLED" -gt 0 ]; then
+    BAR=$(printf '%0.s#' $(seq 1 $FILLED))
+  fi
+  if [ "$EMPTY" -gt 0 ]; then
+    BAR="${BAR}$(printf '%0.s-' $(seq 1 $EMPTY))"
+  fi
   echo "  Progress:           [${BAR}] ${BUNDLE_PCT}%"
 else
   echo "  Bundles completed:  ${FLUSH_COUNT} (total unknown)"
