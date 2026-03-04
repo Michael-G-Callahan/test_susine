@@ -1036,6 +1036,7 @@ normalize_susier_fit <- function(fit_raw, X, L) {
 #' @keywords internal
 run_use_case <- function(use_case, run_row, data_bundle, job_config, blocked_idx = integer(0)) {
   L <- as.integer(run_row$L)
+  max_iter <- as.integer(job_config$job$max_iter %||% 100L)
   backend <- as.character(use_case$backend[[1]])
   prior_mean_strategy <- as.character(use_case$prior_mean_strategy[[1]])
   prior_variance_strategy <- as.character(use_case$prior_variance_strategy[[1]])
@@ -1128,6 +1129,7 @@ run_use_case <- function(use_case, run_row, data_bundle, job_config, blocked_idx
       y = data_bundle$y,
       mu_0 = mu_0,
       prior_inclusion_weights = prior_weights,
+      max_iter = max_iter,
       verbose = FALSE
     )
     if (prior_variance_strategy == "fixed") {
@@ -1150,6 +1152,7 @@ run_use_case <- function(use_case, run_row, data_bundle, job_config, blocked_idx
       prior_weights = prior_weights,
       estimate_prior_variance = identical(prior_variance_strategy, "eb"),
       estimate_residual_variance = TRUE,
+      max_iter = max_iter,
       verbose = FALSE
     )
     if (prior_variance_strategy == "fixed") {

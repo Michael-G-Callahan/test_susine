@@ -1,5 +1,5 @@
 ---
-title: "SuSiNE Pilot Run Control"
+title: "SuSiNE Pilot — Phase B (Exploration)"
 output:
   html_document:
     toc: true
@@ -10,12 +10,13 @@ editor_options:
     wrap: 72
 ---
 
-Summary: Builds job artifacts for the current pilot design under the
-refactored harness. Prefilled for all use cases, all exploration methods,
-and all aggregation methods at K = 12 and L = 10.
+Summary: Phase B of the two-phase pilot. Adds exploration (restarts,
+c-grid, tau-grid) to use cases that survived Phase A screening.
+Adjust `use_case_ids` below based on Phase A results. See
+`refs/pilot_compute_optimization_plan.md` for rationale.
 
 ```{r setup, message=FALSE}
-here::i_am("vignettes/simulation pipeline/run_control_workbook_pilot.Rmd")
+here::i_am("vignettes/simulation pipeline/run_control_workbook_phase_b.Rmd")
 library(here)
 here()
 
@@ -35,64 +36,69 @@ library(readr)
 library(knitr)
 ```
 
-# 1. Pilot Inputs
+# 1. Phase B Inputs
 
 ```{r job-inputs}
+# ------------------------------------------------------------------ #
+# TODO: Update use_case_ids based on Phase A screening results.
+#   - Drop any EB use cases that underperformed baselines.
+#   - Drop redundant functional-pi arms if susie/susine are equivalent.
+#   - Add/remove use cases as the data dictates.
+# ------------------------------------------------------------------ #
+
 job_inputs <- list(
-  job_name = "pilot_study_v1",
+  job_name = "phase_b",
   HPC = TRUE,
   mem = "6G",
   time = "23:59:59",
   email = "mgc5166@psu.edu",
   output_root = here("output"),
 
-  # Full pilot grid with M1-stratified matrix downsampling.
   grid_mode = "full",
 
-  # All pilot use cases from project_status.md Section 2.1
+  # Phase B survivors (ADJUST AFTER PHASE A).
   use_case_ids = c(
-    "susie_vanilla",
-    "susie_ash_fixed",
-    "susie_ash_eb",
-    "susie_inf",
-    "susine_vanilla",
-    "susie_eb",
-    "susine_eb",
-    "susie_functional_pi",
-    "susine_functional_pi",
-    "susine_functional_mu"
+    "susie_vanilla",        # baseline anchor
+    "susie_inf",            # best non-SuSiNE competitor (or susie_ash_fixed)
+    "susine_functional_mu", # central method — c-grid exploration
+    "susine_functional_pi"  # functional pi arm — tau-grid exploration
   ),
 
-  # All exploration methods, budgeted in separate mode.
-  exploration_methods = c("single", "restart", "tau_grid", "c_grid", "refine"),
+  # PHASE B: Exploration with K=5 budget.
+  exploration_methods = c("single", "restart", "tau_grid", "c_grid"),
   exploration_mode = "separate",
-  K = 10L,
+  K = 5L,
 
-  # Core simulation settings for pilot.
+  # Core simulation settings (same as Phase A).
   L_grid = 10L,
   y_noise_grid = c(0.5, 0.8, 0.95),
-  p_star_grid = c(1L, 3L, 5L, 10L, 20L), 
+  p_star_grid = c(1L, 3L, 5L, 10L, 20L),
   architecture_grid = c("sparse"),
   pair_L_p_star = FALSE,
 
-  # Annotation quality grid.
-  annotation_r2 = c(0.0, 0.1, 0.3, 0.5), #c(0.0, 0.1, 0.3, 0.5),
-  inflate_match = c(0.8, 1.0, 1.2), #c(0.8, 1.0, 1.2),
+  # Annotation quality grid: 3x3 (same as Phase A).
+  # TODO: Trim if Phase A shows inflate_match is uninformative.
+  annotation_r2 = c(0.0, 0.1, 0.5),
+  inflate_match = c(0.8, 1.0, 1.2),
 
-  # Exploration grids/settings (must align with K in separate mode).
-  c_grid_values = seq(0, 1.1, length.out = 10),
-  tau_grid_values = seq(0.25, 3.0, length.out = 10),
+  # Exploration grids/settings — K=5 budget.
+  c_grid_values = seq(0, 1.1, length.out = 5),
+  tau_grid_values = seq(0.25, 3.0, length.out = 5),
   restart_settings = list(
-    n_inits = 10L,
+    n_inits = 5L,
     alpha_concentration = 0.001,
     debug_alpha = FALSE
   ),
   refine_settings = list(
-    n_steps = 10L,
+    n_steps = 5L,
     cs_source = "filtered"
   ),
 
   # Prior variance settings.
+  # Baselines use sigma_0_2 = 0.2 only (handled by use case catalog).
+  # Functional use cases get 2 levels.
+  # TODO: If the harness doesn't support per-use-case sigma grids,
+  # keep all 3 here and accept the extra baseline runs (~small).
   sigma_0_2_scalars = c(0.1, 0.2, 0.4),
 
   # Seeds and task packing.
@@ -101,15 +107,14 @@ job_inputs <- list(
   bundles_per_task = 5L,
   task_assignment_seed = 1L,
 
-  # Data source and matrix catalog.
+  # Data source and matrix catalog (same 10 M1-stratified matrices).
   data_scenarios = c("scenario_1"),
   repo_root = here(),
   sampled_scenario_summary = here(
     "data", "sampled_simulated_genotypes", "scenario_sampling_summary.csv"
   ),
 
-  # Pilot matrix selection (M1-stratified 5-10; default 10).
-  pilot_selection_mode = "M1_stratified", # "M1_stratified", "csv", "all"
+  pilot_selection_mode = "M1_stratified",
   pilot_n_matrices = 10L,
   pilot_matrix_ids_path = here("data", "pilot_matrix_ids.csv"),
   pilot_m1_cache_path = here("output", "pilot_m1_metrics.csv"),
@@ -125,7 +130,7 @@ job_inputs <- list(
   write_snps_parquet = FALSE,
   write_confusion_bins = TRUE,
 
-  # All aggregation methods + full per-dataset global pool.
+  # Aggregation methods — full set for ensemble comparison.
   aggregation_methods = c("max_elbo", "uniform", "elbo_softmax", "cluster_weight"),
   include_overall_pool = TRUE,
   overall_aggregation_methods = c("max_elbo", "uniform", "elbo_softmax", "cluster_weight"),
@@ -299,11 +304,11 @@ if (commit_artifacts) {
 
 ```{r submit-hpc, eval=FALSE}
 # On cluster:
-# sbatch output/slurm_scripts/pilot_all_methods_k12_l10.slurm
+# sbatch output/phase_b.slurm
 ```
 
 ```{r local-smoke-single-task, eval=FALSE}
-# Optional local smoke run for task 1 (can still be slow).
+# Optional local smoke run for task 1.
 run_task(
   job_name = job_inputs$job_name,
   task_id = 1L,
@@ -312,4 +317,3 @@ run_task(
   quiet = TRUE
 )
 ```
-

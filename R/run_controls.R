@@ -607,6 +607,8 @@ assign_task_ids_by_bundle <- function(runs,
 #' @param aggregation_methods Character vector of per-group aggregation methods.
 #' @param overall_aggregation_methods Character vector of global-pool aggregation methods.
 #' @param include_overall_pool Logical; include full per-dataset global pool aggregation.
+#' @param max_iter Maximum number of IBSS iterations for susie/susine fits
+#'   (default 100). Lower values speed up runs at the cost of convergence.
 #' @param softmax_temperature Numeric temperature for ELBO softmax weighting.
 #' @param pair_L_p_star Logical; when TRUE, the full grid pairs `L` and `p_star` values 1-1
 #'   instead of expanding their Cartesian product.
@@ -658,6 +660,7 @@ make_job_config <- function(job_name,
                               n_steps = NULL,
                               cs_source = "filtered"
                             ),
+                            max_iter = 100L,
                             aggregation_methods = c("elbo_softmax"),
                             overall_aggregation_methods = NULL,
                             include_overall_pool = TRUE,
@@ -820,6 +823,7 @@ make_job_config <- function(job_name,
       runs_per_task = runs_per_task,
       credible_set_rho = credible_set_rho,
       purity_threshold = purity_threshold,
+      max_iter = as.integer(max_iter),
       verbose_file_output = isTRUE(verbose_file_output),
       write_legacy_snp_csv = isTRUE(write_legacy_snp_csv),
       write_snps_parquet = isTRUE(write_snps_parquet),
