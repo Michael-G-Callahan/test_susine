@@ -249,15 +249,20 @@ pip_bucket_width <- 0.01
 
 # Grouping variables for the detailed confusion matrix
 # This will create one row per (grouping combo x pip_threshold)
+# NOTE: gamma_shrink and annotation_scale are deprecated/removed.
+#  - c_value replaces annotation_scale (SuSiNE prior mean scaling)
+#  - tau_value is the softmax temperature for functional pi
+#  - exploration_methods tracks how each fit was generated
 detailed_grouping_vars <- c(
-  "use_case_id", "variant_type", "agg_method",
+  "use_case_id", "explore_method", "agg_method",
   "p_star", "L", "y_noise",
-  "annotation_r2", "inflate_match", "gamma_shrink",
-  "annotation_scale", "sigma_0_2_scalar"
+  "annotation_r2", "inflate_match",
+  "sigma_0_2_scalar", "c_value", "tau_value",
+  "exploration_methods"
 )
 
 # Grouping variables for the dataset-level confusion matrix
-dataset_grouping_vars <- c("matrix_id", "use_case_id", "variant_type", "agg_method")
+dataset_grouping_vars <- c("matrix_id", "use_case_id", "explore_method", "agg_method")
 ```
 
 ## 3.3 Build Detailed Confusion Matrix (by Use Case + Parameters)

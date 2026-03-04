@@ -1,0 +1,1308 @@
+---
+title: "SuSiNE Pilot Phase A — Results Visualization"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    code_folding: hide
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+Summary: Phase A screening results. Evaluates 9 use cases (single fits
++ small c/tau grids for functional arms) across 10 M1-stratified
+matrices. Uses confusion bins and dataset metrics from the completed
+SLURM run to answer key questions driving Phase B design.
+
+Primary questions:
+
+1. Which non-functional use cases perform best?
+2. How does EB compare with fixed-variance counterparts?
+3. Which z-score metric best complements M1 for predicting difficulty?
+4. Do use case rankings change across dataset-difficulty strata?
+5. Do use case rankings change across simulation settings?
+6. How do functional priors (mu vs pi) compare to no-prior baselines?
+7. Does max-ELBO aggregation help functional priors? Where are gains largest?
+
+# Section 1: Setup
+
+```{r setup, message=FALSE, warning=FALSE}
+here::i_am("vignettes/simulation pipeline/visualize_results_phase_a.Rmd")
+library(here)
+library(devtools)
+devtools::load_all(".")
+
+library(dplyr)
+library(tidyr)
+library(readr)
+library(ggplot2)
+library(purrr)
+library(broom)
+```
+
+## 1.1 User Options
+
+```{r user-options}
+save_plots_to_file <- TRUE
+show_in_rstudio_plots <- TRUE
+
+if (isTRUE(getOption("knitr.in.progress"))) {
+  knitr::opts_chunk$set(fig.ext = "png")
+} else if (show_in_rstudio_plots && interactive()) {
+  knitr::opts_chunk$set(fig.show = "hide", dev = "RStudioGD", fig.ext = "png")
+} else {
+  knitr::opts_chunk$set(fig.ext = "png")
+}
+
+maybe_show_plot <- function(p) {
+  if (show_in_rstudio_plots && interactive()) {
+    try(print(p), silent = TRUE)
+  }
+}
+
+save_or_show <- function(p, filename, width = 10, height = 7, dpi = 300,
+                         subdir = "phase_a") {
+  maybe_show_plot(p)
+  if (save_plots_to_file) {
+    filepath <- file.path(plot_dirs[[subdir]], filename)
+    tryCatch(
+      {
+        ggsave(filepath, p, width = width, height = height, dpi = dpi, bg = "white")
+        cat("Saved:", filename, "\n")
+      },
+      error = function(e) cat("Error saving:", filename, "-", conditionMessage(e), "\n")
+    )
+  } else {
+    tryCatch(print(p), error = function(e) {
+      cat("Cannot display plot. Set save_plots_to_file = TRUE.\n")
+    })
+  }
+}
+```
+
+## 1.2 Job Configuration
+
+```{r job-config}
+# UPDATE THESE for your completed Phase A run
+job_name <- "pilot_phase_a"
+parent_job_id <- "48988192"
+output_root <- here("output")
+
+paths <- test_susine::resolve_job_paths(
+  job_name = job_name,
+  parent_job_id = parent_job_id,
+  output_root = output_root
+)
+```
+
+## 1.3 Plot Directories
+
+```{r create-plot-dirs}
+plot_base_dir <- file.path(paths$aggregated_dir, "plots_phase_a")
+plot_dirs <- list(
+  phase_a = file.path(plot_base_dir, "main"),
+  difficulty = file.path(plot_base_dir, "difficulty"),
+  functional = file.path(plot_base_dir, "functional"),
+  stratified = file.path(plot_base_dir, "stratified")
+)
+
+for (d in plot_dirs) {
+  dir.create(d, showWarnings = FALSE, recursive = TRUE)
+}
+cat("Plot directories created under:", plot_base_dir, "\n")
+```
+
+## 1.4 Load Data
+
+```{r load-data, message=FALSE}
+# --- Confusion bins (primary data source) ---
+confusion_bins_path <- file.path(paths$aggregated_dir, "confusion_bins.csv")
+confusion_detailed_path <- file.path(paths$aggregated_dir, "confusion_matrix_detailed.csv")
+
+# Prefer the detailed confusion matrix if already built; else use raw bins
+if (file.exists(confusion_detailed_path)) {
+  confusion <- readr::read_csv(confusion_detailed_path, show_col_types = FALSE)
+  cat("Loaded pre-built confusion_matrix_detailed:", nrow(confusion), "rows\n")
+} else if (file.exists(confusion_bins_path)) {
+  confusion <- readr::read_csv(confusion_bins_path, show_col_types = FALSE)
+  cat("Loaded raw confusion_bins:", nrow(confusion), "rows\n")
+} else {
+  stop("No confusion data found. Run collect_results_workbook.Rmd first.")
+}
+
+# --- Dataset metrics ---
+dataset_metrics_path <- file.path(paths$aggregated_dir, "dataset_metrics.csv")
+if (file.exists(dataset_metrics_path)) {
+  dataset_metrics <- readr::read_csv(dataset_metrics_path, show_col_types = FALSE)
+  cat("Loaded dataset_metrics:", nrow(dataset_metrics), "rows\n")
+} else {
+  warning("dataset_metrics.csv not found — difficulty analyses will be skipped.")
+  dataset_metrics <- NULL
+}
+
+# --- Model metrics (for ELBO-based analysis) ---
+model_metrics_path <- file.path(paths$aggregated_dir, "model_metrics.csv")
+if (file.exists(model_metrics_path)) {
+  model_metrics <- readr::read_csv(model_metrics_path, show_col_types = FALSE)
+  cat("Loaded model_metrics:", nrow(model_metrics), "rows\n")
+} else {
+  warning("model_metrics.csv not found — ELBO-based analyses will use confusion bins only.")
+  model_metrics <- NULL
+}
+
+# --- Run table (for joining extra columns when needed) ---
+run_table_path <- file.path(paths$run_history_dir, "run_table.csv")
+if (file.exists(run_table_path)) {
+  run_table <- readr::read_csv(run_table_path, show_col_types = FALSE)
+  cat("Loaded run_table:", nrow(run_table), "rows\n")
+} else {
+  run_table <- NULL
+}
+```
+
+## 1.5 Define Use Case Groups and Palettes
+
+```{r use-case-definitions}
+# --- Use case groupings ---
+# Non-functional (no annotation dependency)
+nonfunctional_ids <- c(
+  "susie_vanilla", "susie_ash_fixed", "susie_ash_eb",
+  "susie_inf", "susine_vanilla", "susie_eb", "susine_eb"
+)
+
+# Fixed-variance non-functional (exclude EB use cases)
+fixed_nonfunctional_ids <- c(
+  "susie_vanilla", "susie_ash_fixed", "susie_inf", "susine_vanilla"
+)
+
+# EB use cases and their fixed counterparts
+eb_pairs <- tibble::tribble(
+  ~eb_id,        ~fixed_id,         ~pair_label,
+  "susie_eb",    "susie_vanilla",   "SuSiE vanilla",
+  "susine_eb",   "susine_vanilla",  "SuSiNE vanilla",
+  "susie_ash_eb","susie_ash_fixed", "SuSiE-ash"
+)
+
+# Functional use cases
+functional_ids <- c("susine_functional_pi", "susine_functional_mu")
+
+# All use case IDs
+all_ids <- c(nonfunctional_ids, functional_ids)
+
+# --- Labels from catalog ---
+all_labels <- test_susine::get_use_case_labels(all_ids)
+
+# --- Color palette (9 use cases) ---
+# Blues: vanilla SuSiE family
+# Greens: ash family
+# Purples: inf
+# Oranges: functional
+use_case_palette <- c(
+  "susie_vanilla"       = "#2171b5",
+  "susine_vanilla"      = "#6baed6",
+  "susie_eb"            = "#08306b",
+  "susine_eb"           = "#4292c6",
+  "susie_ash_fixed"     = "#238b45",
+  "susie_ash_eb"        = "#74c476",
+  "susie_inf"           = "#6a3d9a",
+  "susine_functional_pi"= "#e6550d",
+  "susine_functional_mu"= "#d62728"
+)
+
+# Short labels for compact plots
+short_labels <- c(
+  "susie_vanilla"       = "Vanilla",
+  "susine_vanilla"      = "Vanilla (susine)",
+  "susie_eb"            = "EB",
+  "susine_eb"           = "EB (susine)",
+  "susie_ash_fixed"     = "Ash-fixed",
+  "susie_ash_eb"        = "Ash-EB",
+  "susie_inf"           = "Inf",
+  "susine_functional_pi"= "Func-pi",
+  "susine_functional_mu"= "Func-mu"
+)
+
+# --- Shared ggplot theme ---
+theme_phase_a <- function(base_size = 13) {
+  ggplot2::theme_minimal(base_size = base_size) +
+    ggplot2::theme(
+      legend.position = "bottom",
+      legend.title = ggplot2::element_text(size = 12, face = "bold"),
+      legend.text = ggplot2::element_text(size = 11),
+      strip.text = ggplot2::element_text(size = 12, face = "bold"),
+      axis.title = ggplot2::element_text(size = 13),
+      plot.title = ggplot2::element_text(size = 15, face = "bold", hjust = 0.5),
+      plot.subtitle = ggplot2::element_text(size = 11, hjust = 0.5, color = "gray40")
+    )
+}
+```
+
+## 1.6 Data Prep — Filter to Base Fits
+
+Phase A has `single`, `c_grid`, and `tau_grid` exploration methods. For
+most analyses (Q1–Q5), we focus on **base fits** (`agg_method` is NA or
+`explore_method == "base"`). The functional prior analyses (Q6–Q7) use
+both base fits and max-ELBO aggregated fits.
+
+```{r data-prep}
+# Base individual fits only (no aggregated rows)
+confusion_base <- confusion %>%
+  dplyr::filter(is.na(agg_method) | agg_method == "none")
+
+# For non-functional use cases: single exploration only (no c/tau grid)
+confusion_nonfunc <- confusion_base %>%
+  dplyr::filter(use_case_id %in% nonfunctional_ids)
+
+# All fits including aggregated (max_elbo rows) for functional analysis
+confusion_with_agg <- confusion %>%
+  dplyr::filter(
+    is.na(agg_method) | agg_method == "none" | agg_method == "max_elbo"
+  )
+
+cat("Base fits:", nrow(confusion_base), "rows\n")
+cat("Non-functional base fits:", nrow(confusion_nonfunc), "rows\n")
+cat("With aggregation rows:", nrow(confusion_with_agg), "rows\n")
+
+# Quick sanity: use case counts
+confusion_base %>%
+  dplyr::count(use_case_id) %>%
+  dplyr::arrange(dplyr::desc(n)) %>%
+  print()
+```
+
+---
+
+# Section 2: Q1 — Non-Functional Use Case Ranking
+
+Which non-functional use cases perform best in AUPRC and Power @ FDR?
+
+## 2.1 Overall AUPRC Ranking
+
+```{r q1-auprc-overall}
+auprc_nonfunc <- test_susine::compute_auprc_from_confusion(
+  confusion_nonfunc,
+  group_vars = "use_case_id"
+) %>%
+  dplyr::arrange(dplyr::desc(AUPRC))
+
+cat("=== Overall AUPRC Ranking (Non-Functional Use Cases) ===\n")
+auprc_nonfunc %>%
+  dplyr::mutate(
+    label = short_labels[use_case_id],
+    rank = dplyr::row_number()
+  ) %>%
+  dplyr::select(rank, use_case_id, label, AUPRC) %>%
+  print(n = 20)
+```
+
+## 2.2 Power vs FDR Curves — Non-Functional
+
+```{r q1-power-fdr, fig.width=10, fig.height=7}
+curves_nonfunc <- test_susine::compute_power_fdr_curves(
+  confusion_nonfunc,
+  group_vars = "use_case_id"
+) %>%
+  dplyr::filter(pip_threshold >= 0.05, pip_threshold <= 0.95)
+
+p_q1_pf <- ggplot2::ggplot(
+  curves_nonfunc,
+  ggplot2::aes(x = fdr, y = power, color = use_case_id)
+) +
+  ggplot2::geom_line(linewidth = 1.0) +
+  ggplot2::geom_point(size = 2, alpha = 0.7) +
+  ggplot2::scale_color_manual(
+    values = use_case_palette[nonfunctional_ids],
+    labels = short_labels[nonfunctional_ids],
+    name = "Use Case"
+  ) +
+  ggplot2::labs(
+    title = "Power vs FDR — Non-Functional Use Cases",
+    subtitle = "Phase A screening (single fits, all settings pooled)",
+    x = "False Discovery Rate",
+    y = "Power (Recall)"
+  ) +
+  ggplot2::coord_cartesian(xlim = c(0, 1)) +
+  theme_phase_a() +
+  ggplot2::guides(color = ggplot2::guide_legend(ncol = 2))
+
+save_or_show(p_q1_pf, "q1_power_fdr_nonfunctional.png", subdir = "phase_a")
+```
+
+## 2.3 Per-Dataset AUPRC Ranking
+
+```{r q1-per-dataset-auprc, fig.width=12, fig.height=7}
+auprc_by_dataset <- test_susine::aggregate_auprc_by_dataset_usecase(
+  confusion_nonfunc
+) %>%
+  dplyr::filter(use_case_id %in% nonfunctional_ids)
+
+# Compute per-dataset ranks
+auprc_ranked <- auprc_by_dataset %>%
+  dplyr::group_by(matrix_id) %>%
+  dplyr::mutate(
+    rank = rank(-AUPRC, ties.method = "min"),
+    n_methods = dplyr::n()
+  ) %>%
+  dplyr::ungroup()
+
+# Summary: how often is each method rank 1, 2, 3?
+rank_summary <- auprc_ranked %>%
+  dplyr::count(use_case_id, rank) %>%
+  tidyr::pivot_wider(names_from = rank, values_from = n, values_fill = 0,
+                     names_prefix = "rank_")
+
+cat("=== Per-Dataset Rank Distribution ===\n")
+print(rank_summary)
+
+# Mean rank per use case
+mean_ranks <- auprc_ranked %>%
+  dplyr::group_by(use_case_id) %>%
+  dplyr::summarise(
+    mean_rank = mean(rank),
+    median_rank = median(rank),
+    mean_AUPRC = mean(AUPRC, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  dplyr::arrange(mean_rank)
+
+cat("\n=== Mean Rank (lower = better) ===\n")
+mean_ranks %>%
+  dplyr::mutate(label = short_labels[use_case_id]) %>%
+  print(n = 20)
+
+# Boxplot of per-dataset AUPRC
+p_q1_box <- ggplot2::ggplot(
+  auprc_by_dataset,
+  ggplot2::aes(
+    x = reorder(use_case_id, -AUPRC, FUN = median),
+    y = AUPRC,
+    fill = use_case_id
+  )
+) +
+  ggplot2::geom_boxplot(alpha = 0.7, outlier.size = 1) +
+  ggplot2::geom_jitter(width = 0.15, size = 1.5, alpha = 0.5) +
+  ggplot2::scale_fill_manual(
+    values = use_case_palette[nonfunctional_ids],
+    labels = short_labels[nonfunctional_ids],
+    guide = "none"
+  ) +
+  ggplot2::scale_x_discrete(labels = short_labels) +
+  ggplot2::labs(
+    title = "Per-Dataset AUPRC Distribution — Non-Functional Use Cases",
+    x = NULL,
+    y = "AUPRC"
+  ) +
+  theme_phase_a() +
+  ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 30, hjust = 1))
+
+save_or_show(p_q1_box, "q1_auprc_boxplot_nonfunctional.png", subdir = "phase_a")
+```
+
+---
+
+# Section 3: Q2 — EB vs Fixed-Variance Comparison
+
+```{r q2-eb-comparison}
+# For each EB pair: compute AUPRC at multiple sigma_0_2_scalar levels
+eb_comparison_data <- list()
+
+for (i in seq_len(nrow(eb_pairs))) {
+  pair <- eb_pairs[i, ]
+
+  # Fixed-variance: group by sigma_0_2_scalar
+  fixed_auprc <- confusion_nonfunc %>%
+    dplyr::filter(use_case_id == pair$fixed_id) %>%
+    test_susine::compute_auprc_from_confusion(
+      group_vars = c("use_case_id", "sigma_0_2_scalar")
+    ) %>%
+    dplyr::mutate(
+      prior_var_type = paste0("fixed (sigma=", sigma_0_2_scalar, ")"),
+      pair_label = pair$pair_label
+    )
+
+  # EB: single AUPRC (sigma_0_2_scalar is NA for EB)
+  eb_auprc <- confusion_nonfunc %>%
+    dplyr::filter(use_case_id == pair$eb_id) %>%
+    test_susine::compute_auprc_from_confusion(
+      group_vars = "use_case_id"
+    ) %>%
+    dplyr::mutate(
+      prior_var_type = "EB",
+      pair_label = pair$pair_label,
+      sigma_0_2_scalar = NA_real_
+    )
+
+  eb_comparison_data[[i]] <- dplyr::bind_rows(fixed_auprc, eb_auprc)
+}
+
+eb_comparison <- dplyr::bind_rows(eb_comparison_data)
+
+cat("=== EB vs Fixed Variance Comparison ===\n")
+eb_comparison %>%
+  dplyr::select(pair_label, prior_var_type, AUPRC) %>%
+  dplyr::arrange(pair_label, prior_var_type) %>%
+  print(n = 30)
+```
+
+```{r q2-eb-plot, fig.width=12, fig.height=5}
+p_q2 <- ggplot2::ggplot(
+  eb_comparison,
+  ggplot2::aes(x = prior_var_type, y = AUPRC, fill = pair_label)
+) +
+  ggplot2::geom_col(position = ggplot2::position_dodge(width = 0.8),
+                    width = 0.7, alpha = 0.85) +
+  ggplot2::facet_wrap(~pair_label, scales = "free_x") +
+  ggplot2::labs(
+    title = "AUPRC: EB vs Fixed Prior Variance",
+    subtitle = "Each group shows EB alongside its fixed-variance counterparts at different sigma levels",
+    x = "Prior Variance Setting",
+    y = "AUPRC",
+    fill = "Model Family"
+  ) +
+  theme_phase_a() +
+  ggplot2::theme(
+    axis.text.x = ggplot2::element_text(angle = 30, hjust = 1),
+    legend.position = "none"
+  )
+
+save_or_show(p_q2, "q2_eb_vs_fixed.png", width = 12, height = 5, subdir = "phase_a")
+```
+
+---
+
+# Section 4: Q3 — Dataset Difficulty Metrics
+
+Which z-score metric, paired with M1, best explains AUPRC variation
+across datasets?
+
+```{r q3-difficulty-setup}
+if (!is.null(dataset_metrics)) {
+  # Compute per-dataset AUPRC (averaged over all non-functional use cases and settings)
+  auprc_per_ds <- test_susine::aggregate_auprc_by_dataset_usecase(
+    confusion_nonfunc
+  )
+
+  # Average AUPRC across use cases within each dataset
+  auprc_mean_ds <- auprc_per_ds %>%
+    dplyr::group_by(matrix_id) %>%
+    dplyr::summarise(
+      mean_AUPRC = mean(AUPRC, na.rm = TRUE),
+      .groups = "drop"
+    )
+
+  # Join with dataset_metrics
+  # dataset_metrics keys by dataset_bundle_id; we need to map to matrix_id
+  # The bundle table has (dataset_bundle_id -> matrix_id), so dataset_metrics
+  # may already have matrix_id from bundle enrichment. If not, join via run_table.
+  if ("matrix_id" %in% names(dataset_metrics)) {
+    ds_diff <- dataset_metrics %>%
+      dplyr::select(matrix_id, M1, z_topk_ratio, z_max_abs,
+                    z_count_abs_gt_3, z_eff_signals) %>%
+      dplyr::group_by(matrix_id) %>%
+      dplyr::summarise(dplyr::across(dplyr::everything(), ~ mean(.x, na.rm = TRUE)),
+                       .groups = "drop") %>%
+      dplyr::inner_join(auprc_mean_ds, by = "matrix_id")
+  } else {
+    # Fallback: aggregate dataset_metrics by dataset_bundle_id -> average per matrix
+    # This requires the bundle lookup
+    warning("matrix_id not found in dataset_metrics; trying to join via run_table")
+    if (!is.null(run_table)) {
+      bundle_to_matrix <- run_table %>%
+        dplyr::distinct(dataset_bundle_id, matrix_id)
+      ds_diff <- dataset_metrics %>%
+        dplyr::left_join(bundle_to_matrix, by = "dataset_bundle_id") %>%
+        dplyr::group_by(matrix_id) %>%
+        dplyr::summarise(dplyr::across(
+          c(M1, z_topk_ratio, z_max_abs, z_count_abs_gt_3, z_eff_signals),
+          ~ mean(.x, na.rm = TRUE)
+        ), .groups = "drop") %>%
+        dplyr::inner_join(auprc_mean_ds, by = "matrix_id")
+    } else {
+      ds_diff <- NULL
+      warning("Cannot join dataset_metrics to matrix_id without run_table.")
+    }
+  }
+
+  if (!is.null(ds_diff)) {
+    cat("Joined dataset difficulty table:", nrow(ds_diff), "datasets\n")
+    print(ds_diff)
+  }
+} else {
+  ds_diff <- NULL
+  message("Skipping difficulty analysis (no dataset_metrics).")
+}
+```
+
+## 4.1 Bivariate R² Screen
+
+```{r q3-r2-screen}
+if (!is.null(ds_diff) && nrow(ds_diff) >= 5) {
+  z_metrics <- c("z_topk_ratio", "z_max_abs", "z_count_abs_gt_3", "z_eff_signals")
+
+  r2_results <- purrr::map_dfr(z_metrics, function(z_var) {
+    # Univariate: z_metric alone
+    f_z <- stats::as.formula(paste("mean_AUPRC ~", z_var))
+    r2_z <- tryCatch(
+      summary(stats::lm(f_z, data = ds_diff))$r.squared,
+      error = function(e) NA_real_
+    )
+
+    # Univariate: M1 alone
+    r2_m1 <- tryCatch(
+      summary(stats::lm(mean_AUPRC ~ M1, data = ds_diff))$r.squared,
+      error = function(e) NA_real_
+    )
+
+    # Bivariate: M1 + z_metric
+    f_both <- stats::as.formula(paste("mean_AUPRC ~ M1 +", z_var))
+    r2_both <- tryCatch(
+      summary(stats::lm(f_both, data = ds_diff))$r.squared,
+      error = function(e) NA_real_
+    )
+
+    tibble::tibble(
+      z_metric = z_var,
+      R2_z_only = r2_z,
+      R2_M1_only = r2_m1,
+      R2_M1_plus_z = r2_both,
+      R2_gain = r2_both - r2_m1
+    )
+  })
+
+  cat("=== Bivariate R² Screen: M1 + z-metric → mean AUPRC ===\n")
+  r2_results %>%
+    dplyr::arrange(dplyr::desc(R2_M1_plus_z)) %>%
+    print()
+
+  best_z <- r2_results %>%
+    dplyr::slice_max(R2_M1_plus_z, n = 1) %>%
+    dplyr::pull(z_metric)
+  cat("\nBest complementary z-metric:", best_z, "\n")
+} else {
+  best_z <- "z_max_abs"  # fallback default
+  message("Insufficient data for R² screen; defaulting to z_max_abs.")
+}
+```
+
+## 4.2 Scatter Plots: M1 and Best z-Metric vs AUPRC
+
+```{r q3-scatter, fig.width=12, fig.height=5}
+if (!is.null(ds_diff) && nrow(ds_diff) >= 3) {
+  # M1 vs mean AUPRC
+  p_m1 <- ggplot2::ggplot(ds_diff, ggplot2::aes(x = M1, y = mean_AUPRC)) +
+    ggplot2::geom_point(size = 3.5, alpha = 0.8) +
+    ggplot2::geom_smooth(method = "lm", se = TRUE, color = "steelblue") +
+    ggplot2::labs(title = "M1 vs Mean AUPRC", x = "M1 (LD complexity)", y = "Mean AUPRC") +
+    theme_phase_a()
+
+  # Best z-metric vs mean AUPRC
+  p_z <- ggplot2::ggplot(ds_diff, ggplot2::aes(x = .data[[best_z]], y = mean_AUPRC)) +
+    ggplot2::geom_point(size = 3.5, alpha = 0.8) +
+    ggplot2::geom_smooth(method = "lm", se = TRUE, color = "darkred") +
+    ggplot2::labs(
+      title = paste(best_z, "vs Mean AUPRC"),
+      x = best_z, y = "Mean AUPRC"
+    ) +
+    theme_phase_a()
+
+  p_q3 <- cowplot::plot_grid(p_m1, p_z, ncol = 2)
+  save_or_show(p_q3, "q3_difficulty_scatter.png", width = 12, height = 5,
+               subdir = "difficulty")
+} else {
+  message("Insufficient data for difficulty scatter plots.")
+}
+```
+
+---
+
+# Section 5: Q4 — Rankings Stratified by Dataset Metrics
+
+```{r q4-dataset-strata-setup}
+if (!is.null(ds_diff) && nrow(ds_diff) >= 4) {
+  # Create M1 bins (median split)
+  m1_median <- median(ds_diff$M1, na.rm = TRUE)
+  ds_diff <- ds_diff %>%
+    dplyr::mutate(
+      M1_bin = dplyr::if_else(M1 <= m1_median, "Low M1", "High M1")
+    )
+
+  # Create z-metric bins (median split on best z-metric)
+  z_median <- median(ds_diff[[best_z]], na.rm = TRUE)
+  ds_diff <- ds_diff %>%
+    dplyr::mutate(
+      z_bin = dplyr::if_else(.data[[best_z]] <= z_median, "Low z", "High z"),
+      difficulty_bin = paste(M1_bin, "/", z_bin)
+    )
+
+  # Map bins back to per-dataset AUPRC (with use_case_id)
+  auprc_stratified <- auprc_per_ds %>%
+    dplyr::filter(use_case_id %in% nonfunctional_ids) %>%
+    dplyr::inner_join(
+      ds_diff %>% dplyr::select(matrix_id, M1_bin, z_bin, difficulty_bin),
+      by = "matrix_id"
+    )
+
+  cat("Difficulty strata counts:\n")
+  auprc_stratified %>%
+    dplyr::distinct(matrix_id, difficulty_bin) %>%
+    dplyr::count(difficulty_bin) %>%
+    print()
+}
+```
+
+## 5.1 AUPRC by Use Case, Faceted by Difficulty
+
+```{r q4-faceted-difficulty, fig.width=12, fig.height=8}
+if (exists("auprc_stratified") && nrow(auprc_stratified) > 0) {
+  # Mean AUPRC per (use_case, difficulty_bin)
+  auprc_strata_summary <- auprc_stratified %>%
+    dplyr::group_by(use_case_id, difficulty_bin) %>%
+    dplyr::summarise(
+      mean_AUPRC = mean(AUPRC, na.rm = TRUE),
+      sd_AUPRC = sd(AUPRC, na.rm = TRUE),
+      n = dplyr::n(),
+      .groups = "drop"
+    )
+
+  p_q4 <- ggplot2::ggplot(
+    auprc_strata_summary,
+    ggplot2::aes(
+      x = reorder(use_case_id, -mean_AUPRC),
+      y = mean_AUPRC,
+      fill = use_case_id
+    )
+  ) +
+    ggplot2::geom_col(alpha = 0.85) +
+    ggplot2::geom_errorbar(
+      ggplot2::aes(
+        ymin = pmax(mean_AUPRC - sd_AUPRC, 0),
+        ymax = pmin(mean_AUPRC + sd_AUPRC, 1)
+      ),
+      width = 0.3
+    ) +
+    ggplot2::facet_wrap(~difficulty_bin, ncol = 2) +
+    ggplot2::scale_fill_manual(
+      values = use_case_palette[nonfunctional_ids],
+      labels = short_labels[nonfunctional_ids],
+      guide = "none"
+    ) +
+    ggplot2::scale_x_discrete(labels = short_labels) +
+    ggplot2::labs(
+      title = "Non-Functional AUPRC by Dataset Difficulty Stratum",
+      subtitle = paste("Stratified by M1 (median split) and", best_z, "(median split)"),
+      x = NULL,
+      y = "Mean AUPRC (+/- 1 SD)"
+    ) +
+    theme_phase_a() +
+    ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 35, hjust = 1))
+
+  save_or_show(p_q4, "q4_auprc_by_difficulty_stratum.png", width = 12, height = 8,
+               subdir = "stratified")
+} else {
+  message("Skipping Q4 plot (no dataset metrics available).")
+}
+```
+
+---
+
+# Section 6: Q5 — Rankings Stratified by Simulation Settings
+
+## 6.1 AUPRC by p_star
+
+```{r q5-pstar, fig.width=12, fig.height=6}
+auprc_by_pstar <- test_susine::compute_auprc_from_confusion(
+  confusion_nonfunc,
+  group_vars = c("use_case_id", "p_star")
+)
+
+p_q5a <- ggplot2::ggplot(
+  auprc_by_pstar,
+  ggplot2::aes(x = factor(p_star), y = AUPRC, color = use_case_id,
+               group = use_case_id)
+) +
+  ggplot2::geom_line(linewidth = 0.9) +
+  ggplot2::geom_point(size = 3) +
+  ggplot2::scale_color_manual(
+    values = use_case_palette[nonfunctional_ids],
+    labels = short_labels[nonfunctional_ids],
+    name = "Use Case"
+  ) +
+  ggplot2::labs(
+    title = "AUPRC by p* — Non-Functional Use Cases",
+    x = "p* (number of causal effects)",
+    y = "AUPRC"
+  ) +
+  theme_phase_a() +
+  ggplot2::guides(color = ggplot2::guide_legend(ncol = 2))
+
+save_or_show(p_q5a, "q5_auprc_by_pstar.png", width = 12, height = 6,
+             subdir = "stratified")
+```
+
+## 6.2 AUPRC by y_noise
+
+```{r q5-ynoise, fig.width=12, fig.height=6}
+auprc_by_ynoise <- test_susine::compute_auprc_from_confusion(
+  confusion_nonfunc,
+  group_vars = c("use_case_id", "y_noise")
+)
+
+p_q5b <- ggplot2::ggplot(
+  auprc_by_ynoise,
+  ggplot2::aes(x = y_noise, y = AUPRC, color = use_case_id,
+               group = use_case_id)
+) +
+  ggplot2::geom_line(linewidth = 0.9) +
+  ggplot2::geom_point(size = 3) +
+  ggplot2::scale_color_manual(
+    values = use_case_palette[nonfunctional_ids],
+    labels = short_labels[nonfunctional_ids],
+    name = "Use Case"
+  ) +
+  ggplot2::labs(
+    title = "AUPRC by Noise Level — Non-Functional Use Cases",
+    x = "y_noise (residual variance fraction)",
+    y = "AUPRC"
+  ) +
+  theme_phase_a() +
+  ggplot2::guides(color = ggplot2::guide_legend(ncol = 2))
+
+save_or_show(p_q5b, "q5_auprc_by_ynoise.png", width = 12, height = 6,
+             subdir = "stratified")
+```
+
+## 6.3 Power vs FDR Faceted by p_star × y_noise
+
+```{r q5-faceted-pf, fig.width=14, fig.height=10}
+curves_by_settings <- test_susine::compute_power_fdr_curves(
+  confusion_nonfunc,
+  group_vars = c("use_case_id", "p_star", "y_noise")
+) %>%
+  dplyr::filter(pip_threshold >= 0.05, pip_threshold <= 0.95)
+
+# Only show a subset of p_star values to keep the plot readable
+pstar_show <- c(1, 5, 20)
+curves_facet <- curves_by_settings %>%
+  dplyr::filter(p_star %in% pstar_show) %>%
+  dplyr::mutate(
+    p_star_label = paste0("p* = ", p_star),
+    y_noise_label = paste0("y_noise = ", y_noise)
+  )
+
+if (nrow(curves_facet) > 0) {
+  p_q5c <- ggplot2::ggplot(
+    curves_facet,
+    ggplot2::aes(x = fdr, y = power, color = use_case_id)
+  ) +
+    ggplot2::geom_line(linewidth = 0.8) +
+    ggplot2::facet_grid(p_star_label ~ y_noise_label) +
+    ggplot2::scale_color_manual(
+      values = use_case_palette[nonfunctional_ids],
+      labels = short_labels[nonfunctional_ids],
+      name = "Use Case"
+    ) +
+    ggplot2::labs(
+      title = "Power vs FDR — Non-Functional, by p* and y_noise",
+      x = "FDR", y = "Power"
+    ) +
+    ggplot2::coord_cartesian(xlim = c(0, 1)) +
+    theme_phase_a() +
+    ggplot2::guides(color = ggplot2::guide_legend(ncol = 3))
+
+  save_or_show(p_q5c, "q5_power_fdr_faceted_pstar_ynoise.png",
+               width = 14, height = 10, subdir = "stratified")
+}
+```
+
+---
+
+# Section 7: Q6 — Functional Prior Comparison
+
+How do functional priors (mu_0 = c*a via c-grid, and softmax(|a|/tau)
+via tau-grid) compare to uninformed baselines? This uses the base fits
+for all use cases, and examines how performance depends on c, tau,
+annotation_r2, and inflate_match.
+
+## 7.1 Overall Comparison: Functional vs Baselines
+
+```{r q6-overall, fig.width=10, fig.height=7}
+# For functional use cases, include all exploration methods (single + c/tau grid)
+# For baselines, use single fits only
+confusion_q6 <- confusion_base %>%
+  dplyr::filter(use_case_id %in% c("susie_vanilla", "susine_functional_pi",
+                                     "susine_functional_mu"))
+
+auprc_q6 <- test_susine::compute_auprc_from_confusion(
+  confusion_q6,
+  group_vars = "use_case_id"
+) %>%
+  dplyr::arrange(dplyr::desc(AUPRC))
+
+cat("=== Functional vs Baseline AUPRC (all fits pooled) ===\n")
+auprc_q6 %>%
+  dplyr::mutate(label = short_labels[use_case_id]) %>%
+  print()
+```
+
+## 7.2 AUPRC by c_value (Functional mu)
+
+```{r q6-c-value, fig.width=10, fig.height=6}
+# SuSiNE functional mu: AUPRC by c_value
+confusion_mu <- confusion_base %>%
+  dplyr::filter(use_case_id == "susine_functional_mu")
+
+auprc_by_c <- test_susine::compute_auprc_from_confusion(
+  confusion_mu,
+  group_vars = c("use_case_id", "c_value")
+)
+
+# Add baseline reference
+auprc_baseline <- test_susine::compute_auprc_from_confusion(
+  confusion_base %>% dplyr::filter(use_case_id == "susie_vanilla"),
+  group_vars = "use_case_id"
+)
+
+cat("=== AUPRC by c_value (functional mu) ===\n")
+print(auprc_by_c)
+
+if (nrow(auprc_by_c) > 0) {
+  p_q6c <- ggplot2::ggplot(
+    auprc_by_c,
+    ggplot2::aes(x = c_value, y = AUPRC)
+  ) +
+    ggplot2::geom_line(linewidth = 1.0, color = use_case_palette["susine_functional_mu"]) +
+    ggplot2::geom_point(size = 3.5, color = use_case_palette["susine_functional_mu"]) +
+    ggplot2::geom_hline(
+      yintercept = auprc_baseline$AUPRC[1],
+      linetype = "dashed", color = use_case_palette["susie_vanilla"],
+      linewidth = 0.8
+    ) +
+    ggplot2::annotate("text", x = max(auprc_by_c$c_value, na.rm = TRUE),
+                      y = auprc_baseline$AUPRC[1],
+                      label = "Vanilla baseline", hjust = 1, vjust = -0.5,
+                      color = use_case_palette["susie_vanilla"], size = 3.5) +
+    ggplot2::labs(
+      title = "AUPRC by Prior Mean Scale (c) — Functional mu",
+      subtitle = "mu_0 = c * a; dashed line = vanilla SuSiE baseline",
+      x = "c (annotation scale)",
+      y = "AUPRC"
+    ) +
+    theme_phase_a()
+
+  save_or_show(p_q6c, "q6_auprc_by_c_value.png", width = 10, height = 6,
+               subdir = "functional")
+}
+```
+
+## 7.3 AUPRC by tau_value (Functional pi)
+
+```{r q6-tau-value, fig.width=10, fig.height=6}
+confusion_pi <- confusion_base %>%
+  dplyr::filter(use_case_id == "susine_functional_pi")
+
+auprc_by_tau <- test_susine::compute_auprc_from_confusion(
+  confusion_pi,
+  group_vars = c("use_case_id", "tau_value")
+)
+
+cat("=== AUPRC by tau_value (functional pi) ===\n")
+print(auprc_by_tau)
+
+if (nrow(auprc_by_tau) > 0) {
+  p_q6t <- ggplot2::ggplot(
+    auprc_by_tau,
+    ggplot2::aes(x = tau_value, y = AUPRC)
+  ) +
+    ggplot2::geom_line(linewidth = 1.0, color = use_case_palette["susine_functional_pi"]) +
+    ggplot2::geom_point(size = 3.5, color = use_case_palette["susine_functional_pi"]) +
+    ggplot2::geom_hline(
+      yintercept = auprc_baseline$AUPRC[1],
+      linetype = "dashed", color = use_case_palette["susie_vanilla"],
+      linewidth = 0.8
+    ) +
+    ggplot2::annotate("text", x = max(auprc_by_tau$tau_value, na.rm = TRUE),
+                      y = auprc_baseline$AUPRC[1],
+                      label = "Vanilla baseline", hjust = 1, vjust = -0.5,
+                      color = use_case_palette["susie_vanilla"], size = 3.5) +
+    ggplot2::labs(
+      title = "AUPRC by Softmax Temperature (tau) — Functional pi",
+      subtitle = "pi = softmax(|a|/tau); dashed line = vanilla SuSiE baseline",
+      x = "tau (softmax temperature)",
+      y = "AUPRC"
+    ) +
+    theme_phase_a()
+
+  save_or_show(p_q6t, "q6_auprc_by_tau_value.png", width = 10, height = 6,
+               subdir = "functional")
+}
+```
+
+## 7.4 Functional AUPRC by annotation_r2 and inflate_match
+
+```{r q6-annotation-quality, fig.width=14, fig.height=8}
+# Compare functional vs baseline across annotation quality levels
+functional_plus_baseline <- confusion_base %>%
+  dplyr::filter(
+    use_case_id %in% c("susie_vanilla", "susine_functional_pi", "susine_functional_mu")
+  )
+
+auprc_by_annot <- test_susine::compute_auprc_from_confusion(
+  functional_plus_baseline,
+  group_vars = c("use_case_id", "annotation_r2", "inflate_match")
+)
+
+if (nrow(auprc_by_annot) > 0) {
+  # For baseline (susie_vanilla), annotation_r2 and inflate_match are NA
+  # Separate baseline and functional
+  baseline_auprc <- auprc_by_annot %>%
+    dplyr::filter(use_case_id == "susie_vanilla")
+
+  func_auprc <- auprc_by_annot %>%
+    dplyr::filter(use_case_id != "susie_vanilla") %>%
+    dplyr::filter(!is.na(annotation_r2))
+
+  if (nrow(func_auprc) > 0) {
+    p_q6ann <- ggplot2::ggplot(
+      func_auprc,
+      ggplot2::aes(x = annotation_r2, y = AUPRC, color = use_case_id)
+    ) +
+      ggplot2::geom_line(linewidth = 0.9) +
+      ggplot2::geom_point(size = 3) +
+      ggplot2::facet_wrap(~paste("inflate_match =", inflate_match), ncol = 3) +
+      ggplot2::geom_hline(
+        data = baseline_auprc,
+        ggplot2::aes(yintercept = AUPRC),
+        linetype = "dashed", color = use_case_palette["susie_vanilla"],
+        linewidth = 0.7
+      ) +
+      ggplot2::scale_color_manual(
+        values = use_case_palette[functional_ids],
+        labels = short_labels[functional_ids],
+        name = "Use Case"
+      ) +
+      ggplot2::labs(
+        title = "Functional AUPRC by Annotation Quality",
+        subtitle = "Dashed line = vanilla SuSiE baseline (annotation-independent)",
+        x = "annotation_r2 (fraction of causal effect variance explained)",
+        y = "AUPRC"
+      ) +
+      theme_phase_a()
+
+    save_or_show(p_q6ann, "q6_functional_by_annotation_quality.png",
+                 width = 14, height = 8, subdir = "functional")
+  }
+}
+```
+
+---
+
+# Section 8: Q7 — Max-ELBO Aggregation Gains for Functional Priors
+
+For functional use cases with c-grid or tau-grid exploration, does
+max-ELBO selection (picking the best-ELBO fit among the K=3 grid)
+improve over the average individual fit? Compare the gain for pi vs mu.
+
+## 8.1 Extract Aggregated Fits
+
+```{r q7-agg-setup}
+# max_elbo aggregated rows for functional use cases
+confusion_agg_func <- confusion_with_agg %>%
+  dplyr::filter(
+    use_case_id %in% functional_ids,
+    agg_method == "max_elbo"
+  )
+
+# Individual fits for functional use cases (for comparison)
+confusion_indiv_func <- confusion_base %>%
+  dplyr::filter(use_case_id %in% functional_ids)
+
+cat("Aggregated functional rows:", nrow(confusion_agg_func), "\n")
+cat("Individual functional rows:", nrow(confusion_indiv_func), "\n")
+```
+
+## 8.2 Gain from Max-ELBO: Overall
+
+```{r q7-overall-gain}
+auprc_agg <- test_susine::compute_auprc_from_confusion(
+  confusion_agg_func,
+  group_vars = "use_case_id"
+) %>%
+  dplyr::rename(AUPRC_max_elbo = AUPRC)
+
+auprc_indiv <- test_susine::compute_auprc_from_confusion(
+  confusion_indiv_func,
+  group_vars = "use_case_id"
+) %>%
+  dplyr::rename(AUPRC_individual = AUPRC)
+
+gain_overall <- dplyr::inner_join(auprc_agg, auprc_indiv, by = "use_case_id") %>%
+  dplyr::mutate(
+    AUPRC_gain = AUPRC_max_elbo - AUPRC_individual,
+    pct_gain = 100 * AUPRC_gain / AUPRC_individual,
+    label = short_labels[use_case_id]
+  )
+
+cat("=== Max-ELBO Aggregation Gain (Functional Use Cases) ===\n")
+gain_overall %>%
+  dplyr::select(label, AUPRC_individual, AUPRC_max_elbo, AUPRC_gain, pct_gain) %>%
+  print()
+```
+
+## 8.3 Gain by Annotation Quality
+
+```{r q7-gain-by-annot, fig.width=12, fig.height=6}
+auprc_agg_annot <- test_susine::compute_auprc_from_confusion(
+  confusion_agg_func,
+  group_vars = c("use_case_id", "annotation_r2")
+) %>%
+  dplyr::rename(AUPRC_max_elbo = AUPRC)
+
+auprc_indiv_annot <- test_susine::compute_auprc_from_confusion(
+  confusion_indiv_func,
+  group_vars = c("use_case_id", "annotation_r2")
+) %>%
+  dplyr::rename(AUPRC_individual = AUPRC)
+
+gain_annot <- dplyr::inner_join(
+  auprc_agg_annot, auprc_indiv_annot,
+  by = c("use_case_id", "annotation_r2")
+) %>%
+  dplyr::mutate(
+    AUPRC_gain = AUPRC_max_elbo - AUPRC_individual,
+    label = short_labels[use_case_id]
+  ) %>%
+  dplyr::filter(!is.na(annotation_r2))
+
+if (nrow(gain_annot) > 0) {
+  p_q7 <- ggplot2::ggplot(
+    gain_annot,
+    ggplot2::aes(x = annotation_r2, y = AUPRC_gain, color = use_case_id)
+  ) +
+    ggplot2::geom_line(linewidth = 1.0) +
+    ggplot2::geom_point(size = 3.5) +
+    ggplot2::geom_hline(yintercept = 0, linetype = "dotted", color = "gray50") +
+    ggplot2::scale_color_manual(
+      values = use_case_palette[functional_ids],
+      labels = short_labels[functional_ids],
+      name = "Use Case"
+    ) +
+    ggplot2::labs(
+      title = "AUPRC Gain from Max-ELBO Aggregation",
+      subtitle = "Gain = AUPRC(max-ELBO) - AUPRC(avg individual fit)",
+      x = "annotation_r2",
+      y = "AUPRC Gain"
+    ) +
+    theme_phase_a()
+
+  save_or_show(p_q7, "q7_maxelbo_gain_by_annotation.png", width = 12, height = 6,
+               subdir = "functional")
+}
+```
+
+## 8.4 Gain by Simulation Settings
+
+```{r q7-gain-by-settings, fig.width=14, fig.height=8}
+auprc_agg_settings <- test_susine::compute_auprc_from_confusion(
+  confusion_agg_func,
+  group_vars = c("use_case_id", "p_star", "y_noise")
+) %>%
+  dplyr::rename(AUPRC_max_elbo = AUPRC)
+
+auprc_indiv_settings <- test_susine::compute_auprc_from_confusion(
+  confusion_indiv_func,
+  group_vars = c("use_case_id", "p_star", "y_noise")
+) %>%
+  dplyr::rename(AUPRC_individual = AUPRC)
+
+gain_settings <- dplyr::inner_join(
+  auprc_agg_settings, auprc_indiv_settings,
+  by = c("use_case_id", "p_star", "y_noise")
+) %>%
+  dplyr::mutate(
+    AUPRC_gain = AUPRC_max_elbo - AUPRC_individual,
+    label = short_labels[use_case_id]
+  )
+
+if (nrow(gain_settings) > 0) {
+  p_q7b <- ggplot2::ggplot(
+    gain_settings,
+    ggplot2::aes(x = factor(p_star), y = AUPRC_gain, fill = use_case_id)
+  ) +
+    ggplot2::geom_col(position = ggplot2::position_dodge(width = 0.8),
+                      width = 0.7, alpha = 0.85) +
+    ggplot2::facet_wrap(~paste("y_noise =", y_noise), ncol = 3) +
+    ggplot2::geom_hline(yintercept = 0, linetype = "dotted", color = "gray50") +
+    ggplot2::scale_fill_manual(
+      values = use_case_palette[functional_ids],
+      labels = short_labels[functional_ids],
+      name = "Use Case"
+    ) +
+    ggplot2::labs(
+      title = "Max-ELBO Aggregation Gain by p* and y_noise",
+      subtitle = "Positive = max-ELBO selection improves over average individual fit",
+      x = "p*",
+      y = "AUPRC Gain"
+    ) +
+    theme_phase_a()
+
+  save_or_show(p_q7b, "q7_maxelbo_gain_by_pstar_ynoise.png",
+               width = 14, height = 8, subdir = "functional")
+}
+```
+
+---
+
+# Section 9: Additional Analyses
+
+## 9.1 Verification: susine vs susieR Baselines
+
+Do the susine verification use cases match their susieR counterparts?
+
+```{r q_extra_verification}
+verification_pairs <- tibble::tribble(
+  ~susie_id,        ~susine_id,       ~pair_label,
+  "susie_vanilla",  "susine_vanilla", "Vanilla",
+  "susie_eb",       "susine_eb",      "EB"
+)
+
+for (i in seq_len(nrow(verification_pairs))) {
+  pair <- verification_pairs[i, ]
+  auprc_pair <- test_susine::aggregate_auprc_by_dataset_usecase(
+    confusion_base %>%
+      dplyr::filter(use_case_id %in% c(pair$susie_id, pair$susine_id))
+  )
+
+  if (nrow(auprc_pair) > 0) {
+    wide <- auprc_pair %>%
+      tidyr::pivot_wider(
+        id_cols = matrix_id,
+        names_from = use_case_id,
+        values_from = AUPRC
+      )
+
+    if (ncol(wide) >= 3) {
+      vals <- wide[[pair$susie_id]]
+      ref <- wide[[pair$susine_id]]
+      corr <- cor(vals, ref, use = "complete.obs")
+      max_diff <- max(abs(vals - ref), na.rm = TRUE)
+      cat(sprintf("Verification (%s): corr=%.5f, max|diff|=%.6f\n",
+                  pair$pair_label, corr, max_diff))
+    }
+  }
+}
+```
+
+## 9.2 Sigma_0_2_scalar Sensitivity (Fixed-Variance Use Cases)
+
+```{r q_extra_sigma, fig.width=12, fig.height=7}
+auprc_by_sigma <- test_susine::compute_auprc_from_confusion(
+  confusion_nonfunc %>% dplyr::filter(use_case_id %in% fixed_nonfunctional_ids),
+  group_vars = c("use_case_id", "sigma_0_2_scalar")
+) %>%
+  dplyr::filter(!is.na(sigma_0_2_scalar))
+
+if (nrow(auprc_by_sigma) > 0) {
+  p_sigma <- ggplot2::ggplot(
+    auprc_by_sigma,
+    ggplot2::aes(x = sigma_0_2_scalar, y = AUPRC, color = use_case_id)
+  ) +
+    ggplot2::geom_line(linewidth = 0.9) +
+    ggplot2::geom_point(size = 3) +
+    ggplot2::scale_color_manual(
+      values = use_case_palette[fixed_nonfunctional_ids],
+      labels = short_labels[fixed_nonfunctional_ids],
+      name = "Use Case"
+    ) +
+    ggplot2::labs(
+      title = "AUPRC Sensitivity to Prior Variance (sigma_0^2 scalar)",
+      x = expression(sigma[0]^2 ~ "scalar (fraction of var(y))"),
+      y = "AUPRC"
+    ) +
+    theme_phase_a()
+
+  save_or_show(p_sigma, "extra_sigma_sensitivity.png", width = 12, height = 7,
+               subdir = "phase_a")
+}
+```
+
+## 9.3 Full Heatmap: Use Case × p_star AUPRC
+
+```{r q_extra_heatmap, fig.width=10, fig.height=6}
+auprc_all_pstar <- test_susine::compute_auprc_from_confusion(
+  confusion_base %>% dplyr::filter(use_case_id %in% all_ids),
+  group_vars = c("use_case_id", "p_star")
+)
+
+if (nrow(auprc_all_pstar) > 0) {
+  p_heat <- ggplot2::ggplot(
+    auprc_all_pstar,
+    ggplot2::aes(x = factor(p_star), y = use_case_id, fill = AUPRC)
+  ) +
+    ggplot2::geom_tile(color = "white", linewidth = 0.5) +
+    ggplot2::geom_text(ggplot2::aes(label = sprintf("%.3f", AUPRC)),
+                       size = 3.5, color = "white") +
+    ggplot2::scale_fill_viridis_c(option = "magma", direction = -1) +
+    ggplot2::scale_y_discrete(labels = short_labels) +
+    ggplot2::labs(
+      title = "AUPRC Heatmap: All Use Cases × p*",
+      x = "p*",
+      y = NULL,
+      fill = "AUPRC"
+    ) +
+    theme_phase_a() +
+    ggplot2::theme(
+      legend.position = "right",
+      axis.text.y = ggplot2::element_text(size = 11)
+    )
+
+  save_or_show(p_heat, "extra_heatmap_usecase_pstar.png", width = 10, height = 6,
+               subdir = "phase_a")
+}
+```
+
+---
+
+# Section 10: Summary and Phase B Recommendations
+
+```{r summary-recommendations}
+cat("==============================================================\n")
+cat("  Phase A Results Summary\n")
+cat("==============================================================\n\n")
+
+# Overall non-functional AUPRC ranking
+cat("--- Top non-functional use cases (overall AUPRC) ---\n")
+if (exists("auprc_nonfunc")) {
+  auprc_nonfunc %>%
+    dplyr::mutate(label = short_labels[use_case_id]) %>%
+    dplyr::select(use_case_id, label, AUPRC) %>%
+    print(n = 10)
+}
+
+# EB comparison
+cat("\n--- EB vs Fixed comparison ---\n")
+if (exists("gain_overall")) {
+  gain_overall %>%
+    dplyr::select(label, AUPRC_individual, AUPRC_max_elbo, pct_gain) %>%
+    print()
+}
+
+# Best z-metric
+if (exists("best_z")) {
+  cat("\n--- Best complementary z-metric for difficulty:", best_z, "---\n")
+  if (exists("r2_results")) print(r2_results)
+}
+
+cat("\n==============================================================\n")
+cat("  Phase B Design Guidance\n")
+cat("==============================================================\n")
+cat("
+Based on Phase A screening:
+1. Identify which use cases to KEEP for Phase B exploration.
+2. Confirm sigma_0^2 sensitivity (pick 1-2 values or keep 3).
+3. Set c-grid and tau-grid ranges based on Q6 results.
+4. Use best z-metric for difficulty stratification analysis.
+5. Decide whether verification use cases can be dropped.
+")
+```
