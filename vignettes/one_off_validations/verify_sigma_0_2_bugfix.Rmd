@@ -1,0 +1,644 @@
+---
+title: "Verification: sigma_0_2 Bug Fix (susine vs susieR)"
+date: "2026-03-04"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+    code_folding: show
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+# Background
+
+**Bug**: In `run_model.R`, the harness was passing
+`sigma_0_2 = sigma_scalar * var(y)` to `susine::susine()`. But
+`susine::initialize_priors()` (line 277 of `initialize.R`) internally
+does `sigma_0_2 <- sigma_0_2 * var_y`. The result: susine received an
+effective prior variance of $0.2 \times \text{var}(y)^2$ instead of
+$0.2 \times \text{var}(y)$.
+
+**Fix**: Changed `run_model.R` line 1138 to pass the raw scalar (e.g.,
+0.2) without pre-multiplying by `var(y)`.
+`susieR::susie()` uses `scaled_prior_variance` directly as the fraction
+of `var(y)`, and `susine` does its own internal scaling — so both now
+receive the same semantic value.
+
+**This vignette** verifies the fix at three levels:
+
+1.  **Direct engine calls** — match susine and susieR with identical
+    arguments, no harness.
+2.  **Through `run_use_case()`** — the actual harness function that
+    dispatches to each backend.
+3.  **Across multiple scenarios** — vary p\*, noise, sigma scalars, EB
+    vs fixed, to build confidence the fix is robust.
+
+```{r setup, message=FALSE, warning=FALSE}
+here::i_am(
+  "vignettes/one_off_validations/verify_sigma_0_2_bugfix.Rmd"
+)
+library(here)
+library(dplyr)
+library(tibble)
+library(tidyr)
+library(ggplot2)
+
+devtools::load_all(here("../susine"), quiet = TRUE)
+devtools::load_all(here("../susieR"), quiet = TRUE)
+devtools::load_all(here("."), quiet = TRUE)
+
+set.seed(20260304)
+```
+
+# Level 1: Direct Engine Comparison
+
+Same synthetic data, same hyperparameters, no harness. If this fails,
+the engines themselves have diverged.
+
+```{r direct-engine-data}
+n <- 400L
+p <- 200L
+L <- 10L
+scaled_prior_variance <- 0.2
+tol <- 1e-5
+max_iter <- 200L
+
+# Correlated design (AR1-ish, rho = 0.6)
+X <- matrix(rnorm(n * p), nrow = n)
+for (j in 2:p) {
+  X[, j] <- 0.6 * X[, j - 1] + sqrt(1 - 0.6^2) * X[, j]
+}
+
+causal_idx <- sort(sample(seq_len(p), 5))
+beta_true <- rep(0, p)
+beta_true[causal_idx] <- rnorm(length(causal_idx), sd = 0.7)
+
+signal <- drop(X %*% beta_true)
+noise_var <- var(signal) * (1 - 0.30) / 0.30
+y <- signal + rnorm(n, sd = sqrt(noise_var))
+
+cat(sprintf("n=%d, p=%d, L=%d, causal=%s\n", n, p, L,
+            paste(causal_idx, collapse = ",")))
+cat(sprintf("var(y)=%.4f, PVE≈0.30\n", var(y)))
+```
+
+## 1.1 Fixed Prior Variance
+
+```{r direct-fixed}
+# --- susieR ---
+susie_formals <- names(formals(susieR::susie))
+susie_args <- list(
+  X = X, y = y, L = L,
+  scaled_prior_variance = scaled_prior_variance,
+  estimate_prior_variance = FALSE,
+  estimate_residual_variance = TRUE,
+  standardize = TRUE, intercept = TRUE,
+  tol = tol, max_iter = max_iter
+)
+if ("convergence_method" %in% susie_formals)
+  susie_args$convergence_method <- "elbo"
+if ("refine" %in% susie_formals)
+  susie_args$refine <- FALSE
+susie_args <- susie_args[intersect(names(susie_args), susie_formals)]
+fit_susieR <- do.call(susieR::susie, susie_args)
+
+# --- susine ---
+# Key: pass raw scalar (0.2), NOT 0.2 * var(y)
+fit_susine <- susine::susine(
+  L = L, X = X, y = y,
+  mu_0 = 0,
+  sigma_0_2 = scaled_prior_variance,
+  prior_inclusion_weights = NULL,
+  prior_update_method = "none",
+  auto_scale_mu_0 = FALSE,
+  auto_scale_sigma_0_2 = FALSE,
+  tol = tol, max_iter = max_iter
+)
+
+pip_R <- fit_susieR$pip
+pip_S <- fit_susine$model_fit$PIPs
+```
+
+```{r direct-fixed-checks}
+check_agreement <- function(pip_a, pip_b, fit_a, fit_b,
+                            label = "comparison",
+                            max_pip_tol = 0.02,
+                            mean_pip_tol = 0.005,
+                            cor_tol = 0.995) {
+  pip_diff <- abs(pip_a - pip_b)
+  metrics <- tibble::tibble(
+    metric = c("max_pip_diff", "mean_pip_diff", "pip_correlation",
+               "top10_overlap", "sigma2_rel_diff", "elbo_rel_diff"),
+    value = c(
+      max(pip_diff),
+      mean(pip_diff),
+      cor(pip_a, pip_b),
+      length(intersect(order(pip_a, decreasing = TRUE)[1:10],
+                        order(pip_b, decreasing = TRUE)[1:10])) / 10,
+      abs(tail(fit_b$model_fit$sigma_2, 1) - fit_a$sigma2) /
+        fit_a$sigma2,
+      abs(tail(fit_b$model_fit$elbo, 1) - tail(fit_a$elbo, 1)) /
+        abs(tail(fit_a$elbo, 1))
+    ),
+    threshold = c(max_pip_tol, mean_pip_tol, NA, NA, 0.05, 0.01),
+    pass = c(
+      max(pip_diff) < max_pip_tol,
+      mean(pip_diff) < mean_pip_tol,
+      cor(pip_a, pip_b) > cor_tol,
+      length(intersect(order(pip_a, decreasing = TRUE)[1:10],
+                        order(pip_b, decreasing = TRUE)[1:10])) >= 7,
+      abs(tail(fit_b$model_fit$sigma_2, 1) - fit_a$sigma2) /
+        fit_a$sigma2 < 0.05,
+      abs(tail(fit_b$model_fit$elbo, 1) - tail(fit_a$elbo, 1)) /
+        abs(tail(fit_a$elbo, 1)) < 0.01
+    )
+  )
+  cat(sprintf("\n=== %s ===\n", label))
+  print(metrics, n = 10)
+  cat(sprintf("%d / %d passed\n", sum(metrics$pass), nrow(metrics)))
+  metrics
+}
+
+results_fixed <- check_agreement(
+  pip_R, pip_S, fit_susieR, fit_susine,
+  label = "Level 1: Fixed variance (direct calls)"
+)
+```
+
+```{r direct-fixed-scatter, fig.width=6, fig.height=6}
+plot_df <- tibble::tibble(susieR = pip_R, susine = pip_S)
+ggplot(plot_df, aes(x = susieR, y = susine)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
+  geom_point(alpha = 0.5, size = 1.5) +
+  labs(title = "Level 1: PIPs — susieR vs susine (fixed variance)",
+       subtitle = sprintf("cor=%.6f, max|diff|=%.6f",
+                          cor(pip_R, pip_S), max(abs(pip_R - pip_S))),
+       x = "susieR PIP", y = "susine PIP") +
+  coord_equal(xlim = c(0, 1), ylim = c(0, 1)) +
+  theme_minimal(base_size = 13)
+```
+
+## 1.2 EB Prior Variance
+
+```{r direct-eb}
+susie_args_eb <- susie_args
+susie_args_eb$estimate_prior_variance <- TRUE
+susie_args_eb$scaled_prior_variance <- scaled_prior_variance
+fit_susieR_eb <- do.call(susieR::susie, susie_args_eb)
+
+fit_susine_eb <- susine::susine(
+  L = L, X = X, y = y,
+  mu_0 = 0,
+  sigma_0_2 = scaled_prior_variance,
+  prior_inclusion_weights = NULL,
+  prior_update_method = "var",
+  auto_scale_mu_0 = FALSE,
+  auto_scale_sigma_0_2 = FALSE,
+  tol = tol, max_iter = max_iter
+)
+
+results_eb <- check_agreement(
+  fit_susieR_eb$pip, fit_susine_eb$model_fit$PIPs,
+  fit_susieR_eb, fit_susine_eb,
+  label = "Level 1: EB prior variance (direct calls)"
+)
+```
+
+```{r direct-eb-scatter, fig.width=6, fig.height=6}
+plot_df_eb <- tibble::tibble(
+  susieR = fit_susieR_eb$pip,
+  susine = fit_susine_eb$model_fit$PIPs
+)
+ggplot(plot_df_eb, aes(x = susieR, y = susine)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
+  geom_point(alpha = 0.5, size = 1.5) +
+  labs(title = "Level 1: PIPs — susieR vs susine (EB)",
+       subtitle = sprintf("cor=%.6f, max|diff|=%.6f",
+                          cor(plot_df_eb$susieR, plot_df_eb$susine),
+                          max(abs(plot_df_eb$susieR - plot_df_eb$susine))),
+       x = "susieR PIP", y = "susine PIP") +
+  coord_equal(xlim = c(0, 1), ylim = c(0, 1)) +
+  theme_minimal(base_size = 13)
+```
+
+## 1.3 Demonstration: the OLD bug
+
+Show what happens if you pass `sigma_0_2 = 0.2 * var(y)` (the
+old buggy harness behavior). The PIPs should diverge badly.
+
+```{r old-bug-demo}
+fit_susine_buggy <- susine::susine(
+  L = L, X = X, y = y,
+  mu_0 = 0,
+  sigma_0_2 = scaled_prior_variance * var(y),
+  prior_inclusion_weights = NULL,
+  prior_update_method = "none",
+  auto_scale_mu_0 = FALSE,
+  auto_scale_sigma_0_2 = FALSE,
+  tol = tol, max_iter = max_iter
+)
+
+pip_buggy <- fit_susine_buggy$model_fit$PIPs
+max_diff_buggy <- max(abs(pip_R - pip_buggy))
+cor_buggy <- cor(pip_R, pip_buggy)
+
+cat("=== Old bug: sigma_0_2 pre-multiplied by var(y) ===\n")
+cat(sprintf("max |PIP diff| with susieR:  %.4f  (should be LARGE)\n", max_diff_buggy))
+cat(sprintf("PIP correlation with susieR: %.6f  (should be LOW)\n", cor_buggy))
+cat(sprintf("\nWith the FIX:  max diff = %.6f, cor = %.8f\n",
+            max(abs(pip_R - pip_S)), cor(pip_R, pip_S)))
+```
+
+```{r old-bug-scatter, fig.width=10, fig.height=5}
+plot_bug <- tibble::tibble(
+  susieR = c(pip_R, pip_R),
+  susine = c(pip_S, pip_buggy),
+  version = rep(c("Fixed (correct)", "Buggy (old)"), each = p)
+)
+
+ggplot(plot_bug, aes(x = susieR, y = susine)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
+  geom_point(alpha = 0.4, size = 1.5) +
+  facet_wrap(~version) +
+  labs(title = "Bug demonstration: correct vs old (buggy) sigma_0_2 handling",
+       x = "susieR PIP", y = "susine PIP") +
+  coord_equal(xlim = c(0, 1), ylim = c(0, 1)) +
+  theme_minimal(base_size = 13)
+```
+
+---
+
+# Level 2: Through the Harness (`run_use_case`)
+
+Call `run_use_case()` with mocked `use_case`, `run_row`, and
+`job_config` objects for both "susine" and "susieR" backends.
+This exercises the actual code path that the SLURM jobs use, including
+`parse_sigma_0_2_scalar` and the arg list construction.
+
+```{r harness-setup}
+# Build a minimal data_bundle
+data_bundle <- list(
+  X = X,
+  y = y,
+  beta = beta_true,
+  effect_sd = sd(beta_true[causal_idx]),
+  priors_cache = new.env(parent = emptyenv())
+)
+
+# Build a run_row that corresponds to vanilla fixed-variance
+run_row_fixed <- tibble::tibble(
+  dataset_bundle_id = 1L,
+  use_case_id = "susie_vanilla",
+  matrix_id = "test_matrix_1",
+  p_star = length(causal_idx),
+  y_noise = round(1 - 0.30, 2),
+  L = L,
+  sigma_0_2_scalar = "0.2",
+  annotation_r2 = NA_real_,
+  inflate_match = NA_real_,
+  c_value = NA_real_,
+  tau_value = NA_real_,
+  restart_id = NA_integer_,
+  refine_step = NA_integer_,
+  run_type = "cold",
+  phenotype_seed = 42L,
+  annotation_seed = NA_integer_
+)
+
+# Job config with explicit tol
+job_config <- list(
+  job = list(
+    max_iter = max_iter,
+    tol = tol
+  )
+)
+```
+
+## 2.1 susieR Backend via Harness
+
+```{r harness-susieR}
+uc_susieR <- tibble::tibble(
+  use_case_id  = "susie_vanilla",
+  backend      = "susieR",
+  prior_mean_strategy     = "none",
+  prior_variance_strategy = "fixed",
+  inclusion_prior_strategy = "uniform",
+  unmappable_effects = "none"
+)
+
+result_susieR <- test_susine:::run_use_case(
+  use_case    = uc_susieR,
+  run_row     = run_row_fixed,
+  data_bundle = data_bundle,
+  job_config  = job_config
+)
+
+pip_harness_R <- result_susieR$fits[[1]]$model_fit$PIPs
+cat(sprintf("susieR via harness: %d PIPs, max=%.4f\n",
+            length(pip_harness_R), max(pip_harness_R)))
+```
+
+## 2.2 susine Backend via Harness
+
+```{r harness-susine}
+uc_susine <- tibble::tibble(
+  use_case_id  = "susine_vanilla",
+  backend      = "susine",
+  prior_mean_strategy     = "none",
+  prior_variance_strategy = "fixed",
+  inclusion_prior_strategy = "uniform",
+  unmappable_effects = "none"
+)
+
+run_row_susine <- run_row_fixed %>%
+  dplyr::mutate(use_case_id = "susine_vanilla")
+
+result_susine <- test_susine:::run_use_case(
+  use_case    = uc_susine,
+  run_row     = run_row_susine,
+  data_bundle = data_bundle,
+  job_config  = job_config
+)
+
+pip_harness_S <- result_susine$fits[[1]]$model_fit$PIPs
+cat(sprintf("susine via harness: %d PIPs, max=%.4f\n",
+            length(pip_harness_S), max(pip_harness_S)))
+```
+
+## 2.3 Harness Comparison
+
+```{r harness-compare}
+results_harness <- check_agreement(
+  pip_harness_R, pip_harness_S,
+  result_susieR$fits[[1]]$raw, result_susine$fits[[1]],
+  label = "Level 2: Through run_use_case() harness"
+)
+```
+
+```{r harness-scatter, fig.width=6, fig.height=6}
+plot_harness <- tibble::tibble(susieR = pip_harness_R, susine = pip_harness_S)
+ggplot(plot_harness, aes(x = susieR, y = susine)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
+  geom_point(alpha = 0.5, size = 1.5) +
+  labs(title = "Level 2: PIPs through the harness",
+       subtitle = sprintf("cor=%.6f, max|diff|=%.6f",
+                          cor(pip_harness_R, pip_harness_S),
+                          max(abs(pip_harness_R - pip_harness_S))),
+       x = "susieR PIP (via harness)", y = "susine PIP (via harness)") +
+  coord_equal(xlim = c(0, 1), ylim = c(0, 1)) +
+  theme_minimal(base_size = 13)
+```
+
+---
+
+# Level 3: Multi-Scenario Sweep
+
+Systematically vary signal density, noise level, and sigma scalar.
+Each scenario fits both backends via `run_use_case()` and records
+agreement metrics.
+
+```{r sweep-scenarios}
+scenarios <- tidyr::expand_grid(
+  p_star = c(2, 5, 15),
+  y_noise = c(0.5, 0.7, 0.9),
+  sigma_0_2_scalar = c(0.1, 0.2, 0.5)
+)
+
+cat(sprintf("Running %d scenarios...\n", nrow(scenarios)))
+```
+
+```{r sweep-run, message=FALSE, warning=FALSE}
+sweep_results <- purrr::pmap_dfr(scenarios, function(p_star, y_noise, sigma_0_2_scalar) {
+  # --- Generate fresh data for this scenario ---
+  loc_beta <- rep(0, p)
+  loc_causal <- sort(sample(seq_len(p), p_star))
+  loc_beta[loc_causal] <- rnorm(p_star, sd = 0.6)
+
+  loc_signal <- drop(X %*% loc_beta)
+  loc_pve <- 1 - y_noise
+  if (var(loc_signal) < 1e-12) {
+    loc_noise_var <- 1
+  } else {
+    loc_noise_var <- var(loc_signal) * y_noise / loc_pve
+  }
+  loc_y <- loc_signal + rnorm(n, sd = sqrt(loc_noise_var))
+
+  loc_bundle <- list(
+    X = X, y = loc_y,
+    beta = loc_beta,
+    effect_sd = if (p_star > 0) sd(loc_beta[loc_causal]) else 0.5,
+    priors_cache = new.env(parent = emptyenv())
+  )
+
+  loc_row <- run_row_fixed %>%
+    dplyr::mutate(
+      p_star = !!p_star,
+      y_noise = !!y_noise,
+      sigma_0_2_scalar = as.character(!!sigma_0_2_scalar)
+    )
+
+  # susieR
+  loc_row_R <- loc_row %>% dplyr::mutate(use_case_id = "susie_vanilla")
+  res_R <- tryCatch(
+    test_susine:::run_use_case(uc_susieR, loc_row_R, loc_bundle, job_config),
+    error = function(e) NULL
+  )
+
+  # susine
+  loc_row_S <- loc_row %>% dplyr::mutate(use_case_id = "susine_vanilla")
+  res_S <- tryCatch(
+    test_susine:::run_use_case(uc_susine, loc_row_S, loc_bundle, job_config),
+    error = function(e) NULL
+  )
+
+  if (is.null(res_R) || is.null(res_S)) {
+    return(tibble::tibble(
+      p_star = p_star, y_noise = y_noise,
+      sigma_0_2_scalar = sigma_0_2_scalar,
+      max_pip_diff = NA_real_, mean_pip_diff = NA_real_,
+      pip_cor = NA_real_, sigma2_rel_diff = NA_real_,
+      status = "ERROR"
+    ))
+  }
+
+  loc_pip_R <- res_R$fits[[1]]$model_fit$PIPs
+  loc_pip_S <- res_S$fits[[1]]$model_fit$PIPs
+  loc_diff <- abs(loc_pip_R - loc_pip_S)
+
+  loc_sigma2_R <- res_R$fits[[1]]$raw$sigma2
+  loc_sigma2_S <- tail(res_S$fits[[1]]$model_fit$sigma_2, 1)
+
+  tibble::tibble(
+    p_star = p_star,
+    y_noise = y_noise,
+    sigma_0_2_scalar = sigma_0_2_scalar,
+    max_pip_diff = max(loc_diff),
+    mean_pip_diff = mean(loc_diff),
+    pip_cor = cor(loc_pip_R, loc_pip_S),
+    sigma2_rel_diff = abs(loc_sigma2_S - loc_sigma2_R) / loc_sigma2_R,
+    status = "OK"
+  )
+})
+
+cat(sprintf("Completed %d scenarios.\n", nrow(sweep_results)))
+```
+
+## 3.1 Sweep Summary Table
+
+```{r sweep-table}
+sweep_results %>%
+  dplyr::arrange(dplyr::desc(max_pip_diff)) %>%
+  print(n = 40)
+
+cat("\n=== Worst-case metrics across all scenarios ===\n")
+cat(sprintf("max of max_pip_diff:  %.6f\n", max(sweep_results$max_pip_diff, na.rm = TRUE)))
+cat(sprintf("max of mean_pip_diff: %.6f\n", max(sweep_results$mean_pip_diff, na.rm = TRUE)))
+cat(sprintf("min pip_cor:          %.6f\n", min(sweep_results$pip_cor, na.rm = TRUE)))
+cat(sprintf("max sigma2_rel_diff:  %.6f\n", max(sweep_results$sigma2_rel_diff, na.rm = TRUE)))
+```
+
+## 3.2 Agreement Heatmap
+
+```{r sweep-heatmap, fig.width=10, fig.height=7}
+ggplot(
+  sweep_results %>% dplyr::filter(status == "OK"),
+  aes(x = factor(sigma_0_2_scalar), y = factor(p_star), fill = max_pip_diff)
+) +
+  geom_tile(color = "white", linewidth = 0.5) +
+  geom_text(aes(label = sprintf("%.4f", max_pip_diff)), size = 3.5) +
+  facet_wrap(~paste("y_noise =", y_noise), ncol = 3) +
+  scale_fill_gradient(low = "white", high = "firebrick",
+                      limits = c(0, max(0.05, max(sweep_results$max_pip_diff, na.rm = TRUE)))) +
+  labs(
+    title = "Max |PIP diff| across susieR/susine (via harness)",
+    subtitle = "All values should be < 0.02 — small numerical differences expected",
+    x = expression(sigma[0]^2 ~ "scalar"), y = "p*", fill = "Max |PIP diff|"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "right")
+```
+
+## 3.3 Correlation Heatmap
+
+```{r sweep-cor-heatmap, fig.width=10, fig.height=7}
+ggplot(
+  sweep_results %>% dplyr::filter(status == "OK"),
+  aes(x = factor(sigma_0_2_scalar), y = factor(p_star), fill = pip_cor)
+) +
+  geom_tile(color = "white", linewidth = 0.5) +
+  geom_text(aes(label = sprintf("%.5f", pip_cor)), size = 3.5) +
+  facet_wrap(~paste("y_noise =", y_noise), ncol = 3) +
+  scale_fill_gradient(low = "orange", high = "forestgreen",
+                      limits = c(min(0.99, min(sweep_results$pip_cor, na.rm = TRUE)), 1)) +
+  labs(
+    title = "PIP Correlation across susieR/susine (via harness)",
+    subtitle = "All values should be > 0.995",
+    x = expression(sigma[0]^2 ~ "scalar"), y = "p*", fill = "PIP cor"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "right")
+```
+
+---
+
+# Level 4: EB Variance via Harness
+
+Repeat Level 2 with `prior_variance_strategy = "eb"` to confirm
+the EB path also matches.
+
+```{r harness-eb-setup}
+uc_susieR_eb <- uc_susieR %>%
+  dplyr::mutate(
+    use_case_id = "susie_eb",
+    prior_variance_strategy = "eb"
+  )
+
+uc_susine_eb <- uc_susine %>%
+  dplyr::mutate(
+    use_case_id = "susine_eb",
+    prior_variance_strategy = "eb"
+  )
+
+run_row_eb <- run_row_fixed %>%
+  dplyr::mutate(sigma_0_2_scalar = NA_character_)
+```
+
+```{r harness-eb-run}
+result_R_eb <- test_susine:::run_use_case(
+  uc_susieR_eb,
+  run_row_eb %>% dplyr::mutate(use_case_id = "susie_eb"),
+  data_bundle, job_config
+)
+
+result_S_eb <- test_susine:::run_use_case(
+  uc_susine_eb,
+  run_row_eb %>% dplyr::mutate(use_case_id = "susine_eb"),
+  data_bundle, job_config
+)
+
+pip_h_R_eb <- result_R_eb$fits[[1]]$model_fit$PIPs
+pip_h_S_eb <- result_S_eb$fits[[1]]$model_fit$PIPs
+
+results_harness_eb <- check_agreement(
+  pip_h_R_eb, pip_h_S_eb,
+  result_R_eb$fits[[1]]$raw, result_S_eb$fits[[1]],
+  label = "Level 4: EB variance through harness"
+)
+```
+
+```{r harness-eb-scatter, fig.width=6, fig.height=6}
+plot_eb <- tibble::tibble(susieR = pip_h_R_eb, susine = pip_h_S_eb)
+ggplot(plot_eb, aes(x = susieR, y = susine)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
+  geom_point(alpha = 0.5, size = 1.5) +
+  labs(title = "Level 4: PIPs — EB prior variance (via harness)",
+       subtitle = sprintf("cor=%.6f, max|diff|=%.6f",
+                          cor(pip_h_R_eb, pip_h_S_eb),
+                          max(abs(pip_h_R_eb - pip_h_S_eb))),
+       x = "susieR PIP", y = "susine PIP") +
+  coord_equal(xlim = c(0, 1), ylim = c(0, 1)) +
+  theme_minimal(base_size = 13)
+```
+
+---
+
+# Final Verdict
+
+```{r final-verdict}
+all_results <- dplyr::bind_rows(
+  results_fixed  %>% dplyr::mutate(level = "L1: Direct fixed"),
+  results_eb     %>% dplyr::mutate(level = "L1: Direct EB"),
+  results_harness %>% dplyr::mutate(level = "L2: Harness fixed"),
+  results_harness_eb %>% dplyr::mutate(level = "L4: Harness EB")
+)
+
+cat("================================================================\n")
+cat("  FINAL VERIFICATION SUMMARY\n")
+cat("================================================================\n\n")
+
+all_results %>%
+  dplyr::select(level, metric, value, pass) %>%
+  print(n = 30)
+
+n_total <- nrow(all_results)
+n_pass <- sum(all_results$pass)
+
+cat(sprintf("\nDirect checks: %d / %d passed\n", n_pass, n_total))
+
+# Sweep summary
+sweep_ok <- sweep_results %>% dplyr::filter(status == "OK")
+sweep_pass <- sum(sweep_ok$max_pip_diff < 0.02 & sweep_ok$pip_cor > 0.995)
+cat(sprintf("Sweep scenarios: %d / %d within tolerance\n",
+            sweep_pass, nrow(sweep_ok)))
+cat(sprintf("Total: %d / %d all clear\n",
+            n_pass + sweep_pass, n_total + nrow(sweep_ok)))
+
+if (n_pass == n_total && sweep_pass == nrow(sweep_ok)) {
+  cat("\n*** ALL CHECKS PASSED — sigma_0_2 bug is squashed. ***\n")
+} else {
+  cat("\n!!! SOME CHECKS FAILED — investigate above. !!!\n")
+}
+```
