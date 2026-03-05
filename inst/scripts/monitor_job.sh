@@ -60,8 +60,14 @@ fi
 
 # Fall back to SLURM if config didn't have n_tasks
 if [ "$N_TASKS" = "0" ] || [ -z "$N_TASKS" ]; then
-  N_TASKS=$(scontrol show job "$PARENT_ID" 2>/dev/null | grep -oP 'ArrayTaskId=\K[0-9]+-[0-9]+' | awk -F- '{print $2}' || true)
+  # Try range format first (pending jobs: ArrayTaskId=1-90 or 1-90%20)
+  N_TASKS=$(scontrol show job "$PARENT_ID" 2>/dev/null \
+    | grep -oP 'ArrayTaskId=\K[0-9]+-[0-9]+' | head -1 | awk -F- '{print $2}' || true)
   N_TASKS=$(echo "$N_TASKS" | extract_int)
+fi
+# Last resort: count task directories (reliable once all tasks have started)
+if [ "$N_TASKS" = "0" ] || [ -z "$N_TASKS" ]; then
+  N_TASKS=$(find "$STAGING_DIR" -maxdepth 1 -type d -name 'task-*' 2>/dev/null | wc -l | tr -d ' ')
 fi
 N_TASKS=${N_TASKS:-0}
 BUNDLES_PER_TASK=${BUNDLES_PER_TASK:-0}
