@@ -34,7 +34,8 @@ run_task <- function(job_name,
       confusion = list(),
       dataset_metrics = list(),
       multimodal = list(),
-      validation = list()
+      validation = list(),
+      prior_diagnostics = list()
     )
     buffer_ctx$base_output <- determine_base_output(job_config)
     buffer_ctx$task_id <- task_id
@@ -522,6 +523,17 @@ generate_data_for_bundle <- function(bundle_row, job_config) {
       effect_sd = effect_sd,
       seed = seed
     )
+  } else if (identical(architecture, "susie2_sparse")) {
+    simulate_effect_sizes_susie2_sparse(
+      p = ncol(X),
+      p_star = p_star,
+      seed = seed
+    )
+  } else if (identical(architecture, "susie2_oligogenic")) {
+    simulate_effect_sizes_susie2_oligogenic(
+      p = ncol(X),
+      seed = seed
+    )
   } else {
     simulate_effect_sizes(
       p = ncol(X),
@@ -530,12 +542,32 @@ generate_data_for_bundle <- function(bundle_row, job_config) {
       seed = seed
     )
   }
-  phenotype <- simulate_phenotype(
-    X = X,
-    beta = effects$beta,
-    noise_fraction = y_noise,
-    seed = seed + 1L
-  )
+
+  # SuSiE 2.0 architectures use h2-calibrated noise; others use noise_fraction
+  phenotype <- if (architecture %in% c("susie2_sparse", "susie2_oligogenic")) {
+    simulate_phenotype_h2(
+      X = X,
+      beta = effects$beta,
+      h2_snp_per_causal = if (identical(architecture, "susie2_sparse")) {
+        as.numeric(bundle_row[["h2_snp_per_causal"]] %||% 0.03)
+      } else {
+        NA_real_
+      },
+      h2_total = if (identical(architecture, "susie2_oligogenic")) {
+        as.numeric(bundle_row[["h2_total"]] %||% 0.25)
+      } else {
+        NA_real_
+      },
+      seed = seed + 1L
+    )
+  } else {
+    simulate_phenotype(
+      X = X,
+      beta = effects$beta,
+      noise_fraction = y_noise,
+      seed = seed + 1L
+    )
+  }
 
   list(
     X = X,
@@ -677,6 +709,20 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
         buffer_ctx = buffer_ctx,
         variant_meta = meta
       )
+
+      # Extract and buffer prior diagnostics for susine fits
+      if (!is.null(buffer_ctx) && isTRUE(job_config$job$write_prior_diagnostics)) {
+        prior_diag <- extract_prior_diagnostics(
+          fit = fit,
+          run_id = as.integer(run_row$run_id),
+          backend = as.character(use_case$backend[[1]])
+        )
+        if (!is.null(prior_diag) && nrow(prior_diag)) {
+          buffer_ctx$buffers$prior_diagnostics[[
+            length(buffer_ctx$buffers$prior_diagnostics) + 1L
+          ]] <- prior_diag
+        }
+      }
 
       if (!isTRUE(meta$is_agg)) {
         elbo_val <- suppressWarnings(as.numeric(tail(fit$model_fit$elbo, 1)))
@@ -1032,6 +1078,53 @@ normalize_susier_fit <- function(fit_raw, X, L) {
   )
 }
 
+#' Extract per-effect prior diagnostics from a converged fit.
+#'
+#' Returns a tibble with one row per effect (L rows), recording the final
+#' learned prior parameters: scale factor c_l, sigma_0_2_l, and tau2_l.
+#' Only meaningful for susine backend fits.
+#'
+#' @param fit A susine fit object (from `susine::susine()`).
+#' @param run_id Integer run identifier.
+#' @param backend Character scalar: `"susine"` or `"susieR"`.
+#' @return A tibble with columns `run_id`, `effect_l`, `c_l`, `mu_0_l`,
+#'   `sigma_0_2_l`, `tau2_l`, or `NULL` if not a susine fit.
+#' @keywords internal
+extract_prior_diagnostics <- function(fit, run_id, backend) {
+  if (backend != "susine") return(NULL)
+  priors <- fit$priors
+  if (is.null(priors)) return(NULL)
+
+  L <- length(priors$mu_0_scale_factor %||% numeric(0))
+  if (L == 0L) return(NULL)
+
+  c_l <- as.numeric(priors$mu_0_scale_factor)
+  tau2_l <- as.numeric(priors$mu_0_scale_tau2 %||% rep(NA_real_, L))
+  # sigma_0_2 is L x p; take column 1 as representative (all p identical per effect)
+  sigma_0_2_l <- if (!is.null(priors$sigma_0_2) && is.matrix(priors$sigma_0_2)) {
+    as.numeric(priors$sigma_0_2[, 1])
+  } else {
+    rep(NA_real_, L)
+  }
+  # mu_0 is L x p; take column 1 as representative (for "mean"/"mu_var" methods
+  # all p values are identical; for annotation methods it's SNP-specific so
+  # column 1 is just a sample).
+  mu_0_l <- if (!is.null(priors$mu_0) && is.matrix(priors$mu_0)) {
+    as.numeric(priors$mu_0[, 1])
+  } else {
+    rep(NA_real_, L)
+  }
+
+  tibble::tibble(
+    run_id = as.integer(run_id),
+    effect_l = seq_len(L),
+    c_l = c_l,
+    mu_0_l = mu_0_l,
+    sigma_0_2_l = sigma_0_2_l,
+    tau2_l = tau2_l
+  )
+}
+
 #' Fit one run row under a prior spec (susine or susieR backend).
 #' @keywords internal
 run_use_case <- function(use_case, run_row, data_bundle, job_config, blocked_idx = integer(0)) {
@@ -1043,6 +1136,8 @@ run_use_case <- function(use_case, run_row, data_bundle, job_config, blocked_idx
   prior_variance_strategy <- as.character(use_case$prior_variance_strategy[[1]])
   inclusion_prior_strategy <- as.character(use_case$inclusion_prior_strategy[[1]])
   unmappable_effects <- as.character(use_case$unmappable_effects[[1]] %||% "none")
+  eb_method <- use_case$eb_method[[1]] %||% NA_character_
+  c_nonneg_flag <- isTRUE(use_case$c_nonneg[[1]])
 
   annotation_r2 <- as.numeric(run_row$annotation_r2 %||% NA_real_)
   inflate_match <- as.numeric(run_row$inflate_match %||% NA_real_)
@@ -1140,9 +1235,47 @@ run_use_case <- function(use_case, run_row, data_bundle, job_config, blocked_idx
       args$sigma_0_2 <- as.numeric(sigma_scalar_fixed)
       args$prior_update_method <- "none"
     } else {
-      args$prior_update_method <- "var"
+      args$prior_update_method <- if (!is.na(eb_method)) eb_method else "var"
+      args$c_nonneg <- c_nonneg_flag
+      # For "scale" and "mean" EB: sigma is fixed at user-specified value,
+      # only c (or scalar mu) is optimized.
+      if (!is.na(eb_method) && eb_method %in% c("scale", "mean") &&
+          !is.null(sigma_scalar_fixed)) {
+        args$sigma_0_2 <- as.numeric(sigma_scalar_fixed)
+      }
     }
-    fit <- do.call(susine::susine, args)
+    # scale_var_outer: inner IBSS does "var" only; outer loop re-estimates c
+    if (!is.na(eb_method) && eb_method == "scale_var_outer") {
+      n_outer <- 5L
+      current_c <- c_value
+      for (outer_iter in seq_len(n_outer)) {
+        args$mu_0 <- as.numeric(current_c) * as.numeric(annotation_vec)
+        fit <- do.call(susine::susine, args)
+        # Re-estimate c via neg_log_lik_scale optimization (reuses susine internals)
+        new_c <- tryCatch({
+          c_lower <- if (c_nonneg_flag) 0 else -100
+          sigma_0_2_fixed <- fit$priors$sigma_0_2[1, ]
+          opt <- stats::optim(
+            par = current_c,
+            fn = susine::neg_log_lik_scale,
+            annotation = as.numeric(annotation_vec),
+            X = data_bundle$X,
+            y = data_bundle$y - fit$model_fit$fitted_y + data_bundle$X %*% (fit$priors$mu_0[1, ] * fit$effect_fits$alpha[1, ]),
+            sigma_2 = fit$model_fit$sigma_2[length(fit$model_fit$sigma_2)],
+            sigma_0_2_fixed = sigma_0_2_fixed,
+            prior_inclusion_weights = fit$priors$prior_inclusion_weights[1, ],
+            method = "Brent",
+            lower = c_lower,
+            upper = 100
+          )$par
+          as.numeric(opt)
+        }, error = function(e) current_c)
+        if (abs(new_c - current_c) < 1e-4) break
+        current_c <- new_c
+      }
+    } else {
+      fit <- do.call(susine::susine, args)
+    }
     fit$settings$L <- fit$settings$L %||% L
   } else if (backend == "susieR") {
     if (!requireNamespace("susieR", quietly = TRUE)) {
@@ -1662,7 +1795,7 @@ flush_task_buffers <- function(buffer_ctx) {
   if (is.null(buf) ||
       !length(buf$model) && !length(buf$effect) && !length(buf$snps) &&
       !length(buf$confusion) && !length(buf$dataset_metrics) && !length(buf$multimodal) &&
-      !length(buf$validation)) {
+      !length(buf$validation) && !length(buf$prior_diagnostics)) {
     return(invisible(NULL))
   }
   base_output <- buffer_ctx$base_output
@@ -1684,6 +1817,7 @@ flush_task_buffers <- function(buffer_ctx) {
   confusion_tbl <- if (length(buf$confusion)) dplyr::bind_rows(buf$confusion) else NULL
   dataset_tbl <- if (length(buf$dataset_metrics)) dplyr::bind_rows(buf$dataset_metrics) else NULL
   multimodal_tbl <- if (length(buf$multimodal)) dplyr::bind_rows(buf$multimodal) else NULL
+  prior_diag_tbl <- if (length(buf$prior_diagnostics)) dplyr::bind_rows(buf$prior_diagnostics) else NULL
 
   write_flush_outputs(
     staging_dir = staging_dir,
@@ -1695,7 +1829,8 @@ flush_task_buffers <- function(buffer_ctx) {
     validation_row = validation_tbl,
     confusion_bins = confusion_tbl,
     dataset_metrics = dataset_tbl,
-    multimodal_metrics = multimodal_tbl
+    multimodal_metrics = multimodal_tbl,
+    prior_diagnostics = prior_diag_tbl
   )
 
   if (is.null(validation_tbl) || !nrow(validation_tbl)) {
@@ -1715,7 +1850,8 @@ flush_task_buffers <- function(buffer_ctx) {
     confusion = list(),
     dataset_metrics = list(),
     multimodal = list(),
-    validation = list()
+    validation = list(),
+    prior_diagnostics = list()
   )
   buffer_ctx$flush_index <- buffer_ctx$flush_index + 1L
 }
@@ -1729,7 +1865,8 @@ write_flush_outputs <- function(staging_dir,
                                 validation_row,
                                 confusion_bins = NULL,
                                 dataset_metrics = NULL,
-                                multimodal_metrics = NULL) {
+                                multimodal_metrics = NULL,
+                                prior_diagnostics = NULL) {
   if (!is.null(model_metrics) && nrow(model_metrics)) {
     model_metrics <- dplyr::mutate(model_metrics, task_id = task_id, flush_id = flush_label)
     readr::write_csv(model_metrics, file.path(staging_dir, sprintf("%s_model_metrics.csv", flush_label)))
@@ -1757,6 +1894,10 @@ write_flush_outputs <- function(staging_dir,
   if (!is.null(multimodal_metrics) && nrow(multimodal_metrics)) {
     multimodal_metrics <- dplyr::mutate(multimodal_metrics, task_id = task_id, flush_id = flush_label)
     readr::write_csv(multimodal_metrics, file.path(staging_dir, sprintf("%s_multimodal_metrics.csv", flush_label)))
+  }
+  if (!is.null(prior_diagnostics) && nrow(prior_diagnostics)) {
+    prior_diagnostics <- dplyr::mutate(prior_diagnostics, task_id = task_id, flush_id = flush_label)
+    readr::write_csv(prior_diagnostics, file.path(staging_dir, sprintf("%s_prior_diagnostics.csv", flush_label)))
   }
 }
 

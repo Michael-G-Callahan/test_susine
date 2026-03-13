@@ -48,6 +48,8 @@ library(broom)
 save_plots_to_file <- TRUE
 show_in_rstudio_plots <- TRUE
 fdr_threshold <- 0.5  # FDR level for Power@FDR summaries
+# If TRUE, error when functional_mu rows with c_value = NA are present.
+strict_fmu_c_na <- FALSE
 
 if (isTRUE(getOption("knitr.in.progress"))) {
   knitr::opts_chunk$set(fig.ext = "png")
@@ -102,8 +104,8 @@ power_at_fdr <- function(curves_df, fdr_thresh = fdr_threshold,
 
 ```{r job-config}
 # UPDATE THESE for your completed Phase A run
-job_name <- "pilot_phase_a"
-parent_job_id <- "48988192"
+job_name <- Sys.getenv("TS_JOB_NAME", unset = "pilot_phase_a")
+parent_job_id <- Sys.getenv("TS_PARENT_JOB_ID", unset = "48997267")
 output_root <- here("output")
 
 paths <- test_susine::resolve_job_paths(
@@ -489,7 +491,7 @@ if (nrow(curves_facet) > 0) {
     ggplot2::aes(x = fdr, y = power, color = use_case_id)
   ) +
     ggplot2::geom_line(linewidth = 0.8) +
-    ggplot2::facet_grid(p_star_label ~ y_noise_label) +
+    ggplot2::facet_grid(p_star_label ~ y_noise_label, scales = "free_y") +
     ggplot2::scale_color_manual(
       values = use_case_palette[nonfunctional_ids],
       labels = short_labels[nonfunctional_ids],
@@ -625,54 +627,77 @@ save_or_show(p_q2b, "q2_eb_vs_fixed_power.png", width = 14, height = 5,
 # Section 5: Q3 — Dataset Difficulty Metrics
 
 Aggregate per dataset_bundle (not per matrix) to get ~450 observation
-points (10 matrices × 5 p_star × 3 y_noise × 3 seeds). Show both AUPRC
-and Power @ FDR.
+points (10 matrices x 5 p_star x 3 y_noise x 3 seeds). Use:
+
+1. Overall per-bundle AUPRC (single curve from combined confusion bins
+   across all base fits)
+2. Mean per-bundle AUPRC across use cases (for reference)
+
+Then test `M1 + high-LD + z-score` combinations and visualize each
+predictor marginally (after accounting for the other two).
 
 ```{r q3-difficulty-setup}
-# Per-bundle AUPRC and power: aggregate confusion bins by everything
-# EXCEPT dataset_bundle. This gives one AUPRC per (bundle × use_case).
-# We then average across use cases for the difficulty scatter.
-
-# dataset_bundle_id should be in confusion_bins from run_enrich_full
-if ("dataset_bundle_id" %in% names(confusion_nonfunc)) {
-  auprc_per_bundle <- test_susine::compute_auprc_from_confusion(
-    confusion_nonfunc,
+# Per-bundle AUPRC:
+# 1) overall_AUPRC from combined confusion bins across all base fits.
+# 2) mean_AUPRC across use-case-specific AUPRC values.
+if ("dataset_bundle_id" %in% names(confusion_base)) {
+  auprc_per_bundle_usecase <- test_susine::compute_auprc_from_confusion(
+    confusion_base,
     group_vars = c("dataset_bundle_id", "use_case_id")
   )
-
-  # Average across use cases per bundle
-  auprc_bundle_mean <- auprc_per_bundle %>%
+  auprc_bundle_mean <- auprc_per_bundle_usecase %>%
     dplyr::group_by(dataset_bundle_id) %>%
     dplyr::summarise(mean_AUPRC = mean(AUPRC, na.rm = TRUE), .groups = "drop")
 
-  cat("Per-bundle AUPRCs computed:", nrow(auprc_per_bundle), "rows\n")
-  cat("Unique bundles:", nrow(auprc_bundle_mean), "\n")
+  auprc_bundle_overall <- test_susine::compute_auprc_from_confusion(
+    confusion_base,
+    group_vars = c("dataset_bundle_id")
+  ) %>%
+    dplyr::rename(overall_AUPRC = AUPRC)
+
+  cat("Per-bundle use-case AUPRC rows:", nrow(auprc_per_bundle_usecase), "\n")
+  cat("Unique bundles (overall AUPRC):", nrow(auprc_bundle_overall), "\n")
 } else {
   warning("dataset_bundle_id not in confusion data; falling back to matrix_id aggregation.")
-  auprc_per_bundle <- test_susine::aggregate_auprc_by_dataset_usecase(confusion_nonfunc)
-  auprc_bundle_mean <- auprc_per_bundle %>%
+  auprc_per_bundle_usecase <- test_susine::aggregate_auprc_by_dataset_usecase(confusion_base)
+  auprc_bundle_mean <- auprc_per_bundle_usecase %>%
     dplyr::group_by(matrix_id) %>%
     dplyr::summarise(mean_AUPRC = mean(AUPRC, na.rm = TRUE), .groups = "drop")
+  auprc_bundle_overall <- test_susine::compute_auprc_from_confusion(
+    confusion_base,
+    group_vars = c("matrix_id")
+  ) %>%
+    dplyr::rename(overall_AUPRC = AUPRC)
 }
 ```
 
 ```{r q3-join-metrics}
 if (!is.null(dataset_metrics)) {
-  # dataset_metrics has one row per (dataset_bundle_id × phenotype_seed) or per bundle
-  dm_cols <- c("M1", "z_topk_ratio", "z_max_abs", "z_count_abs_gt_3", "z_eff_signals")
+  dm_cols <- c(
+    "M1",
+    "high_ld_count_095",
+    "high_ld_count_095_per_snp",
+    "high_ld_frac_095",
+    "z_topk_ratio",
+    "z_max_abs",
+    "z_count_abs_gt_3",
+    "z_eff_signals"
+  )
 
   if ("dataset_bundle_id" %in% names(dataset_metrics) &&
-      "dataset_bundle_id" %in% names(auprc_bundle_mean)) {
+      "dataset_bundle_id" %in% names(auprc_bundle_overall)) {
     ds_diff_bundle <- dataset_metrics %>%
       dplyr::select(dplyr::any_of(c("dataset_bundle_id", dm_cols))) %>%
-      dplyr::inner_join(auprc_bundle_mean, by = "dataset_bundle_id")
+      dplyr::inner_join(auprc_bundle_overall, by = "dataset_bundle_id") %>%
+      dplyr::left_join(auprc_bundle_mean, by = "dataset_bundle_id")
   } else if ("matrix_id" %in% names(dataset_metrics)) {
     ds_diff_bundle <- dataset_metrics %>%
       dplyr::select(dplyr::any_of(c("matrix_id", dm_cols))) %>%
       dplyr::group_by(matrix_id) %>%
-      dplyr::summarise(dplyr::across(dplyr::everything(), ~ mean(.x, na.rm = TRUE)),
+      dplyr::summarise(dplyr::across(dplyr::any_of(dm_cols), ~ mean(.x, na.rm = TRUE)),
                        .groups = "drop") %>%
-      dplyr::inner_join(auprc_bundle_mean, by = "matrix_id")
+      dplyr::inner_join(auprc_bundle_overall, by = "matrix_id") %>%
+      dplyr::left_join(auprc_bundle_mean, by = "matrix_id")
   } else {
     ds_diff_bundle <- NULL
     warning("Cannot join dataset_metrics.")
@@ -687,62 +712,138 @@ if (!is.null(dataset_metrics)) {
 }
 ```
 
-## 5.1 Bivariate R² Screen
+## 5.1 Trio R2 Screen
 
 ```{r q3-r2-screen}
 if (!is.null(ds_diff_bundle) && nrow(ds_diff_bundle) >= 10) {
   z_metrics <- c("z_topk_ratio", "z_max_abs", "z_count_abs_gt_3", "z_eff_signals")
+  high_ld_metrics <- c("high_ld_count_095", "high_ld_count_095_per_snp", "high_ld_frac_095")
+  z_metrics <- intersect(z_metrics, names(ds_diff_bundle))
+  high_ld_metrics <- intersect(high_ld_metrics, names(ds_diff_bundle))
 
-  r2_results <- purrr::map_dfr(z_metrics, function(z_var) {
-    f_z <- stats::as.formula(paste("mean_AUPRC ~", z_var))
-    r2_z <- tryCatch(summary(stats::lm(f_z, data = ds_diff_bundle))$r.squared,
-                     error = function(e) NA_real_)
-    r2_m1 <- tryCatch(summary(stats::lm(mean_AUPRC ~ M1, data = ds_diff_bundle))$r.squared,
-                      error = function(e) NA_real_)
-    f_both <- stats::as.formula(paste("mean_AUPRC ~ M1 +", z_var))
-    r2_both <- tryCatch(summary(stats::lm(f_both, data = ds_diff_bundle))$r.squared,
-                        error = function(e) NA_real_)
+  r2_m1 <- tryCatch(
+    summary(stats::lm(overall_AUPRC ~ M1, data = ds_diff_bundle))$r.squared,
+    error = function(e) NA_real_
+  )
 
-    tibble::tibble(z_metric = z_var, R2_z_only = r2_z, R2_M1_only = r2_m1,
-                   R2_M1_plus_z = r2_both, R2_gain = r2_both - r2_m1)
-  })
+  if (length(z_metrics) > 0 && length(high_ld_metrics) > 0) {
+    trio_results <- tidyr::expand_grid(
+      high_ld_metric = high_ld_metrics,
+      z_metric = z_metrics
+    ) %>%
+      dplyr::rowwise() %>%
+      dplyr::mutate(
+        R2_M1_only = r2_m1,
+        R2_trio = tryCatch(
+          summary(stats::lm(
+            stats::as.formula(
+              paste("overall_AUPRC ~ M1 +", high_ld_metric, "+", z_metric)
+            ),
+            data = ds_diff_bundle
+          ))$r.squared,
+          error = function(e) NA_real_
+        ),
+        R2_gain = R2_trio - R2_M1_only
+      ) %>%
+      dplyr::ungroup() %>%
+      dplyr::arrange(dplyr::desc(R2_trio))
 
-  cat("=== Bivariate R² Screen: M1 + z-metric → mean AUPRC ===\n")
-  r2_results %>% dplyr::arrange(dplyr::desc(R2_M1_plus_z)) %>% print()
+    cat("=== Trio screen: M1 + high-LD + z-metric -> overall AUPRC ===\n")
+    print(trio_results)
 
-  best_z <- r2_results %>%
-    dplyr::slice_max(R2_M1_plus_z, n = 1) %>%
-    dplyr::pull(z_metric)
-  cat("\nBest complementary z-metric:", best_z, "\n")
+    trio_table_path <- file.path(paths$aggregated_dir, "q3_trio_r2_table.csv")
+    readr::write_csv(trio_results, trio_table_path)
+    cat("Saved trio R2 table:", trio_table_path, "\n")
+
+    best_row <- trio_results %>% dplyr::slice_max(R2_trio, n = 1, with_ties = FALSE)
+    best_high_ld <- best_row$high_ld_metric[1]
+    best_z <- best_row$z_metric[1]
+    best_r2 <- best_row$R2_trio[1]
+    cat("\nBest high-LD metric:", best_high_ld, "\n")
+    cat("Best z-metric:", best_z, "\n")
+    cat("Best trio R2:", sprintf("%.4f", best_r2), "\n")
+  } else {
+    best_high_ld <- "high_ld_count_095_per_snp"
+    best_z <- "z_max_abs"
+    best_r2 <- NA_real_
+    message("Missing high-LD or z metrics in dataset_metrics; defaulting metric choices.")
+  }
 } else {
+  best_high_ld <- "high_ld_count_095_per_snp"
   best_z <- "z_max_abs"
-  message("Insufficient data for R² screen; defaulting to z_max_abs.")
+  best_r2 <- NA_real_
+  message("Insufficient data for R2 screen; defaulting to high_ld_count_095_per_snp + z_max_abs.")
 }
 ```
 
-## 5.2 Per-Bundle Scatter: M1 and Best z-Metric vs AUPRC
+## 5.2 Marginal Predictor Effects: M1, High-LD, and Best z-Metric
 
-```{r q3-scatter, fig.width=12, fig.height=5}
+```{r q3-scatter, fig.width=15, fig.height=5}
 if (!is.null(ds_diff_bundle) && nrow(ds_diff_bundle) >= 3) {
-  p_m1 <- ggplot2::ggplot(ds_diff_bundle,
-                           ggplot2::aes(x = M1, y = mean_AUPRC)) +
-    ggplot2::geom_point(size = 1.8, alpha = 0.5) +
-    ggplot2::geom_smooth(method = "lm", se = TRUE, color = "steelblue") +
-    ggplot2::labs(title = "M1 vs Mean AUPRC (per bundle)",
-                  x = "M1", y = "Mean AUPRC") +
-    theme_phase_a()
+  make_partial_df <- function(df, y_var, x_var, controls = character()) {
+    keep_cols <- unique(c(y_var, x_var, controls))
+    dfx <- df %>%
+      dplyr::select(dplyr::any_of(keep_cols)) %>%
+      tidyr::drop_na()
+    if (!nrow(dfx)) {
+      return(NULL)
+    }
+    y_resid <- if (length(controls)) {
+      stats::residuals(stats::lm(stats::as.formula(
+        paste(y_var, "~", paste(controls, collapse = " + "))
+      ), data = dfx))
+    } else {
+      dfx[[y_var]]
+    }
+    x_resid <- if (length(controls)) {
+      stats::residuals(stats::lm(stats::as.formula(
+        paste(x_var, "~", paste(controls, collapse = " + "))
+      ), data = dfx))
+    } else {
+      dfx[[x_var]]
+    }
+    tibble::tibble(x = x_resid, y = y_resid)
+  }
 
-  p_z <- ggplot2::ggplot(ds_diff_bundle,
-                          ggplot2::aes(x = .data[[best_z]], y = mean_AUPRC)) +
-    ggplot2::geom_point(size = 1.8, alpha = 0.5) +
-    ggplot2::geom_smooth(method = "lm", se = TRUE, color = "darkred") +
-    ggplot2::labs(title = paste(best_z, "vs Mean AUPRC (per bundle)"),
-                  x = best_z, y = "Mean AUPRC") +
-    theme_phase_a()
+  partial_m1 <- make_partial_df(
+    ds_diff_bundle, "overall_AUPRC", "M1", controls = c(best_high_ld, best_z)
+  )
+  partial_high_ld <- make_partial_df(
+    ds_diff_bundle, "overall_AUPRC", best_high_ld, controls = c("M1", best_z)
+  )
+  partial_z <- make_partial_df(
+    ds_diff_bundle, "overall_AUPRC", best_z, controls = c("M1", best_high_ld)
+  )
 
-  p_q3 <- cowplot::plot_grid(p_m1, p_z, ncol = 2)
-  save_or_show(p_q3, "q3_difficulty_scatter_per_bundle.png",
-               width = 12, height = 5, subdir = "difficulty")
+  plot_partial <- function(df, title, x_label, color) {
+    ggplot2::ggplot(df, ggplot2::aes(x = x, y = y)) +
+      ggplot2::geom_point(size = 1.8, alpha = 0.55, color = color) +
+      ggplot2::geom_smooth(method = "lm", se = TRUE, color = "black", linewidth = 0.7) +
+      ggplot2::labs(title = title, x = x_label, y = "Overall AUPRC (residualized)") +
+      theme_phase_a()
+  }
+
+  p_m1 <- plot_partial(partial_m1, "Marginal Effect: M1", "M1 residual", "#1f78b4")
+  p_high_ld <- plot_partial(
+    partial_high_ld,
+    paste("Marginal Effect:", best_high_ld),
+    paste(best_high_ld, "residual"),
+    "#33a02c"
+  )
+  p_z <- plot_partial(
+    partial_z,
+    paste("Marginal Effect:", best_z),
+    paste(best_z, "residual"),
+    "#e31a1c"
+  )
+
+  p_q3 <- cowplot::plot_grid(p_m1, p_high_ld, p_z, ncol = 3)
+  save_or_show(p_q3, "q3_difficulty_partial_effects.png",
+               width = 15, height = 5, subdir = "difficulty")
+
+  if (!is.na(best_r2)) {
+    cat("Best trio model R2:", sprintf("%.4f", best_r2), "\n")
+  }
 }
 ```
 
@@ -867,38 +968,116 @@ inflate_match.
 confusion_mu <- confusion_base %>%
   dplyr::filter(use_case_id == "susine_functional_mu")
 
-auprc_by_c <- test_susine::compute_auprc_from_confusion(
-  confusion_mu, group_vars = c("use_case_id", "c_value")
-)
+format_param_val <- function(x) {
+  trimws(format(x, digits = 3, scientific = FALSE))
+}
+
+# Diagnostics: c-value counts before filtering
+cat("=== functional_mu row counts by c_value (raw) ===\n")
+print(confusion_mu %>% dplyr::count(c_value, sort = TRUE))
+
+if (any(is.na(confusion_mu$c_value))) {
+  msg <- "functional_mu has rows with c_value = NA. Excluding these rows from Q6 plot."
+  if (isTRUE(strict_fmu_c_na)) {
+    stop(msg)
+  } else {
+    warning(msg)
+  }
+}
+
+confusion_mu_plot <- confusion_mu %>%
+  dplyr::filter(!is.na(c_value), !is.na(annotation_r2), !is.na(inflate_match))
 
 auprc_baseline <- test_susine::compute_auprc_from_confusion(
-  confusion_base %>% dplyr::filter(use_case_id == "susie_vanilla"),
+  confusion_base %>% dplyr::filter(use_case_id == "susine_vanilla"),
   group_vars = "use_case_id"
 )
+baseline_val <- auprc_baseline$AUPRC[1]
+
+auprc_by_c <- test_susine::compute_auprc_from_confusion(
+  confusion_mu_plot,
+  group_vars = c("c_value")
+)
+
+auprc_by_c_detail <- test_susine::compute_auprc_from_confusion(
+  confusion_mu_plot,
+  group_vars = c("c_value", "annotation_r2", "inflate_match")
+)
+
+q6_numeric <- auprc_by_c %>%
+  dplyr::mutate(
+    AUPRC_susine_baseline = baseline_val,
+    diff_vs_susine_baseline = AUPRC - AUPRC_susine_baseline
+  ) %>%
+  dplyr::arrange(c_value)
 
 cat("=== AUPRC by c_value (functional mu) ===\n")
-print(auprc_by_c)
+print(q6_numeric)
 
-if (nrow(auprc_by_c) > 0) {
-  p_q6c <- ggplot2::ggplot(auprc_by_c, ggplot2::aes(x = c_value, y = AUPRC)) +
-    ggplot2::geom_line(linewidth = 1.0,
-                       color = use_case_palette["susine_functional_mu"]) +
-    ggplot2::geom_point(size = 3.5,
-                        color = use_case_palette["susine_functional_mu"]) +
-    ggplot2::geom_hline(yintercept = auprc_baseline$AUPRC[1], linetype = "dashed",
-                        color = use_case_palette["susie_vanilla"], linewidth = 0.8) +
-    ggplot2::annotate("text", x = max(auprc_by_c$c_value, na.rm = TRUE),
-                      y = auprc_baseline$AUPRC[1],
-                      label = "Vanilla baseline", hjust = 1, vjust = -0.5,
-                      color = use_case_palette["susie_vanilla"], size = 3.5) +
+q6_table_path <- file.path(paths$aggregated_dir, "q6_auprc_by_c_table.csv")
+readr::write_csv(q6_numeric, q6_table_path)
+cat("Saved Q6 numeric table:", q6_table_path, "\n")
+
+q6_detail_path <- file.path(paths$aggregated_dir, "q6_auprc_by_c_table_stratified.csv")
+readr::write_csv(auprc_by_c_detail, q6_detail_path)
+cat("Saved Q6 stratified c table:", q6_detail_path, "\n")
+
+if (nrow(auprc_by_c_detail) > 0) {
+  p_q6c <- ggplot2::ggplot(
+    auprc_by_c_detail,
+    ggplot2::aes(
+      x = c_value,
+      y = AUPRC,
+      color = factor(annotation_r2),
+      group = factor(annotation_r2)
+    )
+  ) +
+    ggplot2::geom_line(linewidth = 1.0) +
+    ggplot2::geom_point(size = 3) +
+    ggplot2::geom_hline(
+      yintercept = baseline_val,
+      linetype = "dashed",
+      color = use_case_palette["susine_vanilla"],
+      linewidth = 0.8
+    ) +
+    ggplot2::facet_wrap(~paste0("inflate_match = ", inflate_match), ncol = 3) +
+    ggplot2::scale_color_brewer(palette = "Dark2", name = "annotation_r2") +
     ggplot2::labs(
-      title = "AUPRC by Prior Mean Scale (c) — Functional mu",
-      subtitle = "mu_0 = c * a; dashed = vanilla SuSiE baseline",
+      title = "AUPRC by c (Functional mu): color = annotation_r2, facet = inflate_match",
+      subtitle = "mu_0 = c * a; dashed = vanilla SuSiNE baseline",
       x = "c (annotation scale)", y = "AUPRC"
     ) + theme_phase_a()
 
   save_or_show(p_q6c, "q6_auprc_by_c_value.png", width = 10, height = 6,
                subdir = "functional")
+
+  p_q6c_alt <- ggplot2::ggplot(
+    auprc_by_c_detail,
+    ggplot2::aes(
+      x = c_value,
+      y = AUPRC,
+      color = factor(inflate_match),
+      group = factor(inflate_match)
+    )
+  ) +
+    ggplot2::geom_line(linewidth = 1.0) +
+    ggplot2::geom_point(size = 3) +
+    ggplot2::geom_hline(
+      yintercept = baseline_val,
+      linetype = "dashed",
+      color = use_case_palette["susine_vanilla"],
+      linewidth = 0.8
+    ) +
+    ggplot2::facet_wrap(~paste0("annotation_r2 = ", annotation_r2), ncol = 3) +
+    ggplot2::scale_color_brewer(palette = "Set1", name = "inflate_match") +
+    ggplot2::labs(
+      title = "AUPRC by c (Functional mu): color = inflate_match, facet = annotation_r2",
+      subtitle = "mu_0 = c * a; dashed = vanilla SuSiNE baseline",
+      x = "c (annotation scale)", y = "AUPRC"
+    ) + theme_phase_a()
+
+  save_or_show(p_q6c_alt, "q6_auprc_by_c_value_by_inflate_color.png",
+               width = 10, height = 6, subdir = "functional")
 }
 ```
 
@@ -906,83 +1085,275 @@ if (nrow(auprc_by_c) > 0) {
 
 ```{r q6-tau-value, fig.width=10, fig.height=6}
 confusion_pi <- confusion_base %>%
-  dplyr::filter(use_case_id == "susine_functional_pi")
+  dplyr::filter(use_case_id == "susine_functional_pi") %>%
+  dplyr::filter(!is.na(tau_value), !is.na(annotation_r2), !is.na(inflate_match))
 
 auprc_by_tau <- test_susine::compute_auprc_from_confusion(
-  confusion_pi, group_vars = c("use_case_id", "tau_value")
+  confusion_pi,
+  group_vars = c("tau_value")
+)
+
+auprc_by_tau_detail <- test_susine::compute_auprc_from_confusion(
+  confusion_pi,
+  group_vars = c("tau_value", "annotation_r2", "inflate_match")
 )
 
 cat("=== AUPRC by tau_value (functional pi) ===\n")
 print(auprc_by_tau)
 
-if (nrow(auprc_by_tau) > 0) {
-  p_q6t <- ggplot2::ggplot(auprc_by_tau, ggplot2::aes(x = tau_value, y = AUPRC)) +
-    ggplot2::geom_line(linewidth = 1.0,
-                       color = use_case_palette["susine_functional_pi"]) +
-    ggplot2::geom_point(size = 3.5,
-                        color = use_case_palette["susine_functional_pi"]) +
-    ggplot2::geom_hline(yintercept = auprc_baseline$AUPRC[1], linetype = "dashed",
-                        color = use_case_palette["susie_vanilla"], linewidth = 0.8) +
-    ggplot2::annotate("text", x = max(auprc_by_tau$tau_value, na.rm = TRUE),
-                      y = auprc_baseline$AUPRC[1],
-                      label = "Vanilla baseline", hjust = 1, vjust = -0.5,
-                      color = use_case_palette["susie_vanilla"], size = 3.5) +
+q6_tau_table_path <- file.path(paths$aggregated_dir, "q6_auprc_by_tau_table.csv")
+readr::write_csv(auprc_by_tau, q6_tau_table_path)
+q6_tau_detail_path <- file.path(paths$aggregated_dir, "q6_auprc_by_tau_table_stratified.csv")
+readr::write_csv(auprc_by_tau_detail, q6_tau_detail_path)
+
+if (nrow(auprc_by_tau_detail) > 0) {
+  p_q6t <- ggplot2::ggplot(
+    auprc_by_tau_detail,
+    ggplot2::aes(
+      x = tau_value,
+      y = AUPRC,
+      color = factor(annotation_r2),
+      group = factor(annotation_r2)
+    )
+  ) +
+    ggplot2::geom_line(linewidth = 1.0) +
+    ggplot2::geom_point(size = 3) +
+    ggplot2::geom_hline(
+      yintercept = baseline_val,
+      linetype = "dashed",
+      color = use_case_palette["susine_vanilla"],
+      linewidth = 0.8
+    ) +
+    ggplot2::facet_wrap(~paste0("inflate_match = ", inflate_match), ncol = 3) +
+    ggplot2::scale_color_brewer(palette = "Dark2", name = "annotation_r2") +
     ggplot2::labs(
-      title = "AUPRC by Softmax Temperature (tau) — Functional pi",
-      subtitle = "pi = softmax(|a|/tau); dashed = vanilla SuSiE baseline",
+      title = "AUPRC by tau (Functional pi): color = annotation_r2, facet = inflate_match",
+      subtitle = "pi = softmax(|a|/tau); dashed = vanilla SuSiNE baseline",
       x = "tau (softmax temperature)", y = "AUPRC"
     ) + theme_phase_a()
 
   save_or_show(p_q6t, "q6_auprc_by_tau_value.png", width = 10, height = 6,
                subdir = "functional")
+
+  p_q6t_alt <- ggplot2::ggplot(
+    auprc_by_tau_detail,
+    ggplot2::aes(
+      x = tau_value,
+      y = AUPRC,
+      color = factor(inflate_match),
+      group = factor(inflate_match)
+    )
+  ) +
+    ggplot2::geom_line(linewidth = 1.0) +
+    ggplot2::geom_point(size = 3) +
+    ggplot2::geom_hline(
+      yintercept = baseline_val,
+      linetype = "dashed",
+      color = use_case_palette["susine_vanilla"],
+      linewidth = 0.8
+    ) +
+    ggplot2::facet_wrap(~paste0("annotation_r2 = ", annotation_r2), ncol = 3) +
+    ggplot2::scale_color_brewer(palette = "Set1", name = "inflate_match") +
+    ggplot2::labs(
+      title = "AUPRC by tau (Functional pi): color = inflate_match, facet = annotation_r2",
+      subtitle = "pi = softmax(|a|/tau); dashed = vanilla SuSiNE baseline",
+      x = "tau (softmax temperature)", y = "AUPRC"
+    ) + theme_phase_a()
+
+  save_or_show(p_q6t_alt, "q6_auprc_by_tau_value_by_inflate_color.png",
+               width = 10, height = 6, subdir = "functional")
 }
 ```
 
 ## 7.3 Functional AUPRC by annotation_r2, Faceted by inflate_match
 
-Baseline (susie_vanilla) has inflate_match = NA so it appears as a
+Baseline (susine_vanilla) has inflate_match = NA so it appears as a
 horizontal reference line within each facet, not a separate panel.
 
 ```{r q6-annotation-quality, fig.width=14, fig.height=6}
 func_conf <- confusion_base %>%
-  dplyr::filter(use_case_id %in% functional_ids)
+  dplyr::filter(use_case_id %in% functional_ids) %>%
+  dplyr::filter(!is.na(annotation_r2), !is.na(inflate_match)) %>%
+  dplyr::mutate(
+    param_group = dplyr::case_when(
+      use_case_id == "susine_functional_mu" & !is.na(c_value) ~
+        paste0("func-mu c=", format_param_val(c_value)),
+      use_case_id == "susine_functional_pi" & !is.na(tau_value) ~
+        paste0("func-pi tau=", format_param_val(tau_value)),
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  dplyr::filter(!is.na(param_group))
 
 auprc_func_annot <- test_susine::compute_auprc_from_confusion(
   func_conf,
-  group_vars = c("use_case_id", "annotation_r2", "inflate_match")
-) %>%
-  dplyr::filter(!is.na(annotation_r2), !is.na(inflate_match))
+  group_vars = c("param_group", "annotation_r2", "inflate_match")
+)
 
 if (nrow(auprc_func_annot) > 0) {
-  # Baseline AUPRC (inflate_match agnostic)
-  baseline_val <- auprc_baseline$AUPRC[1]
+  mu_vals <- sort(unique(confusion_mu_plot$c_value))
+  pi_vals <- sort(unique(confusion_pi$tau_value))
+  mu_groups <- paste0("func-mu c=", format_param_val(mu_vals))
+  pi_groups <- paste0("func-pi tau=", format_param_val(pi_vals))
+  param_levels <- c(mu_groups, pi_groups)
+  param_levels <- param_levels[param_levels %in% unique(auprc_func_annot$param_group)]
+
+  base_cols <- c("#1b9e77", "#1f78b4", "#6a3d9a", "#e31a1c", "#ff7f00", "#b15928")
+  if (length(param_levels) > length(base_cols)) {
+    param_cols <- scales::hue_pal()(length(param_levels))
+  } else {
+    param_cols <- base_cols[seq_along(param_levels)]
+  }
+  param_palette <- stats::setNames(param_cols, param_levels)
 
   p_q6ann <- ggplot2::ggplot(
-    auprc_func_annot,
-    ggplot2::aes(x = annotation_r2, y = AUPRC, color = use_case_id)
+    dplyr::mutate(auprc_func_annot, param_group = factor(param_group, levels = param_levels)),
+    ggplot2::aes(x = annotation_r2, y = AUPRC, color = param_group, group = param_group)
   ) +
     ggplot2::geom_line(linewidth = 0.9) +
     ggplot2::geom_point(size = 3) +
-    ggplot2::geom_hline(yintercept = baseline_val, linetype = "dashed",
-                        color = use_case_palette["susie_vanilla"],
-                        linewidth = 0.7) +
-    ggplot2::annotate("text", x = 0, y = baseline_val,
-                      label = "Vanilla (no annotation)", hjust = 0, vjust = -0.5,
-                      color = use_case_palette["susie_vanilla"], size = 3) +
+    ggplot2::geom_hline(
+      yintercept = baseline_val,
+      linetype = "dashed",
+      color = use_case_palette["susine_vanilla"],
+      linewidth = 0.7
+    ) +
     ggplot2::facet_wrap(~paste("inflate_match =", inflate_match), ncol = 3) +
     ggplot2::scale_color_manual(
-      values = use_case_palette[functional_ids],
-      labels = short_labels[functional_ids],
-      name = "Use Case"
+      values = param_palette,
+      name = "Functional setting"
     ) +
     ggplot2::labs(
       title = "Functional AUPRC by Annotation Quality",
-      subtitle = "Dashed line = vanilla baseline (no functional info)",
+      subtitle = "Colors split by func-mu c and func-pi tau; dashed line = vanilla baseline",
       x = "annotation_r2", y = "AUPRC"
     ) +
     theme_phase_a()
 
   save_or_show(p_q6ann, "q6_functional_by_annotation_quality.png",
+               width = 14, height = 6, subdir = "functional")
+}
+```
+
+## 7.4 Functional Gain Breakdown by annotation_r2 and c/tau
+
+```{r q6-breakdown-gain, fig.width=14, fig.height=8}
+auprc_func_param <- test_susine::compute_auprc_from_confusion(
+  func_conf %>%
+    dplyr::mutate(
+      param_axis = dplyr::if_else(
+        use_case_id == "susine_functional_mu",
+        "c",
+        "tau"
+      ),
+      param_value = dplyr::if_else(
+        use_case_id == "susine_functional_mu",
+        c_value,
+        tau_value
+      )
+    ),
+  group_vars = c("use_case_id", "param_axis", "param_value", "annotation_r2", "inflate_match")
+) %>%
+  dplyr::mutate(
+    AUPRC_gain_vs_vanilla = AUPRC - baseline_val,
+    use_case_label = dplyr::coalesce(short_labels[use_case_id], use_case_id),
+    param_value_label = format_param_val(param_value)
+  )
+
+if (nrow(auprc_func_param) > 0) {
+  gain_table_path <- file.path(paths$aggregated_dir, "q6_functional_gain_breakdown_table.csv")
+  readr::write_csv(auprc_func_param, gain_table_path)
+  cat("Saved functional gain breakdown table:", gain_table_path, "\n")
+
+  param_levels <- auprc_func_param %>%
+    dplyr::arrange(param_value) %>%
+    dplyr::pull(param_value_label) %>%
+    unique()
+
+  p_q6gain <- ggplot2::ggplot(
+    auprc_func_param %>%
+      dplyr::mutate(param_value_label = factor(param_value_label, levels = param_levels)),
+    ggplot2::aes(
+      x = factor(annotation_r2),
+      y = param_value_label,
+      fill = AUPRC_gain_vs_vanilla
+    )
+  ) +
+    ggplot2::geom_tile(color = "white") +
+    ggplot2::geom_text(ggplot2::aes(label = sprintf("%.3f", AUPRC_gain_vs_vanilla)), size = 3) +
+    ggplot2::facet_grid(use_case_label ~ paste0("inflate_match = ", inflate_match)) +
+    ggplot2::scale_fill_gradient2(low = "#b2182b", mid = "white", high = "#2166ac", midpoint = 0) +
+    ggplot2::labs(
+      title = "Functional Gain over Vanilla by Annotation Quality and c/tau",
+      subtitle = "Negative values identify underperformance regimes",
+      x = "annotation_r2",
+      y = "c or tau",
+      fill = "AUPRC gain"
+    ) +
+    theme_phase_a()
+
+  save_or_show(p_q6gain, "q6_functional_gain_by_annotation_param.png",
+               width = 14, height = 8, subdir = "functional")
+}
+```
+
+## 7.5 Functional-mu p*=1 Diagnostic Slice
+
+```{r q6-functional-mu-pstar1, fig.width=14, fig.height=6}
+mu_by_setting <- test_susine::compute_auprc_from_confusion(
+  confusion_mu_plot,
+  group_vars = c("p_star", "y_noise", "c_value", "annotation_r2", "inflate_match")
+) %>%
+  dplyr::filter(p_star == 1)
+
+baseline_by_setting <- test_susine::compute_auprc_from_confusion(
+  confusion_base %>% dplyr::filter(use_case_id == "susine_vanilla"),
+  group_vars = c("p_star", "y_noise")
+) %>%
+  dplyr::rename(AUPRC_baseline = AUPRC) %>%
+  dplyr::filter(p_star == 1) %>%
+  dplyr::select(-p_star)
+
+mu_pstar1_diag <- mu_by_setting %>%
+  dplyr::left_join(baseline_by_setting, by = "y_noise") %>%
+  dplyr::mutate(
+    AUPRC_gain_vs_baseline = AUPRC - AUPRC_baseline,
+    c_label = format_param_val(c_value)
+  )
+
+if (nrow(mu_pstar1_diag) > 0) {
+  pstar1_table_path <- file.path(paths$aggregated_dir, "q6_functional_mu_pstar1_diagnostic.csv")
+  readr::write_csv(mu_pstar1_diag, pstar1_table_path)
+  cat("Saved p*=1 diagnostic table:", pstar1_table_path, "\n")
+
+  c_levels <- mu_pstar1_diag %>%
+    dplyr::arrange(c_value) %>%
+    dplyr::pull(c_label) %>%
+    unique()
+
+  p_mu_pstar1 <- ggplot2::ggplot(
+    mu_pstar1_diag %>%
+      dplyr::mutate(c_label = factor(c_label, levels = c_levels)),
+    ggplot2::aes(
+      x = factor(annotation_r2),
+      y = c_label,
+      fill = AUPRC_gain_vs_baseline
+    )
+  ) +
+    ggplot2::geom_tile(color = "white") +
+    ggplot2::geom_text(ggplot2::aes(label = sprintf("%.3f", AUPRC_gain_vs_baseline)), size = 3) +
+    ggplot2::facet_grid(y_noise ~ paste0("inflate_match = ", inflate_match)) +
+    ggplot2::scale_fill_gradient2(low = "#b2182b", mid = "white", high = "#2166ac", midpoint = 0) +
+    ggplot2::labs(
+      title = "Functional-mu Diagnostic at p* = 1",
+      subtitle = "Cell value = AUPRC(functional-mu) - AUPRC(susine_vanilla)",
+      x = "annotation_r2",
+      y = "c value",
+      fill = "AUPRC gain"
+    ) +
+    theme_phase_a()
+
+  save_or_show(p_mu_pstar1, "q6_functional_mu_pstar1_diagnostic.png",
                width = 14, height = 6, subdir = "functional")
 }
 ```
@@ -1224,9 +1595,15 @@ if (exists("eb_comparison")) {
 }
 
 # Difficulty
-if (exists("best_z")) {
-  cat("\n--- Best z-metric for difficulty:", best_z, "---\n")
-  if (exists("r2_results")) print(r2_results)
+if (exists("best_z") && exists("best_high_ld")) {
+  cat(
+    "\n--- Best trio for difficulty: M1 +",
+    best_high_ld,
+    "+",
+    best_z,
+    "---\n"
+  )
+  if (exists("trio_results")) print(trio_results)
 }
 
 # Max-ELBO functional gains
@@ -1245,7 +1622,7 @@ Based on Phase A screening:
 1. Verify susine/susieR consistency after sigma_0_2 bug fix.
 2. Confirm sigma_0^2 sensitivity (pick 1-2 values or keep 3).
 3. Set c-grid and tau-grid ranges based on Q6 results.
-4. Use best z-metric for difficulty stratification.
+4. Use best high-LD + z-metric pair for difficulty stratification.
 5. Decide which use cases to keep/drop for exploration budget.
 ")
 ```

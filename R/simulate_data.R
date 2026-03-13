@@ -136,6 +136,155 @@ simulate_effect_sizes_oligogenic <- function(p,
   list(beta = beta, causal_idx = causal_idx, effect_tier = effect_tier)
 }
 
+# SuSiE 2.0 architectures ------------------------------------------------
+
+#' Simulate sparse effect sizes matching the SuSiE 2.0 paper.
+#'
+#' All causal variants receive fixed effect beta = 1 (not random). Noise is
+#' calibrated via h2 rather than noise_fraction — see [simulate_phenotype_h2()].
+#'
+#' @param p Number of SNPs.
+#' @param p_star Number of causal SNPs.
+#' @param seed Optional seed for reproducibility.
+#'
+#' @return List with `beta` and `causal_idx`.
+#' @keywords internal
+simulate_effect_sizes_susie2_sparse <- function(p, p_star, seed = NULL) {
+  stopifnot(p > 0, p_star >= 0)
+  if (!is.null(seed)) set.seed(seed)
+  causal_idx <- if (p_star > 0) {
+    sort(sample.int(p, size = min(p_star, p), replace = FALSE))
+  } else {
+    integer(0)
+  }
+  beta <- numeric(p)
+  if (length(causal_idx)) beta[causal_idx] <- 1
+  list(beta = beta, causal_idx = causal_idx)
+}
+
+#' Simulate oligogenic effect sizes matching the SuSiE 2.0 paper.
+#'
+#' Three tiers with fixed variant counts: sparse (3), oligogenic (5), and
+#' polygenic (15). Each tier's L2 energy is rescaled to the target heritability
+#' fraction. The oligogenic tier uses a two-component Gaussian mixture.
+#'
+#' @param p Number of SNPs.
+#' @param seed Optional seed for reproducibility.
+#' @param tier_config Named list of tier specifications. Each element is a list
+#'   with `k` (number of variants) and `h2_frac` (fraction of total h2).
+#'
+#' @return List with `beta`, `causal_idx`, and `effect_tier`.
+#' @keywords internal
+simulate_effect_sizes_susie2_oligogenic <- function(
+    p,
+    seed = NULL,
+    tier_config = list(
+      sparse     = list(k = 3L,  h2_frac = 0.50),
+      oligogenic = list(k = 5L,  h2_frac = 0.35),
+      polygenic  = list(k = 15L, h2_frac = 0.15)
+    )) {
+  stopifnot(p > 0)
+  if (!is.null(seed)) set.seed(seed)
+
+  n_sparse <- tier_config$sparse$k
+  n_oligo  <- tier_config$oligogenic$k
+  n_poly   <- tier_config$polygenic$k
+  n_total  <- n_sparse + n_oligo + n_poly
+  stopifnot(n_total <= p)
+
+  # Sample non-overlapping causal indices
+  all_causal <- sort(sample.int(p, size = n_total, replace = FALSE))
+  sparse_idx <- all_causal[seq_len(n_sparse)]
+  oligo_idx  <- all_causal[n_sparse + seq_len(n_oligo)]
+  poly_idx   <- all_causal[n_sparse + n_oligo + seq_len(n_poly)]
+
+  beta <- numeric(p)
+
+  # Sparse: large effects ~ N(0, 1)
+  beta[sparse_idx] <- stats::rnorm(n_sparse, mean = 0, sd = 1)
+
+  # Oligogenic: 2-component Gaussian mixture (35% large / 65% small)
+  if (n_oligo > 0L) {
+    mix <- stats::rbinom(n_oligo, size = 1, prob = 0.35)
+    sd_vec <- ifelse(mix == 1L, 0.8, 0.25)
+    beta[oligo_idx] <- stats::rnorm(n_oligo, mean = 0, sd = sd_vec)
+  }
+
+  # Polygenic: small effects ~ N(0, 0.08^2)
+  if (n_poly > 0L) {
+    beta[poly_idx] <- stats::rnorm(n_poly, mean = 0, sd = 0.08)
+  }
+
+  # Rescale each tier to target energy fractions
+  frac_sparse <- tier_config$sparse$h2_frac
+  frac_oligo  <- tier_config$oligogenic$h2_frac
+  frac_poly   <- tier_config$polygenic$h2_frac
+  total_frac  <- frac_sparse + frac_oligo + frac_poly
+  frac_sparse <- frac_sparse / total_frac
+  frac_oligo  <- frac_oligo / total_frac
+  frac_poly   <- frac_poly / total_frac
+
+  total_energy <- sum(beta^2)
+  if (!is.finite(total_energy) || total_energy <= 0) total_energy <- 1
+
+  beta <- scale_tier_to_energy(beta, sparse_idx, frac_sparse * total_energy)
+  beta <- scale_tier_to_energy(beta, oligo_idx, frac_oligo * total_energy)
+  beta <- scale_tier_to_energy(beta, poly_idx, frac_poly * total_energy)
+
+  effect_tier <- rep("none", p)
+  effect_tier[sparse_idx] <- "sparse"
+  effect_tier[oligo_idx]  <- "oligogenic"
+  effect_tier[poly_idx]   <- "polygenic"
+  causal_idx <- sort(c(sparse_idx, oligo_idx, poly_idx))
+
+  list(beta = beta, causal_idx = causal_idx, effect_tier = effect_tier)
+}
+
+#' Simulate phenotype with heritability-calibrated noise (SuSiE 2.0 style).
+#'
+#' Instead of specifying a noise fraction, the residual variance is calibrated
+#' to achieve a target total heritability (h2). Exactly one of
+#' `h2_snp_per_causal` or `h2_total` must be non-NA.
+#'
+#' @param X Design matrix (n x p).
+#' @param beta True effect sizes (length p).
+#' @param h2_snp_per_causal Per-SNP heritability; total h2 = h2_snp * n_causal.
+#' @param h2_total Total heritability directly (for oligogenic architectures).
+#' @param seed Optional seed.
+#'
+#' @return List with `y`, `sigma2`, and `h2_realized`.
+#' @keywords internal
+simulate_phenotype_h2 <- function(X, beta,
+                                  h2_snp_per_causal = NA_real_,
+                                  h2_total = NA_real_,
+                                  seed = NULL) {
+  if (!is.null(seed)) set.seed(seed)
+
+  has_snp <- !is.null(h2_snp_per_causal) && is.finite(h2_snp_per_causal)
+  has_total <- !is.null(h2_total) && is.finite(h2_total)
+  stopifnot(has_snp || has_total, !(has_snp && has_total))
+
+  h2 <- if (has_snp) {
+    h2_snp_per_causal * sum(beta != 0)
+  } else {
+    h2_total
+  }
+  h2 <- max(min(h2, 0.999), 0.001)
+
+  signal <- as.vector(X %*% beta)
+  var_signal <- stats::var(signal)
+  if (is.na(var_signal) || var_signal <= 0) var_signal <- 1e-3
+
+  sigma2 <- var_signal * (1 - h2) / h2
+  y <- signal + stats::rnorm(nrow(X), mean = 0, sd = sqrt(sigma2))
+
+  list(
+    y = as.numeric(y),
+    sigma2 = sigma2,
+    h2_realized = var_signal / (var_signal + sigma2)
+  )
+}
+
 #' Construct mu_0 and sigma_0_2 priors from effect sizes using annotation knobs.
 #'
 #' @param beta Numeric vector of true effects.
@@ -293,6 +442,17 @@ generate_simulation_data <- function(spec,
       effect_sd = spec$effect_sd %||% 1,
       seed = seed
     )
+  } else if (identical(architecture, "susie2_sparse")) {
+    simulate_effect_sizes_susie2_sparse(
+      p = ncol(X),
+      p_star = spec$p_star %||% 3L,
+      seed = seed
+    )
+  } else if (identical(architecture, "susie2_oligogenic")) {
+    simulate_effect_sizes_susie2_oligogenic(
+      p = ncol(X),
+      seed = seed
+    )
   } else {
     simulate_effect_sizes(
       p = ncol(X),
@@ -301,12 +461,32 @@ generate_simulation_data <- function(spec,
       seed = seed
     )
   }
-  phenotype <- simulate_phenotype(
-    X = X,
-    beta = effects$beta,
-    noise_fraction = spec$y_noise %||% 0.5,
-    seed = seed + 1L
-  )
+
+  # SuSiE 2.0 architectures use h2-calibrated noise; others use noise_fraction
+  phenotype <- if (architecture %in% c("susie2_sparse", "susie2_oligogenic")) {
+    simulate_phenotype_h2(
+      X = X,
+      beta = effects$beta,
+      h2_snp_per_causal = if (identical(architecture, "susie2_sparse")) {
+        spec$h2_snp_per_causal %||% 0.03
+      } else {
+        NA_real_
+      },
+      h2_total = if (identical(architecture, "susie2_oligogenic")) {
+        spec$h2_total %||% 0.25
+      } else {
+        NA_real_
+      },
+      seed = seed + 1L
+    )
+  } else {
+    simulate_phenotype(
+      X = X,
+      beta = effects$beta,
+      noise_fraction = spec$y_noise %||% 0.5,
+      seed = seed + 1L
+    )
+  }
   priors <- simulate_priors(
     beta = effects$beta,
     annotation_r2 = spec$annotation_r2 %||% 0,
@@ -329,6 +509,7 @@ generate_simulation_data <- function(spec,
     architecture = architecture,
     annotation_r2_observed = priors$observed_r2,
     annotation_r2_target = spec$annotation_r2 %||% NA_real_,
-    inflate_match = spec$inflate_match %||% NA_real_
+    inflate_match = spec$inflate_match %||% NA_real_,
+    h2_realized = phenotype$h2_realized %||% NA_real_
   )
 }

@@ -206,18 +206,22 @@ make_run_tables <- function(use_case_ids,
       dplyr::pull(.data$matrix_id)
 
     if (grid_mode == "minimal") {
-      # Single bundle per scenario (first matrix, first y_noise, first p_star, first seed).
-      matrix_ids <- matrix_catalog_subset %>%
-        dplyr::group_by(.data$data_scenario) %>%
-        dplyr::slice_head(n = 1) %>%
-        dplyr::ungroup() %>%
-        dplyr::pull(.data$matrix_id)
+      # Covering design: each setting value appears at least once via rep_len cycling.
+      values <- list(
+        y_noise = y_vals,
+        p_star = p_vals,
+        phenotype_seed = seed_values,
+        architecture = arch_vals,
+        matrix_id = candidate_matrices
+      )
+      lengths <- vapply(values, length, integer(1))
+      n_rows <- max(lengths)
       bundles <- tibble::tibble(
-        matrix_id = matrix_ids,
-        y_noise = y_vals[1],
-        p_star = p_vals[1],
-        phenotype_seed = seed_values[1],
-        architecture = arch_vals[1]
+        y_noise = rep_len(values$y_noise, n_rows),
+        p_star = rep_len(values$p_star, n_rows),
+        phenotype_seed = rep_len(values$phenotype_seed, n_rows),
+        architecture = rep_len(values$architecture, n_rows),
+        matrix_id = rep_len(values$matrix_id, n_rows)
       )
       return(bundles)
     }
@@ -253,7 +257,25 @@ make_run_tables <- function(use_case_ids,
     bundles
   }
 
-  dataset_bundles <- build_dataset_bundles() %>%
+  dataset_bundles <- build_dataset_bundles()
+
+  # h2-based architectures: y_noise and p_star are not meaningful parameters.
+  # Set to NA and collapse duplicate rows to avoid redundant datasets.
+  h2_archs <- c("susie2_sparse", "susie2_oligogenic")
+  if (any(dataset_bundles$architecture %in% h2_archs)) {
+    dataset_bundles <- dataset_bundles %>%
+      dplyr::mutate(
+        y_noise = dplyr::if_else(.data$architecture %in% h2_archs, NA_real_, .data$y_noise)
+      )
+    # susie2_oligogenic has fixed tier counts — p_star not applicable
+    dataset_bundles <- dataset_bundles %>%
+      dplyr::mutate(
+        p_star = dplyr::if_else(.data$architecture == "susie2_oligogenic", NA_integer_, .data$p_star)
+      ) %>%
+      dplyr::distinct()
+  }
+
+  dataset_bundles <- dataset_bundles %>%
     dplyr::mutate(
       dataset_bundle_id = dplyr::row_number(),
       base_seed = phenotype_seed,
@@ -476,16 +498,51 @@ make_run_tables <- function(use_case_ids,
       )
   }
 
+  # Minimal-mode cycling state for annotation quality -------------------------
+  if (grid_mode == "minimal") {
+    ann_full_grid <- dplyr::distinct(
+      dplyr::select(prior_quality, .data$annotation_r2, .data$inflate_match)
+    )
+    minimal_ann_idx <- 0L
+  }
+
   runs <- purrr::map_dfr(seq_len(nrow(prior_specs)), function(i) {
     spec <- prior_specs[i, ]
-    ann_grid <- annotation_grid_for_spec(spec)
+
+    if (grid_mode == "minimal") {
+      # 1 annotation combo per annotation-supporting spec, cycling through combos
+      if (!isTRUE(spec$supports_annotation)) {
+        ann_grid <- tibble::tibble(
+          annotation_r2 = NA_real_, inflate_match = NA_real_
+        )
+      } else {
+        minimal_ann_idx <<- minimal_ann_idx + 1L
+        row_idx <- ((minimal_ann_idx - 1L) %% nrow(ann_full_grid)) + 1L
+        ann_grid <- ann_full_grid[row_idx, , drop = FALSE]
+      }
+    } else {
+      ann_grid <- annotation_grid_for_spec(spec)
+    }
+
     exploration_grid <- build_exploration_groups(spec)
-    base <- dataset_bundles %>%
-      dplyr::inner_join(L_by_bundle, by = "dataset_bundle_id") %>%
-      dplyr::mutate(
-        prior_spec_id = spec$prior_spec_id,
-        use_case_id = spec$prior_spec_id
-      )
+
+    if (grid_mode == "minimal") {
+      # 1 bundle per use case, cycling through bundles
+      bundle_idx <- ((i - 1L) %% nrow(dataset_bundles)) + 1L
+      base <- dataset_bundles[bundle_idx, , drop = FALSE] %>%
+        dplyr::inner_join(L_by_bundle, by = "dataset_bundle_id") %>%
+        dplyr::mutate(
+          prior_spec_id = spec$prior_spec_id,
+          use_case_id = spec$prior_spec_id
+        )
+    } else {
+      base <- dataset_bundles %>%
+        dplyr::inner_join(L_by_bundle, by = "dataset_bundle_id") %>%
+        dplyr::mutate(
+          prior_spec_id = spec$prior_spec_id,
+          use_case_id = spec$prior_spec_id
+        )
+    }
     tidyr::crossing(base, ann_grid, exploration_grid)
   }) %>%
     dplyr::mutate(
@@ -644,6 +701,7 @@ make_job_config <- function(job_name,
                             write_legacy_snp_csv = FALSE,
                             write_snps_parquet = TRUE,
                             write_confusion_bins = TRUE,
+                            write_prior_diagnostics = FALSE,
                             verbose_file_output = TRUE,
                             buffer_flush_interval = 300L,
                             task_assignment_seed = NULL,
@@ -716,14 +774,35 @@ make_job_config <- function(job_name,
     sigma_0_2_scalars <- 0.2
   }
 
-  fixed_ids <- prior_specs$prior_spec_id[prior_specs$prior_variance_strategy == "fixed"]
-  runs_fixed <- runs %>% dplyr::filter(.data$prior_spec_id %in% fixed_ids)
+  # Specs that need sigma_0_2_scalar expansion:
+  # 1. Fixed-variance specs (prior_variance_strategy == "fixed")
+  # 2. "scale" EB method specs (sigma fixed, c optimized — sigma_0_2_scalar sets the fixed sigma)
+  # 3. "mean" EB method specs (sigma fixed, scalar mu optimized)
+  needs_sigma_ids <- prior_specs$prior_spec_id[
+    prior_specs$prior_variance_strategy == "fixed" |
+      (!is.na(prior_specs$eb_method) & prior_specs$eb_method %in% c("scale", "mean"))
+  ]
+  runs_fixed <- runs %>% dplyr::filter(.data$prior_spec_id %in% needs_sigma_ids)
   runs_non_fixed <- runs %>%
-    dplyr::filter(!(.data$prior_spec_id %in% fixed_ids)) %>%
+    dplyr::filter(!(.data$prior_spec_id %in% needs_sigma_ids)) %>%
     dplyr::mutate(sigma_0_2_scalar = NA_character_)
   if (nrow(runs_fixed)) {
-    runs_fixed <- runs_fixed %>%
-      tidyr::crossing(sigma_0_2_scalar = as.character(sigma_0_2_scalars))
+    if (grid_mode == "minimal") {
+      # Cycle sigma values across specs: each spec gets 1 sigma, cycling
+      sigma_vals <- as.character(sigma_0_2_scalars)
+      spec_sigma_map <- runs_fixed %>%
+        dplyr::distinct(.data$prior_spec_id) %>%
+        dplyr::mutate(
+          .sigma_idx = ((dplyr::row_number() - 1L) %% length(sigma_vals)) + 1L,
+          sigma_0_2_scalar = sigma_vals[.sigma_idx]
+        ) %>%
+        dplyr::select(.data$prior_spec_id, .data$sigma_0_2_scalar)
+      runs_fixed <- runs_fixed %>%
+        dplyr::inner_join(spec_sigma_map, by = "prior_spec_id")
+    } else {
+      runs_fixed <- runs_fixed %>%
+        tidyr::crossing(sigma_0_2_scalar = as.character(sigma_0_2_scalars))
+    }
   } else {
     runs_fixed <- dplyr::mutate(runs_fixed, sigma_0_2_scalar = character(0))
   }
@@ -789,10 +868,17 @@ make_job_config <- function(job_name,
 
   tables$runs <- runs
 
+  # Minimal mode: force all bundles into a single task
+  effective_bundles_per_task <- if (grid_mode == "minimal") {
+    nrow(tables$dataset_bundles)
+  } else {
+    bundles_per_task
+  }
+
   runs_tasks <- assign_task_ids_by_bundle(
     tables$runs,
     bundle_id_col = "dataset_bundle_id",
-    bundles_per_task = bundles_per_task,
+    bundles_per_task = effective_bundles_per_task,
     shuffle_seed = task_assignment_seed,
     shuffle = TRUE
   )
@@ -829,6 +915,7 @@ make_job_config <- function(job_name,
       write_legacy_snp_csv = isTRUE(write_legacy_snp_csv),
       write_snps_parquet = isTRUE(write_snps_parquet),
       write_confusion_bins = isTRUE(write_confusion_bins),
+      write_prior_diagnostics = isTRUE(write_prior_diagnostics),
       buffer_flush_interval = as.integer(buffer_flush_interval),
       task_assignment_seed = task_assignment_seed,
       compute = compute_list,

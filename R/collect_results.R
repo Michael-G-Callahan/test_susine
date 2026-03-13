@@ -59,6 +59,7 @@ index_staging_outputs <- function(job_name,
     if (grepl("_confusion_bins\\.csv$", fname)) return("confusion_bins")
     if (grepl("_dataset_metrics\\.csv$", fname)) return("dataset_metrics")
     if (grepl("_multimodal_metrics\\.csv$", fname)) return("multimodal_metrics")
+    if (grepl("_prior_diagnostics\\.csv$", fname)) return("prior_diagnostics")
     if (grepl("_snps\\.parquet$", fname)) return("snps")
     NA_character_
   }
@@ -107,6 +108,7 @@ validate_staging_outputs <- function(file_index) {
       confusion_bins = function(p) readr::read_csv(p, show_col_types = FALSE),
       dataset_metrics = function(p) readr::read_csv(p, show_col_types = FALSE),
       multimodal_metrics = function(p) readr::read_csv(p, show_col_types = FALSE),
+      prior_diagnostics = function(p) readr::read_csv(p, show_col_types = FALSE),
       snps = function(p) arrow::read_parquet(p),
       function(p) stop("Unknown type: ", type)
     )
@@ -269,6 +271,7 @@ aggregate_staging_outputs <- function(job_name,
   confusion_files <- dplyr::filter(idx, .data$type == "confusion_bins")$path
   dataset_files <- dplyr::filter(idx, .data$type == "dataset_metrics")$path
   multimodal_files <- dplyr::filter(idx, .data$type == "multimodal_metrics")$path
+  prior_diag_files <- dplyr::filter(idx, .data$type == "prior_diagnostics")$path
   snp_files <- dplyr::filter(idx, .data$type == "snps")$path
 
   # Column lists for join-enrichment — match the original aggregated schemas.
@@ -328,6 +331,14 @@ aggregate_staging_outputs <- function(job_name,
     rm(multimodal_tbl, multimodal_files)
     gc()
   }
+  if (length(prior_diag_files)) {
+    prior_diag_tbl <- read_csv_safe(prior_diag_files, idx) %>%
+      enrich_from_run_table(cols = run_enrich_core)
+    readr::write_csv(prior_diag_tbl, file.path(output_dir, "prior_diagnostics.csv"))
+    log_progress("Wrote prior_diagnostics.csv")
+    rm(prior_diag_tbl, prior_diag_files)
+    gc()
+  }
   if (length(snp_files) && isTRUE(write_snps_dataset)) {
     log_progress(sprintf("Writing SNP dataset from %d parquet fragment(s)...", length(snp_files)))
     snp_dataset <- arrow::open_dataset(snp_files, format = "parquet")
@@ -381,6 +392,34 @@ aggregate_staging_outputs <- function(job_name,
     file_index = idx,
     snp_files = snp_files
   )
+}
+
+#' Compute AUPRC rank of each run within its dataset bundle.
+#'
+#' Ranks all runs sharing the same `dataset_bundle_id` by AUPRC (descending).
+#' Uses only purity-filtered rows from the model metrics table.
+#'
+#' @param model_metrics_tbl Tibble of aggregated model metrics (must contain
+#'   `run_id`, `dataset_bundle_id`, `AUPRC`, and `filtering` columns).
+#' @return Tibble with columns `run_id`, `auprc_rank`, `n_competitors`.
+#' @export
+compute_model_rank <- function(model_metrics_tbl) {
+  if (is.null(model_metrics_tbl) || !nrow(model_metrics_tbl)) {
+    return(tibble::tibble(
+      run_id = integer(),
+      auprc_rank = integer(),
+      n_competitors = integer()
+    ))
+  }
+  model_metrics_tbl %>%
+    dplyr::filter(.data$filtering == "purity_filtered") %>%
+    dplyr::group_by(.data$dataset_bundle_id) %>%
+    dplyr::mutate(
+      auprc_rank = rank(-.data$AUPRC, ties.method = "min"),
+      n_competitors = dplyr::n()
+    ) %>%
+    dplyr::ungroup() %>%
+    dplyr::select("run_id", "auprc_rank", "n_competitors")
 }
 
 #' Build pre-aggregated confusion matrix from SNPs dataset.

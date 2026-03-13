@@ -78,12 +78,12 @@ job_inputs <- list(
 
   # Annotation quality grid: 3x3 (same as Phase A).
   # TODO: Trim if Phase A shows inflate_match is uninformative.
-  annotation_r2 = c(0.0, 0.1, 0.5),
+  annotation_r2 = c(0.0, 0.35, 0.7),
   inflate_match = c(0.8, 1.0, 1.2),
 
   # Exploration grids/settings — K=5 budget.
   c_grid_values = seq(0, 1.1, length.out = 5),
-  tau_grid_values = seq(0.25, 3.0, length.out = 5),
+  tau_grid_values = seq(1.0, 3.0, length.out = 5),
   restart_settings = list(
     n_inits = 5L,
     alpha_concentration = 0.001,
@@ -94,12 +94,8 @@ job_inputs <- list(
     cs_source = "filtered"
   ),
 
-  # Prior variance settings.
-  # Baselines use sigma_0_2 = 0.2 only (handled by use case catalog).
-  # Functional use cases get 2 levels.
-  # TODO: If the harness doesn't support per-use-case sigma grids,
-  # keep all 3 here and accept the extra baseline runs (~small).
-  sigma_0_2_scalars = c(0.1, 0.2, 0.4),
+  # Prior variance settings (expanded to include smaller values).
+  sigma_0_2_scalars = c(0.01, 0.02, 0.03, 0.1, 0.2, 0.4),
 
   # Seeds and task packing.
   seeds = 1:3,
