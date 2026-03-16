@@ -1,0 +1,778 @@
+---
+title: "SuSiNE EB Method Ablation — Visualization"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+Summary: Visualizes aggregated outputs from the EB ablation study.
+Key question: which EB strategy is best for (1) prior variance only,
+(2) annotation scale (c) only, and (3) joint mean + variance?
+Moderators: annotation quality (annotation_r2, inflate_match),
+architecture (sparse / susie2_sparse / susie2_oligogenic), and
+the nonneg constraint on c.
+
+Run collect_results_workbook.Rmd first to produce aggregated CSVs.
+
+# Section 1: Setup
+
+```{r setup, message=FALSE, warning=FALSE}
+here::i_am("vignettes/simulation pipeline/visualize_results_workbook_eb_ablation.Rmd")
+library(here)
+library(devtools)
+devtools::load_all(".")
+
+library(dplyr)
+library(tidyr)
+library(readr)
+library(ggplot2)
+library(stringr)
+library(purrr)
+library(scales)
+```
+
+## 1.1 Job Configuration
+
+```{r job-config}
+# UPDATE these two values after each run.
+job_name      <- "eb_ablation_v2"
+parent_job_id <- "REPLACE_WITH_PARENT_JOB_ID"
+output_root   <- here("output")
+
+paths <- test_susine::resolve_job_paths(
+  job_name      = job_name,
+  parent_job_id = parent_job_id,
+  output_root   = output_root
+)
+```
+
+## 1.2 Plot Directories
+
+```{r plot-dirs}
+save_plots_to_file    <- TRUE
+show_in_rstudio_plots <- TRUE
+
+if (isTRUE(getOption("knitr.in.progress"))) {
+  knitr::opts_chunk$set(fig.ext = "png")
+} else if (show_in_rstudio_plots && interactive()) {
+  knitr::opts_chunk$set(fig.show = "hide", dev = "RStudioGD", fig.ext = "png")
+} else {
+  knitr::opts_chunk$set(fig.ext = "png")
+}
+
+plot_base_dir <- file.path(paths$aggregated_dir, "plots_eb_ablation")
+plot_dirs <- list(
+  overview    = file.path(plot_base_dir, "overview"),
+  no_ann      = file.path(plot_base_dir, "no_annotation"),
+  ann_eb      = file.path(plot_base_dir, "annotation_eb"),
+  nonneg      = file.path(plot_base_dir, "nonneg"),
+  diagnostics = file.path(plot_base_dir, "prior_diagnostics"),
+  tables      = file.path(plot_base_dir, "tables")
+)
+for (d in plot_dirs) dir.create(d, showWarnings = FALSE, recursive = TRUE)
+cat("Plot directories created under:", plot_base_dir, "\n")
+
+maybe_show_plot <- function(p) {
+  if (show_in_rstudio_plots && interactive()) try(print(p), silent = TRUE)
+}
+
+save_or_show <- function(p, filename, width = 12, height = 7,
+                          dpi = 300, subdir = "overview") {
+  maybe_show_plot(p)
+  if (save_plots_to_file) {
+    fp <- file.path(plot_dirs[[subdir]], filename)
+    tryCatch(
+      { ggsave(fp, p, width = width, height = height, dpi = dpi, bg = "white")
+        cat("Saved:", filename, "\n") },
+      error = function(e) cat("Error saving:", filename, "-", conditionMessage(e), "\n")
+    )
+  } else {
+    tryCatch(print(p), error = function(e) message("Cannot display plot."))
+  }
+}
+```
+
+## 1.3 Use Case Categories and Palettes
+
+```{r uc-categories}
+# 23 use cases grouped by EB strategy role.
+uc_category <- c(
+  susie_vanilla                         = "baseline",
+  susine_vanilla                        = "baseline",
+  susie_eb                              = "eb_variance",
+  susine_eb                             = "eb_variance",
+  susine_eb_mean                        = "eb_mean",
+  susine_eb_mu_var                      = "eb_joint_no_ann",
+  susine_eb_scale                       = "scale_only",
+  susine_eb_scale_nonneg                = "scale_only",
+  susine_eb_scale_var                   = "ann_eb_joint",
+  susine_eb_scale_var_nonneg            = "ann_eb_joint",
+  susine_eb_penalized_scale_var         = "ann_eb_joint",
+  susine_eb_penalized_scale_var_nonneg  = "ann_eb_joint",
+  susine_eb_scale_var_outer             = "ann_eb_joint",
+  susine_eb_scale_var_outer_nonneg      = "ann_eb_joint",
+  susine_eb_clamped_scale_var           = "ann_eb_joint",
+  susine_eb_clamped_scale_var_nonneg    = "ann_eb_joint",
+  susine_eb_alternating_scale_var       = "ann_eb_joint",
+  susine_eb_alternating_scale_var_nonneg = "ann_eb_joint",
+  susine_functional_mu                  = "fixed_c_grid"
+)
+
+# Whether the use case requires annotation
+uc_needs_annotation <- c(
+  susie_vanilla                         = FALSE,
+  susine_vanilla                        = FALSE,
+  susie_eb                              = FALSE,
+  susine_eb                             = FALSE,
+  susine_eb_mean                        = FALSE,
+  susine_eb_mu_var                      = FALSE,
+  susine_eb_scale                       = TRUE,
+  susine_eb_scale_nonneg                = TRUE,
+  susine_eb_scale_var                   = TRUE,
+  susine_eb_scale_var_nonneg            = TRUE,
+  susine_eb_penalized_scale_var         = TRUE,
+  susine_eb_penalized_scale_var_nonneg  = TRUE,
+  susine_eb_scale_var_outer             = TRUE,
+  susine_eb_scale_var_outer_nonneg      = TRUE,
+  susine_eb_clamped_scale_var           = TRUE,
+  susine_eb_clamped_scale_var_nonneg    = TRUE,
+  susine_eb_alternating_scale_var       = TRUE,
+  susine_eb_alternating_scale_var_nonneg = TRUE,
+  susine_functional_mu                  = TRUE
+)
+
+# Category-level palette
+category_palette <- c(
+  baseline        = "#636363",
+  eb_variance     = "#2171b5",
+  eb_mean         = "#74c476",
+  eb_joint_no_ann = "#238b45",
+  scale_only      = "#fd8d3c",
+  ann_eb_joint    = "#cb181d",
+  fixed_c_grid    = "#984ea3"
+)
+
+# Per-use-case short labels for axis display
+uc_short_label <- c(
+  susie_vanilla                          = "SuSiE",
+  susine_vanilla                         = "SuSiNE",
+  susie_eb                               = "SuSiE+EB_var",
+  susine_eb                              = "SuSiNE+EB_var",
+  susine_eb_mean                         = "EB_mean",
+  susine_eb_mu_var                       = "EB_mu+var",
+  susine_eb_scale                        = "EB_scale",
+  susine_eb_scale_nonneg                 = "EB_scale+",
+  susine_eb_scale_var                    = "scale_var",
+  susine_eb_scale_var_nonneg             = "scale_var+",
+  susine_eb_penalized_scale_var          = "pen_sv",
+  susine_eb_penalized_scale_var_nonneg   = "pen_sv+",
+  susine_eb_scale_var_outer              = "outer_sv",
+  susine_eb_scale_var_outer_nonneg       = "outer_sv+",
+  susine_eb_clamped_scale_var            = "clamp_sv",
+  susine_eb_clamped_scale_var_nonneg     = "clamp_sv+",
+  susine_eb_alternating_scale_var        = "alt_sv",
+  susine_eb_alternating_scale_var_nonneg = "alt_sv+",
+  susine_functional_mu                   = "fixed_c_grid"
+)
+```
+
+---
+
+# Section 2: Load Data
+
+```{r load-data, message=FALSE}
+agg <- paths$aggregated_dir
+
+conf_path        <- file.path(agg, "confusion_matrix_detailed.csv")
+dataset_path     <- file.path(agg, "dataset_metrics.csv")
+multimodal_path  <- file.path(agg, "multimodal_metrics.csv")
+model_path       <- file.path(agg, "model_metrics.csv")
+prior_diag_path  <- file.path(agg, "prior_diagnostics.csv")
+
+if (!file.exists(conf_path))    stop("Missing confusion_matrix_detailed.csv — run collect workbook first.")
+if (!file.exists(dataset_path)) stop("Missing dataset_metrics.csv.")
+
+conf_raw        <- readr::read_csv(conf_path,       show_col_types = FALSE)
+dataset_metrics <- readr::read_csv(dataset_path,    show_col_types = FALSE)
+
+multimodal_metrics <- if (file.exists(multimodal_path)) {
+  readr::read_csv(multimodal_path, show_col_types = FALSE)
+} else { message("multimodal_metrics.csv not found."); NULL }
+
+model_metrics <- if (file.exists(model_path)) {
+  readr::read_csv(model_path, show_col_types = FALSE)
+} else { message("model_metrics.csv not found."); NULL }
+
+prior_diagnostics <- if (file.exists(prior_diag_path)) {
+  readr::read_csv(prior_diag_path, show_col_types = FALSE)
+} else { message("prior_diagnostics.csv not found."); NULL }
+
+cat("Confusion rows:", nrow(conf_raw), "\n")
+cat("Dataset rows:  ", nrow(dataset_metrics), "\n")
+```
+
+## 2.1 Peek at Column Structure
+
+```{r peek-columns}
+# Inspect key columns before filtering — adjust filters below if values differ.
+cat("--- confusion_matrix_detailed columns ---\n")
+print(names(conf_raw))
+
+if (!is.null(conf_raw) && "variant_type" %in% names(conf_raw)) {
+  cat("\nvariant_type values:\n")
+  print(table(conf_raw$variant_type, useNA = "ifany"))
+}
+if (!is.null(conf_raw) && "agg_method" %in% names(conf_raw)) {
+  cat("\nagg_method values:\n")
+  print(table(conf_raw$agg_method, useNA = "ifany"))
+}
+if (!is.null(prior_diagnostics)) {
+  cat("\n--- prior_diagnostics columns ---\n")
+  print(names(prior_diagnostics))
+}
+```
+
+---
+
+# Section 3: Data Preparation
+
+```{r data-prep}
+# Primary confusion filter:
+#  - variant_type: keep causal-SNP rows (adjust if column has different name/value)
+#  - agg_method: for single-fit use cases pick "single" or "max_elbo";
+#                for c_grid (susine_functional_mu) pick "elbo_softmax"
+#  Adjust these strings to match what you see in 2.1 above.
+primary_variant_type <- "causal"   # or "all" / "purity_filtered" — check peek
+primary_agg_single   <- "single"   # single-run methods
+primary_agg_cgrid    <- "elbo_softmax"
+
+conf <- conf_raw %>%
+  dplyr::filter(
+    .data$variant_type == primary_variant_type | !("variant_type" %in% names(.))
+  ) %>%
+  dplyr::filter(
+    (.data$use_case_id == "susine_functional_mu" & .data$agg_method == primary_agg_cgrid) |
+    (.data$use_case_id != "susine_functional_mu" & .data$agg_method == primary_agg_single) |
+    !("agg_method" %in% names(.))
+  ) %>%
+  dplyr::mutate(
+    eb_category = dplyr::recode(.data$use_case_id, !!!uc_category, .default = "other"),
+    needs_annotation = uc_needs_annotation[.data$use_case_id],
+    short_label = dplyr::recode(.data$use_case_id, !!!uc_short_label, .default = .data$use_case_id),
+    nonneg = stringr::str_ends(.data$use_case_id, "_nonneg"),
+    # Paired method name for nonneg comparisons
+    method_base = stringr::str_remove(.data$use_case_id, "_nonneg$")
+  )
+
+cat("Rows after primary filter:", nrow(conf), "\n")
+cat("use_case_id values present:\n")
+print(sort(unique(conf$use_case_id)))
+```
+
+```{r compute-auprc}
+# AUPRC per (use_case_id, architecture, annotation_r2, inflate_match, sigma_0_2_scalar)
+# — this is the core per-dataset-scenario summary metric.
+auprc_group_vars <- intersect(
+  c("use_case_id", "architecture", "annotation_r2", "inflate_match",
+    "sigma_0_2_scalar", "matrix_id", "y_noise", "p_star", "L"),
+  names(conf)
+)
+
+auprc_tbl <- test_susine::compute_auprc_from_confusion(conf, group_vars = auprc_group_vars) %>%
+  dplyr::mutate(
+    eb_category  = dplyr::recode(.data$use_case_id, !!!uc_category,     .default = "other"),
+    short_label  = dplyr::recode(.data$use_case_id, !!!uc_short_label,  .default = .data$use_case_id),
+    nonneg       = stringr::str_ends(.data$use_case_id, "_nonneg"),
+    method_base  = stringr::str_remove(.data$use_case_id, "_nonneg$"),
+    needs_annotation = uc_needs_annotation[.data$use_case_id]
+  )
+
+cat("AUPRC rows:", nrow(auprc_tbl), "\n")
+```
+
+---
+
+# Section 4: Overview — AUPRC by EB Category
+
+```{r auprc-overview, message=FALSE}
+# Collapse over annotation_r2/inflate_match for overview (annotation-free methods
+# don't have these; annotation-based methods are averaged over quality levels here).
+p_overview <- ggplot(
+  auprc_tbl,
+  aes(x = reorder(short_label, AUPRC, FUN = median, na.rm = TRUE),
+      y = AUPRC,
+      fill = eb_category)
+) +
+  geom_boxplot(outlier.size = 0.5, alpha = 0.8) +
+  scale_fill_manual(values = category_palette) +
+  facet_wrap(~ architecture, ncol = 1) +
+  coord_flip() +
+  labs(
+    title = "AUPRC by use case (primary agg method)",
+    x = NULL, y = "AUPRC", fill = "EB category"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom", strip.text = element_text(face = "bold"))
+
+save_or_show(p_overview, "auprc_overview_by_architecture.png",
+             width = 10, height = 14, subdir = "overview")
+```
+
+---
+
+# Section 5: No-Annotation EB Methods
+
+Compares: vanilla → EB variance → EB mean → EB joint (no annotations).
+
+```{r no-ann-subset}
+no_ann_ids <- c("susie_vanilla", "susine_vanilla", "susie_eb",
+                "susine_eb", "susine_eb_mean", "susine_eb_mu_var")
+
+auprc_no_ann <- auprc_tbl %>%
+  dplyr::filter(.data$use_case_id %in% no_ann_ids)
+
+no_ann_order <- c("SuSiE", "SuSiNE", "SuSiE+EB_var", "SuSiNE+EB_var",
+                  "EB_mean", "EB_mu+var")
+auprc_no_ann <- auprc_no_ann %>%
+  dplyr::mutate(
+    short_label = factor(.data$short_label, levels = no_ann_order)
+  )
+```
+
+```{r no-ann-plot, message=FALSE}
+p_no_ann <- ggplot(
+  auprc_no_ann,
+  aes(x = short_label, y = AUPRC, fill = eb_category)
+) +
+  geom_boxplot(outlier.size = 0.5, alpha = 0.8) +
+  scale_fill_manual(values = category_palette) +
+  facet_wrap(~ architecture) +
+  labs(
+    title = "AUPRC: no-annotation EB methods",
+    subtitle = "Does EB variance/mean/joint estimation improve over vanilla?",
+    x = NULL, y = "AUPRC", fill = "EB category"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1),
+        legend.position = "bottom")
+
+save_or_show(p_no_ann, "auprc_no_annotation_eb.png", subdir = "no_ann")
+```
+
+```{r no-ann-by-pstar, message=FALSE}
+# Facet by p_star to see if EB methods help more in oligogenic settings.
+if ("p_star" %in% names(auprc_no_ann) && any(!is.na(auprc_no_ann$p_star))) {
+  p_no_ann_pstar <- ggplot(
+    auprc_no_ann %>% dplyr::filter(!is.na(.data$p_star)),
+    aes(x = short_label, y = AUPRC, fill = eb_category)
+  ) +
+    geom_boxplot(outlier.size = 0.5, alpha = 0.8) +
+    scale_fill_manual(values = category_palette) +
+    facet_grid(architecture ~ p_star, labeller = label_both) +
+    labs(
+      title = "AUPRC vs p* (no-annotation EB methods)",
+      x = NULL, y = "AUPRC", fill = "EB category"
+    ) +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 35, hjust = 1),
+          legend.position = "bottom")
+
+  save_or_show(p_no_ann_pstar, "auprc_no_annotation_by_pstar.png",
+               width = 16, height = 10, subdir = "no_ann")
+}
+```
+
+---
+
+# Section 6: Annotation-Based EB Methods (scale_var variants)
+
+Compares all annotation-based joint EB methods against susine_vanilla and
+susine_functional_mu (fixed c-grid) baselines.
+
+```{r ann-eb-subset}
+ann_eb_ids <- c(
+  "susine_vanilla",
+  "susine_functional_mu",
+  "susine_eb_scale_var",          "susine_eb_scale_var_nonneg",
+  "susine_eb_penalized_scale_var", "susine_eb_penalized_scale_var_nonneg",
+  "susine_eb_scale_var_outer",    "susine_eb_scale_var_outer_nonneg",
+  "susine_eb_clamped_scale_var",  "susine_eb_clamped_scale_var_nonneg",
+  "susine_eb_alternating_scale_var", "susine_eb_alternating_scale_var_nonneg"
+)
+
+auprc_ann_eb <- auprc_tbl %>%
+  dplyr::filter(
+    .data$use_case_id %in% ann_eb_ids,
+    !is.na(.data$annotation_r2) | .data$use_case_id == "susine_vanilla"
+  )
+```
+
+```{r ann-eb-by-r2, message=FALSE}
+# AUPRC by method × annotation_r2, faceted by inflate_match.
+p_ann_r2 <- ggplot(
+  auprc_ann_eb %>% dplyr::filter(!is.na(.data$annotation_r2)),
+  aes(x = factor(annotation_r2), y = AUPRC,
+      fill = short_label, color = short_label)
+) +
+  geom_boxplot(alpha = 0.5, outlier.size = 0.4, position = position_dodge(0.8)) +
+  facet_grid(architecture ~ inflate_match, labeller = label_both) +
+  labs(
+    title = "Annotation-based EB methods: AUPRC vs annotation quality",
+    subtitle = "Faceted by inflate_match (annotation inflation factor)",
+    x = "annotation_r2", y = "AUPRC",
+    fill = "Method", color = "Method"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        legend.text = element_text(size = 7),
+        strip.text = element_text(face = "bold"))
+
+save_or_show(p_ann_r2, "auprc_ann_eb_by_r2_inflate.png",
+             width = 16, height = 12, subdir = "ann_eb")
+```
+
+```{r ann-eb-winner, message=FALSE}
+# Median AUPRC per method × annotation_r2 — which method wins most often?
+winner_tbl <- auprc_ann_eb %>%
+  dplyr::filter(!is.na(.data$annotation_r2)) %>%
+  dplyr::group_by(.data$use_case_id, .data$short_label,
+                  .data$architecture, .data$annotation_r2, .data$inflate_match) %>%
+  dplyr::summarise(
+    median_AUPRC = median(.data$AUPRC, na.rm = TRUE),
+    n            = dplyr::n(),
+    .groups = "drop"
+  )
+
+readr::write_csv(winner_tbl,
+  file.path(plot_dirs$tables, "ann_eb_winner_table.csv"))
+cat("Wrote ann_eb_winner_table.csv\n")
+
+# Heatmap: method × annotation_r2 median AUPRC (best architecture only)
+best_arch <- winner_tbl %>%
+  dplyr::group_by(.data$architecture) %>%
+  dplyr::summarise(mean_auprc = mean(.data$median_AUPRC, na.rm = TRUE)) %>%
+  dplyr::slice_max(.data$mean_auprc, n = 1) %>%
+  dplyr::pull(.data$architecture)
+
+p_heatmap <- winner_tbl %>%
+  dplyr::filter(.data$architecture == best_arch[1]) %>%
+  ggplot(aes(x = factor(annotation_r2), y = short_label, fill = median_AUPRC)) +
+  geom_tile(color = "white") +
+  scale_fill_viridis_c(option = "plasma", name = "Median\nAUPRC") +
+  facet_wrap(~ inflate_match, labeller = label_both) +
+  labs(
+    title = sprintf("Median AUPRC heatmap — annotation EB methods (%s)", best_arch[1]),
+    x = "annotation_r2", y = NULL
+  ) +
+  theme_minimal() +
+  theme(strip.text = element_text(face = "bold"))
+
+save_or_show(p_heatmap, "auprc_heatmap_ann_eb.png",
+             width = 14, height = 8, subdir = "ann_eb")
+```
+
+---
+
+# Section 7: Scale-Only EB (sigma grid)
+
+`susine_eb_scale` fixes mu_0 and optimizes only c; run across sigma_0_2_scalar grid.
+
+```{r scale-only-plot, message=FALSE}
+auprc_scale <- auprc_tbl %>%
+  dplyr::filter(.data$use_case_id %in% c("susine_eb_scale", "susine_eb_scale_nonneg",
+                                          "susine_vanilla"))
+
+if (nrow(auprc_scale) > 0 && "sigma_0_2_scalar" %in% names(auprc_scale)) {
+  p_scale <- ggplot(
+    auprc_scale %>% dplyr::filter(!is.na(.data$annotation_r2) |
+                                    .data$use_case_id == "susine_vanilla"),
+    aes(x = factor(sigma_0_2_scalar), y = AUPRC, fill = short_label)
+  ) +
+    geom_boxplot(alpha = 0.7, outlier.size = 0.4) +
+    facet_grid(architecture ~ annotation_r2, labeller = label_both) +
+    labs(
+      title = "Scale-only EB (c optimized, sigma fixed): AUPRC vs sigma_0_2",
+      x = "sigma_0_2_scalar", y = "AUPRC", fill = "Method"
+    ) +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+
+  save_or_show(p_scale, "auprc_scale_only_eb.png",
+               width = 14, height = 10, subdir = "ann_eb")
+}
+```
+
+---
+
+# Section 8: nonneg Constraint Effect
+
+Paired comparison: for each annotation-based method, does the nonneg
+constraint on c help or hurt?
+
+```{r nonneg-comparison, message=FALSE}
+# Pivot wide: AUPRC for unconstrained vs nonneg, matched by dataset scenario.
+paired_vars <- intersect(
+  c("architecture", "annotation_r2", "inflate_match",
+    "sigma_0_2_scalar", "matrix_id", "y_noise", "p_star", "L", "method_base"),
+  names(auprc_tbl)
+)
+
+auprc_nonneg <- auprc_tbl %>%
+  dplyr::filter(.data$eb_category == "ann_eb_joint") %>%
+  dplyr::select(dplyr::all_of(c(paired_vars, "nonneg", "AUPRC"))) %>%
+  tidyr::pivot_wider(
+    names_from  = "nonneg",
+    values_from = "AUPRC",
+    names_prefix = "nonneg_"
+  ) %>%
+  dplyr::rename(AUPRC_unconstrained = nonneg_FALSE,
+                AUPRC_nonneg        = nonneg_TRUE) %>%
+  dplyr::mutate(delta_nonneg = .data$AUPRC_nonneg - .data$AUPRC_unconstrained)
+
+if (nrow(auprc_nonneg) > 0 && "AUPRC_unconstrained" %in% names(auprc_nonneg)) {
+  p_nonneg_scatter <- ggplot(
+    auprc_nonneg,
+    aes(x = AUPRC_unconstrained, y = AUPRC_nonneg,
+        color = method_base)
+  ) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray50") +
+    geom_point(alpha = 0.5, size = 0.8) +
+    facet_wrap(~ architecture) +
+    labs(
+      title = "nonneg constraint: AUPRC head-to-head per method",
+      subtitle = "Above diagonal = nonneg helps",
+      x = "AUPRC (unconstrained)", y = "AUPRC (nonneg)",
+      color = "Base method"
+    ) +
+    theme_minimal() +
+    theme(legend.position = "bottom",
+          legend.text = element_text(size = 8))
+
+  save_or_show(p_nonneg_scatter, "nonneg_head_to_head.png",
+               width = 12, height = 8, subdir = "nonneg")
+
+  p_nonneg_delta <- ggplot(
+    auprc_nonneg,
+    aes(x = delta_nonneg, fill = method_base)
+  ) +
+    geom_histogram(bins = 30, alpha = 0.7) +
+    geom_vline(xintercept = 0, linetype = "dashed") +
+    facet_grid(method_base ~ architecture, scales = "free_y") +
+    labs(
+      title = "AUPRC delta (nonneg - unconstrained) by method",
+      x = "Delta AUPRC", y = "Count", fill = "Base method"
+    ) +
+    theme_minimal() +
+    theme(legend.position = "none",
+          strip.text.y = element_text(size = 7))
+
+  save_or_show(p_nonneg_delta, "nonneg_delta_histogram.png",
+               width = 14, height = 10, subdir = "nonneg")
+}
+```
+
+---
+
+# Section 9: Power-FDR Curves
+
+```{r pwr-fdr-no-ann, message=FALSE}
+# No-annotation methods overall.
+conf_no_ann <- conf %>%
+  dplyr::filter(.data$use_case_id %in% no_ann_ids)
+
+if (nrow(conf_no_ann) > 0) {
+  curves_no_ann <- test_susine::compute_power_fdr_curves(
+    conf_no_ann,
+    group_vars = c("use_case_id", "architecture")
+  )
+
+  no_ann_pal <- setNames(
+    scales::hue_pal()(length(no_ann_ids)),
+    no_ann_ids
+  )
+
+  p_curves_no_ann <- ggplot(
+    curves_no_ann,
+    aes(x = fdr, y = power, color = use_case_id)
+  ) +
+    geom_line(linewidth = 0.8) +
+    facet_wrap(~ architecture) +
+    labs(
+      title = "Power vs FDR — no-annotation EB methods",
+      x = "FDR (1 - Precision)", y = "Power (Recall)",
+      color = "Use case"
+    ) +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+
+  save_or_show(p_curves_no_ann, "power_fdr_no_annotation.png",
+               subdir = "overview")
+}
+```
+
+```{r pwr-fdr-ann-eb, message=FALSE}
+# Annotation EB methods at best annotation quality.
+best_r2 <- if ("annotation_r2" %in% names(conf))
+  max(conf$annotation_r2, na.rm = TRUE) else NA
+
+conf_ann_best <- conf %>%
+  dplyr::filter(
+    .data$use_case_id %in% ann_eb_ids,
+    is.na(.data$annotation_r2) | .data$annotation_r2 == best_r2
+  )
+
+if (nrow(conf_ann_best) > 0) {
+  curves_ann <- test_susine::compute_power_fdr_curves(
+    conf_ann_best,
+    group_vars = c("use_case_id", "architecture")
+  )
+
+  p_curves_ann <- ggplot(curves_ann, aes(x = fdr, y = power, color = use_case_id)) +
+    geom_line(linewidth = 0.7) +
+    facet_wrap(~ architecture) +
+    labs(
+      title = sprintf("Power vs FDR — annotation EB methods (r2 = %.1f)", best_r2),
+      x = "FDR", y = "Power", color = "Use case"
+    ) +
+    theme_minimal() +
+    theme(legend.position = "bottom",
+          legend.text = element_text(size = 7))
+
+  save_or_show(p_curves_ann, "power_fdr_annotation_eb_best_r2.png",
+               subdir = "ann_eb")
+}
+```
+
+---
+
+# Section 10: Prior Diagnostics
+
+Visualizes what EB methods actually learned: distribution of c_l and
+sigma_0_2_l per effect across datasets.
+
+```{r prior-diag-check}
+if (!is.null(prior_diagnostics) && nrow(prior_diagnostics) > 0) {
+  cat("prior_diagnostics columns:\n")
+  print(names(prior_diagnostics))
+  cat("\nRows:", nrow(prior_diagnostics), "\n")
+  cat("use_case_id values:\n")
+  print(table(prior_diagnostics$use_case_id, useNA = "ifany"))
+}
+```
+
+```{r prior-diag-c, message=FALSE}
+if (!is.null(prior_diagnostics)) {
+  c_col <- intersect(c("c_l", "c_value", "c"), names(prior_diagnostics))[1]
+  sig_col <- intersect(c("sigma_0_2_l", "sigma_0_2", "sigma_l"), names(prior_diagnostics))[1]
+
+  if (!is.na(c_col)) {
+    pd <- prior_diagnostics %>%
+      dplyr::mutate(
+        short_label = dplyr::recode(.data$use_case_id, !!!uc_short_label,
+                                    .default = .data$use_case_id),
+        eb_category = dplyr::recode(.data$use_case_id, !!!uc_category, .default = "other")
+      ) %>%
+      dplyr::filter(!is.na(.data[[c_col]]))
+
+    p_c_dist <- ggplot(pd, aes(x = .data[[c_col]], fill = eb_category)) +
+      geom_histogram(bins = 40, alpha = 0.8) +
+      geom_vline(xintercept = 0, linetype = "dashed", color = "gray30") +
+      scale_fill_manual(values = category_palette) +
+      facet_wrap(~ short_label, scales = "free_y") +
+      labs(
+        title = sprintf("Learned c_l distribution ('%s') by EB method", c_col),
+        x = "Learned c per effect", y = "Count",
+        fill = "Category"
+      ) +
+      theme_minimal() +
+      theme(legend.position = "bottom",
+            strip.text = element_text(size = 8))
+
+    save_or_show(p_c_dist, "c_l_distribution_by_method.png",
+                 width = 16, height = 12, subdir = "diagnostics")
+  } else {
+    message("No c_l-like column found in prior_diagnostics. Columns: ",
+            paste(names(prior_diagnostics), collapse = ", "))
+  }
+
+  if (!is.na(sig_col)) {
+    pd_sig <- prior_diagnostics %>%
+      dplyr::filter(!is.na(.data[[sig_col]])) %>%
+      dplyr::mutate(
+        short_label = dplyr::recode(.data$use_case_id, !!!uc_short_label,
+                                    .default = .data$use_case_id)
+      )
+
+    p_sig_dist <- ggplot(pd_sig, aes(x = .data[[sig_col]], fill = short_label)) +
+      geom_histogram(bins = 40, alpha = 0.8, show.legend = FALSE) +
+      facet_wrap(~ short_label, scales = "free") +
+      labs(
+        title = sprintf("Learned sigma_0_2 distribution ('%s') by EB method", sig_col),
+        x = "Learned sigma_0_2 per effect", y = "Count"
+      ) +
+      theme_minimal() +
+      theme(strip.text = element_text(size = 8))
+
+    save_or_show(p_sig_dist, "sigma_0_2_l_distribution_by_method.png",
+                 width = 16, height = 12, subdir = "diagnostics")
+  }
+}
+```
+
+---
+
+# Section 11: Summary Tables
+
+```{r summary-table}
+auprc_summary <- auprc_tbl %>%
+  dplyr::group_by(.data$use_case_id, .data$short_label, .data$eb_category,
+                  .data$architecture) %>%
+  dplyr::summarise(
+    n             = dplyr::n(),
+    median_AUPRC  = median(.data$AUPRC, na.rm = TRUE),
+    mean_AUPRC    = mean(.data$AUPRC,   na.rm = TRUE),
+    sd_AUPRC      = sd(.data$AUPRC,     na.rm = TRUE),
+    q25_AUPRC     = quantile(.data$AUPRC, 0.25, na.rm = TRUE),
+    q75_AUPRC     = quantile(.data$AUPRC, 0.75, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  dplyr::arrange(.data$architecture, dplyr::desc(.data$median_AUPRC))
+
+readr::write_csv(auprc_summary, file.path(plot_dirs$tables, "auprc_summary.csv"))
+cat("Wrote auprc_summary.csv\n")
+
+# Print top methods per architecture
+auprc_summary %>%
+  dplyr::group_by(.data$architecture) %>%
+  dplyr::slice_max(.data$median_AUPRC, n = 5) %>%
+  dplyr::select(.data$architecture, .data$short_label, .data$eb_category,
+                .data$median_AUPRC, .data$n) %>%
+  knitr::kable(digits = 4, caption = "Top 5 methods by median AUPRC per architecture")
+```
+
+```{r annotation-eb-summary}
+# Best annotation-based EB method per (annotation_r2, inflate_match, architecture).
+if ("annotation_r2" %in% names(auprc_tbl)) {
+  best_ann_eb <- auprc_tbl %>%
+    dplyr::filter(.data$eb_category == "ann_eb_joint",
+                  !is.na(.data$annotation_r2)) %>%
+    dplyr::group_by(.data$use_case_id, .data$short_label, .data$architecture,
+                    .data$annotation_r2, .data$inflate_match) %>%
+    dplyr::summarise(
+      median_AUPRC = median(.data$AUPRC, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    dplyr::group_by(.data$architecture, .data$annotation_r2, .data$inflate_match) %>%
+    dplyr::slice_max(.data$median_AUPRC, n = 1) %>%
+    dplyr::ungroup()
+
+  readr::write_csv(best_ann_eb, file.path(plot_dirs$tables, "best_ann_eb_by_quality.csv"))
+  cat("Wrote best_ann_eb_by_quality.csv\n")
+  print(best_ann_eb)
+}
+```
