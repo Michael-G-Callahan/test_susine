@@ -43,6 +43,7 @@ job_inputs <- list(
   HPC = TRUE,
   mem = "8G",
   time = "3:59:59",
+  account = "statsresearch_sc_default",
   email = "mgc5166@psu.edu",
   output_root = here("output"),
 
@@ -302,6 +303,11 @@ job_config <- make_job_config(
   softmax_temperature = job_inputs$softmax_temperature,
   metrics_settings = job_inputs$metrics_settings
 )
+
+# Set SLURM account for allocation-based scheduling
+if (!is.null(job_inputs$account)) {
+  job_config$job$slurm$account <- job_inputs$account
+}
 ```
 
 # 4. Inspect Run Design

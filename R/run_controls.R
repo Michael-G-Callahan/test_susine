@@ -926,7 +926,8 @@ make_job_config <- function(job_name,
         time = time,
         mem = mem,
         cpus_per_task = 1,
-        partition = NULL
+        partition = NULL,
+        account = NULL
       )
     ),
     paths = list(
@@ -1026,6 +1027,12 @@ render_slurm_script <- function(job_config, run_task_script) {
     NULL
   }
 
+  account_line <- if (!is.null(slurm$account)) {
+    paste0("#SBATCH --account=", slurm$account)
+  } else {
+    NULL
+  }
+
   hpc_setup <- if (isTRUE(job$HPC)) {
     c(
       "module load r",
@@ -1047,6 +1054,7 @@ render_slurm_script <- function(job_config, run_task_script) {
     sprintf("#SBATCH --mail-user=%s", job$email),
     "#SBATCH --mail-type=BEGIN,END,FAIL",
     partition_line,
+    account_line,
     "# Log to /dev/null; we'll redirect ourselves below.",
     "#SBATCH --output=/dev/null",
     "#SBATCH --error=/dev/null",
