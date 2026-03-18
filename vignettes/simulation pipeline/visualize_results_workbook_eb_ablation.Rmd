@@ -331,12 +331,21 @@ plot_sparse_hg2 <- function(mm_sub, color_var, title) {
     theme_susie2()
 }
 
-# TPR vs FPR curve, no faceting, narrow + wide xlim
+# TPR vs FPR curve, no faceting, narrow + wide xlim.
+# Adds a star at the point closest to FPR = 0.05 for each group.
 plot_sparse_tpr_fpr <- function(pfd_sub, color_var, title) {
   if (is.null(pfd_sub) || nrow(pfd_sub) == 0) return(invisible(NULL))
+  # Find the point closest to FPR = 0.05 per group for star marker
+  star_pts <- pfd_sub %>%
+    dplyr::group_by(.data[[color_var]]) %>%
+    dplyr::slice_min(abs(.data$fpr - 0.05), n = 1, with_ties = FALSE) %>%
+    dplyr::ungroup()
   base_p <- ggplot(pfd_sub, aes(x = fpr, y = power,
                                  color = .data[[color_var]])) +
     geom_line() +
+    geom_point(data = star_pts, aes(x = fpr, y = power,
+                                     color = .data[[color_var]]),
+               shape = 8, size = 3, stroke = 1.2, show.legend = FALSE) +
     geom_vline(xintercept = 0.05, linetype = "dashed", color = "red",
                linewidth = 0.5) +
     scale_x_continuous(expand = expansion(c(0, 0.02))) +
@@ -345,6 +354,25 @@ plot_sparse_tpr_fpr <- function(pfd_sub, color_var, title) {
     theme_susie2()
   list(narrow = base_p + coord_cartesian(xlim = c(0, 0.1)),
        wide   = base_p + coord_cartesian(xlim = c(0, 0.5)))
+}
+
+# Precision-Recall curve, colored by use case
+plot_sparse_pr <- function(pfd_sub, color_var, title) {
+  if (is.null(pfd_sub) || nrow(pfd_sub) == 0) return(invisible(NULL))
+  # Star at FPR = 0.05 point (same point as on TPR/FPR plot)
+  star_pts <- pfd_sub %>%
+    dplyr::group_by(.data[[color_var]]) %>%
+    dplyr::slice_min(abs(.data$fpr - 0.05), n = 1, with_ties = FALSE) %>%
+    dplyr::ungroup()
+  ggplot(pfd_sub, aes(x = recall, y = precision,
+                       color = .data[[color_var]])) +
+    geom_line() +
+    geom_point(data = star_pts, aes(x = recall, y = precision,
+                                     color = .data[[color_var]]),
+               shape = 8, size = 3, stroke = 1.2, show.legend = FALSE) +
+    labs(x = "Recall (TPR)", y = "Precision",
+         color = color_var, title = title) +
+    theme_susie2()
 }
 
 # --- Oligogenic panel helpers (SuSiE2 Fig 1 F-I analogs) ---
@@ -381,6 +409,9 @@ plot_oligo_hg2 <- function(mm_sub, color_var, title) {
 
 # TPR vs FPR for oligogenic top-8 (same as sparse but separate)
 plot_oligo_tpr_fpr <- plot_sparse_tpr_fpr
+
+# Precision-Recall for oligogenic (same as sparse)
+plot_oligo_pr <- plot_sparse_pr
 ```
 
 ---
@@ -712,6 +743,10 @@ if (!is.null(curves)) {
   save_or_show(curves$wide,   "s4_sparse_tpr_fpr_wide.png",
                width = 8, height = 5, subdir = "baseline")
 }
+
+save_or_show(
+  plot_sparse_pr(s4_pfd_sp, "short_label", "Baseline: Sparse — Precision-Recall"),
+  "s4_sparse_pr.png", width = 8, height = 5, subdir = "baseline")
 ```
 
 ## 4.2 Oligogenic panels (SuSiE2 Fig 1 F-I)
@@ -756,8 +791,11 @@ if (!is.null(oligo_top8_pfd)) {
     save_or_show(curves_top8$wide,   "s4_oligo_tpr_fpr_wide.png",
                  width = 8, height = 5, subdir = "baseline")
   }
+  save_or_show(
+    plot_oligo_pr(s4_top8, "short_label", "Baseline: Oligogenic — Precision-Recall (top-8 causal)"),
+    "s4_oligo_pr.png", width = 8, height = 5, subdir = "baseline")
 } else {
-  message("Oligogenic TPR/FPR skipped (no top-8 confusion bins). Re-run sims with updated harness.")
+  message("Oligogenic TPR/FPR + PR skipped (no top-8 confusion bins). Re-run sims with updated harness.")
 }
 ```
 
@@ -808,6 +846,10 @@ if (!is.null(curves)) {
   save_or_show(curves$wide,   "s5_sparse_tpr_fpr_wide.png",
                width = 8, height = 5, subdir = "annot_noeb")
 }
+
+save_or_show(
+  plot_sparse_pr(s5_pfd_sp, "short_label", "Annot no EB: Sparse — Precision-Recall"),
+  "s5_sparse_pr.png", width = 8, height = 5, subdir = "annot_noeb")
 ```
 
 ## 5.2 Oligogenic panels
@@ -852,6 +894,9 @@ if (!is.null(oligo_top8_pfd)) {
     save_or_show(curves_top8$wide,   "s5_oligo_tpr_fpr_wide.png",
                  width = 8, height = 5, subdir = "annot_noeb")
   }
+  save_or_show(
+    plot_oligo_pr(s5_top8, "short_label", "Annot no EB: Oligogenic — Precision-Recall (top-8 causal)"),
+    "s5_oligo_pr.png", width = 8, height = 5, subdir = "annot_noeb")
 } else {
   message("Oligogenic TPR/FPR skipped (no top-8 confusion bins).")
 }
@@ -946,6 +991,10 @@ if (!is.null(curves)) {
   save_or_show(curves$wide,   "s6_sparse_tpr_fpr_wide.png",
                width = 8, height = 5, subdir = "eb_noannot")
 }
+
+save_or_show(
+  plot_sparse_pr(s6_pfd_sp, "short_label", "EB no annot: Sparse — Precision-Recall"),
+  "s6_sparse_pr.png", width = 8, height = 5, subdir = "eb_noannot")
 ```
 
 ## 6.2 Oligogenic panels
@@ -990,8 +1039,11 @@ if (!is.null(oligo_top8_pfd)) {
     save_or_show(curves_top8$wide,   "s6_oligo_tpr_fpr_wide.png",
                  width = 8, height = 5, subdir = "eb_noannot")
   }
+  save_or_show(
+    plot_oligo_pr(s6_top8, "short_label", "EB no annot: Oligogenic — Precision-Recall (top-8 causal)"),
+    "s6_oligo_pr.png", width = 8, height = 5, subdir = "eb_noannot")
 } else {
-  message("Oligogenic TPR/FPR skipped (no top-8 confusion bins).")
+  message("Oligogenic TPR/FPR + PR skipped (no top-8 confusion bins).")
 }
 ```
 
@@ -1059,6 +1111,10 @@ if (!is.null(curves)) {
   save_or_show(curves$wide,   "s7_sparse_tpr_fpr_wide.png",
                width = 8, height = 5, subdir = "eb_annot")
 }
+
+save_or_show(
+  plot_sparse_pr(s7_pfd_sp, "short_label", "EB with annot: Sparse — Precision-Recall"),
+  "s7_sparse_pr.png", width = 8, height = 5, subdir = "eb_annot")
 ```
 
 ## 7.2 Oligogenic panels
@@ -1103,8 +1159,11 @@ if (!is.null(oligo_top8_pfd)) {
     save_or_show(curves_top8$wide,   "s7_oligo_tpr_fpr_wide.png",
                  width = 8, height = 5, subdir = "eb_annot")
   }
+  save_or_show(
+    plot_oligo_pr(s7_top8, "short_label", "EB with annot: Oligogenic — Precision-Recall (top-8 causal)"),
+    "s7_oligo_pr.png", width = 8, height = 5, subdir = "eb_annot")
 } else {
-  message("Oligogenic TPR/FPR skipped (no top-8 confusion bins).")
+  message("Oligogenic TPR/FPR + PR skipped (no top-8 confusion bins).")
 }
 ```
 
