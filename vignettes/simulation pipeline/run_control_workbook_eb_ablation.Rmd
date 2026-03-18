@@ -39,9 +39,9 @@ library(knitr)
 
 ```{r job-inputs}
 job_inputs <- list(
-  job_name = "eb_ablation_v2",
+  job_name = "eb_ablation_v3",
   HPC = TRUE,
-  mem = "6G",
+  mem = "8G",
   time = "3:59:59",
   email = "mgc5166@psu.edu",
   output_root = here("output"),
@@ -109,9 +109,9 @@ job_inputs <- list(
   c_grid_values = c(0, 0.33, 0.67, 1.0, 1.33),
 
   # Seeds and task packing.
-  seeds = 1, #1:3
+  seeds = 1:3, #1:3
   task_unit = "dataset",
-  bundles_per_task = 1L,
+  bundles_per_task = 2L,
   task_assignment_seed = 1L,
 
   # --- Matrix selection ---
@@ -122,7 +122,7 @@ job_inputs <- list(
     "data", "sampled_simulated_genotypes", "scenario_sampling_summary.csv"
   ),
   pilot_selection_mode = "M1_stratified",
-  pilot_n_matrices = 1L,#10L
+  pilot_n_matrices = 10L,#10L
   pilot_matrix_ids_path = here("data", "pilot_matrix_ids.csv"),
   pilot_m1_cache_path = here("output", "pilot_m1_metrics.csv"),
   pilot_catalog_with_m1_path = here(
