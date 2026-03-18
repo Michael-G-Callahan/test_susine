@@ -49,7 +49,7 @@ job_inputs <- list(
   # Full factorial grid.
   grid_mode = "full",
 
-  # --- 23 use cases across 5 categories ---
+  # --- 13 use cases (nonneg-only for annotation EB methods) ---
   use_case_ids = c(
     # Baseline, no annotation (2)
     "susie_vanilla",
@@ -61,21 +61,14 @@ job_inputs <- list(
     "susine_eb_mean",          # susine EB scalar mean only (sigma fixed)
     "susine_eb_mu_var",        # susine EB scalar mean + variance jointly
 
-    # Both EB (c + sigma), with annotations (12 = 6 methods x 2 c_nonneg)
-    "susine_eb_scale_var",
+    # Both EB (c + sigma), with annotations — nonneg only (5)
     "susine_eb_scale_var_nonneg",
-    "susine_eb_penalized_scale_var",
     "susine_eb_penalized_scale_var_nonneg",
-    "susine_eb_scale_var_outer",
     "susine_eb_scale_var_outer_nonneg",
-    "susine_eb_clamped_scale_var",
     "susine_eb_clamped_scale_var_nonneg",
-    "susine_eb_alternating_scale_var",
     "susine_eb_alternating_scale_var_nonneg",
 
-    # Scale only EB (2 = 1 method x 2 c_nonneg)
-    # These get sigma_0_2_scalars = c(0.1, 0.2, 0.4) via grid expansion
-    "susine_eb_scale",
+    # Scale only EB — nonneg only (1)
     "susine_eb_scale_nonneg",
 
     # Annotations, no EB — fixed c + fixed sigma (1)
@@ -100,8 +93,8 @@ job_inputs <- list(
   # fixed tier counts of 3/5/15 = 23 total causal).
   p_star_grid = c(1L, 3L, 5L, 10L),
 
-  # Three architectures: legacy sparse + two SuSiE 2.0 architectures.
-  architecture_grid = c("sparse", "susie2_sparse", "susie2_oligogenic"),
+  # Two SuSiE 2.0 architectures only (legacy sparse dropped).
+  architecture_grid = c("susie2_sparse", "susie2_oligogenic"),
   pair_L_p_star = FALSE,
 
   # Annotation quality: wide range to stress-test EB methods.
