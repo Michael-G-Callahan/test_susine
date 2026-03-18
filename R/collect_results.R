@@ -289,7 +289,7 @@ aggregate_staging_outputs <- function(job_name,
 
   if (length(model_files)) {
     model_tbl <- read_csv_safe(model_files, idx) %>%
-      enrich_from_run_table(cols = run_enrich_core)
+      enrich_from_run_table(cols = run_enrich_full)
     readr::write_csv(model_tbl, file.path(output_dir, "model_metrics.csv"))
     log_progress("Wrote model_metrics.csv")
     rm(model_tbl, model_files)
