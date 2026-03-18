@@ -567,11 +567,23 @@ mm_fair <- mm_base %>%
   add_uc_cols() %>%
   dplyr::mutate(cs_fdr = 1 - .data$mean_coverage)
 
+# Join p_star from confusion bins if not already in model_metrics
+# (model_metrics uses run_enrich_core which omits p_star; confusion bins have it)
+if (!"p_star" %in% names(mm_fair) && "dataset_bundle_id" %in% names(mm_fair)) {
+  p_star_lookup <- conf_base %>%
+    dplyr::distinct(.data$dataset_bundle_id, .data$architecture, .data$p_star)
+  mm_fair <- mm_fair %>%
+    dplyr::left_join(p_star_lookup, by = c("dataset_bundle_id", "architecture"))
+  cat("Joined p_star from confusion bins:", sum(!is.na(mm_fair$p_star)), "non-NA values\n")
+}
+
 # Per-(use_case, architecture, p_star) CS summary
 # p_star varies for sparse; is NA for oligogenic (use NA as a dummy level)
 cs_metrics <- mm_fair %>%
   dplyr::mutate(
-    p_star_lbl = dplyr::if_else(!is.na(.data$p_star), as.character(.data$p_star), "fixed"),
+    p_star_lbl = if ("p_star" %in% names(.))
+                   dplyr::if_else(!is.na(.data$p_star), as.character(.data$p_star), "fixed")
+                 else "fixed",
     sigma_lbl  = dplyr::if_else(!is.na(.data$sigma_0_2_scalar),
                                 as.character(.data$sigma_0_2_scalar), "EB")
   ) %>%
