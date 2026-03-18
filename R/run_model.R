@@ -211,7 +211,9 @@ lookup_use_case <- function(job_config, use_case_id) {
 }
 
 # Compute confusion bins for a PIP vector.
-compute_confusion_bins <- function(pip, causal, pip_bucket_width = 0.01, causal_mask = NULL) {
+compute_confusion_bins <- function(pip, causal, pip_bucket_width = 0.01,
+                                   causal_mask = NULL,
+                                   pip_breaks = NULL) {
   n <- length(pip)
   if (length(causal) != n) {
     stop("pip and causal lengths differ.")
@@ -219,8 +221,16 @@ compute_confusion_bins <- function(pip, causal, pip_bucket_width = 0.01, causal_
   if (!is.null(causal_mask)) {
     causal <- as.integer(seq_len(n) %in% causal_mask)
   }
-  bins <- pmax(0, pmin(1, floor(pip / pip_bucket_width) * pip_bucket_width))
-  bins <- round(bins, 2)
+
+  # Build bin breaks: use pip_breaks if provided, else uniform grid
+  if (is.null(pip_breaks)) {
+    pip_breaks <- seq(0, 1, by = pip_bucket_width)
+  }
+  # findInterval: bin index 1 = [break[1], break[2]), ..., rightmost closed
+  bin_idx <- findInterval(pip, pip_breaks, rightmost.closed = TRUE, left.open = FALSE)
+  # Map each variant to the lower edge of its bin
+  bins <- pip_breaks[pmax(1L, bin_idx)]
+
   tibble::tibble(
     pip_threshold = bins,
     causal = as.integer(causal)
@@ -231,6 +241,20 @@ compute_confusion_bins <- function(pip, causal, pip_bucket_width = 0.01, causal_
       n_noncausal_at_bucket = sum(.data$causal == 0, na.rm = TRUE),
       .groups = "drop"
     )
+}
+
+#' Build variable-width PIP bin breaks optimized for TPR/FPR resolution.
+#' Fine bins where FPR action occurs (low PIP), coarser where it doesn't.
+#' @return Numeric vector of break points from 0 to 1.
+#' @export
+pip_breaks_variable <- function() {
+  c(
+    seq(0.000, 0.0275, by = 0.0025),   # 12 bins: [0.00, 0.03)
+    seq(0.030, 0.095,  by = 0.005),     # 14 bins: [0.03, 0.10)
+    seq(0.10,  0.19,   by = 0.01),      # 10 bins: [0.10, 0.20)
+    seq(0.20,  0.90,   by = 0.05),      # 15 bins: [0.20, 0.95)
+    seq(0.95,  1.00,   by = 0.01)       #  5 bins: [0.95, 1.00]
+  )
 }
 
 prior_cache_key <- function(annotation_r2, inflate_match, annotation_seed = NA_integer_) {
@@ -907,7 +931,8 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
             conf_bins <- compute_confusion_bins(
               agg_pip,
               as.integer(seq_along(data_bundle$beta) %in% data_bundle$causal_idx),
-              pip_bucket_width = job_config$job$metrics$pip_bucket_width %||% 0.01
+              pip_bucket_width = job_config$job$metrics$pip_bucket_width %||% 0.01,
+              pip_breaks = job_config$job$metrics$pip_breaks
             )
             agg_run_row <- group_run_map[[group_key]] %||% uc_runs[1, , drop = FALSE]
             agg_run_row$restart_id <- NA_integer_
@@ -972,7 +997,8 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
       conf_bins <- compute_confusion_bins(
         agg_pip,
         as.integer(seq_along(data_bundle$beta) %in% data_bundle$causal_idx),
-        pip_bucket_width = job_config$job$metrics$pip_bucket_width %||% 0.01
+        pip_bucket_width = job_config$job$metrics$pip_bucket_width %||% 0.01,
+        pip_breaks = job_config$job$metrics$pip_breaks
       )
       write_confusion_bins(
         run_row = global_row,
@@ -1648,7 +1674,8 @@ write_run_outputs <- function(run_row,
     conf_bins <- compute_confusion_bins(
       evaluation$combined_pip,
       as.integer(seq_along(data_bundle$beta) %in% data_bundle$causal_idx),
-      pip_bucket_width = job_config$job$metrics$pip_bucket_width %||% 0.01
+      pip_bucket_width = job_config$job$metrics$pip_bucket_width %||% 0.01,
+      pip_breaks = job_config$job$metrics$pip_breaks
     )
     write_confusion_bins(
       run_row = run_row,
@@ -1669,6 +1696,7 @@ write_run_outputs <- function(run_row,
         pip              = evaluation$combined_pip,
         causal           = as.integer(seq_along(data_bundle$beta) %in% data_bundle$causal_idx),
         pip_bucket_width = job_config$job$metrics$pip_bucket_width %||% 0.01,
+        pip_breaks       = job_config$job$metrics$pip_breaks,
         causal_mask      = top8_idx
       ) %>% dplyr::mutate(top_n_causal = 8L)
       write_confusion_bins(

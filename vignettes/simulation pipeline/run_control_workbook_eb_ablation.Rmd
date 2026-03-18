@@ -144,6 +144,7 @@ job_inputs <- list(
   write_legacy_snp_csv = FALSE,
   write_snps_parquet = FALSE,
   write_confusion_bins = TRUE,
+  write_tier_cs_metrics = TRUE,
   write_prior_diagnostics = TRUE,
 
   # Aggregation: for single exploration, aggregation is trivial (1 fit).
@@ -155,6 +156,7 @@ job_inputs <- list(
 
   metrics_settings = list(
     pip_bucket_width = 0.01,
+    pip_breaks = pip_breaks_variable(),
     z_top_k = 10,
     jsd_threshold = 0.15
   ),
@@ -291,6 +293,7 @@ job_config <- make_job_config(
   write_legacy_snp_csv = job_inputs$write_legacy_snp_csv,
   write_snps_parquet = job_inputs$write_snps_parquet,
   write_confusion_bins = job_inputs$write_confusion_bins,
+  write_tier_cs_metrics = job_inputs$write_tier_cs_metrics,
   write_prior_diagnostics = job_inputs$write_prior_diagnostics,
   task_assignment_seed = job_inputs$task_assignment_seed,
   grid_mode = job_inputs$grid_mode,

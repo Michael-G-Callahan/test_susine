@@ -1273,11 +1273,12 @@ if (!is.na(c_col)) {
         labels = scales::label_number(drop0trailing = TRUE)
       ) +
       scale_fill_manual(values = category_palette) +
+      scale_y_continuous(trans = scales::pseudo_log_trans(sigma = 1, base = 10)) +
       facet_wrap(~ short_label, scales = "free_y") +
       labs(
-        title = sprintf("Learned %s distribution by EB method (pseudo-log x-axis)", c_col),
+        title = sprintf("Learned %s distribution by EB method (pseudo-log axes)", c_col),
         x = sprintf("Learned c per effect [%s, pseudo-log scale, sigma=1]", c_col),
-        y = "Count", fill = "Category"
+        y = "Count (pseudo-log scale)", fill = "Category"
       ) +
       theme_minimal() +
       theme(legend.position = "bottom", strip.text = element_text(size = 8),
