@@ -1122,7 +1122,10 @@ fixed_params <- mm_fair %>%
   )
 
 master_table <- overall_auprc %>%
-  dplyr::left_join(tpr_overall,   by = c("use_case_id", "architecture")) %>%
+  dplyr::left_join(
+    tpr_overall %>% dplyr::select("use_case_id", "architecture", "tpr_fpr05", "tpr_fpr10"),
+    by = c("use_case_id", "architecture")
+  ) %>%
   dplyr::left_join(rank_stats,    by = c("use_case_id", "architecture")) %>%
   dplyr::left_join(fixed_params,  by = c("use_case_id", "architecture")) %>%
   dplyr::mutate(
