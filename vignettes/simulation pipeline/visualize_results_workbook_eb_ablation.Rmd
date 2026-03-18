@@ -668,7 +668,7 @@ for (nm in names(panels_s4)) {
 ```
 
 ```{r s4-tpr-fpr, message=FALSE, fig.width=10, fig.height=5}
-curves_s4 <- plot_tpr_fpr(s4_pfd, color_var = "sigma_lbl",
+curves_s4 <- plot_tpr_fpr(s4_pfd, color_var = "short_label",
                            title = "Baseline (susine_vanilla): Variant-level TPR vs FPR")
 if (!is.null(curves_s4$narrow)) {
   save_or_show(curves_s4$narrow, "s4_tpr_fpr_narrow.png", width = 10, height = 5, subdir = "baseline")
