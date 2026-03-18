@@ -22,7 +22,7 @@ get_use_case_labels <- function(use_case_ids = NULL) {
 #' @param confusion_df Data frame with columns: grouping vars, pip_threshold,
 #'   n_causal_at_bucket, n_noncausal_at_bucket
 #' @param group_vars Character vector of columns to group by (e.g., "use_case_id")
-#' @return Data frame with columns: group_vars, pip_threshold, TP, FP, power, fdr, precision
+#' @return Data frame with columns: group_vars, pip_threshold, TP, FP, fpr, power, fdr, precision
 #' @export
 compute_power_fdr_curves <- function(confusion_df, group_vars = "use_case_id") {
 
@@ -44,6 +44,7 @@ confusion_df %>%
       total_noncausal = sum(n_noncausal_at_bucket),
       FN = total_causal - TP,
       TN = total_noncausal - FP,
+      fpr = dplyr::if_else(total_noncausal > 0, FP / total_noncausal, NA_real_),
       precision = dplyr::if_else(TP + FP > 0, TP / (TP + FP), NA_real_),
       recall = dplyr::if_else(total_causal > 0, TP / total_causal, NA_real_),
       power = recall,

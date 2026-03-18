@@ -30,6 +30,7 @@ run_task <- function(job_name,
     buffer_ctx$buffers <- list(
       model = list(),
       effect = list(),
+      tier_cs_metrics = list(),
       snps = list(),
       confusion = list(),
       dataset_metrics = list(),
@@ -210,10 +211,13 @@ lookup_use_case <- function(job_config, use_case_id) {
 }
 
 # Compute confusion bins for a PIP vector.
-compute_confusion_bins <- function(pip, causal, pip_bucket_width = 0.01) {
+compute_confusion_bins <- function(pip, causal, pip_bucket_width = 0.01, causal_mask = NULL) {
   n <- length(pip)
   if (length(causal) != n) {
     stop("pip and causal lengths differ.")
+  }
+  if (!is.null(causal_mask)) {
+    causal <- as.integer(seq_len(n) %in% causal_mask)
   }
   bins <- pmax(0, pmin(1, floor(pip / pip_bucket_width) * pip_bucket_width))
   bins <- round(bins, 2)
@@ -709,6 +713,27 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
         buffer_ctx = buffer_ctx,
         variant_meta = meta
       )
+
+      # Tier-stratified CS power for susie2_oligogenic architectures
+      if (!is.null(buffer_ctx) && isTRUE(job_config$job$write_tier_cs_metrics) &&
+          identical(as.character(run_row$architecture), "susie2_oligogenic") &&
+          !isTRUE(meta$is_agg) &&
+          !is.null(data_bundle$beta) && length(data_bundle$causal_idx) > 0L) {
+        tier_cs <- compute_cs_power_by_tier(
+          effects_filtered = eval_res$effects_filtered,
+          causal_idx       = data_bundle$causal_idx,
+          beta             = data_bundle$beta
+        ) %>%
+          dplyr::mutate(
+            run_id        = as.integer(run_row$run_id),
+            filtering     = "purity_filtered",
+            explore_method = as.character(meta$explore_method %||% "base"),
+            agg_method    = as.character(meta$agg_method %||% NA_character_)
+          )
+        buffer_ctx$buffers$tier_cs_metrics[[
+          length(buffer_ctx$buffers$tier_cs_metrics) + 1L
+        ]] <- tier_cs
+      }
 
       # Extract and buffer prior diagnostics for susine fits
       if (!is.null(buffer_ctx) && isTRUE(job_config$job$write_prior_diagnostics)) {
@@ -1632,6 +1657,28 @@ write_run_outputs <- function(run_row,
       buffer_ctx = buffer_ctx,
       variant_meta = variant_meta
     )
+
+    # For susie2_oligogenic: also write top-8-causal confusion bins
+    if (identical(as.character(run_row$architecture), "susie2_oligogenic") &&
+        length(data_bundle$causal_idx) > 0L && !is.null(data_bundle$beta)) {
+      n_top <- min(8L, length(data_bundle$causal_idx))
+      top8_idx <- data_bundle$causal_idx[
+        order(abs(data_bundle$beta[data_bundle$causal_idx]), decreasing = TRUE)
+      ][seq_len(n_top)]
+      conf_bins_top8 <- compute_confusion_bins(
+        pip              = evaluation$combined_pip,
+        causal           = as.integer(seq_along(data_bundle$beta) %in% data_bundle$causal_idx),
+        pip_bucket_width = job_config$job$metrics$pip_bucket_width %||% 0.01,
+        causal_mask      = top8_idx
+      ) %>% dplyr::mutate(top_n_causal = 8L)
+      write_confusion_bins(
+        run_row      = run_row,
+        job_config   = job_config,
+        conf_bins    = conf_bins_top8,
+        buffer_ctx   = buffer_ctx,
+        variant_meta = variant_meta
+      )
+    }
   }
 
   if (should_write_legacy) {
@@ -1795,7 +1842,8 @@ flush_task_buffers <- function(buffer_ctx) {
   if (is.null(buf) ||
       !length(buf$model) && !length(buf$effect) && !length(buf$snps) &&
       !length(buf$confusion) && !length(buf$dataset_metrics) && !length(buf$multimodal) &&
-      !length(buf$validation) && !length(buf$prior_diagnostics)) {
+      !length(buf$validation) && !length(buf$prior_diagnostics) &&
+      !length(buf$tier_cs_metrics)) {
     return(invisible(NULL))
   }
   base_output <- buffer_ctx$base_output
@@ -1817,7 +1865,8 @@ flush_task_buffers <- function(buffer_ctx) {
   confusion_tbl <- if (length(buf$confusion)) dplyr::bind_rows(buf$confusion) else NULL
   dataset_tbl <- if (length(buf$dataset_metrics)) dplyr::bind_rows(buf$dataset_metrics) else NULL
   multimodal_tbl <- if (length(buf$multimodal)) dplyr::bind_rows(buf$multimodal) else NULL
-  prior_diag_tbl <- if (length(buf$prior_diagnostics)) dplyr::bind_rows(buf$prior_diagnostics) else NULL
+  prior_diag_tbl  <- if (length(buf$prior_diagnostics)) dplyr::bind_rows(buf$prior_diagnostics) else NULL
+  tier_cs_tbl     <- if (length(buf$tier_cs_metrics))   dplyr::bind_rows(buf$tier_cs_metrics)   else NULL
 
   write_flush_outputs(
     staging_dir = staging_dir,
@@ -1830,7 +1879,8 @@ flush_task_buffers <- function(buffer_ctx) {
     confusion_bins = confusion_tbl,
     dataset_metrics = dataset_tbl,
     multimodal_metrics = multimodal_tbl,
-    prior_diagnostics = prior_diag_tbl
+    prior_diagnostics = prior_diag_tbl,
+    tier_cs_metrics = tier_cs_tbl
   )
 
   if (is.null(validation_tbl) || !nrow(validation_tbl)) {
@@ -1851,7 +1901,8 @@ flush_task_buffers <- function(buffer_ctx) {
     dataset_metrics = list(),
     multimodal = list(),
     validation = list(),
-    prior_diagnostics = list()
+    prior_diagnostics = list(),
+    tier_cs_metrics = list()
   )
   buffer_ctx$flush_index <- buffer_ctx$flush_index + 1L
 }
@@ -1866,7 +1917,8 @@ write_flush_outputs <- function(staging_dir,
                                 confusion_bins = NULL,
                                 dataset_metrics = NULL,
                                 multimodal_metrics = NULL,
-                                prior_diagnostics = NULL) {
+                                prior_diagnostics = NULL,
+                                tier_cs_metrics = NULL) {
   if (!is.null(model_metrics) && nrow(model_metrics)) {
     model_metrics <- dplyr::mutate(model_metrics, task_id = task_id, flush_id = flush_label)
     readr::write_csv(model_metrics, file.path(staging_dir, sprintf("%s_model_metrics.csv", flush_label)))
@@ -1898,6 +1950,10 @@ write_flush_outputs <- function(staging_dir,
   if (!is.null(prior_diagnostics) && nrow(prior_diagnostics)) {
     prior_diagnostics <- dplyr::mutate(prior_diagnostics, task_id = task_id, flush_id = flush_label)
     readr::write_csv(prior_diagnostics, file.path(staging_dir, sprintf("%s_prior_diagnostics.csv", flush_label)))
+  }
+  if (!is.null(tier_cs_metrics) && nrow(tier_cs_metrics)) {
+    tier_cs_metrics <- dplyr::mutate(tier_cs_metrics, task_id = task_id, flush_id = flush_label)
+    readr::write_csv(tier_cs_metrics, file.path(staging_dir, sprintf("%s_tier_cs_metrics.csv", flush_label)))
   }
 }
 

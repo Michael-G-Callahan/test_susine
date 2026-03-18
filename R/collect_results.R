@@ -60,6 +60,7 @@ index_staging_outputs <- function(job_name,
     if (grepl("_dataset_metrics\\.csv$", fname)) return("dataset_metrics")
     if (grepl("_multimodal_metrics\\.csv$", fname)) return("multimodal_metrics")
     if (grepl("_prior_diagnostics\\.csv$", fname)) return("prior_diagnostics")
+    if (grepl("_tier_cs_metrics\\.csv$", fname)) return("tier_cs_metrics")
     if (grepl("_snps\\.parquet$", fname)) return("snps")
     NA_character_
   }
@@ -109,6 +110,7 @@ validate_staging_outputs <- function(file_index) {
       dataset_metrics = function(p) readr::read_csv(p, show_col_types = FALSE),
       multimodal_metrics = function(p) readr::read_csv(p, show_col_types = FALSE),
       prior_diagnostics = function(p) readr::read_csv(p, show_col_types = FALSE),
+      tier_cs_metrics = function(p) readr::read_csv(p, show_col_types = FALSE),
       snps = function(p) arrow::read_parquet(p),
       function(p) stop("Unknown type: ", type)
     )
@@ -271,7 +273,8 @@ aggregate_staging_outputs <- function(job_name,
   confusion_files <- dplyr::filter(idx, .data$type == "confusion_bins")$path
   dataset_files <- dplyr::filter(idx, .data$type == "dataset_metrics")$path
   multimodal_files <- dplyr::filter(idx, .data$type == "multimodal_metrics")$path
-  prior_diag_files <- dplyr::filter(idx, .data$type == "prior_diagnostics")$path
+  prior_diag_files   <- dplyr::filter(idx, .data$type == "prior_diagnostics")$path
+  tier_cs_files      <- dplyr::filter(idx, .data$type == "tier_cs_metrics")$path
   snp_files <- dplyr::filter(idx, .data$type == "snps")$path
 
   # Column lists for join-enrichment — match the original aggregated schemas.
@@ -337,6 +340,14 @@ aggregate_staging_outputs <- function(job_name,
     readr::write_csv(prior_diag_tbl, file.path(output_dir, "prior_diagnostics.csv"))
     log_progress("Wrote prior_diagnostics.csv")
     rm(prior_diag_tbl, prior_diag_files)
+    gc()
+  }
+  if (length(tier_cs_files)) {
+    tier_cs_tbl <- read_csv_safe(tier_cs_files, idx) %>%
+      enrich_from_run_table(cols = run_enrich_core)
+    readr::write_csv(tier_cs_tbl, file.path(output_dir, "tier_cs_metrics.csv"))
+    log_progress("Wrote tier_cs_metrics.csv")
+    rm(tier_cs_tbl, tier_cs_files)
     gc()
   }
   if (length(snp_files) && isTRUE(write_snps_dataset)) {

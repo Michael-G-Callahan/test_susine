@@ -1,5 +1,5 @@
 ---
-title: "SuSiNE EB Method Ablation — Visualization"
+title: "SuSiNE EB Method Ablation — Visualization (SuSiE2-Style)"
 output:
   html_document:
     toc: true
@@ -10,12 +10,20 @@ editor_options:
     wrap: 72
 ---
 
-Summary: Visualizes aggregated outputs from the EB ablation study.
-Key question: which EB strategy is best for (1) prior variance only,
-(2) annotation scale (c) only, and (3) joint mean + variance?
-Moderators: annotation quality (annotation_r2, inflate_match),
-architecture (sparse / susie2_sparse / susie2_oligogenic), and
-the nonneg constraint on c.
+Summary: Visualizes EB ablation study results using SuSiE 2.0 paper-style plots
+(CS power, CS FDR, hg2, TPR/FPR curves). Structured around 5 method-comparison groups:
+
+  1. Baseline — no annotation, no EB (susine_vanilla)
+  2. Annotations, no EB (susine_functional_mu, c-grid)
+  3. EB, no annotations (susie_eb / susine_eb / susine_eb_mean / susine_eb_mu_var)
+  4. EB with annotations (all annotation-based EB methods)
+  5. Master summary table
+  6. Prior diagnostics
+
+Architectures: susie2_sparse + susie2_oligogenic only.
+Only real model fits (variant_type == "base") are used — no ensemble aggregations.
+Each comparison section includes both sparse (B-E) and oligogenic (F-I) panels
+modeled after SuSiE 2.0 paper Figure 1.
 
 Run collect_results_workbook.Rmd first to produce aggregated CSVs.
 
@@ -34,6 +42,7 @@ library(ggplot2)
 library(stringr)
 library(purrr)
 library(scales)
+library(knitr)
 ```
 
 ## 1.1 Job Configuration
@@ -41,7 +50,7 @@ library(scales)
 ```{r job-config}
 # UPDATE these two values after each run.
 job_name      <- "eb_ablation_v2"
-parent_job_id <- "REPLACE_WITH_PARENT_JOB_ID"
+parent_job_id <- "49603067"
 output_root   <- here("output")
 
 paths <- test_susine::resolve_job_paths(
@@ -67,23 +76,21 @@ if (isTRUE(getOption("knitr.in.progress"))) {
 
 plot_base_dir <- file.path(paths$aggregated_dir, "plots_eb_ablation")
 plot_dirs <- list(
-  overview    = file.path(plot_base_dir, "overview"),
-  no_ann      = file.path(plot_base_dir, "no_annotation"),
-  ann_eb      = file.path(plot_base_dir, "annotation_eb"),
-  nonneg      = file.path(plot_base_dir, "nonneg"),
-  diagnostics = file.path(plot_base_dir, "prior_diagnostics"),
-  tables      = file.path(plot_base_dir, "tables")
+  baseline    = file.path(plot_base_dir, "s4_baseline"),
+  annot_noeb  = file.path(plot_base_dir, "s5_annot_noeb"),
+  eb_noannot  = file.path(plot_base_dir, "s6_eb_noannot"),
+  eb_annot    = file.path(plot_base_dir, "s7_eb_annot"),
+  master      = file.path(plot_base_dir, "s8_master_table"),
+  diagnostics = file.path(plot_base_dir, "s9_prior_diagnostics")
 )
 for (d in plot_dirs) dir.create(d, showWarnings = FALSE, recursive = TRUE)
 cat("Plot directories created under:", plot_base_dir, "\n")
 
-maybe_show_plot <- function(p) {
-  if (show_in_rstudio_plots && interactive()) try(print(p), silent = TRUE)
-}
-
 save_or_show <- function(p, filename, width = 12, height = 7,
-                          dpi = 300, subdir = "overview") {
-  maybe_show_plot(p)
+                          dpi = 300, subdir = "baseline") {
+  if (show_in_rstudio_plots && interactive()) {
+    try(print(p), silent = TRUE)
+  }
   if (save_plots_to_file) {
     fp <- file.path(plot_dirs[[subdir]], filename)
     tryCatch(
@@ -97,67 +104,102 @@ save_or_show <- function(p, filename, width = 12, height = 7,
 }
 ```
 
-## 1.3 Use Case Categories and Palettes
+## 1.3 Use Case Metadata
 
-```{r uc-categories}
-# 23 use cases grouped by EB strategy role.
+```{r uc-metadata}
+# EB strategy category
 uc_category <- c(
-  susie_vanilla                         = "baseline",
-  susine_vanilla                        = "baseline",
-  susie_eb                              = "eb_variance",
-  susine_eb                             = "eb_variance",
-  susine_eb_mean                        = "eb_mean",
-  susine_eb_mu_var                      = "eb_joint_no_ann",
-  susine_eb_scale                       = "scale_only",
-  susine_eb_scale_nonneg                = "scale_only",
-  susine_eb_scale_var                   = "ann_eb_joint",
-  susine_eb_scale_var_nonneg            = "ann_eb_joint",
-  susine_eb_penalized_scale_var         = "ann_eb_joint",
-  susine_eb_penalized_scale_var_nonneg  = "ann_eb_joint",
-  susine_eb_scale_var_outer             = "ann_eb_joint",
-  susine_eb_scale_var_outer_nonneg      = "ann_eb_joint",
-  susine_eb_clamped_scale_var           = "ann_eb_joint",
-  susine_eb_clamped_scale_var_nonneg    = "ann_eb_joint",
-  susine_eb_alternating_scale_var       = "ann_eb_joint",
+  susie_vanilla                          = "baseline",
+  susine_vanilla                         = "baseline",
+  susie_eb                               = "eb_variance",
+  susine_eb                              = "eb_variance",
+  susine_eb_mean                         = "eb_mean",
+  susine_eb_mu_var                       = "eb_joint_no_ann",
+  susine_eb_scale                        = "scale_only",
+  susine_eb_scale_nonneg                 = "scale_only",
+  susine_eb_scale_var                    = "ann_eb_joint",
+  susine_eb_scale_var_nonneg             = "ann_eb_joint",
+  susine_eb_penalized_scale_var          = "ann_eb_joint",
+  susine_eb_penalized_scale_var_nonneg   = "ann_eb_joint",
+  susine_eb_scale_var_outer              = "ann_eb_joint",
+  susine_eb_scale_var_outer_nonneg       = "ann_eb_joint",
+  susine_eb_clamped_scale_var            = "ann_eb_joint",
+  susine_eb_clamped_scale_var_nonneg     = "ann_eb_joint",
+  susine_eb_alternating_scale_var        = "ann_eb_joint",
   susine_eb_alternating_scale_var_nonneg = "ann_eb_joint",
-  susine_functional_mu                  = "fixed_c_grid"
+  susine_functional_mu                   = "fixed_c_grid"
 )
 
-# Whether the use case requires annotation
+# Whether annotation input is used
 uc_needs_annotation <- c(
-  susie_vanilla                         = FALSE,
-  susine_vanilla                        = FALSE,
-  susie_eb                              = FALSE,
-  susine_eb                             = FALSE,
-  susine_eb_mean                        = FALSE,
-  susine_eb_mu_var                      = FALSE,
-  susine_eb_scale                       = TRUE,
-  susine_eb_scale_nonneg                = TRUE,
-  susine_eb_scale_var                   = TRUE,
-  susine_eb_scale_var_nonneg            = TRUE,
-  susine_eb_penalized_scale_var         = TRUE,
-  susine_eb_penalized_scale_var_nonneg  = TRUE,
-  susine_eb_scale_var_outer             = TRUE,
-  susine_eb_scale_var_outer_nonneg      = TRUE,
-  susine_eb_clamped_scale_var           = TRUE,
-  susine_eb_clamped_scale_var_nonneg    = TRUE,
-  susine_eb_alternating_scale_var       = TRUE,
+  susie_vanilla                          = FALSE,
+  susine_vanilla                         = FALSE,
+  susie_eb                               = FALSE,
+  susine_eb                              = FALSE,
+  susine_eb_mean                         = FALSE,
+  susine_eb_mu_var                       = FALSE,
+  susine_eb_scale                        = TRUE,
+  susine_eb_scale_nonneg                 = TRUE,
+  susine_eb_scale_var                    = TRUE,
+  susine_eb_scale_var_nonneg             = TRUE,
+  susine_eb_penalized_scale_var          = TRUE,
+  susine_eb_penalized_scale_var_nonneg   = TRUE,
+  susine_eb_scale_var_outer              = TRUE,
+  susine_eb_scale_var_outer_nonneg       = TRUE,
+  susine_eb_clamped_scale_var            = TRUE,
+  susine_eb_clamped_scale_var_nonneg     = TRUE,
+  susine_eb_alternating_scale_var        = TRUE,
   susine_eb_alternating_scale_var_nonneg = TRUE,
-  susine_functional_mu                  = TRUE
+  susine_functional_mu                   = TRUE
 )
 
-# Category-level palette
-category_palette <- c(
-  baseline        = "#636363",
-  eb_variance     = "#2171b5",
-  eb_mean         = "#74c476",
-  eb_joint_no_ann = "#238b45",
-  scale_only      = "#fd8d3c",
-  ann_eb_joint    = "#cb181d",
-  fixed_c_grid    = "#984ea3"
+# Whether EB is used at all
+uc_has_eb <- c(
+  susie_vanilla                          = FALSE,
+  susine_vanilla                         = FALSE,
+  susie_eb                               = TRUE,
+  susine_eb                              = TRUE,
+  susine_eb_mean                         = TRUE,
+  susine_eb_mu_var                       = TRUE,
+  susine_eb_scale                        = TRUE,
+  susine_eb_scale_nonneg                 = TRUE,
+  susine_eb_scale_var                    = TRUE,
+  susine_eb_scale_var_nonneg             = TRUE,
+  susine_eb_penalized_scale_var          = TRUE,
+  susine_eb_penalized_scale_var_nonneg   = TRUE,
+  susine_eb_scale_var_outer              = TRUE,
+  susine_eb_scale_var_outer_nonneg       = TRUE,
+  susine_eb_clamped_scale_var            = TRUE,
+  susine_eb_clamped_scale_var_nonneg     = TRUE,
+  susine_eb_alternating_scale_var        = TRUE,
+  susine_eb_alternating_scale_var_nonneg = TRUE,
+  susine_functional_mu                   = FALSE
 )
 
-# Per-use-case short labels for axis display
+# What EB optimizes: none / var / mu / both
+uc_eb_target <- c(
+  susie_vanilla                          = "none",
+  susine_vanilla                         = "none",
+  susie_eb                               = "var",
+  susine_eb                              = "var",
+  susine_eb_mean                         = "mu",
+  susine_eb_mu_var                       = "both",
+  susine_eb_scale                        = "mu",
+  susine_eb_scale_nonneg                 = "mu",
+  susine_eb_scale_var                    = "both",
+  susine_eb_scale_var_nonneg             = "both",
+  susine_eb_penalized_scale_var          = "both",
+  susine_eb_penalized_scale_var_nonneg   = "both",
+  susine_eb_scale_var_outer              = "both",
+  susine_eb_scale_var_outer_nonneg       = "both",
+  susine_eb_clamped_scale_var            = "both",
+  susine_eb_clamped_scale_var_nonneg     = "both",
+  susine_eb_alternating_scale_var        = "both",
+  susine_eb_alternating_scale_var_nonneg = "both",
+  susine_functional_mu                   = "none"
+)
+
+# Short display labels
 uc_short_label <- c(
   susie_vanilla                          = "SuSiE",
   susine_vanilla                         = "SuSiNE",
@@ -179,6 +221,156 @@ uc_short_label <- c(
   susine_eb_alternating_scale_var_nonneg = "alt_sv+",
   susine_functional_mu                   = "fixed_c_grid"
 )
+
+# Category-level palette
+category_palette <- c(
+  baseline        = "#636363",
+  eb_variance     = "#2171b5",
+  eb_mean         = "#74c476",
+  eb_joint_no_ann = "#238b45",
+  scale_only      = "#fd8d3c",
+  ann_eb_joint    = "#cb181d",
+  fixed_c_grid    = "#984ea3"
+)
+
+arch_labels <- c(
+  susie2_sparse     = "SuSiE2-Sparse",
+  susie2_oligogenic = "SuSiE2-Oligogenic"
+)
+```
+
+## 1.4 Plot Helpers
+
+```{r plot-helpers}
+# Shared ggplot theme for SuSiE2-style panels
+theme_susie2 <- function() {
+  theme_bw() +
+    theme(
+      legend.position = "bottom",
+      strip.background = element_rect(fill = "gray92"),
+      strip.text = element_text(size = 9),
+      panel.grid.minor = element_blank()
+    )
+}
+
+# Extract TPR at specified FPR thresholds from a compute_power_fdr_curves() output.
+# Uses TRUE false positive rate (FP / total_noncausal), NOT false discovery rate.
+# Returns one row per group_key with tpr_fpr05 and tpr_fpr10 columns.
+tpr_from_pfd <- function(pfd_tbl) {
+  group_cols <- setdiff(names(pfd_tbl),
+    c("pip_threshold", "TP", "FP", "power", "fdr", "precision",
+      "n_causal_at_bucket", "n_noncausal_at_bucket",
+      "total_causal", "total_noncausal", "FN", "TN", "recall", "fpr"))
+  pfd_tbl %>%
+    dplyr::group_by(dplyr::across(dplyr::all_of(group_cols))) %>%
+    dplyr::arrange(.data$fpr, .by_group = TRUE) %>%
+    dplyr::summarise(
+      tpr_fpr05 = {
+        idx <- which(.data$fpr >= 0.05)[1L]
+        if (is.na(idx)) NA_real_ else .data$power[idx]
+      },
+      tpr_fpr10 = {
+        idx <- which(.data$fpr >= 0.10)[1L]
+        if (is.na(idx)) NA_real_ else .data$power[idx]
+      },
+      .groups = "drop"
+    )
+}
+
+# Add use-case metadata columns
+add_uc_cols <- function(df) {
+  df %>%
+    dplyr::mutate(
+      eb_category      = dplyr::recode(.data$use_case_id, !!!uc_category,    .default = "other"),
+      short_label      = dplyr::recode(.data$use_case_id, !!!uc_short_label, .default = .data$use_case_id),
+      needs_annotation = uc_needs_annotation[.data$use_case_id],
+      has_eb           = uc_has_eb[.data$use_case_id],
+      nonneg           = stringr::str_ends(.data$use_case_id, "_nonneg"),
+      method_base      = stringr::str_remove(.data$use_case_id, "_nonneg$")
+    )
+}
+
+# Produce three SuSiE2-style CS panels (power, FDR, hg2) for a given subset.
+# x_var: column for x-axis (e.g. "p_star_lbl" or "short_label")
+# color_var: column for color (e.g. "sigma_lbl" or "short_label")
+# title_prefix: string prepended to each panel title
+plot_cs_panels <- function(cs_sub, x_var, color_var, facet_var = "architecture",
+                            title_prefix = "", is_discrete_x = TRUE) {
+  if (is.null(cs_sub) || nrow(cs_sub) == 0) {
+    message("plot_cs_panels: empty data — skipping")
+    return(invisible(NULL))
+  }
+  mk <- function(y_var, y_label, add_hline = FALSE, hline_y = NULL) {
+    p <- ggplot(cs_sub, aes(x = .data[[x_var]], y = .data[[y_var]],
+                             color = .data[[color_var]],
+                             group = .data[[color_var]])) +
+      geom_point(size = 2) + geom_line() +
+      facet_wrap(as.formula(paste("~", facet_var)),
+                 labeller = labeller(.cols = arch_labels)) +
+      labs(title = paste0(title_prefix, y_label),
+           x = x_var, y = y_label, color = color_var) +
+      theme_susie2()
+    if (is_discrete_x) {
+      p <- p + scale_x_discrete()
+    }
+    if (add_hline && !is.null(hline_y)) {
+      p <- p + geom_hline(yintercept = hline_y, linetype = "dashed", color = "red", linewidth = 0.7)
+    }
+    p
+  }
+  list(
+    cs_power = mk("mean_cs_power", "95% CS Power"),
+    cs_fdr   = mk("mean_cs_fdr",   "95% CS FDR",  add_hline = TRUE, hline_y = 0.05),
+    hg2      = mk("mean_hg2",      "hg2 (estimated variance explained)")
+  )
+}
+
+# TPR vs FPR curve for one or two xlim ranges.
+# Uses TRUE false positive rate (FP / total_noncausal) on x-axis.
+plot_tpr_fpr <- function(pfd_sub, color_var, title = "Variant-level TPR vs FPR",
+                          facet_var = "architecture") {
+  if (is.null(pfd_sub) || nrow(pfd_sub) == 0) {
+    message("plot_tpr_fpr: empty data — skipping")
+    return(invisible(NULL))
+  }
+  base_p <- ggplot(pfd_sub, aes(x = fpr, y = power, color = .data[[color_var]])) +
+    geom_line() +
+    geom_vline(xintercept = 0.05, linetype = "dashed", color = "red", linewidth = 0.5) +
+    facet_wrap(as.formula(paste("~", facet_var)),
+               labeller = labeller(.cols = arch_labels)) +
+    scale_x_continuous(expand = expansion(c(0, 0.02))) +
+    labs(x = "Variant-level FPR", y = "TPR (Power)", color = color_var, title = title) +
+    theme_susie2()
+  p_narrow <- base_p + coord_cartesian(xlim = c(0, 0.1))
+  p_wide   <- base_p + coord_cartesian(xlim = c(0, 0.5))
+  list(narrow = p_narrow, wide = p_wide)
+}
+
+# Plot tier CS panels for oligogenic (CS power/FDR vs n_top)
+plot_tier_cs <- function(tier_sub, color_var, title_prefix = "") {
+  if (is.null(tier_sub) || nrow(tier_sub) == 0) {
+    message("plot_tier_cs: empty data — skipping")
+    return(invisible(NULL))
+  }
+  p_power <- ggplot(tier_sub, aes(x = factor(.data$n_top), y = mean_cs_power,
+                                   color = .data[[color_var]],
+                                   group = .data[[color_var]])) +
+    geom_point(size = 2.5) + geom_line() +
+    labs(title = paste0(title_prefix, "Oligogenic CS Power vs top-N causal"),
+         x = "Top-N causal variants", y = "95% CS Power", color = color_var) +
+    theme_susie2()
+
+  p_fdr <- ggplot(tier_sub, aes(x = factor(.data$n_top), y = mean_cs_fdr,
+                                 color = .data[[color_var]],
+                                 group = .data[[color_var]])) +
+    geom_point(size = 2.5) + geom_line() +
+    geom_hline(yintercept = 0.05, linetype = "dashed", color = "red") +
+    labs(title = paste0(title_prefix, "Oligogenic CS FDR vs top-N causal"),
+         x = "Top-N causal variants", y = "95% CS FDR", color = color_var) +
+    theme_susie2()
+
+  list(cs_power = p_power, cs_fdr = p_fdr)
+}
 ```
 
 ---
@@ -189,531 +381,847 @@ uc_short_label <- c(
 agg <- paths$aggregated_dir
 
 conf_path        <- file.path(agg, "confusion_matrix_detailed.csv")
-dataset_path     <- file.path(agg, "dataset_metrics.csv")
-multimodal_path  <- file.path(agg, "multimodal_metrics.csv")
 model_path       <- file.path(agg, "model_metrics.csv")
 prior_diag_path  <- file.path(agg, "prior_diagnostics.csv")
+tier_cs_path     <- file.path(agg, "tier_cs_metrics.csv")
 
-if (!file.exists(conf_path))    stop("Missing confusion_matrix_detailed.csv — run collect workbook first.")
-if (!file.exists(dataset_path)) stop("Missing dataset_metrics.csv.")
+if (!file.exists(conf_path))  stop("Missing confusion_matrix_detailed.csv")
+if (!file.exists(model_path)) stop("Missing model_metrics.csv")
 
-conf_raw        <- readr::read_csv(conf_path,       show_col_types = FALSE)
-dataset_metrics <- readr::read_csv(dataset_path,    show_col_types = FALSE)
-
-multimodal_metrics <- if (file.exists(multimodal_path)) {
-  readr::read_csv(multimodal_path, show_col_types = FALSE)
-} else { message("multimodal_metrics.csv not found."); NULL }
-
-model_metrics <- if (file.exists(model_path)) {
-  readr::read_csv(model_path, show_col_types = FALSE)
-} else { message("model_metrics.csv not found."); NULL }
+conf_raw      <- readr::read_csv(conf_path,  show_col_types = FALSE)
+model_metrics <- readr::read_csv(model_path, show_col_types = FALSE)
 
 prior_diagnostics <- if (file.exists(prior_diag_path)) {
   readr::read_csv(prior_diag_path, show_col_types = FALSE)
-} else { message("prior_diagnostics.csv not found."); NULL }
+} else {
+  message("prior_diagnostics.csv not found — Section 9 will be skipped.")
+  NULL
+}
 
-cat("Confusion rows:", nrow(conf_raw), "\n")
-cat("Dataset rows:  ", nrow(dataset_metrics), "\n")
+tier_cs_metrics <- if (file.exists(tier_cs_path)) {
+  readr::read_csv(tier_cs_path, show_col_types = FALSE) %>% add_uc_cols()
+} else {
+  message("tier_cs_metrics.csv not found — oligogenic top-N panels will be skipped.")
+  NULL
+}
+
+cat("Confusion rows:      ", nrow(conf_raw), "\n")
+cat("Model metric rows:   ", nrow(model_metrics), "\n")
 ```
 
-## 2.1 Peek at Column Structure
-
 ```{r peek-columns}
-# Inspect key columns before filtering — adjust filters below if values differ.
 cat("--- confusion_matrix_detailed columns ---\n")
 print(names(conf_raw))
-
-if (!is.null(conf_raw) && "variant_type" %in% names(conf_raw)) {
-  cat("\nvariant_type values:\n")
+if ("variant_type" %in% names(conf_raw)) {
+  cat("\nvariant_type counts:\n")
   print(table(conf_raw$variant_type, useNA = "ifany"))
 }
-if (!is.null(conf_raw) && "agg_method" %in% names(conf_raw)) {
-  cat("\nagg_method values:\n")
-  print(table(conf_raw$agg_method, useNA = "ifany"))
-}
-if (!is.null(prior_diagnostics)) {
-  cat("\n--- prior_diagnostics columns ---\n")
-  print(names(prior_diagnostics))
-}
+cat("\n--- model_metrics columns ---\n")
+print(names(model_metrics))
 ```
 
 ---
 
 # Section 3: Data Preparation
 
-```{r data-prep}
-# Primary confusion filter:
-#  - variant_type: keep causal-SNP rows (adjust if column has different name/value)
-#  - agg_method: for single-fit use cases pick "single" or "max_elbo";
-#                for c_grid (susine_functional_mu) pick "elbo_softmax"
-#  Adjust these strings to match what you see in 2.1 above.
-primary_variant_type <- "causal"   # or "all" / "purity_filtered" — check peek
-primary_agg_single   <- "single"   # single-run methods
-primary_agg_cgrid    <- "elbo_softmax"
+## 3.1 Filter to susie2_* architectures + real fits only
 
-conf <- conf_raw %>%
-  dplyr::filter(
-    .data$variant_type == primary_variant_type | !("variant_type" %in% names(.))
-  ) %>%
-  dplyr::filter(
-    (.data$use_case_id == "susine_functional_mu" & .data$agg_method == primary_agg_cgrid) |
-    (.data$use_case_id != "susine_functional_mu" & .data$agg_method == primary_agg_single) |
-    !("agg_method" %in% names(.))
-  ) %>%
-  dplyr::mutate(
-    eb_category = dplyr::recode(.data$use_case_id, !!!uc_category, .default = "other"),
-    needs_annotation = uc_needs_annotation[.data$use_case_id],
-    short_label = dplyr::recode(.data$use_case_id, !!!uc_short_label, .default = .data$use_case_id),
-    nonneg = stringr::str_ends(.data$use_case_id, "_nonneg"),
-    # Paired method name for nonneg comparisons
-    method_base = stringr::str_remove(.data$use_case_id, "_nonneg$")
-  )
+```{r filter-base}
+TARGET_ARCHS <- c("susie2_sparse", "susie2_oligogenic")
 
-cat("Rows after primary filter:", nrow(conf), "\n")
-cat("use_case_id values present:\n")
-print(sort(unique(conf$use_case_id)))
+conf_base <- conf_raw %>%
+  dplyr::filter(
+    .data$variant_type == "base",
+    .data$architecture %in% TARGET_ARCHS
+  ) %>%
+  add_uc_cols()
+
+cat("Base fit confusion rows (susie2_* only):", nrow(conf_base), "\n")
+cat("use_case_ids present:\n")
+print(sort(unique(conf_base$use_case_id)))
+cat("architectures:\n")
+print(table(conf_base$architecture))
 ```
 
-```{r compute-auprc}
-# AUPRC per (use_case_id, architecture, annotation_r2, inflate_match, sigma_0_2_scalar)
-# — this is the core per-dataset-scenario summary metric.
-auprc_group_vars <- intersect(
-  c("use_case_id", "architecture", "annotation_r2", "inflate_match",
-    "sigma_0_2_scalar", "matrix_id", "y_noise", "p_star", "L"),
-  names(conf)
+## 3.2 Best-c for `susine_functional_mu`
+
+```{r best-c-lookup}
+best_c_keys <- intersect(
+  c("matrix_id", "architecture", "annotation_r2", "inflate_match",
+    "sigma_0_2_scalar", "y_noise", "p_star", "L"),
+  names(model_metrics)
 )
 
-auprc_tbl <- test_susine::compute_auprc_from_confusion(conf, group_vars = auprc_group_vars) %>%
-  dplyr::mutate(
-    eb_category  = dplyr::recode(.data$use_case_id, !!!uc_category,     .default = "other"),
-    short_label  = dplyr::recode(.data$use_case_id, !!!uc_short_label,  .default = .data$use_case_id),
-    nonneg       = stringr::str_ends(.data$use_case_id, "_nonneg"),
-    method_base  = stringr::str_remove(.data$use_case_id, "_nonneg$"),
-    needs_annotation = uc_needs_annotation[.data$use_case_id]
-  )
-
-cat("AUPRC rows:", nrow(auprc_tbl), "\n")
-```
-
----
-
-# Section 4: Overview — AUPRC by EB Category
-
-```{r auprc-overview, message=FALSE}
-# Collapse over annotation_r2/inflate_match for overview (annotation-free methods
-# don't have these; annotation-based methods are averaged over quality levels here).
-p_overview <- ggplot(
-  auprc_tbl,
-  aes(x = reorder(short_label, AUPRC, FUN = median, na.rm = TRUE),
-      y = AUPRC,
-      fill = eb_category)
-) +
-  geom_boxplot(outlier.size = 0.5, alpha = 0.8) +
-  scale_fill_manual(values = category_palette) +
-  facet_wrap(~ architecture, ncol = 1) +
-  coord_flip() +
-  labs(
-    title = "AUPRC by use case (primary agg method)",
-    x = NULL, y = "AUPRC", fill = "EB category"
-  ) +
-  theme_minimal() +
-  theme(legend.position = "bottom", strip.text = element_text(face = "bold"))
-
-save_or_show(p_overview, "auprc_overview_by_architecture.png",
-             width = 10, height = 14, subdir = "overview")
-```
-
----
-
-# Section 5: No-Annotation EB Methods
-
-Compares: vanilla → EB variance → EB mean → EB joint (no annotations).
-
-```{r no-ann-subset}
-no_ann_ids <- c("susie_vanilla", "susine_vanilla", "susie_eb",
-                "susine_eb", "susine_eb_mean", "susine_eb_mu_var")
-
-auprc_no_ann <- auprc_tbl %>%
-  dplyr::filter(.data$use_case_id %in% no_ann_ids)
-
-no_ann_order <- c("SuSiE", "SuSiNE", "SuSiE+EB_var", "SuSiNE+EB_var",
-                  "EB_mean", "EB_mu+var")
-auprc_no_ann <- auprc_no_ann %>%
-  dplyr::mutate(
-    short_label = factor(.data$short_label, levels = no_ann_order)
-  )
-```
-
-```{r no-ann-plot, message=FALSE}
-p_no_ann <- ggplot(
-  auprc_no_ann,
-  aes(x = short_label, y = AUPRC, fill = eb_category)
-) +
-  geom_boxplot(outlier.size = 0.5, alpha = 0.8) +
-  scale_fill_manual(values = category_palette) +
-  facet_wrap(~ architecture) +
-  labs(
-    title = "AUPRC: no-annotation EB methods",
-    subtitle = "Does EB variance/mean/joint estimation improve over vanilla?",
-    x = NULL, y = "AUPRC", fill = "EB category"
-  ) +
-  theme_minimal() +
-  theme(axis.text.x = element_text(angle = 30, hjust = 1),
-        legend.position = "bottom")
-
-save_or_show(p_no_ann, "auprc_no_annotation_eb.png", subdir = "no_ann")
-```
-
-```{r no-ann-by-pstar, message=FALSE}
-# Facet by p_star to see if EB methods help more in oligogenic settings.
-if ("p_star" %in% names(auprc_no_ann) && any(!is.na(auprc_no_ann$p_star))) {
-  p_no_ann_pstar <- ggplot(
-    auprc_no_ann %>% dplyr::filter(!is.na(.data$p_star)),
-    aes(x = short_label, y = AUPRC, fill = eb_category)
-  ) +
-    geom_boxplot(outlier.size = 0.5, alpha = 0.8) +
-    scale_fill_manual(values = category_palette) +
-    facet_grid(architecture ~ p_star, labeller = label_both) +
-    labs(
-      title = "AUPRC vs p* (no-annotation EB methods)",
-      x = NULL, y = "AUPRC", fill = "EB category"
-    ) +
-    theme_minimal() +
-    theme(axis.text.x = element_text(angle = 35, hjust = 1),
-          legend.position = "bottom")
-
-  save_or_show(p_no_ann_pstar, "auprc_no_annotation_by_pstar.png",
-               width = 16, height = 10, subdir = "no_ann")
+if ("c_value" %in% names(model_metrics) && "elbo_final" %in% names(model_metrics)) {
+  best_c_lookup <- model_metrics %>%
+    dplyr::filter(
+      .data$use_case_id == "susine_functional_mu",
+      .data$filtering   == "purity_filtered",
+      .data$architecture %in% TARGET_ARCHS
+    ) %>%
+    dplyr::group_by(dplyr::across(dplyr::all_of(c(best_c_keys, "c_value")))) %>%
+    dplyr::summarise(mean_elbo = mean(.data$elbo_final, na.rm = TRUE), .groups = "drop") %>%
+    dplyr::group_by(dplyr::across(dplyr::all_of(best_c_keys))) %>%
+    dplyr::slice_max(.data$mean_elbo, n = 1, with_ties = FALSE) %>%
+    dplyr::ungroup() %>%
+    dplyr::select(-"mean_elbo")
+  cat("best_c_lookup rows:", nrow(best_c_lookup), "\n")
+  if (nrow(best_c_lookup) > 0) {
+    cat("Best c_value distribution:\n")
+    print(table(best_c_lookup$c_value, useNA = "ifany"))
+  }
+} else {
+  message("c_value or elbo_final not in model_metrics — susine_functional_mu uses all c values.")
+  best_c_lookup <- NULL
 }
 ```
 
----
+## 3.3 Build `conf_fair`
 
-# Section 6: Annotation-Based EB Methods (scale_var variants)
+```{r conf-fair}
+conf_functional_best <- conf_base %>%
+  dplyr::filter(.data$use_case_id == "susine_functional_mu")
 
-Compares all annotation-based joint EB methods against susine_vanilla and
-susine_functional_mu (fixed c-grid) baselines.
+if (!is.null(best_c_lookup) && "c_value" %in% names(conf_base)) {
+  conf_join_keys <- intersect(names(best_c_lookup), names(conf_base))
+  conf_join_keys <- conf_join_keys[conf_join_keys != "c_value"]
+  all_join_keys  <- c(conf_join_keys, "c_value")
+  conf_functional_best <- conf_functional_best %>%
+    dplyr::semi_join(best_c_lookup, by = all_join_keys)
+}
 
-```{r ann-eb-subset}
-ann_eb_ids <- c(
-  "susine_vanilla",
-  "susine_functional_mu",
-  "susine_eb_scale_var",          "susine_eb_scale_var_nonneg",
-  "susine_eb_penalized_scale_var", "susine_eb_penalized_scale_var_nonneg",
-  "susine_eb_scale_var_outer",    "susine_eb_scale_var_outer_nonneg",
-  "susine_eb_clamped_scale_var",  "susine_eb_clamped_scale_var_nonneg",
-  "susine_eb_alternating_scale_var", "susine_eb_alternating_scale_var_nonneg"
-)
+conf_fair <- conf_base %>%
+  dplyr::filter(.data$use_case_id != "susine_functional_mu") %>%
+  dplyr::bind_rows(conf_functional_best)
 
-auprc_ann_eb <- auprc_tbl %>%
+cat("conf_fair rows:", nrow(conf_fair), "\n")
+```
+
+## 3.4 Compute pooled power-FDR curves
+
+```{r pfd-curves}
+# One curve per (use_case_id, architecture): pools all datasets + annotation conditions
+overall_pfd <- test_susine::compute_power_fdr_curves(
+  conf_fair,
+  group_vars = c("use_case_id", "architecture")
+) %>% add_uc_cols()
+
+# Also stratified by annotation_r2 + inflate_match (for annotation sections)
+if (all(c("annotation_r2", "inflate_match") %in% names(conf_fair))) {
+  annot_pfd <- test_susine::compute_power_fdr_curves(
+    conf_fair %>% dplyr::filter(!is.na(.data$annotation_r2)),
+    group_vars = c("use_case_id", "architecture", "annotation_r2", "inflate_match")
+  ) %>% add_uc_cols()
+} else {
+  annot_pfd <- NULL
+}
+
+# Oligogenic top-8 curve (uses top_n_causal == 8 rows if available)
+if ("top_n_causal" %in% names(conf_fair)) {
+  oligo_top8_pfd <- test_susine::compute_power_fdr_curves(
+    conf_fair %>% dplyr::filter(
+      .data$architecture == "susie2_oligogenic",
+      !is.na(.data$top_n_causal) & .data$top_n_causal == 8L
+    ),
+    group_vars = c("use_case_id", "architecture")
+  ) %>% add_uc_cols()
+} else {
+  oligo_top8_pfd <- NULL
+}
+
+cat("overall_pfd rows:", nrow(overall_pfd), "\n")
+cat("fpr column present:", "fpr" %in% names(overall_pfd), "\n")
+```
+
+## 3.5 Extract TPR @ FPR thresholds
+
+```{r tpr-overall}
+tpr_overall <- tpr_from_pfd(overall_pfd)
+cat("tpr_overall rows:", nrow(tpr_overall), "\n")
+cat("tpr_fpr10 range:", range(tpr_overall$tpr_fpr10, na.rm = TRUE), "\n")
+```
+
+## 3.6 CS metrics from model_metrics
+
+```{r cs-metrics}
+mm_base <- model_metrics %>%
   dplyr::filter(
-    .data$use_case_id %in% ann_eb_ids,
-    !is.na(.data$annotation_r2) | .data$use_case_id == "susine_vanilla"
+    .data$filtering   == "purity_filtered",
+    .data$architecture %in% TARGET_ARCHS
   )
-```
 
-```{r ann-eb-by-r2, message=FALSE}
-# AUPRC by method × annotation_r2, faceted by inflate_match.
-p_ann_r2 <- ggplot(
-  auprc_ann_eb %>% dplyr::filter(!is.na(.data$annotation_r2)),
-  aes(x = factor(annotation_r2), y = AUPRC,
-      fill = short_label, color = short_label)
-) +
-  geom_boxplot(alpha = 0.5, outlier.size = 0.4, position = position_dodge(0.8)) +
-  facet_grid(architecture ~ inflate_match, labeller = label_both) +
-  labs(
-    title = "Annotation-based EB methods: AUPRC vs annotation quality",
-    subtitle = "Faceted by inflate_match (annotation inflation factor)",
-    x = "annotation_r2", y = "AUPRC",
-    fill = "Method", color = "Method"
-  ) +
-  theme_minimal() +
-  theme(legend.position = "bottom",
-        legend.text = element_text(size = 7),
-        strip.text = element_text(face = "bold"))
+# Best-c filter for susine_functional_mu in model_metrics
+mm_functional_best <- mm_base %>%
+  dplyr::filter(.data$use_case_id == "susine_functional_mu")
 
-save_or_show(p_ann_r2, "auprc_ann_eb_by_r2_inflate.png",
-             width = 16, height = 12, subdir = "ann_eb")
-```
+if (!is.null(best_c_lookup) && "c_value" %in% names(mm_base)) {
+  mm_join_keys <- intersect(names(best_c_lookup), names(mm_base))
+  mm_all_join  <- c(mm_join_keys[mm_join_keys != "c_value"], "c_value")
+  mm_functional_best <- mm_functional_best %>%
+    dplyr::semi_join(best_c_lookup, by = intersect(mm_all_join, names(.)))
+}
 
-```{r ann-eb-winner, message=FALSE}
-# Median AUPRC per method × annotation_r2 — which method wins most often?
-winner_tbl <- auprc_ann_eb %>%
-  dplyr::filter(!is.na(.data$annotation_r2)) %>%
-  dplyr::group_by(.data$use_case_id, .data$short_label,
-                  .data$architecture, .data$annotation_r2, .data$inflate_match) %>%
+mm_fair <- mm_base %>%
+  dplyr::filter(.data$use_case_id != "susine_functional_mu") %>%
+  dplyr::bind_rows(mm_functional_best) %>%
+  add_uc_cols() %>%
+  dplyr::mutate(cs_fdr = 1 - .data$mean_coverage)
+
+# Per-(use_case, architecture, p_star) CS summary
+# p_star varies for sparse; is NA for oligogenic (use NA as a dummy level)
+cs_metrics <- mm_fair %>%
+  dplyr::mutate(
+    p_star_lbl = dplyr::if_else(!is.na(.data$p_star), as.character(.data$p_star), "fixed"),
+    sigma_lbl  = dplyr::if_else(!is.na(.data$sigma_0_2_scalar),
+                                as.character(.data$sigma_0_2_scalar), "EB")
+  ) %>%
+  dplyr::group_by(.data$use_case_id, .data$short_label, .data$eb_category,
+                  .data$has_eb, .data$needs_annotation,
+                  .data$architecture, .data$p_star_lbl, .data$sigma_lbl) %>%
   dplyr::summarise(
-    median_AUPRC = median(.data$AUPRC, na.rm = TRUE),
-    n            = dplyr::n(),
+    mean_cs_power = mean(.data$power,   na.rm = TRUE),
+    mean_cs_fdr   = mean(.data$cs_fdr,  na.rm = TRUE),
+    mean_hg2      = mean(.data$hg2,     na.rm = TRUE),
+    n_fits        = dplyr::n(),
     .groups = "drop"
   )
 
-readr::write_csv(winner_tbl,
-  file.path(plot_dirs$tables, "ann_eb_winner_table.csv"))
-cat("Wrote ann_eb_winner_table.csv\n")
-
-# Heatmap: method × annotation_r2 median AUPRC (best architecture only)
-best_arch <- winner_tbl %>%
-  dplyr::group_by(.data$architecture) %>%
-  dplyr::summarise(mean_auprc = mean(.data$median_AUPRC, na.rm = TRUE)) %>%
-  dplyr::slice_max(.data$mean_auprc, n = 1) %>%
-  dplyr::pull(.data$architecture)
-
-p_heatmap <- winner_tbl %>%
-  dplyr::filter(.data$architecture == best_arch[1]) %>%
-  ggplot(aes(x = factor(annotation_r2), y = short_label, fill = median_AUPRC)) +
-  geom_tile(color = "white") +
-  scale_fill_viridis_c(option = "plasma", name = "Median\nAUPRC") +
-  facet_wrap(~ inflate_match, labeller = label_both) +
-  labs(
-    title = sprintf("Median AUPRC heatmap — annotation EB methods (%s)", best_arch[1]),
-    x = "annotation_r2", y = NULL
-  ) +
-  theme_minimal() +
-  theme(strip.text = element_text(face = "bold"))
-
-save_or_show(p_heatmap, "auprc_heatmap_ann_eb.png",
-             width = 14, height = 8, subdir = "ann_eb")
+cat("cs_metrics rows:", nrow(cs_metrics), "\n")
 ```
 
----
+## 3.7 Per-run ranks (for master table)
 
-# Section 7: Scale-Only EB (sigma grid)
+```{r ranks}
+rank_id_col <- if ("dataset_bundle_id" %in% names(mm_fair)) "dataset_bundle_id" else "matrix_id"
 
-`susine_eb_scale` fixes mu_0 and optimizes only c; run across sigma_0_2_scalar grid.
+ranks_tbl <- mm_fair %>%
+  dplyr::group_by(.data[[rank_id_col]], .data$architecture) %>%
+  dplyr::mutate(
+    auprc_rank  = rank(-.data$AUPRC,        ties.method = "min"),
+    tpr10_rank  = if ("tpr_at_fpr_10" %in% names(.))
+                    rank(-.data$tpr_at_fpr_10, ties.method = "min")
+                  else NA_integer_,
+    n_competing = dplyr::n()
+  ) %>%
+  dplyr::ungroup()
 
-```{r scale-only-plot, message=FALSE}
-auprc_scale <- auprc_tbl %>%
-  dplyr::filter(.data$use_case_id %in% c("susine_eb_scale", "susine_eb_scale_nonneg",
-                                          "susine_vanilla"))
+cat("Ranked rows:", nrow(ranks_tbl), "\n")
+```
 
-if (nrow(auprc_scale) > 0 && "sigma_0_2_scalar" %in% names(auprc_scale)) {
-  p_scale <- ggplot(
-    auprc_scale %>% dplyr::filter(!is.na(.data$annotation_r2) |
-                                    .data$use_case_id == "susine_vanilla"),
-    aes(x = factor(sigma_0_2_scalar), y = AUPRC, fill = short_label)
-  ) +
-    geom_boxplot(alpha = 0.7, outlier.size = 0.4) +
-    facet_grid(architecture ~ annotation_r2, labeller = label_both) +
-    labs(
-      title = "Scale-only EB (c optimized, sigma fixed): AUPRC vs sigma_0_2",
-      x = "sigma_0_2_scalar", y = "AUPRC", fill = "Method"
-    ) +
-    theme_minimal() +
-    theme(legend.position = "bottom")
+## 3.8 Tier CS summary (computed once, filtered per section)
 
-  save_or_show(p_scale, "auprc_scale_only_eb.png",
-               width = 14, height = 10, subdir = "ann_eb")
+```{r tier-summary}
+tier_summary <- if (!is.null(tier_cs_metrics) && nrow(tier_cs_metrics) > 0) {
+  tier_cs_metrics %>%
+    dplyr::filter(.data$filtering == "purity_filtered") %>%
+    dplyr::group_by(.data$use_case_id, .data$short_label, .data$eb_category,
+                    .data$architecture, .data$n_top) %>%
+    dplyr::summarise(
+      mean_cs_power = mean(.data$cs_power, na.rm = TRUE),
+      mean_cs_fdr   = mean(.data$cs_fdr,   na.rm = TRUE),
+      .groups = "drop"
+    )
+} else {
+  NULL
+}
+
+if (!is.null(tier_summary)) {
+  cat("tier_summary rows:", nrow(tier_summary), "\n")
+  cat("n_top values:", sort(unique(tier_summary$n_top)), "\n")
+} else {
+  message("No tier_cs_metrics — oligogenic top-N panels will be skipped in all sections.")
 }
 ```
 
 ---
 
-# Section 8: nonneg Constraint Effect
+# Section 4: Baseline — No Annotations, No EB
 
-Paired comparison: for each annotation-based method, does the nonneg
-constraint on c help or hurt?
+Uses `susine_vanilla` only (susie and susine replicate; color by sigma_0_2_scalar).
 
-```{r nonneg-comparison, message=FALSE}
-# Pivot wide: AUPRC for unconstrained vs nonneg, matched by dataset scenario.
-paired_vars <- intersect(
-  c("architecture", "annotation_r2", "inflate_match",
-    "sigma_0_2_scalar", "matrix_id", "y_noise", "p_star", "L", "method_base"),
-  names(auprc_tbl)
+## 4.1 Sparse high-level panels (SuSiE2 Fig 1B-E)
+
+```{r s4-prep}
+s4_cs <- cs_metrics %>%
+  dplyr::filter(.data$use_case_id == "susine_vanilla")
+
+s4_pfd <- overall_pfd %>%
+  dplyr::filter(.data$use_case_id == "susine_vanilla")
+
+cat("S4 cs rows:", nrow(s4_cs), "\n")
+```
+
+```{r s4-cs-panels, message=FALSE, fig.width=12, fig.height=5}
+panels_s4 <- plot_cs_panels(
+  cs_sub       = s4_cs,
+  x_var        = "p_star_lbl",
+  color_var    = "sigma_lbl",
+  facet_var    = "architecture",
+  title_prefix = "Baseline (susine_vanilla): "
+)
+for (nm in names(panels_s4)) {
+  if (!is.null(panels_s4[[nm]])) {
+    save_or_show(panels_s4[[nm]], sprintf("s4_%s.png", nm),
+                 width = 12, height = 5, subdir = "baseline")
+  }
+}
+```
+
+```{r s4-tpr-fpr, message=FALSE, fig.width=10, fig.height=5}
+curves_s4 <- plot_tpr_fpr(s4_pfd, color_var = "sigma_lbl",
+                           title = "Baseline (susine_vanilla): Variant-level TPR vs FPR")
+if (!is.null(curves_s4$narrow)) {
+  save_or_show(curves_s4$narrow, "s4_tpr_fpr_narrow.png", width = 10, height = 5, subdir = "baseline")
+  save_or_show(curves_s4$wide,   "s4_tpr_fpr_wide.png",   width = 10, height = 5, subdir = "baseline")
+}
+```
+
+## 4.2 Oligogenic high-level panels (SuSiE2 Fig 1F-I)
+
+```{r s4-oligo-tier, message=FALSE, fig.width=10, fig.height=6}
+if (!is.null(tier_summary)) {
+  s4_tier <- tier_summary %>%
+    dplyr::filter(.data$use_case_id == "susine_vanilla",
+                  .data$architecture == "susie2_oligogenic")
+
+  tier_panels_s4 <- plot_tier_cs(s4_tier, color_var = "short_label",
+                                  title_prefix = "Baseline: ")
+  if (!is.null(tier_panels_s4)) {
+    for (nm in names(tier_panels_s4)) {
+      save_or_show(tier_panels_s4[[nm]], sprintf("s4_oligo_%s.png", nm),
+                   width = 10, height = 6, subdir = "baseline")
+    }
+  }
+} else {
+  message("Tier CS data not available — oligogenic CS panels skipped for baseline.")
+}
+```
+
+```{r s4-oligo-tpr-fpr, message=FALSE, fig.width=10, fig.height=5}
+if (!is.null(oligo_top8_pfd)) {
+  s4_top8 <- oligo_top8_pfd %>%
+    dplyr::filter(.data$use_case_id == "susine_vanilla")
+
+  if (nrow(s4_top8) > 0) {
+    curves_s4_top8 <- plot_tpr_fpr(
+      s4_top8, color_var = "short_label",
+      title = "Baseline: Oligogenic TPR vs FPR (top-8 causal)"
+    )
+    if (!is.null(curves_s4_top8$narrow)) {
+      save_or_show(curves_s4_top8$narrow, "s4_oligo_top8_tpr_fpr_narrow.png",
+                   width = 10, height = 5, subdir = "baseline")
+      save_or_show(curves_s4_top8$wide,   "s4_oligo_top8_tpr_fpr_wide.png",
+                   width = 10, height = 5, subdir = "baseline")
+    }
+  }
+} else {
+  message("Top-8 confusion bins not available — oligogenic TPR/FPR skipped for baseline.")
+}
+```
+
+---
+
+# Section 5: Annotations, No EB (`susine_functional_mu`)
+
+Uses all c_values (not best-c restricted) to show how c affects performance.
+
+## 5.1 Sparse high-level panels (best-c, lumped over annotation settings)
+
+```{r s5-prep}
+s5_cs <- cs_metrics %>%
+  dplyr::filter(.data$use_case_id == "susine_functional_mu")
+
+s5_pfd_fair <- overall_pfd %>%
+  dplyr::filter(.data$use_case_id == "susine_functional_mu")
+```
+
+```{r s5-cs-panels, message=FALSE, fig.width=12, fig.height=5}
+panels_s5 <- plot_cs_panels(
+  cs_sub       = s5_cs,
+  x_var        = "p_star_lbl",
+  color_var    = "sigma_lbl",
+  facet_var    = "architecture",
+  title_prefix = "Annot, no EB (susine_functional_mu): "
+)
+for (nm in names(panels_s5)) {
+  if (!is.null(panels_s5[[nm]])) {
+    save_or_show(panels_s5[[nm]], sprintf("s5_%s.png", nm),
+                 width = 12, height = 5, subdir = "annot_noeb")
+  }
+}
+```
+
+```{r s5-tpr-fpr, message=FALSE, fig.width=10, fig.height=5}
+curves_s5 <- plot_tpr_fpr(s5_pfd_fair, color_var = "short_label",
+                           title = "Annot no EB (best-c): Variant-level TPR vs FPR")
+if (!is.null(curves_s5$narrow)) {
+  save_or_show(curves_s5$narrow, "s5_tpr_fpr_narrow.png", width = 10, height = 5, subdir = "annot_noeb")
+  save_or_show(curves_s5$wide,   "s5_tpr_fpr_wide.png",   width = 10, height = 5, subdir = "annot_noeb")
+}
+```
+
+## 5.2 Oligogenic high-level panels
+
+```{r s5-oligo-tier, message=FALSE, fig.width=10, fig.height=6}
+if (!is.null(tier_summary)) {
+  s5_tier <- tier_summary %>%
+    dplyr::filter(.data$use_case_id == "susine_functional_mu",
+                  .data$architecture == "susie2_oligogenic")
+
+  tier_panels_s5 <- plot_tier_cs(s5_tier, color_var = "short_label",
+                                  title_prefix = "Annot no EB: ")
+  if (!is.null(tier_panels_s5)) {
+    for (nm in names(tier_panels_s5)) {
+      save_or_show(tier_panels_s5[[nm]], sprintf("s5_oligo_%s.png", nm),
+                   width = 10, height = 6, subdir = "annot_noeb")
+    }
+  }
+}
+```
+
+```{r s5-oligo-tpr-fpr, message=FALSE, fig.width=10, fig.height=5}
+if (!is.null(oligo_top8_pfd)) {
+  s5_top8 <- oligo_top8_pfd %>%
+    dplyr::filter(.data$use_case_id == "susine_functional_mu")
+
+  if (nrow(s5_top8) > 0) {
+    curves_s5_top8 <- plot_tpr_fpr(
+      s5_top8, color_var = "short_label",
+      title = "Annot no EB: Oligogenic TPR vs FPR (top-8 causal)"
+    )
+    if (!is.null(curves_s5_top8$narrow)) {
+      save_or_show(curves_s5_top8$narrow, "s5_oligo_top8_tpr_fpr_narrow.png",
+                   width = 10, height = 5, subdir = "annot_noeb")
+      save_or_show(curves_s5_top8$wide,   "s5_oligo_top8_tpr_fpr_wide.png",
+                   width = 10, height = 5, subdir = "annot_noeb")
+    }
+  }
+}
+```
+
+## 5.3 Overall TPR @ FPR=0.05 vs c_value (faceted by annotation_r2 x inflate_match)
+
+```{r s5-tpr-vs-c, message=FALSE, fig.width=14, fig.height=8}
+# Use conf_base (all c values) for this section, not conf_fair
+s5_pfd_all_c <- if ("c_value" %in% names(conf_base)) {
+  test_susine::compute_power_fdr_curves(
+    conf_base %>% dplyr::filter(.data$use_case_id == "susine_functional_mu"),
+    group_vars = intersect(
+      c("use_case_id", "architecture", "annotation_r2", "inflate_match", "c_value"),
+      names(conf_base)
+    )
+  ) %>% add_uc_cols()
+} else {
+  test_susine::compute_power_fdr_curves(
+    conf_base %>% dplyr::filter(.data$use_case_id == "susine_functional_mu"),
+    group_vars = intersect(c("use_case_id", "architecture"), names(conf_base))
+  ) %>% add_uc_cols()
+}
+
+if (!is.null(s5_pfd_all_c) && "c_value" %in% names(s5_pfd_all_c)) {
+  tpr_s5 <- tpr_from_pfd(s5_pfd_all_c)
+
+  if (all(c("annotation_r2", "inflate_match") %in% names(tpr_s5))) {
+    for (arch in unique(tpr_s5$architecture)) {
+      p_s5 <- tpr_s5 %>%
+        dplyr::filter(.data$architecture == arch) %>%
+        ggplot(aes(x = .data$c_value, y = tpr_fpr05, color = use_case_id)) +
+        geom_point(size = 2) + geom_line() +
+        facet_grid(annotation_r2 ~ inflate_match, labeller = label_both) +
+        labs(
+          title = sprintf("Annot, no EB: Overall TPR @ FPR=0.05 vs c_value [%s]", arch),
+          x = "c_value (fixed annotation scale)", y = "TPR @ FPR=0.05", color = "Use case"
+        ) +
+        theme_susie2()
+      save_or_show(p_s5, sprintf("s5_tpr_fpr05_vs_c_%s.png", arch),
+                   width = 14, height = 8, subdir = "annot_noeb")
+    }
+  }
+}
+```
+
+---
+
+# Section 6: EB, No Annotations
+
+Comparison: `susie_vanilla`, `susine_vanilla`, `susie_eb`, `susine_eb`,
+`susine_eb_mean`, `susine_eb_mu_var`.
+
+## 6.1 Sparse high-level panels
+
+```{r s6-prep}
+S6_USE_CASES <- c("susie_vanilla", "susine_vanilla", "susie_eb",
+                  "susine_eb", "susine_eb_mean", "susine_eb_mu_var")
+
+s6_cs <- cs_metrics %>%
+  dplyr::filter(.data$use_case_id %in% S6_USE_CASES)
+
+s6_pfd <- overall_pfd %>%
+  dplyr::filter(.data$use_case_id %in% S6_USE_CASES)
+
+cat("S6 use cases present:", paste(sort(unique(s6_cs$use_case_id)), collapse = ", "), "\n")
+```
+
+```{r s6-cs-panels, message=FALSE, fig.width=12, fig.height=5}
+panels_s6 <- plot_cs_panels(
+  cs_sub       = s6_cs,
+  x_var        = "p_star_lbl",
+  color_var    = "short_label",
+  facet_var    = "architecture",
+  title_prefix = "EB no annot: "
+)
+for (nm in names(panels_s6)) {
+  if (!is.null(panels_s6[[nm]])) {
+    save_or_show(panels_s6[[nm]], sprintf("s6_%s.png", nm),
+                 width = 12, height = 5, subdir = "eb_noannot")
+  }
+}
+```
+
+```{r s6-tpr-fpr, message=FALSE, fig.width=10, fig.height=5}
+curves_s6 <- plot_tpr_fpr(s6_pfd, color_var = "short_label",
+                           title = "EB no annot: Variant-level TPR vs FPR")
+if (!is.null(curves_s6$narrow)) {
+  save_or_show(curves_s6$narrow, "s6_tpr_fpr_narrow.png", width = 10, height = 5, subdir = "eb_noannot")
+  save_or_show(curves_s6$wide,   "s6_tpr_fpr_wide.png",   width = 10, height = 5, subdir = "eb_noannot")
+}
+```
+
+## 6.2 Oligogenic high-level panels
+
+```{r s6-oligo-tier, message=FALSE, fig.width=10, fig.height=6}
+if (!is.null(tier_summary)) {
+  s6_tier <- tier_summary %>%
+    dplyr::filter(.data$use_case_id %in% S6_USE_CASES,
+                  .data$architecture == "susie2_oligogenic")
+
+  tier_panels_s6 <- plot_tier_cs(s6_tier, color_var = "short_label",
+                                  title_prefix = "EB no annot: ")
+  if (!is.null(tier_panels_s6)) {
+    for (nm in names(tier_panels_s6)) {
+      save_or_show(tier_panels_s6[[nm]], sprintf("s6_oligo_%s.png", nm),
+                   width = 10, height = 6, subdir = "eb_noannot")
+    }
+  }
+}
+```
+
+```{r s6-oligo-tpr-fpr, message=FALSE, fig.width=10, fig.height=5}
+if (!is.null(oligo_top8_pfd)) {
+  s6_top8 <- oligo_top8_pfd %>%
+    dplyr::filter(.data$use_case_id %in% S6_USE_CASES)
+
+  if (nrow(s6_top8) > 0) {
+    curves_s6_top8 <- plot_tpr_fpr(
+      s6_top8, color_var = "short_label",
+      title = "EB no annot: Oligogenic TPR vs FPR (top-8 causal)"
+    )
+    if (!is.null(curves_s6_top8$narrow)) {
+      save_or_show(curves_s6_top8$narrow, "s6_oligo_top8_tpr_fpr_narrow.png",
+                   width = 10, height = 5, subdir = "eb_noannot")
+      save_or_show(curves_s6_top8$wide,   "s6_oligo_top8_tpr_fpr_wide.png",
+                   width = 10, height = 5, subdir = "eb_noannot")
+    }
+  }
+}
+```
+
+---
+
+# Section 7: EB with Annotations
+
+All annotation-based EB methods plus `susine_functional_mu` (best-c) as baseline.
+
+## 7.1 Sparse high-level panels (lumped over annotation conditions)
+
+```{r s7-prep}
+S7_USE_CASES <- c(
+  "susine_functional_mu",
+  "susine_eb_scale", "susine_eb_scale_nonneg",
+  "susine_eb_scale_var", "susine_eb_scale_var_nonneg",
+  "susine_eb_penalized_scale_var", "susine_eb_penalized_scale_var_nonneg",
+  "susine_eb_scale_var_outer", "susine_eb_scale_var_outer_nonneg",
+  "susine_eb_clamped_scale_var", "susine_eb_clamped_scale_var_nonneg",
+  "susine_eb_alternating_scale_var", "susine_eb_alternating_scale_var_nonneg"
 )
 
-auprc_nonneg <- auprc_tbl %>%
-  dplyr::filter(.data$eb_category == "ann_eb_joint") %>%
-  dplyr::select(dplyr::all_of(c(paired_vars, "nonneg", "AUPRC"))) %>%
-  tidyr::pivot_wider(
-    names_from  = "nonneg",
-    values_from = "AUPRC",
-    names_prefix = "nonneg_"
+s7_cs <- cs_metrics %>%
+  dplyr::filter(.data$use_case_id %in% S7_USE_CASES)
+
+s7_pfd <- overall_pfd %>%
+  dplyr::filter(.data$use_case_id %in% S7_USE_CASES)
+
+s7_annot_pfd <- if (!is.null(annot_pfd)) {
+  annot_pfd %>% dplyr::filter(.data$use_case_id %in% S7_USE_CASES)
+} else {
+  NULL
+}
+
+cat("S7 use cases present:", paste(sort(unique(s7_cs$use_case_id)), collapse = ", "), "\n")
+```
+
+```{r s7-cs-panels, message=FALSE, fig.width=14, fig.height=5}
+panels_s7 <- plot_cs_panels(
+  cs_sub       = s7_cs,
+  x_var        = "p_star_lbl",
+  color_var    = "short_label",
+  facet_var    = "architecture",
+  title_prefix = "EB with annot: "
+)
+for (nm in names(panels_s7)) {
+  if (!is.null(panels_s7[[nm]])) {
+    save_or_show(panels_s7[[nm]], sprintf("s7_%s.png", nm),
+                 width = 14, height = 5, subdir = "eb_annot")
+  }
+}
+```
+
+```{r s7-tpr-fpr, message=FALSE, fig.width=10, fig.height=5}
+curves_s7 <- plot_tpr_fpr(s7_pfd, color_var = "short_label",
+                           title = "EB with annot: Variant-level TPR vs FPR")
+if (!is.null(curves_s7$narrow)) {
+  save_or_show(curves_s7$narrow, "s7_tpr_fpr_narrow.png", width = 10, height = 5, subdir = "eb_annot")
+  save_or_show(curves_s7$wide,   "s7_tpr_fpr_wide.png",   width = 10, height = 5, subdir = "eb_annot")
+}
+```
+
+## 7.2 Oligogenic high-level panels
+
+```{r s7-oligo-tier, message=FALSE, fig.width=12, fig.height=6}
+if (!is.null(tier_summary)) {
+  s7_tier <- tier_summary %>%
+    dplyr::filter(.data$use_case_id %in% S7_USE_CASES,
+                  .data$architecture == "susie2_oligogenic")
+
+  tier_panels_s7 <- plot_tier_cs(s7_tier, color_var = "short_label",
+                                  title_prefix = "EB with annot: ")
+  if (!is.null(tier_panels_s7)) {
+    for (nm in names(tier_panels_s7)) {
+      save_or_show(tier_panels_s7[[nm]], sprintf("s7_oligo_%s.png", nm),
+                   width = 12, height = 6, subdir = "eb_annot")
+    }
+  }
+}
+```
+
+```{r s7-oligo-tpr-fpr, message=FALSE, fig.width=10, fig.height=5}
+if (!is.null(oligo_top8_pfd)) {
+  s7_top8 <- oligo_top8_pfd %>%
+    dplyr::filter(.data$use_case_id %in% S7_USE_CASES)
+
+  if (nrow(s7_top8) > 0) {
+    curves_s7_top8 <- plot_tpr_fpr(
+      s7_top8, color_var = "short_label",
+      title = "EB with annot: Oligogenic TPR vs FPR (top-8 causal)"
+    )
+    if (!is.null(curves_s7_top8$narrow)) {
+      save_or_show(curves_s7_top8$narrow, "s7_oligo_top8_tpr_fpr_narrow.png",
+                   width = 10, height = 5, subdir = "eb_annot")
+      save_or_show(curves_s7_top8$wide,   "s7_oligo_top8_tpr_fpr_wide.png",
+                   width = 10, height = 5, subdir = "eb_annot")
+    }
+  }
+}
+```
+
+## 7.3 Overall TPR @ FPR=0.05 vs annotation_r2 (faceted by architecture x inflate_match)
+
+```{r s7-tpr-vs-annot, message=FALSE, fig.width=14, fig.height=8}
+if (!is.null(s7_annot_pfd) && nrow(s7_annot_pfd) > 0) {
+  tpr_s7 <- tpr_from_pfd(s7_annot_pfd)
+
+  p_s7_tpr <- ggplot(tpr_s7, aes(x = annotation_r2, y = tpr_fpr05, color = short_label)) +
+    geom_point(size = 2) + geom_line() +
+    facet_grid(architecture ~ inflate_match,
+               labeller = labeller(architecture = arch_labels, inflate_match = label_both)) +
+    scale_x_continuous(breaks = sort(unique(tpr_s7$annotation_r2))) +
+    labs(
+      title = "EB with annot: Overall TPR @ FPR=0.05 vs annotation_r2",
+      x = "Annotation R\u00b2", y = "TPR @ FPR=0.05", color = "Method"
+    ) +
+    theme_susie2()
+  save_or_show(p_s7_tpr, "s7_tpr_fpr05_vs_annot_r2.png",
+               width = 14, height = 8, subdir = "eb_annot")
+}
+```
+
+## 7.4 Nonneg constraint comparison
+
+```{r s7-nonneg, message=FALSE, fig.width=10, fig.height=6}
+tpr_nonneg <- tpr_overall %>%
+  dplyr::filter(.data$use_case_id %in% S7_USE_CASES,
+                .data$needs_annotation) %>%
+  dplyr::mutate(
+    nonneg      = stringr::str_ends(.data$use_case_id, "_nonneg"),
+    method_base = stringr::str_remove(.data$use_case_id, "_nonneg$")
+  )
+
+if (nrow(tpr_nonneg) > 0 && any(tpr_nonneg$nonneg)) {
+  tpr_nonneg_wide <- tpr_nonneg %>%
+    dplyr::select("method_base", "architecture", "nonneg", "tpr_fpr10") %>%
+    tidyr::pivot_wider(names_from = "nonneg", values_from = "tpr_fpr10",
+                       names_prefix = "nonneg_") %>%
+    dplyr::rename(tpr_unconstrained = nonneg_FALSE, tpr_nonneg = nonneg_TRUE)
+
+  if ("tpr_unconstrained" %in% names(tpr_nonneg_wide) &&
+      "tpr_nonneg" %in% names(tpr_nonneg_wide)) {
+    p_nonneg <- ggplot(tpr_nonneg_wide,
+                       aes(x = tpr_unconstrained, y = tpr_nonneg, color = method_base)) +
+      geom_point(size = 2.5) +
+      geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray50") +
+      facet_wrap(~ architecture, labeller = labeller(.cols = arch_labels)) +
+      labs(
+        title = "Nonneg constraint effect: TPR@FPR=0.1",
+        x = "Unconstrained (TPR@FPR=0.1)", y = "Nonneg constrained (TPR@FPR=0.1)",
+        color = "Method base"
+      ) +
+      theme_susie2()
+    save_or_show(p_nonneg, "s7_nonneg_scatter.png", width = 10, height = 6, subdir = "eb_annot")
+  }
+}
+```
+
+---
+
+# Section 8: Master Summary Table
+
+One row per (use_case_id, architecture). Primary sort: overall TPR@FPR=0.1 descending.
+
+```{r master-table}
+# Overall AUPRC pooled across all datasets
+overall_auprc <- test_susine::compute_auprc_from_confusion(
+  conf_fair, group_vars = c("use_case_id", "architecture")
+) %>% add_uc_cols() %>%
+  dplyr::rename(overall_AUPRC = "AUPRC")
+
+# Rank stats
+rank_stats <- ranks_tbl %>%
+  dplyr::group_by(.data$use_case_id, .data$architecture) %>%
+  dplyr::summarise(
+    pct_rank1_tpr10 = if (all(is.na(.data$tpr10_rank))) NA_real_
+                      else mean(.data$tpr10_rank == 1L, na.rm = TRUE),
+    pct_top3_tpr10  = if (all(is.na(.data$tpr10_rank))) NA_real_
+                      else mean(.data$tpr10_rank <= 3L, na.rm = TRUE),
+    n_fits = dplyr::n(),
+    .groups = "drop"
+  )
+
+# Sigma / c fixed values (first non-NA per use_case, if applicable)
+fixed_params <- mm_fair %>%
+  dplyr::group_by(.data$use_case_id, .data$architecture) %>%
+  dplyr::summarise(
+    sigma_fixed = {
+      vals <- unique(na.omit(.data$sigma_0_2_scalar))
+      if (length(vals) == 1L) vals else NA_character_
+    },
+    c_fixed = if ("c_value" %in% names(.)) {
+      vals <- unique(na.omit(.data$c_value))
+      if (length(vals) == 1L) as.character(vals) else NA_character_
+    } else NA_character_,
+    .groups = "drop"
+  )
+
+master_table <- overall_auprc %>%
+  dplyr::left_join(tpr_overall,   by = c("use_case_id", "architecture")) %>%
+  dplyr::left_join(rank_stats,    by = c("use_case_id", "architecture")) %>%
+  dplyr::left_join(fixed_params,  by = c("use_case_id", "architecture")) %>%
+  dplyr::mutate(
+    has_annotation = uc_needs_annotation[.data$use_case_id],
+    has_eb         = uc_has_eb[.data$use_case_id],
+    eb_type        = uc_eb_target[.data$use_case_id]
   ) %>%
-  dplyr::rename(AUPRC_unconstrained = nonneg_FALSE,
-                AUPRC_nonneg        = nonneg_TRUE) %>%
-  dplyr::mutate(delta_nonneg = .data$AUPRC_nonneg - .data$AUPRC_unconstrained)
+  dplyr::select(
+    "use_case_id", "short_label", "architecture",
+    "has_annotation", "has_eb", "eb_type",
+    "c_fixed", "sigma_fixed",
+    "overall_AUPRC", "tpr_fpr05", "tpr_fpr10",
+    "pct_rank1_tpr10", "pct_top3_tpr10",
+    "n_fits"
+  ) %>%
+  dplyr::arrange(dplyr::desc(.data$tpr_fpr10), dplyr::desc(.data$overall_AUPRC))
 
-if (nrow(auprc_nonneg) > 0 && "AUPRC_unconstrained" %in% names(auprc_nonneg)) {
-  p_nonneg_scatter <- ggplot(
-    auprc_nonneg,
-    aes(x = AUPRC_unconstrained, y = AUPRC_nonneg,
-        color = method_base)
-  ) +
-    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray50") +
-    geom_point(alpha = 0.5, size = 0.8) +
-    facet_wrap(~ architecture) +
-    labs(
-      title = "nonneg constraint: AUPRC head-to-head per method",
-      subtitle = "Above diagonal = nonneg helps",
-      x = "AUPRC (unconstrained)", y = "AUPRC (nonneg)",
-      color = "Base method"
-    ) +
-    theme_minimal() +
-    theme(legend.position = "bottom",
-          legend.text = element_text(size = 8))
+readr::write_csv(master_table, file.path(plot_dirs$master, "master_summary.csv"))
+cat("Wrote master_summary.csv\n")
 
-  save_or_show(p_nonneg_scatter, "nonneg_head_to_head.png",
-               width = 12, height = 8, subdir = "nonneg")
-
-  p_nonneg_delta <- ggplot(
-    auprc_nonneg,
-    aes(x = delta_nonneg, fill = method_base)
-  ) +
-    geom_histogram(bins = 30, alpha = 0.7) +
-    geom_vline(xintercept = 0, linetype = "dashed") +
-    facet_grid(method_base ~ architecture, scales = "free_y") +
-    labs(
-      title = "AUPRC delta (nonneg - unconstrained) by method",
-      x = "Delta AUPRC", y = "Count", fill = "Base method"
-    ) +
-    theme_minimal() +
-    theme(legend.position = "none",
-          strip.text.y = element_text(size = 7))
-
-  save_or_show(p_nonneg_delta, "nonneg_delta_histogram.png",
-               width = 14, height = 10, subdir = "nonneg")
-}
+master_table %>%
+  dplyr::mutate(dplyr::across(dplyr::where(is.numeric), ~ round(.x, 3))) %>%
+  knitr::kable(caption = "Master summary (ranked by overall TPR@FPR=0.1, then AUPRC)")
 ```
 
 ---
 
-# Section 9: Power-FDR Curves
+# Section 9: Prior Diagnostics
 
-```{r pwr-fdr-no-ann, message=FALSE}
-# No-annotation methods overall.
-conf_no_ann <- conf %>%
-  dplyr::filter(.data$use_case_id %in% no_ann_ids)
-
-if (nrow(conf_no_ann) > 0) {
-  curves_no_ann <- test_susine::compute_power_fdr_curves(
-    conf_no_ann,
-    group_vars = c("use_case_id", "architecture")
-  )
-
-  no_ann_pal <- setNames(
-    scales::hue_pal()(length(no_ann_ids)),
-    no_ann_ids
-  )
-
-  p_curves_no_ann <- ggplot(
-    curves_no_ann,
-    aes(x = fdr, y = power, color = use_case_id)
-  ) +
-    geom_line(linewidth = 0.8) +
-    facet_wrap(~ architecture) +
-    labs(
-      title = "Power vs FDR — no-annotation EB methods",
-      x = "FDR (1 - Precision)", y = "Power (Recall)",
-      color = "Use case"
-    ) +
-    theme_minimal() +
-    theme(legend.position = "bottom")
-
-  save_or_show(p_curves_no_ann, "power_fdr_no_annotation.png",
-               subdir = "overview")
-}
-```
-
-```{r pwr-fdr-ann-eb, message=FALSE}
-# Annotation EB methods at best annotation quality.
-best_r2 <- if ("annotation_r2" %in% names(conf))
-  max(conf$annotation_r2, na.rm = TRUE) else NA
-
-conf_ann_best <- conf %>%
-  dplyr::filter(
-    .data$use_case_id %in% ann_eb_ids,
-    is.na(.data$annotation_r2) | .data$annotation_r2 == best_r2
-  )
-
-if (nrow(conf_ann_best) > 0) {
-  curves_ann <- test_susine::compute_power_fdr_curves(
-    conf_ann_best,
-    group_vars = c("use_case_id", "architecture")
-  )
-
-  p_curves_ann <- ggplot(curves_ann, aes(x = fdr, y = power, color = use_case_id)) +
-    geom_line(linewidth = 0.7) +
-    facet_wrap(~ architecture) +
-    labs(
-      title = sprintf("Power vs FDR — annotation EB methods (r2 = %.1f)", best_r2),
-      x = "FDR", y = "Power", color = "Use case"
-    ) +
-    theme_minimal() +
-    theme(legend.position = "bottom",
-          legend.text = element_text(size = 7))
-
-  save_or_show(p_curves_ann, "power_fdr_annotation_eb_best_r2.png",
-               subdir = "ann_eb")
-}
-```
-
----
-
-# Section 10: Prior Diagnostics
-
-Visualizes what EB methods actually learned: distribution of c_l and
-sigma_0_2_l per effect across datasets.
+What do EB methods actually learn? Distributions of c_l and sigma_0_2_l per effect.
 
 ```{r prior-diag-check}
 if (!is.null(prior_diagnostics) && nrow(prior_diagnostics) > 0) {
-  cat("prior_diagnostics columns:\n")
-  print(names(prior_diagnostics))
-  cat("\nRows:", nrow(prior_diagnostics), "\n")
-  cat("use_case_id values:\n")
+  cat("prior_diagnostics rows:", nrow(prior_diagnostics), "\n")
+  cat("Columns:", paste(names(prior_diagnostics), collapse = ", "), "\n")
+  cat("use_case_id counts:\n")
   print(table(prior_diagnostics$use_case_id, useNA = "ifany"))
+} else {
+  message("No prior_diagnostics available — skipping Section 9.")
+  knitr::knit_exit()
 }
 ```
 
 ```{r prior-diag-c, message=FALSE}
-if (!is.null(prior_diagnostics)) {
-  c_col <- intersect(c("c_l", "c_value", "c"), names(prior_diagnostics))[1]
-  sig_col <- intersect(c("sigma_0_2_l", "sigma_0_2", "sigma_l"), names(prior_diagnostics))[1]
+c_col   <- intersect(c("c_l", "c_value", "c"), names(prior_diagnostics))[1]
+sig_col <- intersect(c("sigma_0_2_l", "sigma_0_2", "sigma_l"), names(prior_diagnostics))[1]
 
-  if (!is.na(c_col)) {
-    pd <- prior_diagnostics %>%
-      dplyr::mutate(
-        short_label = dplyr::recode(.data$use_case_id, !!!uc_short_label,
-                                    .default = .data$use_case_id),
-        eb_category = dplyr::recode(.data$use_case_id, !!!uc_category, .default = "other")
-      ) %>%
-      dplyr::filter(!is.na(.data[[c_col]]))
+if (!is.na(c_col)) {
+  pd <- prior_diagnostics %>%
+    add_uc_cols() %>%
+    dplyr::filter(!is.na(.data[[c_col]]),
+                  .data$eb_category != "baseline",
+                  .data$eb_category != "fixed_c_grid")
 
+  if (nrow(pd) > 0) {
     p_c_dist <- ggplot(pd, aes(x = .data[[c_col]], fill = eb_category)) +
-      geom_histogram(bins = 40, alpha = 0.8) +
+      geom_histogram(bins = 80, alpha = 0.8) +
       geom_vline(xintercept = 0, linetype = "dashed", color = "gray30") +
+      scale_x_continuous(
+        trans = scales::pseudo_log_trans(sigma = 1, base = 10),
+        breaks = c(-100, -10, -1, -0.1, 0, 0.1, 1, 10, 100),
+        labels = scales::label_number(drop0trailing = TRUE)
+      ) +
       scale_fill_manual(values = category_palette) +
       facet_wrap(~ short_label, scales = "free_y") +
       labs(
-        title = sprintf("Learned c_l distribution ('%s') by EB method", c_col),
-        x = "Learned c per effect", y = "Count",
-        fill = "Category"
+        title = sprintf("Learned %s distribution by EB method (pseudo-log x-axis)", c_col),
+        x = sprintf("Learned c per effect [%s, pseudo-log scale, sigma=1]", c_col),
+        y = "Count", fill = "Category"
       ) +
       theme_minimal() +
-      theme(legend.position = "bottom",
-            strip.text = element_text(size = 8))
+      theme(legend.position = "bottom", strip.text = element_text(size = 8),
+            axis.text.x = element_text(angle = 30, hjust = 1))
 
     save_or_show(p_c_dist, "c_l_distribution_by_method.png",
                  width = 16, height = 12, subdir = "diagnostics")
-  } else {
-    message("No c_l-like column found in prior_diagnostics. Columns: ",
-            paste(names(prior_diagnostics), collapse = ", "))
   }
+}
+```
 
-  if (!is.na(sig_col)) {
-    pd_sig <- prior_diagnostics %>%
-      dplyr::filter(!is.na(.data[[sig_col]])) %>%
-      dplyr::mutate(
-        short_label = dplyr::recode(.data$use_case_id, !!!uc_short_label,
-                                    .default = .data$use_case_id)
-      )
+```{r prior-diag-sigma, message=FALSE}
+if (!is.na(sig_col)) {
+  pd_sig <- prior_diagnostics %>%
+    add_uc_cols() %>%
+    dplyr::filter(!is.na(.data[[sig_col]]),
+                  .data$eb_category != "baseline") %>%
+    dplyr::mutate(
+      log_sigma = pmax(-10, pmin(5, log(.data[[sig_col]] + 1e-12)))
+    )
 
-    p_sig_dist <- ggplot(pd_sig, aes(x = .data[[sig_col]], fill = short_label)) +
-      geom_histogram(bins = 40, alpha = 0.8, show.legend = FALSE) +
-      facet_wrap(~ short_label, scales = "free") +
+  if (nrow(pd_sig) > 0) {
+    p_sig_dist <- ggplot(pd_sig, aes(x = log_sigma, fill = short_label)) +
+      geom_histogram(bins = 50, alpha = 0.8, show.legend = FALSE) +
+      facet_wrap(~ short_label, scales = "free_y") +
       labs(
-        title = sprintf("Learned sigma_0_2 distribution ('%s') by EB method", sig_col),
-        x = "Learned sigma_0_2 per effect", y = "Count"
+        title = sprintf("Learned %s distribution by EB method (log scale)", sig_col),
+        subtitle = "log(sigma_0_2_l), floored at -10, ceilinged at 5",
+        x = "log(sigma_0_2_l)  [floor = -10, ceil = 5]",
+        y = "Count"
       ) +
       theme_minimal() +
       theme(strip.text = element_text(size = 8))
@@ -726,53 +1234,15 @@ if (!is.null(prior_diagnostics)) {
 
 ---
 
-# Section 11: Summary Tables
+# Section 10: Output Summary
 
-```{r summary-table}
-auprc_summary <- auprc_tbl %>%
-  dplyr::group_by(.data$use_case_id, .data$short_label, .data$eb_category,
-                  .data$architecture) %>%
-  dplyr::summarise(
-    n             = dplyr::n(),
-    median_AUPRC  = median(.data$AUPRC, na.rm = TRUE),
-    mean_AUPRC    = mean(.data$AUPRC,   na.rm = TRUE),
-    sd_AUPRC      = sd(.data$AUPRC,     na.rm = TRUE),
-    q25_AUPRC     = quantile(.data$AUPRC, 0.25, na.rm = TRUE),
-    q75_AUPRC     = quantile(.data$AUPRC, 0.75, na.rm = TRUE),
-    .groups = "drop"
-  ) %>%
-  dplyr::arrange(.data$architecture, dplyr::desc(.data$median_AUPRC))
-
-readr::write_csv(auprc_summary, file.path(plot_dirs$tables, "auprc_summary.csv"))
-cat("Wrote auprc_summary.csv\n")
-
-# Print top methods per architecture
-auprc_summary %>%
-  dplyr::group_by(.data$architecture) %>%
-  dplyr::slice_max(.data$median_AUPRC, n = 5) %>%
-  dplyr::select(.data$architecture, .data$short_label, .data$eb_category,
-                .data$median_AUPRC, .data$n) %>%
-  knitr::kable(digits = 4, caption = "Top 5 methods by median AUPRC per architecture")
-```
-
-```{r annotation-eb-summary}
-# Best annotation-based EB method per (annotation_r2, inflate_match, architecture).
-if ("annotation_r2" %in% names(auprc_tbl)) {
-  best_ann_eb <- auprc_tbl %>%
-    dplyr::filter(.data$eb_category == "ann_eb_joint",
-                  !is.na(.data$annotation_r2)) %>%
-    dplyr::group_by(.data$use_case_id, .data$short_label, .data$architecture,
-                    .data$annotation_r2, .data$inflate_match) %>%
-    dplyr::summarise(
-      median_AUPRC = median(.data$AUPRC, na.rm = TRUE),
-      .groups = "drop"
-    ) %>%
-    dplyr::group_by(.data$architecture, .data$annotation_r2, .data$inflate_match) %>%
-    dplyr::slice_max(.data$median_AUPRC, n = 1) %>%
-    dplyr::ungroup()
-
-  readr::write_csv(best_ann_eb, file.path(plot_dirs$tables, "best_ann_eb_by_quality.csv"))
-  cat("Wrote best_ann_eb_by_quality.csv\n")
-  print(best_ann_eb)
-}
+```{r output-summary}
+cat("All plots saved under:", plot_base_dir, "\n\n")
+purrr::walk(names(plot_dirs), function(subdir) {
+  files <- list.files(plot_dirs[[subdir]], full.names = FALSE)
+  if (length(files) > 0) {
+    cat(sprintf("[%s] %d files\n", subdir, length(files)))
+    purrr::walk(files, function(f) cat("  ", f, "\n"))
+  }
+})
 ```

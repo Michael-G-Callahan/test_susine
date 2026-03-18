@@ -138,7 +138,7 @@ use_case_method <- c(
 ```{r load-data, message=FALSE}
 dataset_metrics_path <- file.path(paths$aggregated_dir, "dataset_metrics.csv")
 multimodal_metrics_path <- file.path(paths$aggregated_dir, "multimodal_metrics.csv")
-confusion_bins_path <- file.path(paths$aggregated_dir, "confusion_bins_collapsed.csv")
+confusion_bins_path <- file.path(paths$aggregated_dir, "confusion_matrix_detailed.csv")
 model_metrics_path <- file.path(paths$aggregated_dir, "model_metrics.csv")
 effect_metrics_path <- file.path(paths$aggregated_dir, "effect_metrics.csv")
 

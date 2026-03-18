@@ -109,6 +109,60 @@ auprc_average_precision <- function(scores, labels) {
   mean(tp[pos_idx] / (tp[pos_idx] + fp[pos_idx]))
 }
 
+# TPR at specified FPR thresholds — derived from a sorted PIP score list.
+# Returns a named list with one entry per threshold, suitable for bind_cols.
+compute_tpr_at_fpr <- function(pip, causal, fpr_thresholds = c(0.05, 0.1, 0.2, 0.5)) {
+  causal      <- as.integer(causal > 0)
+  n_causal    <- sum(causal)
+  n_noncausal <- length(causal) - n_causal
+  col_names   <- paste0("tpr_at_fpr_",
+                        formatC(fpr_thresholds * 100L, format = "d", flag = "0", width = 2))
+  if (n_causal == 0L || n_noncausal == 0L) {
+    return(purrr::set_names(as.list(rep(NA_real_, length(fpr_thresholds))), col_names))
+  }
+  ord      <- order(pip, decreasing = TRUE)
+  causal_o <- causal[ord]
+  fpr_vec  <- cumsum(1L - causal_o) / n_noncausal
+  tpr_vec  <- cumsum(causal_o) / n_causal
+  vals <- purrr::map_dbl(fpr_thresholds, function(thr) {
+    idx <- which(fpr_vec >= thr)[1L]
+    if (is.na(idx)) NA_real_ else tpr_vec[idx]
+  })
+  purrr::set_names(as.list(vals), col_names)
+}
+
+# CS power and FDR considering only the top-n causal variants by |beta|.
+# Used for tier-stratified evaluation of susie2_oligogenic architectures.
+# effects_filtered: output of evaluate_model()$effects_filtered (has $indices list-column).
+compute_cs_power_by_tier <- function(effects_filtered, causal_idx, beta,
+                                     n_top_vec = c(3L, 5L, 7L, 9L, 11L, 23L)) {
+  if (length(causal_idx) == 0L) {
+    return(tibble::tibble(
+      n_top    = as.integer(n_top_vec),
+      cs_power = NA_real_,
+      cs_fdr   = NA_real_
+    ))
+  }
+  causal_order <- causal_idx[order(abs(beta[causal_idx]), decreasing = TRUE)]
+  cs_indices   <- effects_filtered$indices   # list-column
+  union_cs     <- sort(unique(unlist(cs_indices)))
+  purrr::map_dfr(n_top_vec, function(n_top) {
+    top_causal <- head(causal_order, n_top)
+    cs_power   <- if (length(union_cs) > 0L)
+      length(intersect(union_cs, top_causal)) / max(length(top_causal), 1L)
+    else 0
+    cs_fdr <- if (length(cs_indices) > 0L) {
+      has_causal <- vapply(cs_indices, function(idx) {
+        length(intersect(idx, top_causal)) > 0L
+      }, logical(1L))
+      mean(!has_causal)
+    } else {
+      NA_real_
+    }
+    tibble::tibble(n_top = as.integer(n_top), cs_power = cs_power, cs_fdr = cs_fdr)
+  })
+}
+
 # Cross-entropy (log loss) for binary labels and predicted probs
 cross_entropy_loss <- function(scores, labels, eps = 1e-12) {
   if (length(scores) != length(labels))
@@ -227,9 +281,10 @@ evaluate_model <- function(fit, X, y = NULL, causal_idx = integer(0),
   labels <- rep(0L, ncol(X))
   if (length(causal_idx) > 0) labels[causal_idx] <- 1L
 
-  auprc <- if (sum(labels) > 0) auprc_average_precision(combined_pip, labels) else NA_real_
-  xent  <- if (length(labels) == length(combined_pip))
-              cross_entropy_loss(combined_pip, labels) else NA_real_
+  auprc     <- if (sum(labels) > 0) auprc_average_precision(combined_pip, labels) else NA_real_
+  xent      <- if (length(labels) == length(combined_pip))
+                 cross_entropy_loss(combined_pip, labels) else NA_real_
+  tpr_vals  <- compute_tpr_at_fpr(combined_pip, labels)
 
   # -------- h_g^2 --------
   hg2 <- estimate_hg2(fit, y, X)
@@ -239,32 +294,38 @@ evaluate_model <- function(fit, X, y = NULL, causal_idx = integer(0),
   sigma2_path <- tryCatch(fit$model_fit$sigma_2, error = function(e) NULL)
 
   # Model-level summaries
-  model_unfiltered <- data.frame(
-    L_nominal      = L,
-    L_effective    = L_eff_unfiltered,
-    mean_size      = mean(effects_unfiltered$size, na.rm = TRUE),
-    mean_purity    = mean(effects_unfiltered$purity, na.rm = TRUE),
-    mean_coverage  = mean(effects_unfiltered$coverage, na.rm = TRUE),
-    power          = power_unfiltered,
-    overlap_rate   = overlap_unfiltered,
-    AUPRC          = auprc,
-    cross_entropy  = xent,
-    hg2            = hg2,
-    stringsAsFactors = FALSE
+  model_unfiltered <- dplyr::bind_cols(
+    data.frame(
+      L_nominal      = L,
+      L_effective    = L_eff_unfiltered,
+      mean_size      = mean(effects_unfiltered$size, na.rm = TRUE),
+      mean_purity    = mean(effects_unfiltered$purity, na.rm = TRUE),
+      mean_coverage  = mean(effects_unfiltered$coverage, na.rm = TRUE),
+      power          = power_unfiltered,
+      overlap_rate   = overlap_unfiltered,
+      AUPRC          = auprc,
+      cross_entropy  = xent,
+      hg2            = hg2,
+      stringsAsFactors = FALSE
+    ),
+    tibble::as_tibble(tpr_vals)
   )
 
-  model_filtered <- data.frame(
-    L_nominal      = L,
-    L_effective    = L_eff_filtered,
-    mean_size      = mean(effects_filtered$size, na.rm = TRUE),
-    mean_purity    = mean(effects_filtered$purity, na.rm = TRUE),
-    mean_coverage  = mean(effects_filtered$coverage, na.rm = TRUE),
-    power          = power_filtered,
-    overlap_rate   = overlap_filtered,
-    AUPRC          = auprc,     # classification metrics don't change with filtering
-    cross_entropy  = xent,
-    hg2            = hg2,
-    stringsAsFactors = FALSE
+  model_filtered <- dplyr::bind_cols(
+    data.frame(
+      L_nominal      = L,
+      L_effective    = L_eff_filtered,
+      mean_size      = mean(effects_filtered$size, na.rm = TRUE),
+      mean_purity    = mean(effects_filtered$purity, na.rm = TRUE),
+      mean_coverage  = mean(effects_filtered$coverage, na.rm = TRUE),
+      power          = power_filtered,
+      overlap_rate   = overlap_filtered,
+      AUPRC          = auprc,     # classification metrics don't change with filtering
+      cross_entropy  = xent,
+      hg2            = hg2,
+      stringsAsFactors = FALSE
+    ),
+    tibble::as_tibble(tpr_vals)
   )
 
   out <- list(
