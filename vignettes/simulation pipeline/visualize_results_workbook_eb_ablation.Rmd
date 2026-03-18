@@ -22,8 +22,14 @@ Summary: Visualizes EB ablation study results using SuSiE 2.0 paper-style plots
 
 Architectures: susie2_sparse + susie2_oligogenic only.
 Only real model fits (variant_type == "base") are used — no ensemble aggregations.
-Each comparison section includes both sparse (B-E) and oligogenic (F-I) panels
-modeled after SuSiE 2.0 paper Figure 1.
+
+Each comparison section has two sub-sections modeled after SuSiE 2.0 paper Figure 1:
+  - Sparse (panels B-E): CS power, CS FDR, hg2, TPR/FPR vs p_star
+  - Oligogenic (panels F-I): CS power, CS FDR vs top-N; hg2; TPR/FPR on top-8 causal
+
+Oligogenic CS/TPR metrics require tier_cs_metrics.csv and top-8 confusion bins
+(generated when write_tier_cs_metrics = TRUE in job config). These panels are
+skipped with a clear message when the data is absent.
 
 Run collect_results_workbook.Rmd first to produce aggregated CSVs.
 
@@ -232,11 +238,6 @@ category_palette <- c(
   ann_eb_joint    = "#cb181d",
   fixed_c_grid    = "#984ea3"
 )
-
-arch_labels <- c(
-  susie2_sparse     = "SuSiE2-Sparse",
-  susie2_oligogenic = "SuSiE2-Oligogenic"
-)
 ```
 
 ## 1.4 Plot Helpers
@@ -253,9 +254,16 @@ theme_susie2 <- function() {
     )
 }
 
+# Create ordered factor for p_star labels (numeric order, "fixed" last)
+ordered_p_star <- function(x) {
+  vals <- unique(x)
+  numeric_vals <- sort(as.numeric(vals[vals != "fixed"]))
+  lvls <- c(as.character(numeric_vals), if ("fixed" %in% vals) "fixed")
+  factor(x, levels = lvls)
+}
+
 # Extract TPR at specified FPR thresholds from a compute_power_fdr_curves() output.
 # Uses TRUE false positive rate (FP / total_noncausal), NOT false discovery rate.
-# Returns one row per group_key with tpr_fpr05 and tpr_fpr10 columns.
 tpr_from_pfd <- function(pfd_tbl) {
   group_cols <- setdiff(names(pfd_tbl),
     c("pip_threshold", "TP", "FP", "power", "fdr", "precision",
@@ -290,87 +298,89 @@ add_uc_cols <- function(df) {
     )
 }
 
-# Produce three SuSiE2-style CS panels (power, FDR, hg2) for a given subset.
-# x_var: column for x-axis (e.g. "p_star_lbl" or "short_label")
-# color_var: column for color (e.g. "sigma_lbl" or "short_label")
-# title_prefix: string prepended to each panel title
-plot_cs_panels <- function(cs_sub, x_var, color_var, facet_var = "architecture",
-                            title_prefix = "", is_discrete_x = TRUE) {
-  if (is.null(cs_sub) || nrow(cs_sub) == 0) {
-    message("plot_cs_panels: empty data — skipping")
-    return(invisible(NULL))
+# --- Sparse panel helpers (SuSiE2 Fig 1 B-E analogs) ---
+
+# CS metric (power or FDR) vs p_star, point+line, no faceting
+plot_sparse_cs <- function(cs_sub, y_var, color_var, y_label, title,
+                            hline_y = NULL) {
+  if (is.null(cs_sub) || nrow(cs_sub) == 0) return(invisible(NULL))
+  cs_sub <- cs_sub %>% dplyr::mutate(p_star_lbl = ordered_p_star(.data$p_star_lbl))
+  p <- ggplot(cs_sub, aes(x = .data$p_star_lbl, y = .data[[y_var]],
+                           color = .data[[color_var]],
+                           group = .data[[color_var]])) +
+    geom_point(size = 2.5) + geom_line() +
+    labs(title = title, x = "p* (number of causal variants)",
+         y = y_label, color = color_var) +
+    theme_susie2()
+  if (!is.null(hline_y)) {
+    p <- p + geom_hline(yintercept = hline_y, linetype = "dashed",
+                         color = "red", linewidth = 0.7)
   }
-  mk <- function(y_var, y_label, add_hline = FALSE, hline_y = NULL) {
-    p <- ggplot(cs_sub, aes(x = .data[[x_var]], y = .data[[y_var]],
+  p
+}
+
+# hg2 boxplot vs p_star from raw per-run data
+plot_sparse_hg2 <- function(mm_sub, color_var, title) {
+  if (is.null(mm_sub) || nrow(mm_sub) == 0) return(invisible(NULL))
+  mm_sub <- mm_sub %>% dplyr::mutate(p_star_lbl = ordered_p_star(.data$p_star_lbl))
+  ggplot(mm_sub, aes(x = .data$p_star_lbl, y = .data$hg2,
+                      fill = .data[[color_var]])) +
+    geom_boxplot(outlier.size = 0.5, alpha = 0.8) +
+    labs(title = title, x = "p* (number of causal variants)",
+         y = "hg2 (estimated heritability)", fill = color_var) +
+    theme_susie2()
+}
+
+# TPR vs FPR curve, no faceting, narrow + wide xlim
+plot_sparse_tpr_fpr <- function(pfd_sub, color_var, title) {
+  if (is.null(pfd_sub) || nrow(pfd_sub) == 0) return(invisible(NULL))
+  base_p <- ggplot(pfd_sub, aes(x = fpr, y = power,
+                                 color = .data[[color_var]])) +
+    geom_line() +
+    geom_vline(xintercept = 0.05, linetype = "dashed", color = "red",
+               linewidth = 0.5) +
+    scale_x_continuous(expand = expansion(c(0, 0.02))) +
+    labs(x = "Variant-level FPR", y = "TPR (Power)",
+         color = color_var, title = title) +
+    theme_susie2()
+  list(narrow = base_p + coord_cartesian(xlim = c(0, 0.1)),
+       wide   = base_p + coord_cartesian(xlim = c(0, 0.5)))
+}
+
+# --- Oligogenic panel helpers (SuSiE2 Fig 1 F-I analogs) ---
+
+# CS power/FDR vs n_top from tier_summary
+plot_oligo_tier_cs <- function(tier_sub, y_var, color_var, y_label, title,
+                                hline_y = NULL) {
+  if (is.null(tier_sub) || nrow(tier_sub) == 0) return(invisible(NULL))
+  p <- ggplot(tier_sub, aes(x = factor(.data$n_top), y = .data[[y_var]],
                              color = .data[[color_var]],
                              group = .data[[color_var]])) +
-      geom_point(size = 2) + geom_line() +
-      facet_wrap(as.formula(paste("~", facet_var)),
-                 labeller = labeller(.cols = arch_labels)) +
-      labs(title = paste0(title_prefix, y_label),
-           x = x_var, y = y_label, color = color_var) +
-      theme_susie2()
-    if (is_discrete_x) {
-      p <- p + scale_x_discrete()
-    }
-    if (add_hline && !is.null(hline_y)) {
-      p <- p + geom_hline(yintercept = hline_y, linetype = "dashed", color = "red", linewidth = 0.7)
-    }
-    p
-  }
-  list(
-    cs_power = mk("mean_cs_power", "95% CS Power"),
-    cs_fdr   = mk("mean_cs_fdr",   "95% CS FDR",  add_hline = TRUE, hline_y = 0.05),
-    hg2      = mk("mean_hg2",      "hg2 (estimated variance explained)")
-  )
-}
-
-# TPR vs FPR curve for one or two xlim ranges.
-# Uses TRUE false positive rate (FP / total_noncausal) on x-axis.
-plot_tpr_fpr <- function(pfd_sub, color_var, title = "Variant-level TPR vs FPR",
-                          facet_var = "architecture") {
-  if (is.null(pfd_sub) || nrow(pfd_sub) == 0) {
-    message("plot_tpr_fpr: empty data — skipping")
-    return(invisible(NULL))
-  }
-  base_p <- ggplot(pfd_sub, aes(x = fpr, y = power, color = .data[[color_var]])) +
-    geom_line() +
-    geom_vline(xintercept = 0.05, linetype = "dashed", color = "red", linewidth = 0.5) +
-    facet_wrap(as.formula(paste("~", facet_var)),
-               labeller = labeller(.cols = arch_labels)) +
-    scale_x_continuous(expand = expansion(c(0, 0.02))) +
-    labs(x = "Variant-level FPR", y = "TPR (Power)", color = color_var, title = title) +
-    theme_susie2()
-  p_narrow <- base_p + coord_cartesian(xlim = c(0, 0.1))
-  p_wide   <- base_p + coord_cartesian(xlim = c(0, 0.5))
-  list(narrow = p_narrow, wide = p_wide)
-}
-
-# Plot tier CS panels for oligogenic (CS power/FDR vs n_top)
-plot_tier_cs <- function(tier_sub, color_var, title_prefix = "") {
-  if (is.null(tier_sub) || nrow(tier_sub) == 0) {
-    message("plot_tier_cs: empty data — skipping")
-    return(invisible(NULL))
-  }
-  p_power <- ggplot(tier_sub, aes(x = factor(.data$n_top), y = mean_cs_power,
-                                   color = .data[[color_var]],
-                                   group = .data[[color_var]])) +
     geom_point(size = 2.5) + geom_line() +
-    labs(title = paste0(title_prefix, "Oligogenic CS Power vs top-N causal"),
-         x = "Top-N causal variants", y = "95% CS Power", color = color_var) +
+    labs(title = title, x = "Top N as Causal Variants",
+         y = y_label, color = color_var) +
     theme_susie2()
-
-  p_fdr <- ggplot(tier_sub, aes(x = factor(.data$n_top), y = mean_cs_fdr,
-                                 color = .data[[color_var]],
-                                 group = .data[[color_var]])) +
-    geom_point(size = 2.5) + geom_line() +
-    geom_hline(yintercept = 0.05, linetype = "dashed", color = "red") +
-    labs(title = paste0(title_prefix, "Oligogenic CS FDR vs top-N causal"),
-         x = "Top-N causal variants", y = "95% CS FDR", color = color_var) +
-    theme_susie2()
-
-  list(cs_power = p_power, cs_fdr = p_fdr)
+  if (!is.null(hline_y)) {
+    p <- p + geom_hline(yintercept = hline_y, linetype = "dashed",
+                         color = "red", linewidth = 0.7)
+  }
+  p
 }
+
+# hg2 boxplot for oligogenic (single group, no p_star axis)
+plot_oligo_hg2 <- function(mm_sub, color_var, title) {
+  if (is.null(mm_sub) || nrow(mm_sub) == 0) return(invisible(NULL))
+  ggplot(mm_sub, aes(x = .data[[color_var]], y = .data$hg2,
+                      fill = .data[[color_var]])) +
+    geom_boxplot(outlier.size = 0.5, alpha = 0.8) +
+    labs(title = title, x = "", y = "hg2 (estimated heritability)",
+         fill = color_var) +
+    theme_susie2() +
+    theme(axis.text.x = element_text(angle = 30, hjust = 1))
+}
+
+# TPR vs FPR for oligogenic top-8 (same as sparse but separate)
+plot_oligo_tpr_fpr <- plot_sparse_tpr_fpr
 ```
 
 ---
@@ -401,7 +411,7 @@ prior_diagnostics <- if (file.exists(prior_diag_path)) {
 tier_cs_metrics <- if (file.exists(tier_cs_path)) {
   readr::read_csv(tier_cs_path, show_col_types = FALSE) %>% add_uc_cols()
 } else {
-  message("tier_cs_metrics.csv not found — oligogenic top-N panels will be skipped.")
+  message("tier_cs_metrics.csv not found — oligogenic top-N CS panels will be skipped.")
   NULL
 }
 
@@ -500,13 +510,22 @@ cat("conf_fair rows:", nrow(conf_fair), "\n")
 ## 3.4 Compute pooled power-FDR curves
 
 ```{r pfd-curves}
-# One curve per (use_case_id, architecture): pools all datasets + annotation conditions
-overall_pfd <- test_susine::compute_power_fdr_curves(
-  conf_fair,
+# Sparse: one curve per (use_case_id) — pools all datasets + annotation conditions
+sparse_pfd <- test_susine::compute_power_fdr_curves(
+  conf_fair %>% dplyr::filter(.data$architecture == "susie2_sparse"),
   group_vars = c("use_case_id", "architecture")
 ) %>% add_uc_cols()
 
-# Also stratified by annotation_r2 + inflate_match (for annotation sections)
+# Oligogenic (all 23 causal as truth — for overall curves only)
+oligo_pfd <- test_susine::compute_power_fdr_curves(
+  conf_fair %>% dplyr::filter(.data$architecture == "susie2_oligogenic"),
+  group_vars = c("use_case_id", "architecture")
+) %>% add_uc_cols()
+
+# Combined for convenience
+overall_pfd <- dplyr::bind_rows(sparse_pfd, oligo_pfd)
+
+# Stratified by annotation_r2 + inflate_match (for annotation sections)
 if (all(c("annotation_r2", "inflate_match") %in% names(conf_fair))) {
   annot_pfd <- test_susine::compute_power_fdr_curves(
     conf_fair %>% dplyr::filter(!is.na(.data$annotation_r2)),
@@ -517,7 +536,11 @@ if (all(c("annotation_r2", "inflate_match") %in% names(conf_fair))) {
 }
 
 # Oligogenic top-8 curve (uses top_n_causal == 8 rows if available)
-if ("top_n_causal" %in% names(conf_fair)) {
+# NOTE: standard confusion bins score all 23 causal. The top-8 bins
+# redefine "causal" as only the 8 strongest variants by |beta|,
+# matching SuSiE2 paper Figure 1I methodology.
+has_top8_bins <- "top_n_causal" %in% names(conf_fair)
+if (has_top8_bins) {
   oligo_top8_pfd <- test_susine::compute_power_fdr_curves(
     conf_fair %>% dplyr::filter(
       .data$architecture == "susie2_oligogenic",
@@ -529,8 +552,9 @@ if ("top_n_causal" %in% names(conf_fair)) {
   oligo_top8_pfd <- NULL
 }
 
-cat("overall_pfd rows:", nrow(overall_pfd), "\n")
-cat("fpr column present:", "fpr" %in% names(overall_pfd), "\n")
+cat("sparse_pfd rows:", nrow(sparse_pfd), "\n")
+cat("oligo_pfd rows:", nrow(oligo_pfd), "\n")
+cat("top-8 confusion bins available:", has_top8_bins, "\n")
 ```
 
 ## 3.5 Extract TPR @ FPR thresholds
@@ -565,16 +589,15 @@ mm_fair <- mm_base %>%
   dplyr::filter(.data$use_case_id != "susine_functional_mu") %>%
   dplyr::bind_rows(mm_functional_best) %>%
   add_uc_cols() %>%
-  dplyr::mutate(cs_fdr = 1 - .data$mean_coverage)
-
-# Per-(use_case, architecture, p_star) CS summary
-# p_star varies for sparse; is NA for oligogenic (use NA as a dummy level)
-cs_metrics <- mm_fair %>%
   dplyr::mutate(
+    cs_fdr     = 1 - .data$mean_coverage,
     p_star_lbl = dplyr::if_else(!is.na(.data$p_star), as.character(.data$p_star), "fixed"),
     sigma_lbl  = dplyr::if_else(!is.na(.data$sigma_0_2_scalar),
                                 as.character(.data$sigma_0_2_scalar), "EB")
-  ) %>%
+  )
+
+# Summarized CS metrics per (use_case, architecture, p_star, sigma) for point+line plots
+cs_metrics <- mm_fair %>%
   dplyr::group_by(.data$use_case_id, .data$short_label, .data$eb_category,
                   .data$has_eb, .data$needs_annotation,
                   .data$architecture, .data$p_star_lbl, .data$sigma_lbl) %>%
@@ -629,7 +652,13 @@ if (!is.null(tier_summary)) {
   cat("tier_summary rows:", nrow(tier_summary), "\n")
   cat("n_top values:", sort(unique(tier_summary$n_top)), "\n")
 } else {
-  message("No tier_cs_metrics — oligogenic top-N panels will be skipped in all sections.")
+  message("No tier_cs_metrics — oligogenic top-N CS panels will be skipped.")
+  message("  To generate: re-run sims with write_tier_cs_metrics = TRUE in job config.")
+}
+
+if (!has_top8_bins) {
+  message("No top-8 confusion bins — oligogenic TPR/FPR panels will be skipped.")
+  message("  To generate: re-run sims with updated harness code (causal_mask support).")
 }
 ```
 
@@ -639,83 +668,96 @@ if (!is.null(tier_summary)) {
 
 Uses `susine_vanilla` only (susie and susine replicate; color by sigma_0_2_scalar).
 
-## 4.1 Sparse high-level panels (SuSiE2 Fig 1B-E)
+## 4.1 Sparse panels (SuSiE2 Fig 1 B-E)
 
-```{r s4-prep}
-s4_cs <- cs_metrics %>%
-  dplyr::filter(.data$use_case_id == "susine_vanilla")
+```{r s4-sparse-prep}
+S4_UCS <- c("susine_vanilla")
 
-s4_pfd <- overall_pfd %>%
-  dplyr::filter(.data$use_case_id == "susine_vanilla")
+s4_cs_sp <- cs_metrics %>%
+  dplyr::filter(.data$use_case_id %in% S4_UCS,
+                .data$architecture == "susie2_sparse")
 
-cat("S4 cs rows:", nrow(s4_cs), "\n")
+s4_mm_sp <- mm_fair %>%
+  dplyr::filter(.data$use_case_id %in% S4_UCS,
+                .data$architecture == "susie2_sparse")
+
+s4_pfd_sp <- sparse_pfd %>%
+  dplyr::filter(.data$use_case_id %in% S4_UCS)
 ```
 
-```{r s4-cs-panels, message=FALSE, fig.width=12, fig.height=5}
-panels_s4 <- plot_cs_panels(
-  cs_sub       = s4_cs,
-  x_var        = "p_star_lbl",
-  color_var    = "sigma_lbl",
-  facet_var    = "architecture",
-  title_prefix = "Baseline (susine_vanilla): "
-)
-for (nm in names(panels_s4)) {
-  if (!is.null(panels_s4[[nm]])) {
-    save_or_show(panels_s4[[nm]], sprintf("s4_%s.png", nm),
-                 width = 12, height = 5, subdir = "baseline")
-  }
+```{r s4-sparse-cs, message=FALSE, fig.width=8, fig.height=5}
+save_or_show(
+  plot_sparse_cs(s4_cs_sp, "mean_cs_power", "sigma_lbl",
+                 "95% CS Power", "Baseline: Sparse — 95% CS Power"),
+  "s4_sparse_cs_power.png", width = 8, height = 5, subdir = "baseline")
+
+save_or_show(
+  plot_sparse_cs(s4_cs_sp, "mean_cs_fdr", "sigma_lbl",
+                 "95% CS FDR", "Baseline: Sparse — 95% CS FDR", hline_y = 0.05),
+  "s4_sparse_cs_fdr.png", width = 8, height = 5, subdir = "baseline")
+```
+
+```{r s4-sparse-hg2, message=FALSE, fig.width=8, fig.height=5}
+save_or_show(
+  plot_sparse_hg2(s4_mm_sp, "sigma_lbl", "Baseline: Sparse — hg2"),
+  "s4_sparse_hg2.png", width = 8, height = 5, subdir = "baseline")
+```
+
+```{r s4-sparse-tpr, message=FALSE, fig.width=8, fig.height=5}
+curves <- plot_sparse_tpr_fpr(s4_pfd_sp, "short_label",
+                               "Baseline: Sparse — TPR vs FPR")
+if (!is.null(curves)) {
+  save_or_show(curves$narrow, "s4_sparse_tpr_fpr_narrow.png",
+               width = 8, height = 5, subdir = "baseline")
+  save_or_show(curves$wide,   "s4_sparse_tpr_fpr_wide.png",
+               width = 8, height = 5, subdir = "baseline")
 }
 ```
 
-```{r s4-tpr-fpr, message=FALSE, fig.width=10, fig.height=5}
-curves_s4 <- plot_tpr_fpr(s4_pfd, color_var = "short_label",
-                           title = "Baseline (susine_vanilla): Variant-level TPR vs FPR")
-if (!is.null(curves_s4$narrow)) {
-  save_or_show(curves_s4$narrow, "s4_tpr_fpr_narrow.png", width = 10, height = 5, subdir = "baseline")
-  save_or_show(curves_s4$wide,   "s4_tpr_fpr_wide.png",   width = 10, height = 5, subdir = "baseline")
-}
-```
+## 4.2 Oligogenic panels (SuSiE2 Fig 1 F-I)
 
-## 4.2 Oligogenic high-level panels (SuSiE2 Fig 1F-I)
-
-```{r s4-oligo-tier, message=FALSE, fig.width=10, fig.height=6}
+```{r s4-oligo-cs, message=FALSE, fig.width=8, fig.height=5}
 if (!is.null(tier_summary)) {
   s4_tier <- tier_summary %>%
-    dplyr::filter(.data$use_case_id == "susine_vanilla",
+    dplyr::filter(.data$use_case_id %in% S4_UCS,
                   .data$architecture == "susie2_oligogenic")
-
-  tier_panels_s4 <- plot_tier_cs(s4_tier, color_var = "short_label",
-                                  title_prefix = "Baseline: ")
-  if (!is.null(tier_panels_s4)) {
-    for (nm in names(tier_panels_s4)) {
-      save_or_show(tier_panels_s4[[nm]], sprintf("s4_oligo_%s.png", nm),
-                   width = 10, height = 6, subdir = "baseline")
-    }
-  }
+  save_or_show(
+    plot_oligo_tier_cs(s4_tier, "mean_cs_power", "short_label",
+                       "95% CS Power", "Baseline: Oligogenic — CS Power vs top-N"),
+    "s4_oligo_cs_power.png", width = 8, height = 5, subdir = "baseline")
+  save_or_show(
+    plot_oligo_tier_cs(s4_tier, "mean_cs_fdr", "short_label",
+                       "95% CS FDR", "Baseline: Oligogenic — CS FDR vs top-N",
+                       hline_y = 0.05),
+    "s4_oligo_cs_fdr.png", width = 8, height = 5, subdir = "baseline")
 } else {
-  message("Tier CS data not available — oligogenic CS panels skipped for baseline.")
+  message("Oligogenic CS panels skipped (no tier_cs_metrics). Re-run sims with write_tier_cs_metrics = TRUE.")
 }
 ```
 
-```{r s4-oligo-tpr-fpr, message=FALSE, fig.width=10, fig.height=5}
+```{r s4-oligo-hg2, message=FALSE, fig.width=8, fig.height=5}
+s4_mm_ol <- mm_fair %>%
+  dplyr::filter(.data$use_case_id %in% S4_UCS,
+                .data$architecture == "susie2_oligogenic")
+save_or_show(
+  plot_oligo_hg2(s4_mm_ol, "short_label", "Baseline: Oligogenic — hg2"),
+  "s4_oligo_hg2.png", width = 8, height = 5, subdir = "baseline")
+```
+
+```{r s4-oligo-tpr, message=FALSE, fig.width=8, fig.height=5}
 if (!is.null(oligo_top8_pfd)) {
   s4_top8 <- oligo_top8_pfd %>%
-    dplyr::filter(.data$use_case_id == "susine_vanilla")
-
-  if (nrow(s4_top8) > 0) {
-    curves_s4_top8 <- plot_tpr_fpr(
-      s4_top8, color_var = "short_label",
-      title = "Baseline: Oligogenic TPR vs FPR (top-8 causal)"
-    )
-    if (!is.null(curves_s4_top8$narrow)) {
-      save_or_show(curves_s4_top8$narrow, "s4_oligo_top8_tpr_fpr_narrow.png",
-                   width = 10, height = 5, subdir = "baseline")
-      save_or_show(curves_s4_top8$wide,   "s4_oligo_top8_tpr_fpr_wide.png",
-                   width = 10, height = 5, subdir = "baseline")
-    }
+    dplyr::filter(.data$use_case_id %in% S4_UCS)
+  curves_top8 <- plot_oligo_tpr_fpr(s4_top8, "short_label",
+                                     "Baseline: Oligogenic — TPR vs FPR (top-8 causal)")
+  if (!is.null(curves_top8)) {
+    save_or_show(curves_top8$narrow, "s4_oligo_tpr_fpr_narrow.png",
+                 width = 8, height = 5, subdir = "baseline")
+    save_or_show(curves_top8$wide,   "s4_oligo_tpr_fpr_wide.png",
+                 width = 8, height = 5, subdir = "baseline")
   }
 } else {
-  message("Top-8 confusion bins not available — oligogenic TPR/FPR skipped for baseline.")
+  message("Oligogenic TPR/FPR skipped (no top-8 confusion bins). Re-run sims with updated harness.")
 }
 ```
 
@@ -723,79 +765,95 @@ if (!is.null(oligo_top8_pfd)) {
 
 # Section 5: Annotations, No EB (`susine_functional_mu`)
 
-Uses all c_values (not best-c restricted) to show how c affects performance.
+## 5.1 Sparse panels
 
-## 5.1 Sparse high-level panels (best-c, lumped over annotation settings)
+```{r s5-sparse-prep}
+S5_UCS <- c("susine_functional_mu")
 
-```{r s5-prep}
-s5_cs <- cs_metrics %>%
-  dplyr::filter(.data$use_case_id == "susine_functional_mu")
+s5_cs_sp <- cs_metrics %>%
+  dplyr::filter(.data$use_case_id %in% S5_UCS,
+                .data$architecture == "susie2_sparse")
 
-s5_pfd_fair <- overall_pfd %>%
-  dplyr::filter(.data$use_case_id == "susine_functional_mu")
+s5_mm_sp <- mm_fair %>%
+  dplyr::filter(.data$use_case_id %in% S5_UCS,
+                .data$architecture == "susie2_sparse")
+
+s5_pfd_sp <- sparse_pfd %>%
+  dplyr::filter(.data$use_case_id %in% S5_UCS)
 ```
 
-```{r s5-cs-panels, message=FALSE, fig.width=12, fig.height=5}
-panels_s5 <- plot_cs_panels(
-  cs_sub       = s5_cs,
-  x_var        = "p_star_lbl",
-  color_var    = "sigma_lbl",
-  facet_var    = "architecture",
-  title_prefix = "Annot, no EB (susine_functional_mu): "
-)
-for (nm in names(panels_s5)) {
-  if (!is.null(panels_s5[[nm]])) {
-    save_or_show(panels_s5[[nm]], sprintf("s5_%s.png", nm),
-                 width = 12, height = 5, subdir = "annot_noeb")
-  }
+```{r s5-sparse-cs, message=FALSE, fig.width=8, fig.height=5}
+save_or_show(
+  plot_sparse_cs(s5_cs_sp, "mean_cs_power", "sigma_lbl",
+                 "95% CS Power", "Annot no EB: Sparse — 95% CS Power"),
+  "s5_sparse_cs_power.png", width = 8, height = 5, subdir = "annot_noeb")
+save_or_show(
+  plot_sparse_cs(s5_cs_sp, "mean_cs_fdr", "sigma_lbl",
+                 "95% CS FDR", "Annot no EB: Sparse — 95% CS FDR", hline_y = 0.05),
+  "s5_sparse_cs_fdr.png", width = 8, height = 5, subdir = "annot_noeb")
+```
+
+```{r s5-sparse-hg2, message=FALSE, fig.width=8, fig.height=5}
+save_or_show(
+  plot_sparse_hg2(s5_mm_sp, "sigma_lbl", "Annot no EB: Sparse — hg2"),
+  "s5_sparse_hg2.png", width = 8, height = 5, subdir = "annot_noeb")
+```
+
+```{r s5-sparse-tpr, message=FALSE, fig.width=8, fig.height=5}
+curves <- plot_sparse_tpr_fpr(s5_pfd_sp, "short_label",
+                               "Annot no EB: Sparse — TPR vs FPR")
+if (!is.null(curves)) {
+  save_or_show(curves$narrow, "s5_sparse_tpr_fpr_narrow.png",
+               width = 8, height = 5, subdir = "annot_noeb")
+  save_or_show(curves$wide,   "s5_sparse_tpr_fpr_wide.png",
+               width = 8, height = 5, subdir = "annot_noeb")
 }
 ```
 
-```{r s5-tpr-fpr, message=FALSE, fig.width=10, fig.height=5}
-curves_s5 <- plot_tpr_fpr(s5_pfd_fair, color_var = "short_label",
-                           title = "Annot no EB (best-c): Variant-level TPR vs FPR")
-if (!is.null(curves_s5$narrow)) {
-  save_or_show(curves_s5$narrow, "s5_tpr_fpr_narrow.png", width = 10, height = 5, subdir = "annot_noeb")
-  save_or_show(curves_s5$wide,   "s5_tpr_fpr_wide.png",   width = 10, height = 5, subdir = "annot_noeb")
-}
-```
+## 5.2 Oligogenic panels
 
-## 5.2 Oligogenic high-level panels
-
-```{r s5-oligo-tier, message=FALSE, fig.width=10, fig.height=6}
+```{r s5-oligo-cs, message=FALSE, fig.width=8, fig.height=5}
 if (!is.null(tier_summary)) {
   s5_tier <- tier_summary %>%
-    dplyr::filter(.data$use_case_id == "susine_functional_mu",
+    dplyr::filter(.data$use_case_id %in% S5_UCS,
                   .data$architecture == "susie2_oligogenic")
-
-  tier_panels_s5 <- plot_tier_cs(s5_tier, color_var = "short_label",
-                                  title_prefix = "Annot no EB: ")
-  if (!is.null(tier_panels_s5)) {
-    for (nm in names(tier_panels_s5)) {
-      save_or_show(tier_panels_s5[[nm]], sprintf("s5_oligo_%s.png", nm),
-                   width = 10, height = 6, subdir = "annot_noeb")
-    }
-  }
+  save_or_show(
+    plot_oligo_tier_cs(s5_tier, "mean_cs_power", "short_label",
+                       "95% CS Power", "Annot no EB: Oligogenic — CS Power vs top-N"),
+    "s5_oligo_cs_power.png", width = 8, height = 5, subdir = "annot_noeb")
+  save_or_show(
+    plot_oligo_tier_cs(s5_tier, "mean_cs_fdr", "short_label",
+                       "95% CS FDR", "Annot no EB: Oligogenic — CS FDR vs top-N",
+                       hline_y = 0.05),
+    "s5_oligo_cs_fdr.png", width = 8, height = 5, subdir = "annot_noeb")
+} else {
+  message("Oligogenic CS panels skipped (no tier_cs_metrics).")
 }
 ```
 
-```{r s5-oligo-tpr-fpr, message=FALSE, fig.width=10, fig.height=5}
+```{r s5-oligo-hg2, message=FALSE, fig.width=8, fig.height=5}
+s5_mm_ol <- mm_fair %>%
+  dplyr::filter(.data$use_case_id %in% S5_UCS,
+                .data$architecture == "susie2_oligogenic")
+save_or_show(
+  plot_oligo_hg2(s5_mm_ol, "short_label", "Annot no EB: Oligogenic — hg2"),
+  "s5_oligo_hg2.png", width = 8, height = 5, subdir = "annot_noeb")
+```
+
+```{r s5-oligo-tpr, message=FALSE, fig.width=8, fig.height=5}
 if (!is.null(oligo_top8_pfd)) {
   s5_top8 <- oligo_top8_pfd %>%
-    dplyr::filter(.data$use_case_id == "susine_functional_mu")
-
-  if (nrow(s5_top8) > 0) {
-    curves_s5_top8 <- plot_tpr_fpr(
-      s5_top8, color_var = "short_label",
-      title = "Annot no EB: Oligogenic TPR vs FPR (top-8 causal)"
-    )
-    if (!is.null(curves_s5_top8$narrow)) {
-      save_or_show(curves_s5_top8$narrow, "s5_oligo_top8_tpr_fpr_narrow.png",
-                   width = 10, height = 5, subdir = "annot_noeb")
-      save_or_show(curves_s5_top8$wide,   "s5_oligo_top8_tpr_fpr_wide.png",
-                   width = 10, height = 5, subdir = "annot_noeb")
-    }
+    dplyr::filter(.data$use_case_id %in% S5_UCS)
+  curves_top8 <- plot_oligo_tpr_fpr(s5_top8, "short_label",
+                                     "Annot no EB: Oligogenic — TPR vs FPR (top-8 causal)")
+  if (!is.null(curves_top8)) {
+    save_or_show(curves_top8$narrow, "s5_oligo_tpr_fpr_narrow.png",
+                 width = 8, height = 5, subdir = "annot_noeb")
+    save_or_show(curves_top8$wide,   "s5_oligo_tpr_fpr_wide.png",
+                 width = 8, height = 5, subdir = "annot_noeb")
   }
+} else {
+  message("Oligogenic TPR/FPR skipped (no top-8 confusion bins).")
 }
 ```
 
@@ -812,10 +870,7 @@ s5_pfd_all_c <- if ("c_value" %in% names(conf_base)) {
     )
   ) %>% add_uc_cols()
 } else {
-  test_susine::compute_power_fdr_curves(
-    conf_base %>% dplyr::filter(.data$use_case_id == "susine_functional_mu"),
-    group_vars = intersect(c("use_case_id", "architecture"), names(conf_base))
-  ) %>% add_uc_cols()
+  NULL
 }
 
 if (!is.null(s5_pfd_all_c) && "c_value" %in% names(s5_pfd_all_c)) {
@@ -847,82 +902,96 @@ if (!is.null(s5_pfd_all_c) && "c_value" %in% names(s5_pfd_all_c)) {
 Comparison: `susie_vanilla`, `susine_vanilla`, `susie_eb`, `susine_eb`,
 `susine_eb_mean`, `susine_eb_mu_var`.
 
-## 6.1 Sparse high-level panels
+## 6.1 Sparse panels
 
 ```{r s6-prep}
 S6_USE_CASES <- c("susie_vanilla", "susine_vanilla", "susie_eb",
                   "susine_eb", "susine_eb_mean", "susine_eb_mu_var")
 
-s6_cs <- cs_metrics %>%
+s6_cs_sp <- cs_metrics %>%
+  dplyr::filter(.data$use_case_id %in% S6_USE_CASES,
+                .data$architecture == "susie2_sparse")
+s6_mm_sp <- mm_fair %>%
+  dplyr::filter(.data$use_case_id %in% S6_USE_CASES,
+                .data$architecture == "susie2_sparse")
+s6_pfd_sp <- sparse_pfd %>%
   dplyr::filter(.data$use_case_id %in% S6_USE_CASES)
 
-s6_pfd <- overall_pfd %>%
-  dplyr::filter(.data$use_case_id %in% S6_USE_CASES)
-
-cat("S6 use cases present:", paste(sort(unique(s6_cs$use_case_id)), collapse = ", "), "\n")
+cat("S6 use cases present:", paste(sort(unique(s6_cs_sp$use_case_id)), collapse = ", "), "\n")
 ```
 
-```{r s6-cs-panels, message=FALSE, fig.width=12, fig.height=5}
-panels_s6 <- plot_cs_panels(
-  cs_sub       = s6_cs,
-  x_var        = "p_star_lbl",
-  color_var    = "short_label",
-  facet_var    = "architecture",
-  title_prefix = "EB no annot: "
-)
-for (nm in names(panels_s6)) {
-  if (!is.null(panels_s6[[nm]])) {
-    save_or_show(panels_s6[[nm]], sprintf("s6_%s.png", nm),
-                 width = 12, height = 5, subdir = "eb_noannot")
-  }
+```{r s6-sparse-cs, message=FALSE, fig.width=10, fig.height=5}
+save_or_show(
+  plot_sparse_cs(s6_cs_sp, "mean_cs_power", "short_label",
+                 "95% CS Power", "EB no annot: Sparse — 95% CS Power"),
+  "s6_sparse_cs_power.png", width = 10, height = 5, subdir = "eb_noannot")
+save_or_show(
+  plot_sparse_cs(s6_cs_sp, "mean_cs_fdr", "short_label",
+                 "95% CS FDR", "EB no annot: Sparse — 95% CS FDR", hline_y = 0.05),
+  "s6_sparse_cs_fdr.png", width = 10, height = 5, subdir = "eb_noannot")
+```
+
+```{r s6-sparse-hg2, message=FALSE, fig.width=10, fig.height=5}
+save_or_show(
+  plot_sparse_hg2(s6_mm_sp, "short_label", "EB no annot: Sparse — hg2"),
+  "s6_sparse_hg2.png", width = 10, height = 5, subdir = "eb_noannot")
+```
+
+```{r s6-sparse-tpr, message=FALSE, fig.width=8, fig.height=5}
+curves <- plot_sparse_tpr_fpr(s6_pfd_sp, "short_label",
+                               "EB no annot: Sparse — TPR vs FPR")
+if (!is.null(curves)) {
+  save_or_show(curves$narrow, "s6_sparse_tpr_fpr_narrow.png",
+               width = 8, height = 5, subdir = "eb_noannot")
+  save_or_show(curves$wide,   "s6_sparse_tpr_fpr_wide.png",
+               width = 8, height = 5, subdir = "eb_noannot")
 }
 ```
 
-```{r s6-tpr-fpr, message=FALSE, fig.width=10, fig.height=5}
-curves_s6 <- plot_tpr_fpr(s6_pfd, color_var = "short_label",
-                           title = "EB no annot: Variant-level TPR vs FPR")
-if (!is.null(curves_s6$narrow)) {
-  save_or_show(curves_s6$narrow, "s6_tpr_fpr_narrow.png", width = 10, height = 5, subdir = "eb_noannot")
-  save_or_show(curves_s6$wide,   "s6_tpr_fpr_wide.png",   width = 10, height = 5, subdir = "eb_noannot")
-}
-```
+## 6.2 Oligogenic panels
 
-## 6.2 Oligogenic high-level panels
-
-```{r s6-oligo-tier, message=FALSE, fig.width=10, fig.height=6}
+```{r s6-oligo-cs, message=FALSE, fig.width=10, fig.height=6}
 if (!is.null(tier_summary)) {
   s6_tier <- tier_summary %>%
     dplyr::filter(.data$use_case_id %in% S6_USE_CASES,
                   .data$architecture == "susie2_oligogenic")
-
-  tier_panels_s6 <- plot_tier_cs(s6_tier, color_var = "short_label",
-                                  title_prefix = "EB no annot: ")
-  if (!is.null(tier_panels_s6)) {
-    for (nm in names(tier_panels_s6)) {
-      save_or_show(tier_panels_s6[[nm]], sprintf("s6_oligo_%s.png", nm),
-                   width = 10, height = 6, subdir = "eb_noannot")
-    }
-  }
+  save_or_show(
+    plot_oligo_tier_cs(s6_tier, "mean_cs_power", "short_label",
+                       "95% CS Power", "EB no annot: Oligogenic — CS Power vs top-N"),
+    "s6_oligo_cs_power.png", width = 10, height = 6, subdir = "eb_noannot")
+  save_or_show(
+    plot_oligo_tier_cs(s6_tier, "mean_cs_fdr", "short_label",
+                       "95% CS FDR", "EB no annot: Oligogenic — CS FDR vs top-N",
+                       hline_y = 0.05),
+    "s6_oligo_cs_fdr.png", width = 10, height = 6, subdir = "eb_noannot")
+} else {
+  message("Oligogenic CS panels skipped (no tier_cs_metrics).")
 }
 ```
 
-```{r s6-oligo-tpr-fpr, message=FALSE, fig.width=10, fig.height=5}
+```{r s6-oligo-hg2, message=FALSE, fig.width=10, fig.height=5}
+s6_mm_ol <- mm_fair %>%
+  dplyr::filter(.data$use_case_id %in% S6_USE_CASES,
+                .data$architecture == "susie2_oligogenic")
+save_or_show(
+  plot_oligo_hg2(s6_mm_ol, "short_label", "EB no annot: Oligogenic — hg2"),
+  "s6_oligo_hg2.png", width = 10, height = 5, subdir = "eb_noannot")
+```
+
+```{r s6-oligo-tpr, message=FALSE, fig.width=8, fig.height=5}
 if (!is.null(oligo_top8_pfd)) {
   s6_top8 <- oligo_top8_pfd %>%
     dplyr::filter(.data$use_case_id %in% S6_USE_CASES)
-
-  if (nrow(s6_top8) > 0) {
-    curves_s6_top8 <- plot_tpr_fpr(
-      s6_top8, color_var = "short_label",
-      title = "EB no annot: Oligogenic TPR vs FPR (top-8 causal)"
-    )
-    if (!is.null(curves_s6_top8$narrow)) {
-      save_or_show(curves_s6_top8$narrow, "s6_oligo_top8_tpr_fpr_narrow.png",
-                   width = 10, height = 5, subdir = "eb_noannot")
-      save_or_show(curves_s6_top8$wide,   "s6_oligo_top8_tpr_fpr_wide.png",
-                   width = 10, height = 5, subdir = "eb_noannot")
-    }
+  curves_top8 <- plot_oligo_tpr_fpr(s6_top8, "short_label",
+                                     "EB no annot: Oligogenic — TPR vs FPR (top-8 causal)")
+  if (!is.null(curves_top8)) {
+    save_or_show(curves_top8$narrow, "s6_oligo_tpr_fpr_narrow.png",
+                 width = 8, height = 5, subdir = "eb_noannot")
+    save_or_show(curves_top8$wide,   "s6_oligo_tpr_fpr_wide.png",
+                 width = 8, height = 5, subdir = "eb_noannot")
   }
+} else {
+  message("Oligogenic TPR/FPR skipped (no top-8 confusion bins).")
 }
 ```
 
@@ -932,23 +1001,27 @@ if (!is.null(oligo_top8_pfd)) {
 
 All annotation-based EB methods plus `susine_functional_mu` (best-c) as baseline.
 
-## 7.1 Sparse high-level panels (lumped over annotation conditions)
+## 7.1 Sparse panels (lumped over annotation conditions)
 
 ```{r s7-prep}
+# Nonneg-only variants + baseline (unconstrained versions dropped for clarity)
 S7_USE_CASES <- c(
   "susine_functional_mu",
-  "susine_eb_scale", "susine_eb_scale_nonneg",
-  "susine_eb_scale_var", "susine_eb_scale_var_nonneg",
-  "susine_eb_penalized_scale_var", "susine_eb_penalized_scale_var_nonneg",
-  "susine_eb_scale_var_outer", "susine_eb_scale_var_outer_nonneg",
-  "susine_eb_clamped_scale_var", "susine_eb_clamped_scale_var_nonneg",
-  "susine_eb_alternating_scale_var", "susine_eb_alternating_scale_var_nonneg"
+  "susine_eb_scale_nonneg",
+  "susine_eb_scale_var_nonneg",
+  "susine_eb_penalized_scale_var_nonneg",
+  "susine_eb_scale_var_outer_nonneg",
+  "susine_eb_clamped_scale_var_nonneg",
+  "susine_eb_alternating_scale_var_nonneg"
 )
 
-s7_cs <- cs_metrics %>%
-  dplyr::filter(.data$use_case_id %in% S7_USE_CASES)
-
-s7_pfd <- overall_pfd %>%
+s7_cs_sp <- cs_metrics %>%
+  dplyr::filter(.data$use_case_id %in% S7_USE_CASES,
+                .data$architecture == "susie2_sparse")
+s7_mm_sp <- mm_fair %>%
+  dplyr::filter(.data$use_case_id %in% S7_USE_CASES,
+                .data$architecture == "susie2_sparse")
+s7_pfd_sp <- sparse_pfd %>%
   dplyr::filter(.data$use_case_id %in% S7_USE_CASES)
 
 s7_annot_pfd <- if (!is.null(annot_pfd)) {
@@ -957,70 +1030,81 @@ s7_annot_pfd <- if (!is.null(annot_pfd)) {
   NULL
 }
 
-cat("S7 use cases present:", paste(sort(unique(s7_cs$use_case_id)), collapse = ", "), "\n")
+cat("S7 use cases present:", paste(sort(unique(s7_cs_sp$use_case_id)), collapse = ", "), "\n")
 ```
 
-```{r s7-cs-panels, message=FALSE, fig.width=14, fig.height=5}
-panels_s7 <- plot_cs_panels(
-  cs_sub       = s7_cs,
-  x_var        = "p_star_lbl",
-  color_var    = "short_label",
-  facet_var    = "architecture",
-  title_prefix = "EB with annot: "
-)
-for (nm in names(panels_s7)) {
-  if (!is.null(panels_s7[[nm]])) {
-    save_or_show(panels_s7[[nm]], sprintf("s7_%s.png", nm),
-                 width = 14, height = 5, subdir = "eb_annot")
-  }
+```{r s7-sparse-cs, message=FALSE, fig.width=12, fig.height=5}
+save_or_show(
+  plot_sparse_cs(s7_cs_sp, "mean_cs_power", "short_label",
+                 "95% CS Power", "EB with annot: Sparse — 95% CS Power"),
+  "s7_sparse_cs_power.png", width = 12, height = 5, subdir = "eb_annot")
+save_or_show(
+  plot_sparse_cs(s7_cs_sp, "mean_cs_fdr", "short_label",
+                 "95% CS FDR", "EB with annot: Sparse — 95% CS FDR", hline_y = 0.05),
+  "s7_sparse_cs_fdr.png", width = 12, height = 5, subdir = "eb_annot")
+```
+
+```{r s7-sparse-hg2, message=FALSE, fig.width=12, fig.height=5}
+save_or_show(
+  plot_sparse_hg2(s7_mm_sp, "short_label", "EB with annot: Sparse — hg2"),
+  "s7_sparse_hg2.png", width = 12, height = 5, subdir = "eb_annot")
+```
+
+```{r s7-sparse-tpr, message=FALSE, fig.width=8, fig.height=5}
+curves <- plot_sparse_tpr_fpr(s7_pfd_sp, "short_label",
+                               "EB with annot: Sparse — TPR vs FPR")
+if (!is.null(curves)) {
+  save_or_show(curves$narrow, "s7_sparse_tpr_fpr_narrow.png",
+               width = 8, height = 5, subdir = "eb_annot")
+  save_or_show(curves$wide,   "s7_sparse_tpr_fpr_wide.png",
+               width = 8, height = 5, subdir = "eb_annot")
 }
 ```
 
-```{r s7-tpr-fpr, message=FALSE, fig.width=10, fig.height=5}
-curves_s7 <- plot_tpr_fpr(s7_pfd, color_var = "short_label",
-                           title = "EB with annot: Variant-level TPR vs FPR")
-if (!is.null(curves_s7$narrow)) {
-  save_or_show(curves_s7$narrow, "s7_tpr_fpr_narrow.png", width = 10, height = 5, subdir = "eb_annot")
-  save_or_show(curves_s7$wide,   "s7_tpr_fpr_wide.png",   width = 10, height = 5, subdir = "eb_annot")
-}
-```
+## 7.2 Oligogenic panels
 
-## 7.2 Oligogenic high-level panels
-
-```{r s7-oligo-tier, message=FALSE, fig.width=12, fig.height=6}
+```{r s7-oligo-cs, message=FALSE, fig.width=12, fig.height=6}
 if (!is.null(tier_summary)) {
   s7_tier <- tier_summary %>%
     dplyr::filter(.data$use_case_id %in% S7_USE_CASES,
                   .data$architecture == "susie2_oligogenic")
-
-  tier_panels_s7 <- plot_tier_cs(s7_tier, color_var = "short_label",
-                                  title_prefix = "EB with annot: ")
-  if (!is.null(tier_panels_s7)) {
-    for (nm in names(tier_panels_s7)) {
-      save_or_show(tier_panels_s7[[nm]], sprintf("s7_oligo_%s.png", nm),
-                   width = 12, height = 6, subdir = "eb_annot")
-    }
-  }
+  save_or_show(
+    plot_oligo_tier_cs(s7_tier, "mean_cs_power", "short_label",
+                       "95% CS Power", "EB with annot: Oligogenic — CS Power vs top-N"),
+    "s7_oligo_cs_power.png", width = 12, height = 6, subdir = "eb_annot")
+  save_or_show(
+    plot_oligo_tier_cs(s7_tier, "mean_cs_fdr", "short_label",
+                       "95% CS FDR", "EB with annot: Oligogenic — CS FDR vs top-N",
+                       hline_y = 0.05),
+    "s7_oligo_cs_fdr.png", width = 12, height = 6, subdir = "eb_annot")
+} else {
+  message("Oligogenic CS panels skipped (no tier_cs_metrics).")
 }
 ```
 
-```{r s7-oligo-tpr-fpr, message=FALSE, fig.width=10, fig.height=5}
+```{r s7-oligo-hg2, message=FALSE, fig.width=12, fig.height=5}
+s7_mm_ol <- mm_fair %>%
+  dplyr::filter(.data$use_case_id %in% S7_USE_CASES,
+                .data$architecture == "susie2_oligogenic")
+save_or_show(
+  plot_oligo_hg2(s7_mm_ol, "short_label", "EB with annot: Oligogenic — hg2"),
+  "s7_oligo_hg2.png", width = 12, height = 5, subdir = "eb_annot")
+```
+
+```{r s7-oligo-tpr, message=FALSE, fig.width=8, fig.height=5}
 if (!is.null(oligo_top8_pfd)) {
   s7_top8 <- oligo_top8_pfd %>%
     dplyr::filter(.data$use_case_id %in% S7_USE_CASES)
-
-  if (nrow(s7_top8) > 0) {
-    curves_s7_top8 <- plot_tpr_fpr(
-      s7_top8, color_var = "short_label",
-      title = "EB with annot: Oligogenic TPR vs FPR (top-8 causal)"
-    )
-    if (!is.null(curves_s7_top8$narrow)) {
-      save_or_show(curves_s7_top8$narrow, "s7_oligo_top8_tpr_fpr_narrow.png",
-                   width = 10, height = 5, subdir = "eb_annot")
-      save_or_show(curves_s7_top8$wide,   "s7_oligo_top8_tpr_fpr_wide.png",
-                   width = 10, height = 5, subdir = "eb_annot")
-    }
+  curves_top8 <- plot_oligo_tpr_fpr(s7_top8, "short_label",
+                                     "EB with annot: Oligogenic — TPR vs FPR (top-8 causal)")
+  if (!is.null(curves_top8)) {
+    save_or_show(curves_top8$narrow, "s7_oligo_tpr_fpr_narrow.png",
+                 width = 8, height = 5, subdir = "eb_annot")
+    save_or_show(curves_top8$wide,   "s7_oligo_tpr_fpr_wide.png",
+                 width = 8, height = 5, subdir = "eb_annot")
   }
+} else {
+  message("Oligogenic TPR/FPR skipped (no top-8 confusion bins).")
 }
 ```
 
@@ -1032,8 +1116,7 @@ if (!is.null(s7_annot_pfd) && nrow(s7_annot_pfd) > 0) {
 
   p_s7_tpr <- ggplot(tpr_s7, aes(x = annotation_r2, y = tpr_fpr05, color = short_label)) +
     geom_point(size = 2) + geom_line() +
-    facet_grid(architecture ~ inflate_match,
-               labeller = labeller(architecture = arch_labels, inflate_match = label_both)) +
+    facet_grid(architecture ~ inflate_match, labeller = label_both) +
     scale_x_continuous(breaks = sort(unique(tpr_s7$annotation_r2))) +
     labs(
       title = "EB with annot: Overall TPR @ FPR=0.05 vs annotation_r2",
@@ -1069,7 +1152,7 @@ if (nrow(tpr_nonneg) > 0 && any(tpr_nonneg$nonneg)) {
                        aes(x = tpr_unconstrained, y = tpr_nonneg, color = method_base)) +
       geom_point(size = 2.5) +
       geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray50") +
-      facet_wrap(~ architecture, labeller = labeller(.cols = arch_labels)) +
+      facet_wrap(~ architecture) +
       labs(
         title = "Nonneg constraint effect: TPR@FPR=0.1",
         x = "Unconstrained (TPR@FPR=0.1)", y = "Nonneg constrained (TPR@FPR=0.1)",
