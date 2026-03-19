@@ -987,25 +987,52 @@ if (!is.null(oligo_top8_pfd)) {
 
 ```{r s5-tpr-vs-c, message=FALSE, fig.width=14, fig.height=8}
 # Use conf_base (all c values) for this section, not conf_fair
-s5_pfd_all_c <- if ("c_value" %in% names(conf_base)) {
+# Sparse: use all causal as truth
+s5_grp_vars <- intersect(
+  c("use_case_id", "architecture", "annotation_r2", "inflate_match",
+    "c_value", "sigma_0_2_scalar"),
+  names(conf_base)
+)
+
+s5_pfd_sparse_c <- if ("c_value" %in% names(conf_base)) {
   test_susine::compute_power_fdr_curves(
-    conf_base %>% dplyr::filter(.data$use_case_id == "susine_functional_mu"),
-    group_vars = intersect(
-      c("use_case_id", "architecture", "annotation_r2", "inflate_match",
-        "c_value", "sigma_0_2_scalar"),
-      names(conf_base)
-    )
+    conf_base %>% dplyr::filter(.data$use_case_id == "susine_functional_mu",
+                                .data$architecture == "susie2_sparse"),
+    group_vars = s5_grp_vars
   ) %>%
     add_uc_cols() %>%
     dplyr::mutate(sigma_lbl = dplyr::if_else(
       !is.na(.data$sigma_0_2_scalar),
       as.character(.data$sigma_0_2_scalar), "EB"
     ))
-} else {
-  NULL
-}
+} else { NULL }
 
-if (!is.null(s5_pfd_all_c) && "c_value" %in% names(s5_pfd_all_c)) {
+# Oligogenic: use top-8 truth when available, else all-23
+s5_pfd_oligo_c <- if ("c_value" %in% names(conf_base)) {
+  oligo_src <- conf_base %>%
+    dplyr::filter(.data$use_case_id == "susine_functional_mu",
+                  .data$architecture == "susie2_oligogenic")
+  if (has_top8_bins && "top_n_causal" %in% names(oligo_src)) {
+    oligo_src <- oligo_src %>%
+      dplyr::filter(!is.na(.data$top_n_causal) & .data$top_n_causal == 8L)
+    cat("S5 oligo TPR vs c: using top-8 truth\n")
+  } else {
+    cat("S5 oligo TPR vs c: using all-23 truth (top-8 bins unavailable)\n")
+  }
+  if (nrow(oligo_src) > 0) {
+    test_susine::compute_power_fdr_curves(oligo_src, group_vars = s5_grp_vars) %>%
+      add_uc_cols() %>%
+      dplyr::mutate(sigma_lbl = dplyr::if_else(
+        !is.na(.data$sigma_0_2_scalar),
+        as.character(.data$sigma_0_2_scalar), "EB"
+      ))
+  } else { NULL }
+} else { NULL }
+
+s5_pfd_all_c <- dplyr::bind_rows(s5_pfd_sparse_c, s5_pfd_oligo_c)
+
+if (!is.null(s5_pfd_all_c) && nrow(s5_pfd_all_c) > 0 &&
+    "c_value" %in% names(s5_pfd_all_c)) {
   tpr_s5 <- tpr_from_pfd(s5_pfd_all_c)
 
   if (all(c("annotation_r2", "inflate_match") %in% names(tpr_s5))) {
