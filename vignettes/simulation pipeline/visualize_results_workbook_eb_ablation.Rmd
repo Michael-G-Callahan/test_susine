@@ -991,10 +991,16 @@ s5_pfd_all_c <- if ("c_value" %in% names(conf_base)) {
   test_susine::compute_power_fdr_curves(
     conf_base %>% dplyr::filter(.data$use_case_id == "susine_functional_mu"),
     group_vars = intersect(
-      c("use_case_id", "architecture", "annotation_r2", "inflate_match", "c_value"),
+      c("use_case_id", "architecture", "annotation_r2", "inflate_match",
+        "c_value", "sigma_0_2_scalar"),
       names(conf_base)
     )
-  ) %>% add_uc_cols()
+  ) %>%
+    add_uc_cols() %>%
+    dplyr::mutate(sigma_lbl = dplyr::if_else(
+      !is.na(.data$sigma_0_2_scalar),
+      as.character(.data$sigma_0_2_scalar), "EB"
+    ))
 } else {
   NULL
 }
@@ -1006,12 +1012,13 @@ if (!is.null(s5_pfd_all_c) && "c_value" %in% names(s5_pfd_all_c)) {
     for (arch in unique(tpr_s5$architecture)) {
       p_s5 <- tpr_s5 %>%
         dplyr::filter(.data$architecture == arch) %>%
-        ggplot(aes(x = .data$c_value, y = tpr_fpr05, color = use_case_id)) +
+        ggplot(aes(x = .data$c_value, y = tpr_fpr05, color = sigma_lbl)) +
         geom_point(size = 2) + geom_line() +
         facet_grid(annotation_r2 ~ inflate_match, labeller = label_both) +
         labs(
           title = sprintf("Annot, no EB: Overall TPR @ FPR=0.05 vs c_value [%s]", arch),
-          x = "c_value (fixed annotation scale)", y = "TPR @ FPR=0.05", color = "Use case"
+          x = "c_value (fixed annotation scale)", y = "TPR @ FPR=0.05",
+          color = expression(sigma[0]^2)
         ) +
         theme_susie2()
       save_or_show(p_s5, sprintf("s5_tpr_fpr05_vs_c_%s.png", arch),
