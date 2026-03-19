@@ -591,7 +591,19 @@ cat("top-8 confusion bins available:", has_top8_bins, "\n")
 ## 3.5 Extract TPR @ FPR thresholds
 
 ```{r tpr-overall}
-tpr_overall <- tpr_from_pfd(overall_pfd)
+# For the master table, use top-8 truth for oligogenic (matching SuSiE2 paper Fig 1I)
+# and all-causal truth for sparse.
+tpr_sparse <- tpr_from_pfd(sparse_pfd)
+
+if (has_top8_bins && !is.null(oligo_top8_pfd) && nrow(oligo_top8_pfd) > 0) {
+  tpr_oligo <- tpr_from_pfd(oligo_top8_pfd)
+  cat("Using top-8 truth for oligogenic TPR in master table\n")
+} else {
+  tpr_oligo <- tpr_from_pfd(oligo_pfd)
+  cat("Top-8 bins unavailable; using all-23 truth for oligogenic TPR in master table\n")
+}
+
+tpr_overall <- dplyr::bind_rows(tpr_sparse, tpr_oligo)
 cat("tpr_overall rows:", nrow(tpr_overall), "\n")
 cat("tpr_fpr10 range:", range(tpr_overall$tpr_fpr10, na.rm = TRUE), "\n")
 ```
