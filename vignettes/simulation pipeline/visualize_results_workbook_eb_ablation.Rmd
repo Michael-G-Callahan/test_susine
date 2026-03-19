@@ -678,15 +678,29 @@ cat("Ranked rows:", nrow(ranks_tbl), "\n")
 
 ```{r tier-summary}
 tier_summary <- if (!is.null(tier_cs_metrics) && nrow(tier_cs_metrics) > 0) {
+  # Include sigma_0_2_scalar in grouping if present (needed for S4 sigma-split plots)
+  tier_grp <- c("use_case_id", "short_label", "eb_category",
+                "architecture", "n_top")
+  if ("sigma_0_2_scalar" %in% names(tier_cs_metrics)) {
+    tier_grp <- c(tier_grp, "sigma_0_2_scalar")
+  }
   tier_cs_metrics %>%
     dplyr::filter(.data$filtering == "purity_filtered") %>%
-    dplyr::group_by(.data$use_case_id, .data$short_label, .data$eb_category,
-                    .data$architecture, .data$n_top) %>%
+    dplyr::group_by(dplyr::across(dplyr::all_of(tier_grp))) %>%
     dplyr::summarise(
       mean_cs_power = mean(.data$cs_power, na.rm = TRUE),
       mean_cs_fdr   = mean(.data$cs_fdr,   na.rm = TRUE),
       .groups = "drop"
-    )
+    ) %>%
+    { if ("sigma_0_2_scalar" %in% names(.)) {
+        dplyr::mutate(., sigma_lbl = dplyr::if_else(
+          !is.na(.data$sigma_0_2_scalar),
+          as.character(.data$sigma_0_2_scalar), "EB"
+        ))
+      } else {
+        dplyr::mutate(., sigma_lbl = "EB")
+      }
+    }
 } else {
   NULL
 }
