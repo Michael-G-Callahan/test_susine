@@ -258,7 +258,8 @@ detailed_grouping_vars <- c(
   "p_star", "L", "y_noise",
   "annotation_r2", "inflate_match",
   "sigma_0_2_scalar", "c_value", "tau_value",
-  "exploration_methods"
+  "exploration_methods",
+  "top_n_causal"
 )
 
 # Grouping variables for the dataset-level confusion matrix
