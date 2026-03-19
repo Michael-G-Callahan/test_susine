@@ -712,8 +712,19 @@ s4_mm_sp <- mm_fair %>%
   dplyr::filter(.data$use_case_id %in% S4_UCS,
                 .data$architecture == "susie2_sparse")
 
-s4_pfd_sp <- sparse_pfd %>%
-  dplyr::filter(.data$use_case_id %in% S4_UCS)
+# Recompute PFD for S4 grouped by sigma_0_2_scalar so TPR/FPR splits by sigma
+s4_pfd_sp <- test_susine::compute_power_fdr_curves(
+  conf_fair %>%
+    dplyr::filter(.data$architecture == "susie2_sparse",
+                  .data$use_case_id %in% S4_UCS),
+  group_vars = c("use_case_id", "architecture", "sigma_0_2_scalar")
+) %>%
+  add_uc_cols() %>%
+  dplyr::mutate(sigma_lbl = dplyr::if_else(
+    !is.na(.data$sigma_0_2_scalar),
+    as.character(.data$sigma_0_2_scalar),
+    "EB"
+  ))
 ```
 
 ```{r s4-sparse-cs, message=FALSE, fig.width=8, fig.height=5}
@@ -735,7 +746,7 @@ save_or_show(
 ```
 
 ```{r s4-sparse-tpr, message=FALSE, fig.width=8, fig.height=5}
-curves <- plot_sparse_tpr_fpr(s4_pfd_sp, "short_label",
+curves <- plot_sparse_tpr_fpr(s4_pfd_sp, "sigma_lbl",
                                "Baseline: Sparse — TPR vs FPR")
 if (!is.null(curves)) {
   save_or_show(curves$narrow, "s4_sparse_tpr_fpr_narrow.png",
@@ -745,7 +756,7 @@ if (!is.null(curves)) {
 }
 
 save_or_show(
-  plot_sparse_pr(s4_pfd_sp, "short_label", "Baseline: Sparse — Precision-Recall"),
+  plot_sparse_pr(s4_pfd_sp, "sigma_lbl", "Baseline: Sparse — Precision-Recall"),
   "s4_sparse_pr.png", width = 8, height = 5, subdir = "baseline")
 ```
 
@@ -757,11 +768,11 @@ if (!is.null(tier_summary)) {
     dplyr::filter(.data$use_case_id %in% S4_UCS,
                   .data$architecture == "susie2_oligogenic")
   save_or_show(
-    plot_oligo_tier_cs(s4_tier, "mean_cs_power", "short_label",
+    plot_oligo_tier_cs(s4_tier, "mean_cs_power", "sigma_lbl",
                        "95% CS Power", "Baseline: Oligogenic — CS Power vs top-N"),
     "s4_oligo_cs_power.png", width = 8, height = 5, subdir = "baseline")
   save_or_show(
-    plot_oligo_tier_cs(s4_tier, "mean_cs_fdr", "short_label",
+    plot_oligo_tier_cs(s4_tier, "mean_cs_fdr", "sigma_lbl",
                        "95% CS FDR", "Baseline: Oligogenic — CS FDR vs top-N",
                        hline_y = 0.05),
     "s4_oligo_cs_fdr.png", width = 8, height = 5, subdir = "baseline")
@@ -775,27 +786,71 @@ s4_mm_ol <- mm_fair %>%
   dplyr::filter(.data$use_case_id %in% S4_UCS,
                 .data$architecture == "susie2_oligogenic")
 save_or_show(
-  plot_oligo_hg2(s4_mm_ol, "short_label", "Baseline: Oligogenic — hg2"),
+  plot_oligo_hg2(s4_mm_ol, "sigma_lbl", "Baseline: Oligogenic — hg2"),
   "s4_oligo_hg2.png", width = 8, height = 5, subdir = "baseline")
 ```
 
 ```{r s4-oligo-tpr, message=FALSE, fig.width=8, fig.height=5}
-if (!is.null(oligo_top8_pfd)) {
-  s4_top8 <- oligo_top8_pfd %>%
-    dplyr::filter(.data$use_case_id %in% S4_UCS)
-  curves_top8 <- plot_oligo_tpr_fpr(s4_top8, "short_label",
-                                     "Baseline: Oligogenic — TPR vs FPR (top-8 causal)")
-  if (!is.null(curves_top8)) {
-    save_or_show(curves_top8$narrow, "s4_oligo_tpr_fpr_narrow.png",
+# Recompute oligo PFD for S4 grouped by sigma_0_2_scalar
+s4_oligo_pfd <- test_susine::compute_power_fdr_curves(
+  conf_fair %>%
+    dplyr::filter(.data$architecture == "susie2_oligogenic",
+                  .data$use_case_id %in% S4_UCS),
+  group_vars = c("use_case_id", "architecture", "sigma_0_2_scalar")
+) %>%
+  add_uc_cols() %>%
+  dplyr::mutate(sigma_lbl = dplyr::if_else(
+    !is.na(.data$sigma_0_2_scalar),
+    as.character(.data$sigma_0_2_scalar),
+    "EB"
+  ))
+
+if (nrow(s4_oligo_pfd) > 0) {
+  curves_ol <- plot_oligo_tpr_fpr(s4_oligo_pfd, "sigma_lbl",
+                                   "Baseline: Oligogenic — TPR vs FPR")
+  if (!is.null(curves_ol)) {
+    save_or_show(curves_ol$narrow, "s4_oligo_tpr_fpr_narrow.png",
                  width = 8, height = 5, subdir = "baseline")
-    save_or_show(curves_top8$wide,   "s4_oligo_tpr_fpr_wide.png",
+    save_or_show(curves_ol$wide,   "s4_oligo_tpr_fpr_wide.png",
                  width = 8, height = 5, subdir = "baseline")
   }
   save_or_show(
-    plot_oligo_pr(s4_top8, "short_label", "Baseline: Oligogenic — Precision-Recall (top-8 causal)"),
+    plot_oligo_pr(s4_oligo_pfd, "sigma_lbl", "Baseline: Oligogenic — Precision-Recall"),
     "s4_oligo_pr.png", width = 8, height = 5, subdir = "baseline")
 } else {
-  message("Oligogenic TPR/FPR + PR skipped (no top-8 confusion bins). Re-run sims with updated harness.")
+  message("Oligogenic TPR/FPR + PR skipped (no oligogenic confusion bins for baseline).")
+}
+
+# Top-8 variant version (if available)
+if (!is.null(oligo_top8_pfd)) {
+  s4_top8 <- test_susine::compute_power_fdr_curves(
+    conf_fair %>%
+      dplyr::filter(.data$architecture == "susie2_oligogenic",
+                    .data$use_case_id %in% S4_UCS,
+                    !is.na(.data$top_n_causal) & .data$top_n_causal == 8L),
+    group_vars = c("use_case_id", "architecture", "sigma_0_2_scalar")
+  ) %>%
+    add_uc_cols() %>%
+    dplyr::mutate(sigma_lbl = dplyr::if_else(
+      !is.na(.data$sigma_0_2_scalar),
+      paste0("σ²=", .data$sigma_0_2_scalar),
+      "fixed"
+    ))
+  if (nrow(s4_top8) > 0) {
+    curves_top8 <- plot_oligo_tpr_fpr(s4_top8, "sigma_lbl",
+                                       "Baseline: Oligogenic — TPR vs FPR (top-8 causal)")
+    if (!is.null(curves_top8)) {
+      save_or_show(curves_top8$narrow, "s4_oligo_top8_tpr_fpr_narrow.png",
+                   width = 8, height = 5, subdir = "baseline")
+      save_or_show(curves_top8$wide,   "s4_oligo_top8_tpr_fpr_wide.png",
+                   width = 8, height = 5, subdir = "baseline")
+    }
+    save_or_show(
+      plot_oligo_pr(s4_top8, "sigma_lbl", "Baseline: Oligogenic — Precision-Recall (top-8 causal)"),
+      "s4_oligo_top8_pr.png", width = 8, height = 5, subdir = "baseline")
+  }
+} else {
+  message("Oligogenic top-8 TPR/FPR + PR skipped (no top-8 confusion bins).")
 }
 ```
 
