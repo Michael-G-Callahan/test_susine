@@ -55,8 +55,8 @@ library(knitr)
 
 ```{r job-config}
 # UPDATE these two values after each run.
-job_name      <- "eb_ablation_v2"
-parent_job_id <- "49603067"
+job_name      <- "eb_ablation_v3"
+parent_job_id <- "49840208"
 output_root   <- here("output")
 
 paths <- test_susine::resolve_job_paths(

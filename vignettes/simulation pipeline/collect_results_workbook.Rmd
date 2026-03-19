@@ -37,8 +37,8 @@ library(arrow)
 ## 1.1 Specify the Job
 
 ```{r job-inputs}
-job_name <- "prior_default_testing"
-parent_job_id <- "47128217"
+job_name <- "eb_ablation_v3"
+parent_job_id <- "49840208"
 output_root <- here("output")
 
 # Toggle to skip writing the aggregated snps_dataset parquet folder.
@@ -255,6 +255,7 @@ pip_bucket_width <- 0.01
 #  - exploration_methods tracks how each fit was generated
 detailed_grouping_vars <- c(
   "use_case_id", "explore_method", "agg_method",
+  "variant_type", "architecture",
   "p_star", "L", "y_noise",
   "annotation_r2", "inflate_match",
   "sigma_0_2_scalar", "c_value", "tau_value",
