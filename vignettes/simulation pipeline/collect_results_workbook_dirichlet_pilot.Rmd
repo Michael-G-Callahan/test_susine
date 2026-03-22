@@ -43,7 +43,7 @@ theme_set(theme_bw(base_size = 13))
 ```{r settings}
 job_name <- "dirichlet_alpha_pilot"
 # Fill in your SLURM parent job ID after submission:
-parent_job_id <- "FILL_IN"
+parent_job_id <- "50040324"
 output_root <- here("output")
 ```
 
@@ -179,8 +179,11 @@ if (nrow(conf_agg) > 0) {
 
 # 6. Plot
 
-```{r plot-individual, fig.width=7, fig.height=4}
-ggplot(tpr_at_fdr, aes(x = factor(alpha_concentration), y = tpr)) +
+```{r plot-individual}
+fig_dir <- file.path(output_root, "figures", job_name)
+dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
+
+p1 <- ggplot(tpr_at_fdr, aes(x = factor(alpha_concentration), y = tpr)) +
   geom_col(fill = "steelblue", width = 0.6) +
   geom_text(aes(label = sprintf("%.3f", tpr)), vjust = -0.5, size = 3.5) +
   labs(
@@ -191,11 +194,15 @@ ggplot(tpr_at_fdr, aes(x = factor(alpha_concentration), y = tpr)) +
   ) +
   ylim(0, NA) +
   theme(axis.text.x = element_text(size = 11))
+
+ggsave(file.path(fig_dir, "tpr_by_alpha_individual.png"),
+       p1, width = 7, height = 4, dpi = 150)
+cat("Saved:", file.path(fig_dir, "tpr_by_alpha_individual.png"), "\n")
 ```
 
-```{r plot-aggregated, fig.width=9, fig.height=5}
+```{r plot-aggregated}
 if (nrow(tpr_at_fdr_agg) > 0) {
-  ggplot(
+  p2 <- ggplot(
     tpr_at_fdr_agg,
     aes(x = factor(alpha_concentration), y = tpr, fill = agg_method)
   ) +
@@ -214,5 +221,9 @@ if (nrow(tpr_at_fdr_agg) > 0) {
     ) +
     ylim(0, NA) +
     theme(axis.text.x = element_text(size = 11))
+
+  ggsave(file.path(fig_dir, "tpr_by_alpha_aggregated.png"),
+         p2, width = 9, height = 5, dpi = 150)
+  cat("Saved:", file.path(fig_dir, "tpr_by_alpha_aggregated.png"), "\n")
 }
 ```
