@@ -1,0 +1,218 @@
+---
+title: "Dirichlet Alpha Pilot — Collect & Visualize"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+Summary: Collects staging outputs from the Dirichlet alpha pilot run,
+then computes TPR @ FDR = 0.05 by alpha value across all datasets
+and aggregation methods.
+
+```{r setup, message=FALSE}
+here::i_am(
+  "vignettes/simulation pipeline/collect_results_workbook_dirichlet_pilot.Rmd"
+)
+library(here)
+here()
+
+library(devtools)
+devtools::load_all(".")
+
+susine_path <- here("..", "susine")
+if (file.exists(file.path(susine_path, "DESCRIPTION"))) {
+  devtools::load_all(susine_path)
+} else {
+  warning("susine package not found at: ", susine_path)
+}
+
+library(dplyr)
+library(tidyr)
+library(readr)
+library(ggplot2)
+theme_set(theme_bw(base_size = 13))
+```
+
+# 1. Job Settings
+
+```{r settings}
+job_name <- "dirichlet_alpha_pilot"
+# Fill in your SLURM parent job ID after submission:
+parent_job_id <- "FILL_IN"
+output_root <- here("output")
+```
+
+# 2. Aggregate Staging Outputs
+
+```{r aggregate}
+agg_dir <- file.path(
+  output_root, "slurm_output", job_name, parent_job_id, "aggregated"
+)
+
+if (!dir.exists(agg_dir) || !file.exists(file.path(agg_dir, "confusion_bins.csv"))) {
+  aggregate_staging_outputs(
+    job_name = job_name,
+    parent_job_id = parent_job_id,
+    output_root = output_root,
+    validate = TRUE
+  )
+}
+
+stopifnot(file.exists(file.path(agg_dir, "confusion_bins.csv")))
+cat("Aggregated outputs found at:", agg_dir, "\n")
+```
+
+# 3. Load Confusion Bins
+
+```{r load-data}
+conf <- readr::read_csv(
+  file.path(agg_dir, "confusion_bins.csv"),
+  show_col_types = FALSE
+)
+
+cat("Rows:", nrow(conf), "\n")
+cat("Columns:", paste(names(conf), collapse = ", "), "\n")
+cat("Alpha values:", sort(unique(conf$alpha_concentration)), "\n")
+
+# Sanity check: alpha_concentration should be present from enrichment
+stopifnot("alpha_concentration" %in% names(conf))
+```
+
+# 4. Compute TPR @ FDR = 0.05 by Alpha
+
+Strategy: from confusion bins, reconstruct the cumulative TP/FP curve
+by sweeping PIP thresholds from high to low. At each threshold, compute
+FDR = FP / (TP + FP) and TPR = TP / total_causal. Find the threshold
+where FDR <= 0.05 and report the corresponding TPR.
+
+```{r tpr-at-fdr}
+target_fdr <- 0.05
+
+# Filter to purity-filtered, non-aggregated runs only
+# (agg_method = NA means individual model fits)
+conf_fits <- conf %>%
+  filter(is.na(agg_method) | agg_method == "")
+
+# Sum confusion bins across ALL runs per alpha value,
+# collapsing across datasets, restarts, everything.
+bins_by_alpha <- conf_fits %>%
+  group_by(alpha_concentration, pip_threshold) %>%
+  summarise(
+    n_causal = sum(n_causal_at_bucket, na.rm = TRUE),
+    n_noncausal = sum(n_noncausal_at_bucket, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(alpha_concentration, desc(pip_threshold))
+
+# Cumulative TP/FP from high PIP threshold down
+tpr_fdr_by_alpha <- bins_by_alpha %>%
+  group_by(alpha_concentration) %>%
+  mutate(
+    cum_tp = cumsum(n_causal),
+    cum_fp = cumsum(n_noncausal),
+    total_causal = sum(n_causal),
+    fdr = cum_fp / pmax(cum_tp + cum_fp, 1),
+    tpr = cum_tp / pmax(total_causal, 1)
+  ) %>%
+  ungroup()
+
+# Find TPR at the most aggressive threshold where FDR <= target
+tpr_at_fdr <- tpr_fdr_by_alpha %>%
+  filter(fdr <= target_fdr) %>%
+  group_by(alpha_concentration) %>%
+  slice_max(tpr, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  select(alpha_concentration, pip_threshold, tpr, fdr, cum_tp, cum_fp, total_causal)
+
+cat("TPR @ FDR <=", target_fdr, "by alpha:\n")
+print(as.data.frame(tpr_at_fdr))
+```
+
+# 5. Same Analysis on Aggregated PIPs
+
+```{r tpr-at-fdr-aggregated}
+# Now look at aggregated PIPs (where agg_method is set)
+conf_agg <- conf %>%
+  filter(!is.na(agg_method) & agg_method != "")
+
+if (nrow(conf_agg) > 0) {
+  bins_by_alpha_agg <- conf_agg %>%
+    group_by(alpha_concentration, agg_method, pip_threshold) %>%
+    summarise(
+      n_causal = sum(n_causal_at_bucket, na.rm = TRUE),
+      n_noncausal = sum(n_noncausal_at_bucket, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    arrange(alpha_concentration, agg_method, desc(pip_threshold))
+
+  tpr_fdr_agg <- bins_by_alpha_agg %>%
+    group_by(alpha_concentration, agg_method) %>%
+    mutate(
+      cum_tp = cumsum(n_causal),
+      cum_fp = cumsum(n_noncausal),
+      total_causal = sum(n_causal),
+      fdr = cum_fp / pmax(cum_tp + cum_fp, 1),
+      tpr = cum_tp / pmax(total_causal, 1)
+    ) %>%
+    ungroup()
+
+  tpr_at_fdr_agg <- tpr_fdr_agg %>%
+    filter(fdr <= target_fdr) %>%
+    group_by(alpha_concentration, agg_method) %>%
+    slice_max(tpr, n = 1, with_ties = FALSE) %>%
+    ungroup() %>%
+    select(alpha_concentration, agg_method, pip_threshold, tpr, fdr,
+           cum_tp, cum_fp, total_causal)
+
+  cat("TPR @ FDR <=", target_fdr, "by alpha x aggregation method:\n")
+  print(as.data.frame(tpr_at_fdr_agg))
+} else {
+  cat("No aggregated runs found in confusion_bins.\n")
+  tpr_at_fdr_agg <- tibble()
+}
+```
+
+# 6. Plot
+
+```{r plot-individual, fig.width=7, fig.height=4}
+ggplot(tpr_at_fdr, aes(x = factor(alpha_concentration), y = tpr)) +
+  geom_col(fill = "steelblue", width = 0.6) +
+  geom_text(aes(label = sprintf("%.3f", tpr)), vjust = -0.5, size = 3.5) +
+  labs(
+    x = "Dirichlet alpha",
+    y = paste0("TPR @ FDR \u2264 ", target_fdr),
+    title = "Individual Fits: TPR by Dirichlet Concentration",
+    subtitle = "Pooled across all 450 datasets, all restarts"
+  ) +
+  ylim(0, NA) +
+  theme(axis.text.x = element_text(size = 11))
+```
+
+```{r plot-aggregated, fig.width=9, fig.height=5}
+if (nrow(tpr_at_fdr_agg) > 0) {
+  ggplot(
+    tpr_at_fdr_agg,
+    aes(x = factor(alpha_concentration), y = tpr, fill = agg_method)
+  ) +
+    geom_col(position = position_dodge(width = 0.7), width = 0.6) +
+    geom_text(
+      aes(label = sprintf("%.3f", tpr)),
+      position = position_dodge(width = 0.7),
+      vjust = -0.5, size = 3
+    ) +
+    labs(
+      x = "Dirichlet alpha",
+      y = paste0("TPR @ FDR \u2264 ", target_fdr),
+      fill = "Aggregation",
+      title = "Aggregated PIPs: TPR by Alpha x Aggregation Method",
+      subtitle = "Pooled across all 450 datasets"
+    ) +
+    ylim(0, NA) +
+    theme(axis.text.x = element_text(size = 11))
+}
+```

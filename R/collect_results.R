@@ -283,7 +283,8 @@ aggregate_staging_outputs <- function(job_name,
   run_enrich_full <- c(run_enrich_core, "group_key", "L", "annotation_r2",
                        "inflate_match", "sigma_0_2_scalar", "c_value", "tau_value",
                        "matrix_id", "y_noise", "p_star", "exploration_mode",
-                       "exploration_methods", "exploration_group")
+                       "exploration_methods", "exploration_group",
+                       "alpha_concentration")
   bundle_enrich_cols <- c("matrix_id", "architecture", "y_noise", "p_star",
                           "phenotype_seed")
 
