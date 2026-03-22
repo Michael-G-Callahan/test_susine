@@ -715,6 +715,7 @@ make_job_config <- function(job_name,
                               n_inits = NULL,
                               alpha_concentration = 1
                             ),
+                            alpha_concentration_grid = NULL,
                             refine_settings = list(
                               n_steps = NULL,
                               cs_source = "filtered"
@@ -808,6 +809,30 @@ make_job_config <- function(job_name,
     runs_fixed <- dplyr::mutate(runs_fixed, sigma_0_2_scalar = character(0))
   }
   runs <- dplyr::bind_rows(runs_fixed, runs_non_fixed)
+
+  # Alpha concentration grid expansion: cross restart runs with alpha values -----
+  if (!is.null(alpha_concentration_grid) && length(alpha_concentration_grid) > 0) {
+    if (!"restart_id" %in% names(runs)) runs$restart_id <- NA_integer_
+    has_restart <- !is.na(runs$restart_id)
+    runs_restart <- runs %>% dplyr::filter(has_restart)
+    runs_other <- runs %>%
+      dplyr::filter(!has_restart) %>%
+      dplyr::mutate(alpha_concentration = NA_real_)
+    if (nrow(runs_restart)) {
+      runs_restart <- runs_restart %>%
+        tidyr::crossing(alpha_concentration = as.numeric(alpha_concentration_grid))
+      # Update group_key to include alpha so each alpha gets separate aggregation
+      runs_restart <- runs_restart %>%
+        dplyr::mutate(
+          group_key = paste0(.data$group_key, "|alpha=", .data$alpha_concentration)
+        )
+    } else {
+      runs_restart <- dplyr::mutate(runs_restart, alpha_concentration = numeric(0))
+    }
+    runs <- dplyr::bind_rows(runs_restart, runs_other)
+  } else {
+    runs$alpha_concentration <- NA_real_
+  }
 
   ann_key <- ifelse(
     is.na(runs$annotation_r2) & is.na(runs$inflate_match),

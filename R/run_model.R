@@ -1200,7 +1200,8 @@ run_use_case <- function(use_case, run_row, data_bundle, job_config, blocked_idx
   p <- ncol(data_bundle$X)
   var_y <- stats::var(data_bundle$y)
   restart_cfg <- job_config$job$compute$restart %||% list()
-  alpha_conc <- restart_cfg$alpha_concentration %||% 1
+  alpha_conc <- as.numeric(run_row$alpha_concentration %||%
+    restart_cfg$alpha_concentration %||% 1)
 
   annotation_vec <- NULL
   if (prior_mean_strategy == "functional_mu" || inclusion_prior_strategy == "functional_pi") {

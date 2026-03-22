@@ -178,11 +178,11 @@ Use this section to experiment with `alpha_concentration` and visualize the
 distribution of `init_alpha` entries across samples.
 
 ```{r alpha-sampling}
-alpha_concentration <- job_inputs$alpha_concentration
+alpha_concentration <- 0.1 #job_inputs$alpha_concentration
 n_samples <- 50
 
-L <- as.integer(restart_row$L)
-p <- ncol(data_bundle$X)
+L <- 10#as.integer(restart_row$L)
+p <- 1000 #ncol(data_bundle$X)
 alpha_vec <- rep(alpha_concentration, p)
 
 alpha_samples <- lapply(seq_len(n_samples), function(i) {

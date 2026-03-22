@@ -553,15 +553,31 @@ oligo_pfd <- test_susine::compute_power_fdr_curves(
   group_vars = c("use_case_id", "architecture")
 ) %>% add_uc_cols()
 
-# Combined for convenience
-overall_pfd <- dplyr::bind_rows(sparse_pfd, oligo_pfd)
-
 # Stratified by annotation_r2 + inflate_match (for annotation sections)
+# Split sparse (all-causal truth) vs oligogenic (top-8 truth)
 if (all(c("annotation_r2", "inflate_match") %in% names(conf_fair))) {
-  annot_pfd <- test_susine::compute_power_fdr_curves(
-    conf_fair %>% dplyr::filter(!is.na(.data$annotation_r2)),
-    group_vars = c("use_case_id", "architecture", "annotation_r2", "inflate_match")
+  annot_grp <- c("use_case_id", "architecture", "annotation_r2", "inflate_match")
+  annot_pfd_sparse <- test_susine::compute_power_fdr_curves(
+    conf_fair %>% dplyr::filter(!is.na(.data$annotation_r2),
+                                .data$architecture == "susie2_sparse"),
+    group_vars = annot_grp
   ) %>% add_uc_cols()
+
+  if (has_top8_bins) {
+    annot_pfd_oligo <- test_susine::compute_power_fdr_curves(
+      conf_fair %>% dplyr::filter(!is.na(.data$annotation_r2),
+                                  .data$architecture == "susie2_oligogenic",
+                                  !is.na(.data$top_n_causal) & .data$top_n_causal == 8L),
+      group_vars = annot_grp
+    ) %>% add_uc_cols()
+  } else {
+    annot_pfd_oligo <- test_susine::compute_power_fdr_curves(
+      conf_fair %>% dplyr::filter(!is.na(.data$annotation_r2),
+                                  .data$architecture == "susie2_oligogenic"),
+      group_vars = annot_grp
+    ) %>% add_uc_cols()
+  }
+  annot_pfd <- dplyr::bind_rows(annot_pfd_sparse, annot_pfd_oligo)
 } else {
   annot_pfd <- NULL
 }
@@ -817,39 +833,9 @@ save_or_show(
 ```
 
 ```{r s4-oligo-tpr, message=FALSE, fig.width=8, fig.height=5}
-# Recompute oligo PFD for S4 grouped by sigma_0_2_scalar
-s4_oligo_pfd <- test_susine::compute_power_fdr_curves(
-  conf_fair %>%
-    dplyr::filter(.data$architecture == "susie2_oligogenic",
-                  .data$use_case_id %in% S4_UCS),
-  group_vars = c("use_case_id", "architecture", "sigma_0_2_scalar")
-) %>%
-  add_uc_cols() %>%
-  dplyr::mutate(sigma_lbl = dplyr::if_else(
-    !is.na(.data$sigma_0_2_scalar),
-    as.character(.data$sigma_0_2_scalar),
-    "EB"
-  ))
-
-if (nrow(s4_oligo_pfd) > 0) {
-  curves_ol <- plot_oligo_tpr_fpr(s4_oligo_pfd, "sigma_lbl",
-                                   "Baseline: Oligogenic — TPR vs FPR")
-  if (!is.null(curves_ol)) {
-    save_or_show(curves_ol$narrow, "s4_oligo_tpr_fpr_narrow.png",
-                 width = 8, height = 5, subdir = "baseline")
-    save_or_show(curves_ol$wide,   "s4_oligo_tpr_fpr_wide.png",
-                 width = 8, height = 5, subdir = "baseline")
-  }
-  save_or_show(
-    plot_oligo_pr(s4_oligo_pfd, "sigma_lbl", "Baseline: Oligogenic — Precision-Recall"),
-    "s4_oligo_pr.png", width = 8, height = 5, subdir = "baseline")
-} else {
-  message("Oligogenic TPR/FPR + PR skipped (no oligogenic confusion bins for baseline).")
-}
-
-# Top-8 variant version (if available)
-if (!is.null(oligo_top8_pfd)) {
-  s4_top8 <- test_susine::compute_power_fdr_curves(
+# Oligogenic TPR/FPR + PR: always use top-8 causal truth
+if (has_top8_bins) {
+  s4_oligo_pfd <- test_susine::compute_power_fdr_curves(
     conf_fair %>%
       dplyr::filter(.data$architecture == "susie2_oligogenic",
                     .data$use_case_id %in% S4_UCS,
@@ -859,24 +845,24 @@ if (!is.null(oligo_top8_pfd)) {
     add_uc_cols() %>%
     dplyr::mutate(sigma_lbl = dplyr::if_else(
       !is.na(.data$sigma_0_2_scalar),
-      paste0("σ²=", .data$sigma_0_2_scalar),
-      "fixed"
+      as.character(.data$sigma_0_2_scalar), "EB"
     ))
-  if (nrow(s4_top8) > 0) {
-    curves_top8 <- plot_oligo_tpr_fpr(s4_top8, "sigma_lbl",
-                                       "Baseline: Oligogenic — TPR vs FPR (top-8 causal)")
-    if (!is.null(curves_top8)) {
-      save_or_show(curves_top8$narrow, "s4_oligo_top8_tpr_fpr_narrow.png",
+  if (nrow(s4_oligo_pfd) > 0) {
+    curves_ol <- plot_oligo_tpr_fpr(s4_oligo_pfd, "sigma_lbl",
+                                     "Baseline: Oligogenic — TPR vs FPR (top-8 causal)")
+    if (!is.null(curves_ol)) {
+      save_or_show(curves_ol$narrow, "s4_oligo_tpr_fpr_narrow.png",
                    width = 8, height = 5, subdir = "baseline")
-      save_or_show(curves_top8$wide,   "s4_oligo_top8_tpr_fpr_wide.png",
+      save_or_show(curves_ol$wide,   "s4_oligo_tpr_fpr_wide.png",
                    width = 8, height = 5, subdir = "baseline")
     }
     save_or_show(
-      plot_oligo_pr(s4_top8, "sigma_lbl", "Baseline: Oligogenic — Precision-Recall (top-8 causal)"),
-      "s4_oligo_top8_pr.png", width = 8, height = 5, subdir = "baseline")
+      plot_oligo_pr(s4_oligo_pfd, "sigma_lbl",
+                    "Baseline: Oligogenic — Precision-Recall (top-8 causal)"),
+      "s4_oligo_pr.png", width = 8, height = 5, subdir = "baseline")
   }
 } else {
-  message("Oligogenic top-8 TPR/FPR + PR skipped (no top-8 confusion bins).")
+  message("Oligogenic TPR/FPR + PR skipped (no top-8 confusion bins).")
 }
 ```
 
@@ -1346,9 +1332,26 @@ One row per (use_case_id, architecture). Primary sort: overall TPR@FPR=0.1 desce
 
 ```{r master-table}
 # Overall AUPRC pooled across all datasets
-overall_auprc <- test_susine::compute_auprc_from_confusion(
-  conf_fair, group_vars = c("use_case_id", "architecture")
-) %>% add_uc_cols() %>%
+# Split sparse (all-causal) vs oligogenic (top-8) to match TPR methodology
+auprc_sparse <- test_susine::compute_auprc_from_confusion(
+  conf_fair %>% dplyr::filter(.data$architecture == "susie2_sparse"),
+  group_vars = c("use_case_id", "architecture")
+) %>% add_uc_cols()
+
+if (has_top8_bins) {
+  auprc_oligo <- test_susine::compute_auprc_from_confusion(
+    conf_fair %>% dplyr::filter(.data$architecture == "susie2_oligogenic",
+                                !is.na(.data$top_n_causal) & .data$top_n_causal == 8L),
+    group_vars = c("use_case_id", "architecture")
+  ) %>% add_uc_cols()
+} else {
+  auprc_oligo <- test_susine::compute_auprc_from_confusion(
+    conf_fair %>% dplyr::filter(.data$architecture == "susie2_oligogenic"),
+    group_vars = c("use_case_id", "architecture")
+  ) %>% add_uc_cols()
+}
+
+overall_auprc <- dplyr::bind_rows(auprc_sparse, auprc_oligo) %>%
   dplyr::rename(overall_AUPRC = "AUPRC")
 
 # Rank stats
