@@ -227,3 +227,75 @@ if (nrow(tpr_at_fdr_agg) > 0) {
   cat("Saved:", file.path(fig_dir, "tpr_by_alpha_aggregated.png"), "\n")
 }
 ```
+
+# 7. Multimodal Metrics by Alpha
+
+```{r load-multimodal}
+mm_path <- file.path(agg_dir, "multimodal_metrics.csv")
+if (file.exists(mm_path)) {
+  mm <- readr::read_csv(mm_path, show_col_types = FALSE)
+
+  # Parse alpha from group_label (e.g., "model_grid|...|alpha=0.01")
+  mm <- mm %>%
+    mutate(
+      alpha_concentration = as.numeric(
+        stringr::str_extract(group_label, "(?<=alpha=)[0-9.]+")
+      )
+    )
+
+  cat("Multimodal metrics rows:", nrow(mm), "\n")
+  cat("Alpha values:", sort(unique(mm$alpha_concentration)), "\n")
+} else {
+  mm <- tibble()
+  cat("No multimodal_metrics.csv found.\n")
+}
+```
+
+```{r multimodal-summary}
+if (nrow(mm) > 0) {
+  mm_summary <- mm %>%
+    filter(!is.na(alpha_concentration)) %>%
+    group_by(alpha_concentration) %>%
+    summarise(
+      n_datasets = n(),
+      mean_jsd = mean(mean_jsd, na.rm = TRUE),
+      median_jsd = median(mean_jsd, na.rm = TRUE),
+      mean_max_jsd = mean(max_jsd, na.rm = TRUE),
+      mean_jaccard_top10 = mean(jaccard_top10, na.rm = TRUE),
+      mean_pip_var = mean(mean_pip_var, na.rm = TRUE),
+      mean_n_clusters = mean(n_clusters, na.rm = TRUE),
+      .groups = "drop"
+    )
+
+  cat("Multimodal metrics summary by alpha:\n")
+  print(as.data.frame(mm_summary))
+}
+```
+
+```{r plot-multimodal}
+if (nrow(mm) > 0 && any(!is.na(mm$alpha_concentration))) {
+  mm_long <- mm %>%
+    filter(!is.na(alpha_concentration)) %>%
+    select(alpha_concentration, mean_jsd, max_jsd, jaccard_top10,
+           mean_pip_var, n_clusters) %>%
+    tidyr::pivot_longer(
+      cols = -alpha_concentration,
+      names_to = "metric",
+      values_to = "value"
+    )
+
+  p3 <- ggplot(mm_long, aes(x = factor(alpha_concentration), y = value)) +
+    geom_boxplot(fill = "lightblue", outlier.size = 0.5) +
+    facet_wrap(~metric, scales = "free_y", ncol = 3) +
+    labs(
+      x = "Dirichlet alpha",
+      title = "Multimodal Metrics by Dirichlet Concentration",
+      subtitle = "Distribution across datasets (one point per dataset)"
+    ) +
+    theme(axis.text.x = element_text(size = 9))
+
+  ggsave(file.path(fig_dir, "multimodal_by_alpha.png"),
+         p3, width = 10, height = 6, dpi = 150)
+  cat("Saved:", file.path(fig_dir, "multimodal_by_alpha.png"), "\n")
+}
+```
