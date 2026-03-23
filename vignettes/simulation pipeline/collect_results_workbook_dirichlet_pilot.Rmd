@@ -44,7 +44,7 @@ theme_set(theme_bw(base_size = 13))
 # 1. Job Settings
 
 ```{r settings}
-job_name <- "dirichlet_alpha_pilot_v2"
+job_name <- "dirichlet_alpha_pilot_v3"
 parent_job_id <- "50042217"
 output_root <- here("output")
 

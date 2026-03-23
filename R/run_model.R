@@ -1782,12 +1782,21 @@ write_run_outputs <- function(run_row,
 
   conf_bins <- NULL
   if (isTRUE(job_config$job$write_confusion_bins)) {
+    # Top-8 causal mask: score only the 8 largest-effect causal variants
+    top8_mask_local <- if (length(data_bundle$causal_idx) > 0L && !is.null(data_bundle$beta)) {
+      n_top <- min(8L, length(data_bundle$causal_idx))
+      data_bundle$causal_idx[
+        order(abs(data_bundle$beta[data_bundle$causal_idx]), decreasing = TRUE)
+      ][seq_len(n_top)]
+    } else {
+      data_bundle$causal_idx
+    }
     conf_bins <- compute_confusion_bins(
       evaluation$combined_pip,
       as.integer(seq_along(data_bundle$beta) %in% data_bundle$causal_idx),
       pip_bucket_width = job_config$job$metrics$pip_bucket_width %||% 0.01,
       pip_breaks = job_config$job$metrics$pip_breaks,
-      causal_mask = top8_causal_mask
+      causal_mask = top8_mask_local
     )
     write_confusion_bins(
       run_row = run_row,
