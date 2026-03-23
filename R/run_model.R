@@ -629,6 +629,16 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
   data_bundle <- generate_data_for_bundle(bundle_row, job_config)
   bundle_row <- dplyr::mutate(bundle_row, data_scenario = data_bundle$data_scenario)
 
+  # Top-8 causal mask: score TP/FP only on the 8 largest-effect causal variants
+  top8_causal_mask <- if (length(data_bundle$causal_idx) > 0L && !is.null(data_bundle$beta)) {
+    n_top <- min(8L, length(data_bundle$causal_idx))
+    data_bundle$causal_idx[
+      order(abs(data_bundle$beta[data_bundle$causal_idx]), decreasing = TRUE)
+    ][seq_len(n_top)]
+  } else {
+    data_bundle$causal_idx
+  }
+
   # Dataset-level metrics (computed once)
   z_top_k <- job_config$job$metrics$z_top_k %||% 10L
   # Slim dataset_metrics: only dataset_bundle_id + data_scenario + metrics.
@@ -934,7 +944,8 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
               agg_pip,
               as.integer(seq_along(data_bundle$beta) %in% data_bundle$causal_idx),
               pip_bucket_width = job_config$job$metrics$pip_bucket_width %||% 0.01,
-              pip_breaks = job_config$job$metrics$pip_breaks
+              pip_breaks = job_config$job$metrics$pip_breaks,
+              causal_mask = top8_causal_mask
             )
             agg_run_row <- group_run_map[[group_key]] %||% uc_runs[1, , drop = FALSE]
             agg_run_row$restart_id <- NA_integer_
@@ -1002,7 +1013,8 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
         agg_pip,
         as.integer(seq_along(data_bundle$beta) %in% data_bundle$causal_idx),
         pip_bucket_width = job_config$job$metrics$pip_bucket_width %||% 0.01,
-        pip_breaks = job_config$job$metrics$pip_breaks
+        pip_breaks = job_config$job$metrics$pip_breaks,
+        causal_mask = top8_causal_mask
       )
       write_confusion_bins(
         run_row = global_row,
@@ -1774,7 +1786,8 @@ write_run_outputs <- function(run_row,
       evaluation$combined_pip,
       as.integer(seq_along(data_bundle$beta) %in% data_bundle$causal_idx),
       pip_bucket_width = job_config$job$metrics$pip_bucket_width %||% 0.01,
-      pip_breaks = job_config$job$metrics$pip_breaks
+      pip_breaks = job_config$job$metrics$pip_breaks,
+      causal_mask = top8_causal_mask
     )
     write_confusion_bins(
       run_row = run_row,
@@ -1784,28 +1797,6 @@ write_run_outputs <- function(run_row,
       variant_meta = variant_meta
     )
 
-    # For susie2_oligogenic: also write top-8-causal confusion bins
-    if (identical(as.character(run_row$architecture), "susie2_oligogenic") &&
-        length(data_bundle$causal_idx) > 0L && !is.null(data_bundle$beta)) {
-      n_top <- min(8L, length(data_bundle$causal_idx))
-      top8_idx <- data_bundle$causal_idx[
-        order(abs(data_bundle$beta[data_bundle$causal_idx]), decreasing = TRUE)
-      ][seq_len(n_top)]
-      conf_bins_top8 <- compute_confusion_bins(
-        pip              = evaluation$combined_pip,
-        causal           = as.integer(seq_along(data_bundle$beta) %in% data_bundle$causal_idx),
-        pip_bucket_width = job_config$job$metrics$pip_bucket_width %||% 0.01,
-        pip_breaks       = job_config$job$metrics$pip_breaks,
-        causal_mask      = top8_idx
-      ) %>% dplyr::mutate(top_n_causal = 8L)
-      write_confusion_bins(
-        run_row      = run_row,
-        job_config   = job_config,
-        conf_bins    = conf_bins_top8,
-        buffer_ctx   = buffer_ctx,
-        variant_meta = variant_meta
-      )
-    }
   }
 
   if (should_write_legacy) {
