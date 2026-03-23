@@ -45,7 +45,7 @@ theme_set(theme_bw(base_size = 13))
 
 ```{r settings}
 job_name <- "dirichlet_alpha_pilot_v2"
-parent_job_id <- "FILL_IN"
+parent_job_id <- "50042217"
 output_root <- here("output")
 
 agg_dir <- file.path(
@@ -114,25 +114,9 @@ baseline_tpr_fpr010 <- {
   if (is.na(idx)) 0 else curves_baseline$power[idx]
 }
 
-# TPR @ FDR thresholds (interpolated)
-baseline_tpr_fdr005 <- {
-  df <- arrange(distinct(curves_baseline, fdr, power), fdr)
-  val <- stats::approx(df$fdr, df$power, xout = 0.05,
-                       ties = "ordered", rule = 2)$y
-  if (is.na(val)) 0 else val
-}
-baseline_tpr_fdr010 <- {
-  df <- arrange(distinct(curves_baseline, fdr, power), fdr)
-  val <- stats::approx(df$fdr, df$power, xout = 0.10,
-                       ties = "ordered", rule = 2)$y
-  if (is.na(val)) 0 else val
-}
-
 cat(sprintf("Baseline (uniform prior) reference:\n"))
 cat(sprintf("  TPR @ FPR=0.05: %.4f\n", baseline_tpr_fpr005))
 cat(sprintf("  TPR @ FPR=0.10: %.4f\n", baseline_tpr_fpr010))
-cat(sprintf("  TPR @ FDR=0.05: %.4f\n", baseline_tpr_fdr005))
-cat(sprintf("  TPR @ FDR=0.10: %.4f\n", baseline_tpr_fdr010))
 ```
 
 ```{r tpr-at-fpr-individual}
@@ -205,43 +189,7 @@ if (nrow(conf_agg) > 0) {
 }
 ```
 
-# 5. TPR @ FDR (stricter criterion)
-
-```{r tpr-at-fdr-aggregated}
-if (nrow(conf_agg) > 0) {
-  # Use interpolation to handle bin-resolution issues
-  tpr_at_fdr_agg <- curves_agg %>%
-    group_by(alpha_concentration, agg_method) %>%
-    summarise(
-      tpr_fdr005 = {
-        df <- arrange(distinct(cur_data_all(), fdr, power), fdr)
-        val <- stats::approx(df$fdr, df$power, xout = 0.05,
-                             ties = "ordered", rule = 2)$y
-        if (is.na(val)) 0 else val
-      },
-      tpr_fdr010 = {
-        df <- arrange(distinct(cur_data_all(), fdr, power), fdr)
-        val <- stats::approx(df$fdr, df$power, xout = 0.10,
-                             ties = "ordered", rule = 2)$y
-        if (is.na(val)) 0 else val
-      },
-      .groups = "drop"
-    )
-
-  all_combos <- tidyr::expand_grid(
-    alpha_concentration = unique(curves_agg$alpha_concentration),
-    agg_method = unique(curves_agg$agg_method)
-  )
-  tpr_at_fdr_agg <- all_combos %>%
-    left_join(tpr_at_fdr_agg, by = c("alpha_concentration", "agg_method")) %>%
-    mutate(across(starts_with("tpr_"), ~coalesce(., 0)))
-
-  cat("Aggregated — TPR @ FDR thresholds (interpolated):\n")
-  print(as.data.frame(tpr_at_fdr_agg))
-}
-```
-
-# 6. Plots — TPR @ FPR
+# 5. Plots — TPR @ FPR
 
 ```{r plot-fpr-individual}
 p1 <- ggplot(tpr_at_fpr_individual,
@@ -298,35 +246,35 @@ if (nrow(tpr_at_fpr_agg) > 0) {
 }
 ```
 
-```{r plot-fdr-aggregated}
-if (nrow(tpr_at_fdr_agg) > 0) {
+```{r plot-fpr010-aggregated}
+if (nrow(tpr_at_fpr_agg) > 0) {
   p2b <- ggplot(
-    tpr_at_fdr_agg,
-    aes(x = factor(alpha_concentration), y = tpr_fdr010, fill = agg_method)
+    tpr_at_fpr_agg,
+    aes(x = factor(alpha_concentration), y = tpr_fpr010, fill = agg_method)
   ) +
     geom_col(position = position_dodge(width = 0.7), width = 0.6) +
-    geom_hline(yintercept = baseline_tpr_fdr010, linetype = "dashed",
+    geom_hline(yintercept = baseline_tpr_fpr010, linetype = "dashed",
                color = "red", linewidth = 0.7) +
-    annotate("text", x = Inf, y = baseline_tpr_fdr010,
-             label = sprintf("baseline = %.3f", baseline_tpr_fdr010),
+    annotate("text", x = Inf, y = baseline_tpr_fpr010,
+             label = sprintf("baseline = %.3f", baseline_tpr_fpr010),
              hjust = 1.1, vjust = -0.5, color = "red", size = 3) +
     geom_text(
-      aes(label = sprintf("%.3f", tpr_fdr010)),
+      aes(label = sprintf("%.3f", tpr_fpr010)),
       position = position_dodge(width = 0.7),
       vjust = -0.5, size = 2.5
     ) +
     labs(
       x = "Dirichlet alpha",
-      y = "TPR @ FDR = 0.10",
+      y = "TPR @ FPR = 0.10",
       fill = "Aggregation",
-      title = "Aggregated PIPs: TPR @ FDR = 0.10 by Alpha (interpolated)",
+      title = "Aggregated PIPs: TPR @ FPR = 0.10 by Alpha",
       subtitle = "Pooled across all datasets"
     ) +
     ylim(0, NA)
 
-  ggsave(file.path(fig_dir, "tpr_fdr010_aggregated.png"),
+  ggsave(file.path(fig_dir, "tpr_fpr010_aggregated.png"),
          p2b, width = 9, height = 5, dpi = 150)
-  cat("Saved:", file.path(fig_dir, "tpr_fdr010_aggregated.png"), "\n")
+  cat("Saved:", file.path(fig_dir, "tpr_fpr010_aggregated.png"), "\n")
 }
 ```
 
