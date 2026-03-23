@@ -61,9 +61,10 @@ job_inputs <- list(
 
   # Fixed simulation settings
   L_grid = 10L,
+  y_noise_grid = 0.8,   # placeholder — ignored by susie2_oligogenic (h2_total=0.25)
+  p_star_grid = 3L,     # placeholder — ignored by susie2_oligogenic (hardcoded 3/5/15)
   architecture_grid = "susie2_oligogenic",  # SuSiE 2 paper Scenario 1: 3/5/15, h2=0.25
   pair_L_p_star = FALSE,
-  # y_noise and p_star are unused — h2_total=0.25 and tier counts hardcoded
 
   # No annotations for this study
   annotation_r2 = 0.0,
