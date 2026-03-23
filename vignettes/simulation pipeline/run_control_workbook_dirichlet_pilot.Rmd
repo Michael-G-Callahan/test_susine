@@ -113,7 +113,11 @@ job_inputs <- list(
   softmax_temperature = 1,
 
   metrics_settings = list(
-    pip_bucket_width = 0.01,
+    pip_breaks = c(
+      seq(0.000, 0.048, by = 0.002),   # 25 bins: [0.00, 0.05) — fine for FPR resolution
+      seq(0.05,  0.19,  by = 0.01),    # 15 bins: [0.05, 0.20)
+      seq(0.20,  1.00,  by = 0.05)     # 17 bins: [0.20, 1.00]
+    ),
     z_top_k = 10,
     jsd_threshold = 0.15
   )
