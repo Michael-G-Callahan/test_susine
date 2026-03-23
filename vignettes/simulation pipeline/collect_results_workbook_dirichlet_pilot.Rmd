@@ -91,6 +91,50 @@ Uses `compute_power_fdr_curves()` which produces both `fpr` and `fdr`
 columns. FPR = FP / total_noncausal (lenient). FDR = FP / (TP + FP)
 (strict).
 
+```{r baseline-reference}
+# Compute baseline (default uniform prior) TPR @ FPR and FDR
+# Default runs are identical across alpha values — take any one
+baseline_alpha <- sort(unique(conf$alpha_concentration))[1L]
+conf_baseline <- conf %>%
+  filter(
+    (is.na(agg_method) | agg_method == ""),
+    run_type == "default",
+    alpha_concentration == baseline_alpha
+  )
+
+curves_baseline <- compute_power_fdr_curves(conf_baseline)
+
+# TPR @ FPR thresholds
+baseline_tpr_fpr005 <- {
+  idx <- which(curves_baseline$fpr >= 0.05)[1L]
+  if (is.na(idx)) 0 else curves_baseline$power[idx]
+}
+baseline_tpr_fpr010 <- {
+  idx <- which(curves_baseline$fpr >= 0.10)[1L]
+  if (is.na(idx)) 0 else curves_baseline$power[idx]
+}
+
+# TPR @ FDR thresholds (interpolated)
+baseline_tpr_fdr005 <- {
+  df <- arrange(distinct(curves_baseline, fdr, power), fdr)
+  val <- stats::approx(df$fdr, df$power, xout = 0.05,
+                       ties = "ordered", rule = 2)$y
+  if (is.na(val)) 0 else val
+}
+baseline_tpr_fdr010 <- {
+  df <- arrange(distinct(curves_baseline, fdr, power), fdr)
+  val <- stats::approx(df$fdr, df$power, xout = 0.10,
+                       ties = "ordered", rule = 2)$y
+  if (is.na(val)) 0 else val
+}
+
+cat(sprintf("Baseline (uniform prior) reference:\n"))
+cat(sprintf("  TPR @ FPR=0.05: %.4f\n", baseline_tpr_fpr005))
+cat(sprintf("  TPR @ FPR=0.10: %.4f\n", baseline_tpr_fpr010))
+cat(sprintf("  TPR @ FDR=0.05: %.4f\n", baseline_tpr_fdr005))
+cat(sprintf("  TPR @ FDR=0.10: %.4f\n", baseline_tpr_fdr010))
+```
+
 ```{r tpr-at-fpr-individual}
 # Individual fits only (no aggregation)
 conf_fits <- conf %>%
@@ -203,6 +247,11 @@ if (nrow(conf_agg) > 0) {
 p1 <- ggplot(tpr_at_fpr_individual,
              aes(x = factor(alpha_concentration), y = tpr_fpr005)) +
   geom_col(fill = "steelblue", width = 0.6) +
+  geom_hline(yintercept = baseline_tpr_fpr005, linetype = "dashed",
+             color = "red", linewidth = 0.7) +
+  annotate("text", x = Inf, y = baseline_tpr_fpr005,
+           label = sprintf("baseline = %.3f", baseline_tpr_fpr005),
+           hjust = 1.1, vjust = -0.5, color = "red", size = 3) +
   geom_text(aes(label = sprintf("%.3f", tpr_fpr005)), vjust = -0.5, size = 3.5) +
   labs(
     x = "Dirichlet alpha",
@@ -224,6 +273,11 @@ if (nrow(tpr_at_fpr_agg) > 0) {
     aes(x = factor(alpha_concentration), y = tpr_fpr005, fill = agg_method)
   ) +
     geom_col(position = position_dodge(width = 0.7), width = 0.6) +
+    geom_hline(yintercept = baseline_tpr_fpr005, linetype = "dashed",
+               color = "red", linewidth = 0.7) +
+    annotate("text", x = Inf, y = baseline_tpr_fpr005,
+             label = sprintf("baseline = %.3f", baseline_tpr_fpr005),
+             hjust = 1.1, vjust = -0.5, color = "red", size = 3) +
     geom_text(
       aes(label = sprintf("%.3f", tpr_fpr005)),
       position = position_dodge(width = 0.7),
@@ -251,6 +305,11 @@ if (nrow(tpr_at_fdr_agg) > 0) {
     aes(x = factor(alpha_concentration), y = tpr_fdr010, fill = agg_method)
   ) +
     geom_col(position = position_dodge(width = 0.7), width = 0.6) +
+    geom_hline(yintercept = baseline_tpr_fdr010, linetype = "dashed",
+               color = "red", linewidth = 0.7) +
+    annotate("text", x = Inf, y = baseline_tpr_fdr010,
+             label = sprintf("baseline = %.3f", baseline_tpr_fdr010),
+             hjust = 1.1, vjust = -0.5, color = "red", size = 3) +
     geom_text(
       aes(label = sprintf("%.3f", tpr_fdr010)),
       position = position_dodge(width = 0.7),
