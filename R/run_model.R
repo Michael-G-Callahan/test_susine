@@ -916,7 +916,9 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
             elbo_vec = group_elbos,
             methods = agg_methods,
             softmax_temperature = softmax_temperature,
-            jsd_threshold = job_config$job$metrics$jsd_threshold %||% 0.15
+            jsd_threshold = job_config$job$metrics$jsd_threshold %||% 0.15,
+            cluster_jsd_thresholds = job_config$job$compute$cluster_jsd_thresholds %||% c(0.50, 1.0, 2.0, 3.0, 5.0),
+            cluster_bjsd_thresholds = job_config$job$compute$cluster_bjsd_thresholds %||% c(0.001, 0.002, 0.004, 0.006, 0.008)
           )
           for (m in names(agg_results)) {
             agg_pip <- agg_results[[m]]
@@ -982,7 +984,9 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
       elbo_vec = global_primary_elbos,
       methods = overall_methods,
       softmax_temperature = softmax_temperature,
-      jsd_threshold = job_config$job$metrics$jsd_threshold %||% 0.15
+      jsd_threshold = job_config$job$metrics$jsd_threshold %||% 0.15,
+      cluster_jsd_thresholds = job_config$job$compute$cluster_jsd_thresholds %||% c(0.50, 1.0, 2.0, 3.0, 5.0),
+      cluster_bjsd_thresholds = job_config$job$compute$cluster_bjsd_thresholds %||% c(0.001, 0.002, 0.004, 0.006, 0.008)
     )
     global_row <- global_run_template %||% bundle_runs[1, , drop = FALSE]
     global_row$use_case_id <- "global_pool"
@@ -1400,7 +1404,9 @@ aggregate_use_case_pips <- function(pip_list,
                                     elbo_vec,
                                     methods = c("elbo_softmax"),
                                     softmax_temperature = 1,
-                                    jsd_threshold = 0.15) {
+                                    jsd_threshold = 0.15,
+                                    cluster_jsd_thresholds = c(0.50, 1.0, 2.0, 3.0, 5.0),
+                                    cluster_bjsd_thresholds = c(0.001, 0.002, 0.004, 0.006, 0.008)) {
   methods <- unique(as.character(methods))
   methods[methods == "softmax_elbo"] <- "elbo_softmax"
   methods[methods == "mean"] <- "uniform"
@@ -1420,6 +1426,8 @@ aggregate_use_case_pips <- function(pip_list,
   }
   if ("cluster_weight" %in% methods && length(elbo_vec) > 1 && nrow(pips_mat) > 1) {
     n <- nrow(pips_mat)
+
+    # Compute categorical JSD distance matrix -----
     jsd_mat <- matrix(0, n, n)
     for (i in 1:(n - 1)) {
       for (j in (i + 1):n) {
@@ -1428,27 +1436,68 @@ aggregate_use_case_pips <- function(pip_list,
         jsd_mat[j, i] <- d
       }
     }
-    hc <- stats::hclust(stats::as.dist(jsd_mat), method = "complete")
-    clusters <- stats::cutree(hc, h = jsd_threshold)
-    cl_levels <- sort(unique(clusters))
-    rep_idx <- integer(length(cl_levels))
-    freq <- numeric(length(cl_levels))
-    elbo_rep <- numeric(length(cl_levels))
-    for (k in seq_along(cl_levels)) {
-      cid <- cl_levels[[k]]
-      idxs <- which(clusters == cid)
-      freq[k] <- length(idxs) / n
-      pick <- idxs[which.max(elbo_vec[idxs])]
-      rep_idx[k] <- pick
-      elbo_rep[k] <- elbo_vec[pick]
+    hc_jsd <- stats::hclust(stats::as.dist(jsd_mat), method = "complete")
+
+    # Compute Bernoulli JSD distance matrix -----
+    bjsd_mat <- matrix(0, n, n)
+    for (i in 1:(n - 1)) {
+      for (j in (i + 1):n) {
+        d <- js_distance_bernoulli(pips_mat[i, ], pips_mat[j, ])
+        bjsd_mat[i, j] <- d
+        bjsd_mat[j, i] <- d
+      }
     }
-    w_rep <- softmax_weights(elbo_rep, temperature = softmax_temperature) / freq
-    w_rep <- w_rep / sum(w_rep)
-    ens <- as.numeric(crossprod(w_rep, pips_mat[rep_idx, , drop = FALSE]))
-    attr(ens, "ess") <- as.numeric(1 / sum(w_rep^2))
-    res$cluster_weight <- ens
+    hc_bjsd <- stats::hclust(stats::as.dist(bjsd_mat), method = "complete")
+
+    # Legacy cluster_weight: categorical JSD at jsd_threshold -----
+    res$cluster_weight <- .cluster_weight_from_hc(
+      hc_jsd, jsd_threshold, elbo_vec, pips_mat, softmax_temperature
+    )
+
+    # Multi-threshold categorical JSD variants -----
+    for (th in cluster_jsd_thresholds) {
+      th_label <- sub("\\.", "", formatC(th, format = "f", digits = 2))
+      name <- paste0("cluster_weight_jsd_", th_label)
+      res[[name]] <- .cluster_weight_from_hc(
+        hc_jsd, th, elbo_vec, pips_mat, softmax_temperature
+      )
+    }
+
+    # Multi-threshold Bernoulli JSD variants -----
+    for (th in cluster_bjsd_thresholds) {
+      th_label <- sub("\\.", "", formatC(th, format = "f", digits = 3))
+      name <- paste0("cluster_weight_bjsd_", th_label)
+      res[[name]] <- .cluster_weight_from_hc(
+        hc_bjsd, th, elbo_vec, pips_mat, softmax_temperature
+      )
+    }
   }
   res
+}
+
+#' Apply cluster-then-weight aggregation from a pre-computed hclust object.
+#' @keywords internal
+.cluster_weight_from_hc <- function(hc, threshold, elbo_vec, pips_mat,
+                                    softmax_temperature = 1) {
+  n <- nrow(pips_mat)
+  clusters <- stats::cutree(hc, h = threshold)
+  cl_levels <- sort(unique(clusters))
+  rep_idx <- integer(length(cl_levels))
+  freq <- numeric(length(cl_levels))
+  elbo_rep <- numeric(length(cl_levels))
+  for (k in seq_along(cl_levels)) {
+    cid <- cl_levels[[k]]
+    idxs <- which(clusters == cid)
+    freq[k] <- length(idxs) / n
+    pick <- idxs[which.max(elbo_vec[idxs])]
+    rep_idx[k] <- pick
+    elbo_rep[k] <- elbo_vec[pick]
+  }
+  w_rep <- softmax_weights(elbo_rep, temperature = softmax_temperature) / freq
+  w_rep <- w_rep / sum(w_rep)
+  ens <- as.numeric(crossprod(w_rep, pips_mat[rep_idx, , drop = FALSE]))
+  attr(ens, "ess") <- as.numeric(1 / sum(w_rep^2))
+  ens
 }
 
 js_distance <- function(p, q, eps = 1e-12) {
@@ -1469,7 +1518,7 @@ js_distance_bernoulli <- function(p, q, eps = 1e-12) {
 
 compute_multimodal_metrics <- function(pip_list, jsd_threshold = 0.15, top_k = 10L,
                                        jsd_thresholds = c(0.15, 0.5, 1.0, 2.0, 3.0, 5.0),
-                                       bjsd_thresholds = c(0.01, 0.05, 0.10, 0.20, 0.40)) {
+                                       bjsd_thresholds = c(0.001, 0.002, 0.004, 0.006, 0.008)) {
   n <- length(pip_list)
   if (n < 2) {
     out <- tibble::tibble(
@@ -1488,7 +1537,7 @@ compute_multimodal_metrics <- function(pip_list, jsd_threshold = 0.15, top_k = 1
       out[[col_name]] <- NA_integer_
     }
     for (th in bjsd_thresholds) {
-      col_name <- sprintf("n_clusters_bjsd_%s", sub("\\.", "", formatC(th, format = "f", digits = 2)))
+      col_name <- sprintf("n_clusters_bjsd_%s", sub("\\.", "", formatC(th, format = "f", digits = 3)))
       out[[col_name]] <- NA_integer_
     }
     return(out)
