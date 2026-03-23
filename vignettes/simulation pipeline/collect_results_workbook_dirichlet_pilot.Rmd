@@ -39,8 +39,6 @@ library(ggplot2)
 library(stringr)
 theme_set(theme_bw(base_size = 13))
 
-fig_dir <- here("output", "figures", "dirichlet_alpha_pilot_v2")
-dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
 ```
 
 # 1. Job Settings
@@ -49,14 +47,17 @@ dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
 job_name <- "dirichlet_alpha_pilot_v2"
 parent_job_id <- "FILL_IN"
 output_root <- here("output")
+
+agg_dir <- file.path(
+  output_root, "slurm_output", job_name, parent_job_id, "aggregated"
+)
+fig_dir <- file.path(agg_dir, "figures")
+dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
 ```
 
 # 2. Aggregate Staging Outputs
 
 ```{r aggregate}
-agg_dir <- file.path(
-  output_root, "slurm_output", job_name, parent_job_id, "aggregated"
-)
 
 if (!dir.exists(agg_dir) || !file.exists(file.path(agg_dir, "confusion_bins.csv"))) {
   aggregate_staging_outputs(
