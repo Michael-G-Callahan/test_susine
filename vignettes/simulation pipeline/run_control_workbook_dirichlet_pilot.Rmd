@@ -41,7 +41,7 @@ library(knitr)
 
 ```{r job-inputs}
 job_inputs <- list(
-  job_name = "dirichlet_alpha_pilot",
+  job_name = "dirichlet_alpha_pilot_v2",
   HPC = TRUE,
   mem = "6G",
   time = "02:59:00",
@@ -79,8 +79,8 @@ job_inputs <- list(
   ),
 
   # Alpha grid: each restart group is duplicated per alpha value,
-  # so total fits = 450 datasets x 5 alphas x 11 = 24,750
-  alpha_concentration_grid = c(1.0, 0.5, 0.1, 0.01, 0.001),
+  # so total fits = 450 datasets x 8 alphas x 11 = 39,600
+  alpha_concentration_grid = c(0.001, 0.01, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0),
 
   # Fixed prior variance
   sigma_0_2_scalars = 0.2,

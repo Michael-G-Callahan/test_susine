@@ -1,5 +1,5 @@
 ---
-title: "Dirichlet Alpha Pilot — Collect & Visualize"
+title: "Dirichlet Alpha Pilot v2 — Collect & Visualize"
 output:
   html_document:
     toc: true
@@ -10,9 +10,10 @@ editor_options:
     wrap: 72
 ---
 
-Summary: Collects staging outputs from the Dirichlet alpha pilot run,
-then computes TPR @ FDR = 0.05 by alpha value across all datasets
-and aggregation methods.
+Summary: Collects staging outputs from the Dirichlet alpha pilot v2,
+then computes TPR @ FPR and TPR @ FDR by alpha value across all
+datasets and aggregation methods. Includes both categorical and
+Bernoulli JSD multimodal metrics.
 
 ```{r setup, message=FALSE}
 here::i_am(
@@ -35,15 +36,18 @@ library(dplyr)
 library(tidyr)
 library(readr)
 library(ggplot2)
+library(stringr)
 theme_set(theme_bw(base_size = 13))
+
+fig_dir <- here("output", "figures", "dirichlet_alpha_pilot_v2")
+dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
 ```
 
 # 1. Job Settings
 
 ```{r settings}
-job_name <- "dirichlet_alpha_pilot"
-# Fill in your SLURM parent job ID after submission:
-parent_job_id <- "50040324"
+job_name <- "dirichlet_alpha_pilot_v2"
+parent_job_id <- "FILL_IN"
 output_root <- here("output")
 ```
 
@@ -67,7 +71,7 @@ stopifnot(file.exists(file.path(agg_dir, "confusion_bins.csv")))
 cat("Aggregated outputs found at:", agg_dir, "\n")
 ```
 
-# 3. Load Confusion Bins
+# 3. Load Data
 
 ```{r load-data}
 conf <- readr::read_csv(
@@ -75,156 +79,194 @@ conf <- readr::read_csv(
   show_col_types = FALSE
 )
 
-cat("Rows:", nrow(conf), "\n")
-cat("Columns:", paste(names(conf), collapse = ", "), "\n")
-cat("Alpha values:", sort(unique(conf$alpha_concentration)), "\n")
-
-# Sanity check: alpha_concentration should be present from enrichment
 stopifnot("alpha_concentration" %in% names(conf))
+cat("Confusion bins rows:", nrow(conf), "\n")
+cat("Alpha values:", sort(unique(conf$alpha_concentration)), "\n")
 ```
 
-# 4. Compute TPR @ FDR = 0.05 by Alpha
+# 4. TPR @ FPR (matching EB ablation convention)
 
-Strategy: from confusion bins, reconstruct the cumulative TP/FP curve
-by sweeping PIP thresholds from high to low. At each threshold, compute
-FDR = FP / (TP + FP) and TPR = TP / total_causal. Find the threshold
-where FDR <= 0.05 and report the corresponding TPR.
+Uses `compute_power_fdr_curves()` which produces both `fpr` and `fdr`
+columns. FPR = FP / total_noncausal (lenient). FDR = FP / (TP + FP)
+(strict).
 
-```{r tpr-at-fdr}
-target_fdr <- 0.05
-
-# Filter to purity-filtered, non-aggregated runs only
-# (agg_method = NA means individual model fits)
+```{r tpr-at-fpr-individual}
+# Individual fits only (no aggregation)
 conf_fits <- conf %>%
   filter(is.na(agg_method) | agg_method == "")
 
-# Sum confusion bins across ALL runs per alpha value,
-# collapsing across datasets, restarts, everything.
-bins_by_alpha <- conf_fits %>%
-  group_by(alpha_concentration, pip_threshold) %>%
+curves_individual <- compute_power_fdr_curves(
+  conf_fits,
+  group_vars = "alpha_concentration"
+)
+
+# TPR @ FPR = 0.05 (EB ablation convention)
+tpr_at_fpr_individual <- curves_individual %>%
+  group_by(alpha_concentration) %>%
   summarise(
-    n_causal = sum(n_causal_at_bucket, na.rm = TRUE),
-    n_noncausal = sum(n_noncausal_at_bucket, na.rm = TRUE),
+    tpr_fpr005 = {
+      idx <- which(fpr >= 0.05)[1L]
+      if (is.na(idx)) NA_real_ else power[idx]
+    },
+    tpr_fpr010 = {
+      idx <- which(fpr >= 0.10)[1L]
+      if (is.na(idx)) NA_real_ else power[idx]
+    },
     .groups = "drop"
-  ) %>%
-  arrange(alpha_concentration, desc(pip_threshold))
+  )
 
-# Cumulative TP/FP from high PIP threshold down
-tpr_fdr_by_alpha <- bins_by_alpha %>%
-  group_by(alpha_concentration) %>%
-  mutate(
-    cum_tp = cumsum(n_causal),
-    cum_fp = cumsum(n_noncausal),
-    total_causal = sum(n_causal),
-    fdr = cum_fp / pmax(cum_tp + cum_fp, 1),
-    tpr = cum_tp / pmax(total_causal, 1)
-  ) %>%
-  ungroup()
-
-# Find TPR at the most aggressive threshold where FDR <= target
-tpr_at_fdr <- tpr_fdr_by_alpha %>%
-  filter(fdr <= target_fdr) %>%
-  group_by(alpha_concentration) %>%
-  slice_max(tpr, n = 1, with_ties = FALSE) %>%
-  ungroup() %>%
-  select(alpha_concentration, pip_threshold, tpr, fdr, cum_tp, cum_fp, total_causal)
-
-cat("TPR @ FDR <=", target_fdr, "by alpha:\n")
-print(as.data.frame(tpr_at_fdr))
+cat("Individual fits — TPR @ FPR thresholds:\n")
+print(as.data.frame(tpr_at_fpr_individual))
 ```
 
-# 5. Same Analysis on Aggregated PIPs
-
-```{r tpr-at-fdr-aggregated}
-# Now look at aggregated PIPs (where agg_method is set)
+```{r tpr-at-fpr-aggregated}
+# Aggregated PIPs
 conf_agg <- conf %>%
   filter(!is.na(agg_method) & agg_method != "")
 
 if (nrow(conf_agg) > 0) {
-  bins_by_alpha_agg <- conf_agg %>%
-    group_by(alpha_concentration, agg_method, pip_threshold) %>%
+  curves_agg <- compute_power_fdr_curves(
+    conf_agg,
+    group_vars = c("alpha_concentration", "agg_method")
+  )
+
+  tpr_at_fpr_agg <- curves_agg %>%
+    group_by(alpha_concentration, agg_method) %>%
     summarise(
-      n_causal = sum(n_causal_at_bucket, na.rm = TRUE),
-      n_noncausal = sum(n_noncausal_at_bucket, na.rm = TRUE),
+      tpr_fpr005 = {
+        idx <- which(fpr >= 0.05)[1L]
+        if (is.na(idx)) NA_real_ else power[idx]
+      },
+      tpr_fpr010 = {
+        idx <- which(fpr >= 0.10)[1L]
+        if (is.na(idx)) NA_real_ else power[idx]
+      },
       .groups = "drop"
-    ) %>%
-    arrange(alpha_concentration, agg_method, desc(pip_threshold))
+    )
 
-  tpr_fdr_agg <- bins_by_alpha_agg %>%
-    group_by(alpha_concentration, agg_method) %>%
-    mutate(
-      cum_tp = cumsum(n_causal),
-      cum_fp = cumsum(n_noncausal),
-      total_causal = sum(n_causal),
-      fdr = cum_fp / pmax(cum_tp + cum_fp, 1),
-      tpr = cum_tp / pmax(total_causal, 1)
-    ) %>%
-    ungroup()
+  # Fill missing combos with NA
+  all_combos <- tidyr::expand_grid(
+    alpha_concentration = unique(curves_agg$alpha_concentration),
+    agg_method = unique(curves_agg$agg_method)
+  )
+  tpr_at_fpr_agg <- all_combos %>%
+    left_join(tpr_at_fpr_agg, by = c("alpha_concentration", "agg_method")) %>%
+    mutate(across(starts_with("tpr_"), ~coalesce(., 0)))
 
-  tpr_at_fdr_agg <- tpr_fdr_agg %>%
-    filter(fdr <= target_fdr) %>%
-    group_by(alpha_concentration, agg_method) %>%
-    slice_max(tpr, n = 1, with_ties = FALSE) %>%
-    ungroup() %>%
-    select(alpha_concentration, agg_method, pip_threshold, tpr, fdr,
-           cum_tp, cum_fp, total_causal)
-
-  cat("TPR @ FDR <=", target_fdr, "by alpha x aggregation method:\n")
-  print(as.data.frame(tpr_at_fdr_agg))
+  cat("Aggregated — TPR @ FPR thresholds:\n")
+  print(as.data.frame(tpr_at_fpr_agg))
 } else {
-  cat("No aggregated runs found in confusion_bins.\n")
-  tpr_at_fdr_agg <- tibble()
+  tpr_at_fpr_agg <- tibble()
 }
 ```
 
-# 6. Plot
+# 5. TPR @ FDR (stricter criterion)
 
-```{r plot-individual}
-fig_dir <- file.path(output_root, "figures", job_name)
-dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
+```{r tpr-at-fdr-aggregated}
+if (nrow(conf_agg) > 0) {
+  # Use interpolation to handle bin-resolution issues
+  tpr_at_fdr_agg <- curves_agg %>%
+    group_by(alpha_concentration, agg_method) %>%
+    summarise(
+      tpr_fdr005 = {
+        df <- arrange(distinct(cur_data_all(), fdr, power), fdr)
+        val <- stats::approx(df$fdr, df$power, xout = 0.05,
+                             ties = "ordered", rule = 2)$y
+        if (is.na(val)) 0 else val
+      },
+      tpr_fdr010 = {
+        df <- arrange(distinct(cur_data_all(), fdr, power), fdr)
+        val <- stats::approx(df$fdr, df$power, xout = 0.10,
+                             ties = "ordered", rule = 2)$y
+        if (is.na(val)) 0 else val
+      },
+      .groups = "drop"
+    )
 
-p1 <- ggplot(tpr_at_fdr, aes(x = factor(alpha_concentration), y = tpr)) +
-  geom_col(fill = "steelblue", width = 0.6) +
-  geom_text(aes(label = sprintf("%.3f", tpr)), vjust = -0.5, size = 3.5) +
-  labs(
-    x = "Dirichlet alpha",
-    y = paste0("TPR @ FDR \u2264 ", target_fdr),
-    title = "Individual Fits: TPR by Dirichlet Concentration",
-    subtitle = "Pooled across all 450 datasets, all restarts"
-  ) +
-  ylim(0, NA) +
-  theme(axis.text.x = element_text(size = 11))
+  all_combos <- tidyr::expand_grid(
+    alpha_concentration = unique(curves_agg$alpha_concentration),
+    agg_method = unique(curves_agg$agg_method)
+  )
+  tpr_at_fdr_agg <- all_combos %>%
+    left_join(tpr_at_fdr_agg, by = c("alpha_concentration", "agg_method")) %>%
+    mutate(across(starts_with("tpr_"), ~coalesce(., 0)))
 
-ggsave(file.path(fig_dir, "tpr_by_alpha_individual.png"),
-       p1, width = 7, height = 4, dpi = 150)
-cat("Saved:", file.path(fig_dir, "tpr_by_alpha_individual.png"), "\n")
+  cat("Aggregated — TPR @ FDR thresholds (interpolated):\n")
+  print(as.data.frame(tpr_at_fdr_agg))
+}
 ```
 
-```{r plot-aggregated}
-if (nrow(tpr_at_fdr_agg) > 0) {
+# 6. Plots — TPR @ FPR
+
+```{r plot-fpr-individual}
+p1 <- ggplot(tpr_at_fpr_individual,
+             aes(x = factor(alpha_concentration), y = tpr_fpr005)) +
+  geom_col(fill = "steelblue", width = 0.6) +
+  geom_text(aes(label = sprintf("%.3f", tpr_fpr005)), vjust = -0.5, size = 3.5) +
+  labs(
+    x = "Dirichlet alpha",
+    y = "TPR @ FPR = 0.05",
+    title = "Individual Fits: TPR @ FPR = 0.05 by Alpha",
+    subtitle = "Pooled across all datasets and restarts"
+  ) +
+  ylim(0, NA)
+
+ggsave(file.path(fig_dir, "tpr_fpr005_individual.png"),
+       p1, width = 7, height = 4, dpi = 150)
+cat("Saved:", file.path(fig_dir, "tpr_fpr005_individual.png"), "\n")
+```
+
+```{r plot-fpr-aggregated}
+if (nrow(tpr_at_fpr_agg) > 0) {
   p2 <- ggplot(
-    tpr_at_fdr_agg,
-    aes(x = factor(alpha_concentration), y = tpr, fill = agg_method)
+    tpr_at_fpr_agg,
+    aes(x = factor(alpha_concentration), y = tpr_fpr005, fill = agg_method)
   ) +
     geom_col(position = position_dodge(width = 0.7), width = 0.6) +
     geom_text(
-      aes(label = sprintf("%.3f", tpr)),
+      aes(label = sprintf("%.3f", tpr_fpr005)),
       position = position_dodge(width = 0.7),
-      vjust = -0.5, size = 3
+      vjust = -0.5, size = 2.5
     ) +
     labs(
       x = "Dirichlet alpha",
-      y = paste0("TPR @ FDR \u2264 ", target_fdr),
+      y = "TPR @ FPR = 0.05",
       fill = "Aggregation",
-      title = "Aggregated PIPs: TPR by Alpha x Aggregation Method",
-      subtitle = "Pooled across all 450 datasets"
+      title = "Aggregated PIPs: TPR @ FPR = 0.05 by Alpha",
+      subtitle = "Pooled across all datasets"
     ) +
-    ylim(0, NA) +
-    theme(axis.text.x = element_text(size = 11))
+    ylim(0, NA)
 
-  ggsave(file.path(fig_dir, "tpr_by_alpha_aggregated.png"),
+  ggsave(file.path(fig_dir, "tpr_fpr005_aggregated.png"),
          p2, width = 9, height = 5, dpi = 150)
-  cat("Saved:", file.path(fig_dir, "tpr_by_alpha_aggregated.png"), "\n")
+  cat("Saved:", file.path(fig_dir, "tpr_fpr005_aggregated.png"), "\n")
+}
+```
+
+```{r plot-fdr-aggregated}
+if (nrow(tpr_at_fdr_agg) > 0) {
+  p2b <- ggplot(
+    tpr_at_fdr_agg,
+    aes(x = factor(alpha_concentration), y = tpr_fdr010, fill = agg_method)
+  ) +
+    geom_col(position = position_dodge(width = 0.7), width = 0.6) +
+    geom_text(
+      aes(label = sprintf("%.3f", tpr_fdr010)),
+      position = position_dodge(width = 0.7),
+      vjust = -0.5, size = 2.5
+    ) +
+    labs(
+      x = "Dirichlet alpha",
+      y = "TPR @ FDR = 0.10",
+      fill = "Aggregation",
+      title = "Aggregated PIPs: TPR @ FDR = 0.10 by Alpha (interpolated)",
+      subtitle = "Pooled across all datasets"
+    ) +
+    ylim(0, NA)
+
+  ggsave(file.path(fig_dir, "tpr_fdr010_aggregated.png"),
+         p2b, width = 9, height = 5, dpi = 150)
+  cat("Saved:", file.path(fig_dir, "tpr_fdr010_aggregated.png"), "\n")
 }
 ```
 
@@ -253,49 +295,180 @@ if (file.exists(mm_path)) {
 
 ```{r multimodal-summary}
 if (nrow(mm) > 0) {
-  mm_summary <- mm %>%
+  # Categorical JSD summary
+  cat("=== Categorical JSD (unnormalized PIP vector) ===\n")
+  mm %>%
     filter(!is.na(alpha_concentration)) %>%
     group_by(alpha_concentration) %>%
     summarise(
-      n_datasets = n(),
+      n = n(),
       mean_jsd = mean(mean_jsd, na.rm = TRUE),
-      median_jsd = median(mean_jsd, na.rm = TRUE),
       mean_max_jsd = mean(max_jsd, na.rm = TRUE),
-      mean_jaccard_top10 = mean(jaccard_top10, na.rm = TRUE),
-      mean_pip_var = mean(mean_pip_var, na.rm = TRUE),
-      mean_n_clusters = mean(n_clusters, na.rm = TRUE),
       .groups = "drop"
-    )
+    ) %>%
+    print()
 
-  cat("Multimodal metrics summary by alpha:\n")
-  print(as.data.frame(mm_summary))
+  # Bernoulli JSD summary (if present)
+  if ("mean_bjsd" %in% names(mm)) {
+    cat("\n=== Bernoulli JSD (per-variant, bounded [0, 0.693]) ===\n")
+    mm %>%
+      filter(!is.na(alpha_concentration)) %>%
+      group_by(alpha_concentration) %>%
+      summarise(
+        n = n(),
+        mean_bjsd = mean(mean_bjsd, na.rm = TRUE),
+        mean_max_bjsd = mean(max_bjsd, na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      print()
+  }
 }
 ```
 
-```{r plot-multimodal}
+```{r plot-multimodal-agnostic}
+# Plot 1: JSD-agnostic metrics (jaccard, pip_var)
 if (nrow(mm) > 0 && any(!is.na(mm$alpha_concentration))) {
-  mm_long <- mm %>%
+  mm_agnostic <- mm %>%
     filter(!is.na(alpha_concentration)) %>%
-    select(alpha_concentration, mean_jsd, max_jsd, jaccard_top10,
-           mean_pip_var, n_clusters) %>%
+    select(alpha_concentration, jaccard_top10, mean_pip_var) %>%
     tidyr::pivot_longer(
       cols = -alpha_concentration,
       names_to = "metric",
       values_to = "value"
     )
 
-  p3 <- ggplot(mm_long, aes(x = factor(alpha_concentration), y = value)) +
+  p_agnostic <- ggplot(mm_agnostic, aes(x = factor(alpha_concentration), y = value)) +
     geom_boxplot(fill = "lightblue", outlier.size = 0.5) +
-    facet_wrap(~metric, scales = "free_y", ncol = 3) +
-    labs(
-      x = "Dirichlet alpha",
-      title = "Multimodal Metrics by Dirichlet Concentration",
-      subtitle = "Distribution across datasets (one point per dataset)"
-    ) +
+    facet_wrap(~metric, scales = "free_y", ncol = 2) +
+    labs(x = "Dirichlet alpha",
+         title = "JSD-Agnostic Multimodal Metrics by Alpha") +
     theme(axis.text.x = element_text(size = 9))
 
-  ggsave(file.path(fig_dir, "multimodal_by_alpha.png"),
-         p3, width = 10, height = 6, dpi = 150)
-  cat("Saved:", file.path(fig_dir, "multimodal_by_alpha.png"), "\n")
+  ggsave(file.path(fig_dir, "multimodal_agnostic.png"),
+         p_agnostic, width = 8, height = 4, dpi = 150)
+  cat("Saved:", file.path(fig_dir, "multimodal_agnostic.png"), "\n")
+}
+```
+
+```{r plot-multimodal-mean-jsd}
+# Plot 2: Mean JSD — categorical vs Bernoulli (2 rows)
+if (nrow(mm) > 0 && "mean_bjsd" %in% names(mm)) {
+  mm_mean <- mm %>%
+    filter(!is.na(alpha_concentration)) %>%
+    select(alpha_concentration, mean_jsd, mean_bjsd) %>%
+    tidyr::pivot_longer(
+      cols = c(mean_jsd, mean_bjsd),
+      names_to = "jsd_type",
+      values_to = "value"
+    ) %>%
+    mutate(jsd_type = dplyr::recode(jsd_type,
+      mean_jsd = "Categorical (unnormalized)",
+      mean_bjsd = "Bernoulli (bounded [0, 0.693])"
+    ))
+
+  p_mean <- ggplot(mm_mean, aes(x = factor(alpha_concentration), y = value)) +
+    geom_boxplot(fill = "lightblue", outlier.size = 0.5) +
+    facet_wrap(~jsd_type, scales = "free_y", ncol = 1) +
+    labs(x = "Dirichlet alpha", y = "Mean pairwise JSD",
+         title = "Mean JSD by Alpha") +
+    theme(axis.text.x = element_text(size = 9))
+
+  ggsave(file.path(fig_dir, "multimodal_mean_jsd.png"),
+         p_mean, width = 7, height = 6, dpi = 150)
+  cat("Saved:", file.path(fig_dir, "multimodal_mean_jsd.png"), "\n")
+}
+```
+
+```{r plot-multimodal-max-jsd}
+# Plot 3: Max JSD — categorical vs Bernoulli (2 rows)
+if (nrow(mm) > 0 && "max_bjsd" %in% names(mm)) {
+  mm_max <- mm %>%
+    filter(!is.na(alpha_concentration)) %>%
+    select(alpha_concentration, max_jsd, max_bjsd) %>%
+    tidyr::pivot_longer(
+      cols = c(max_jsd, max_bjsd),
+      names_to = "jsd_type",
+      values_to = "value"
+    ) %>%
+    mutate(jsd_type = dplyr::recode(jsd_type,
+      max_jsd = "Categorical (unnormalized)",
+      max_bjsd = "Bernoulli (bounded [0, 0.693])"
+    ))
+
+  p_max <- ggplot(mm_max, aes(x = factor(alpha_concentration), y = value)) +
+    geom_boxplot(fill = "lightyellow", outlier.size = 0.5) +
+    facet_wrap(~jsd_type, scales = "free_y", ncol = 1) +
+    labs(x = "Dirichlet alpha", y = "Max pairwise JSD",
+         title = "Max JSD by Alpha") +
+    theme(axis.text.x = element_text(size = 9))
+
+  ggsave(file.path(fig_dir, "multimodal_max_jsd.png"),
+         p_max, width = 7, height = 6, dpi = 150)
+  cat("Saved:", file.path(fig_dir, "multimodal_max_jsd.png"), "\n")
+}
+```
+
+```{r plot-multimodal-n-clusters}
+# Plot 4: n_clusters — rows = JSD type, columns = threshold
+if (nrow(mm) > 0) {
+  # Gather categorical JSD cluster columns
+  jsd_clust_cols <- grep("^n_clusters_jsd_", names(mm), value = TRUE)
+  bjsd_clust_cols <- grep("^n_clusters_bjsd_", names(mm), value = TRUE)
+
+  mm_clust_cat <- mm %>%
+    filter(!is.na(alpha_concentration)) %>%
+    select(alpha_concentration, all_of(jsd_clust_cols)) %>%
+    tidyr::pivot_longer(
+      cols = -alpha_concentration,
+      names_to = "col_name",
+      values_to = "n_clusters"
+    ) %>%
+    mutate(
+      threshold = as.numeric(sub("n_clusters_jsd_", "", col_name)) / 100,
+      # Fix: 015 -> 0.15, 050 -> 0.50, 100 -> 1.00, etc.
+      threshold = dplyr::case_match(col_name,
+        "n_clusters_jsd_015" ~ 0.15,
+        "n_clusters_jsd_050" ~ 0.50,
+        "n_clusters_jsd_100" ~ 1.00,
+        "n_clusters_jsd_200" ~ 2.00,
+        "n_clusters_jsd_300" ~ 3.00,
+        "n_clusters_jsd_500" ~ 5.00
+      ),
+      jsd_type = "Categorical"
+    )
+
+  mm_clust_bern <- mm %>%
+    filter(!is.na(alpha_concentration)) %>%
+    select(alpha_concentration, all_of(bjsd_clust_cols)) %>%
+    tidyr::pivot_longer(
+      cols = -alpha_concentration,
+      names_to = "col_name",
+      values_to = "n_clusters"
+    ) %>%
+    mutate(
+      threshold = dplyr::case_match(col_name,
+        "n_clusters_bjsd_001" ~ 0.01,
+        "n_clusters_bjsd_005" ~ 0.05,
+        "n_clusters_bjsd_010" ~ 0.10,
+        "n_clusters_bjsd_020" ~ 0.20,
+        "n_clusters_bjsd_040" ~ 0.40
+      ),
+      jsd_type = "Bernoulli"
+    )
+
+  mm_clust <- bind_rows(mm_clust_cat, mm_clust_bern) %>%
+    mutate(threshold_label = sprintf("h = %s", threshold))
+
+  p_clust <- ggplot(mm_clust, aes(x = factor(alpha_concentration), y = n_clusters)) +
+    geom_boxplot(fill = "lavender", outlier.size = 0.5) +
+    facet_grid(jsd_type ~ threshold_label, scales = "free") +
+    labs(x = "Dirichlet alpha", y = "Number of clusters",
+         title = "Cluster Count by JSD Type and Threshold") +
+    theme(axis.text.x = element_text(size = 7, angle = 45, hjust = 1),
+          strip.text = element_text(size = 8))
+
+  ggsave(file.path(fig_dir, "multimodal_n_clusters.png"),
+         p_clust, width = 14, height = 6, dpi = 150)
+  cat("Saved:", file.path(fig_dir, "multimodal_n_clusters.png"), "\n")
 }
 ```

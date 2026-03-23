@@ -1459,23 +1459,47 @@ js_distance <- function(p, q, eps = 1e-12) {
   0.5 * kl(p, m) + 0.5 * kl(q, m)
 }
 
-compute_multimodal_metrics <- function(pip_list, jsd_threshold = 0.15, top_k = 10L) {
+js_distance_bernoulli <- function(p, q, eps = 1e-12) {
+  p <- pmin(pmax(as.numeric(p), eps), 1 - eps)
+  q <- pmin(pmax(as.numeric(q), eps), 1 - eps)
+  m <- 0.5 * (p + q)
+  kl_comp <- function(a, b) a * log(a / b) + (1 - a) * log((1 - a) / (1 - b))
+  mean(0.5 * kl_comp(p, m) + 0.5 * kl_comp(q, m))
+}
+
+compute_multimodal_metrics <- function(pip_list, jsd_threshold = 0.15, top_k = 10L,
+                                       jsd_thresholds = c(0.15, 0.5, 1.0, 2.0, 3.0, 5.0),
+                                       bjsd_thresholds = c(0.01, 0.05, 0.10, 0.20, 0.40)) {
   n <- length(pip_list)
   if (n < 2) {
-    return(tibble::tibble(
+    out <- tibble::tibble(
       mean_jsd = NA_real_,
       median_jsd = NA_real_,
       max_jsd = NA_real_,
+      mean_bjsd = NA_real_,
+      median_bjsd = NA_real_,
+      max_bjsd = NA_real_,
       jaccard_top10 = NA_real_,
       mean_pip_var = NA_real_,
       n_clusters = NA_integer_
-    ))
+    )
+    for (th in jsd_thresholds) {
+      col_name <- sprintf("n_clusters_jsd_%s", sub("\\.", "", formatC(th, format = "f", digits = 2)))
+      out[[col_name]] <- NA_integer_
+    }
+    for (th in bjsd_thresholds) {
+      col_name <- sprintf("n_clusters_bjsd_%s", sub("\\.", "", formatC(th, format = "f", digits = 2)))
+      out[[col_name]] <- NA_integer_
+    }
+    return(out)
   }
   pips_mat <- do.call(rbind, lapply(pip_list, as.numeric))
   jsd_vals <- c()
+  bjsd_vals <- c()
   for (i in 1:(n - 1)) {
     for (j in (i + 1):n) {
       jsd_vals <- c(jsd_vals, js_distance(pips_mat[i, ], pips_mat[j, ]))
+      bjsd_vals <- c(bjsd_vals, js_distance_bernoulli(pips_mat[i, ], pips_mat[j, ]))
     }
   }
   # Jaccard top-k (mean across pairs)
@@ -1494,7 +1518,8 @@ compute_multimodal_metrics <- function(pip_list, jsd_threshold = 0.15, top_k = 1
   }
   # PIP variance
   pip_var <- mean(apply(pips_mat, 2, stats::var, na.rm = TRUE))
-  # Cluster count by threshold (complete-linkage on JSD)
+
+  # Cluster count: categorical JSD at legacy threshold
   jsd_mat <- matrix(0, n, n)
   idx <- 1L
   for (i in 1:(n - 1)) {
@@ -1504,17 +1529,41 @@ compute_multimodal_metrics <- function(pip_list, jsd_threshold = 0.15, top_k = 1
       idx <- idx + 1L
     }
   }
-  hc <- stats::hclust(stats::as.dist(jsd_mat), method = "complete")
-  n_clusters <- length(unique(stats::cutree(hc, h = jsd_threshold)))
+  hc_jsd <- stats::hclust(stats::as.dist(jsd_mat), method = "complete")
+  n_clusters <- length(unique(stats::cutree(hc_jsd, h = jsd_threshold)))
 
-  tibble::tibble(
+  # Cluster counts: Bernoulli JSD at multiple thresholds
+  bjsd_mat <- matrix(0, n, n)
+  idx <- 1L
+  for (i in 1:(n - 1)) {
+    for (j in (i + 1):n) {
+      bjsd_mat[i, j] <- bjsd_vals[idx]
+      bjsd_mat[j, i] <- bjsd_vals[idx]
+      idx <- idx + 1L
+    }
+  }
+  hc_bjsd <- stats::hclust(stats::as.dist(bjsd_mat), method = "complete")
+
+  out <- tibble::tibble(
     mean_jsd = mean(jsd_vals),
     median_jsd = stats::median(jsd_vals),
     max_jsd = max(jsd_vals),
+    mean_bjsd = mean(bjsd_vals),
+    median_bjsd = stats::median(bjsd_vals),
+    max_bjsd = max(bjsd_vals),
     jaccard_top10 = mean(pair_jaccard, na.rm = TRUE),
     mean_pip_var = pip_var,
     n_clusters = n_clusters
   )
+  for (th in jsd_thresholds) {
+    col_name <- sprintf("n_clusters_jsd_%s", sub("\\.", "", formatC(th, format = "f", digits = 2)))
+    out[[col_name]] <- length(unique(stats::cutree(hc_jsd, h = th)))
+  }
+  for (th in bjsd_thresholds) {
+    col_name <- sprintf("n_clusters_bjsd_%s", sub("\\.", "", formatC(th, format = "f", digits = 2)))
+    out[[col_name]] <- length(unique(stats::cutree(hc_bjsd, h = th)))
+  }
+  out
 }
 
 write_dataset_metrics <- function(bundle_row, job_config, dataset_metrics, buffer_ctx = NULL) {
