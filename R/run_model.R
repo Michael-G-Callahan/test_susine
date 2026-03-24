@@ -1369,7 +1369,7 @@ run_use_case <- function(use_case, run_row, data_bundle, job_config, blocked_idx
     # prior_refit step 2: refit with uniform pi + converged alpha as init
     if (identical(run_type, "warm") && identical(warm_method, "prior_refit") &&
         !is.null(fit)) {
-      refit_alpha <- do.call(rbind, fit$effect_fits$alpha)
+      refit_alpha <- fit$effect_fits$alpha
       args$prior_inclusion_weights <- base_prior_weights
       args$init_alpha <- refit_alpha
       fit <- do.call(susine::susine, args)
