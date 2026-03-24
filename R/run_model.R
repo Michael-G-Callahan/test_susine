@@ -1251,10 +1251,11 @@ run_use_case <- function(use_case, run_row, data_bundle, job_config, blocked_idx
   run_type <- resolve_run_type(run_row)
 
   prior_weights <- base_prior_weights
+  warm_init_alpha <- NULL
   if (identical(run_type, "warm")) {
     restart_seed <- resolve_restart_seed(run_row, restart_id)
     set.seed(restart_seed)
-    prior_weights <- as.numeric(dirichlet_matrix(1L, rep(alpha_conc, p)))
+    warm_init_alpha <- dirichlet_matrix(L, rep(alpha_conc, p))
   }
   blocked_idx <- normalize_blocked_idx(blocked_idx, p)
   if (length(blocked_idx)) {
@@ -1269,6 +1270,10 @@ run_use_case <- function(use_case, run_row, data_bundle, job_config, blocked_idx
       }
     } else {
       prior_weights <- prior_weights / sum(prior_weights)
+    }
+    if (!is.null(warm_init_alpha)) {
+      warm_init_alpha[, blocked_idx] <- 0
+      warm_init_alpha <- warm_init_alpha / rowSums(warm_init_alpha)
     }
   }
 
@@ -1297,6 +1302,9 @@ run_use_case <- function(use_case, run_row, data_bundle, job_config, blocked_idx
       tol = tol,
       verbose = FALSE
     )
+    if (!is.null(warm_init_alpha)) {
+      args$init_alpha <- warm_init_alpha
+    }
     if (prior_variance_strategy == "fixed") {
       # sigma_0_2 is a proportion of var(y); susine::initialize_priors multiplies
       # by var_y internally, so pass the raw scalar — do NOT pre-multiply.
@@ -1621,7 +1629,7 @@ compute_multimodal_metrics <- function(pip_list, jsd_threshold = 0.15, top_k = 1
     out[[col_name]] <- length(unique(stats::cutree(hc_jsd, h = th)))
   }
   for (th in bjsd_thresholds) {
-    col_name <- sprintf("n_clusters_bjsd_%s", sub("\\.", "", formatC(th, format = "f", digits = 2)))
+    col_name <- sprintf("n_clusters_bjsd_%s", sub("\\.", "", formatC(th, format = "f", digits = 3)))
     out[[col_name]] <- length(unique(stats::cutree(hc_bjsd, h = th)))
   }
   out

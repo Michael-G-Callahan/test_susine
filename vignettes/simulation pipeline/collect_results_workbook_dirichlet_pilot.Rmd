@@ -450,11 +450,20 @@ if (nrow(mm) > 0) {
     ) %>%
     mutate(
       threshold = dplyr::case_match(col_name,
+        # digits=3 naming (current code + next run)
         "n_clusters_bjsd_0001" ~ 0.001,
         "n_clusters_bjsd_0002" ~ 0.002,
         "n_clusters_bjsd_0004" ~ 0.004,
         "n_clusters_bjsd_0006" ~ 0.006,
-        "n_clusters_bjsd_0008" ~ 0.008
+        "n_clusters_bjsd_0008" ~ 0.008,
+        # digits=2 naming (v3 run — bug caused 5 thresholds to collapse to 2)
+        "n_clusters_bjsd_000" ~ 0.001,
+        "n_clusters_bjsd_001" ~ 0.01,
+        # v2 run (old thresholds)
+        "n_clusters_bjsd_005" ~ 0.05,
+        "n_clusters_bjsd_010" ~ 0.10,
+        "n_clusters_bjsd_020" ~ 0.20,
+        "n_clusters_bjsd_040" ~ 0.40
       ),
       jsd_type = "Bernoulli"
     )
