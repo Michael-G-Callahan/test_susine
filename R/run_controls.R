@@ -716,6 +716,7 @@ make_job_config <- function(job_name,
                               alpha_concentration = 1
                             ),
                             alpha_concentration_grid = NULL,
+                            warm_start_grid = NULL,
                             refine_settings = list(
                               n_steps = NULL,
                               cs_source = "filtered"
@@ -810,27 +811,41 @@ make_job_config <- function(job_name,
   }
   runs <- dplyr::bind_rows(runs_fixed, runs_non_fixed)
 
-  # Alpha concentration grid expansion: cross restart runs with alpha values -----
-  if (!is.null(alpha_concentration_grid) && length(alpha_concentration_grid) > 0) {
+  # Warm-start grid expansion: cross restart runs with (warm_method, alpha) pairs
+  ws_grid <- warm_start_grid
+  if (is.null(ws_grid) && !is.null(alpha_concentration_grid) &&
+      length(alpha_concentration_grid) > 0) {
+    # Backward compat: old-style alpha-only grid defaults to init_alpha method
+    ws_grid <- tibble::tibble(
+      warm_method = "init_alpha",
+      alpha_concentration = as.numeric(alpha_concentration_grid)
+    )
+  }
+  if (!is.null(ws_grid) && nrow(ws_grid) > 0) {
     if (!"restart_id" %in% names(runs)) runs$restart_id <- NA_integer_
     has_restart <- !is.na(runs$restart_id)
     runs_restart <- runs %>% dplyr::filter(has_restart)
     runs_other <- runs %>%
       dplyr::filter(!has_restart) %>%
-      dplyr::mutate(alpha_concentration = NA_real_)
+      dplyr::mutate(warm_method = NA_character_, alpha_concentration = NA_real_)
     if (nrow(runs_restart)) {
       runs_restart <- runs_restart %>%
-        tidyr::crossing(alpha_concentration = as.numeric(alpha_concentration_grid))
-      # Update group_key to include alpha so each alpha gets separate aggregation
+        tidyr::crossing(ws_grid)
+      # Update group_key to include method + alpha for separate aggregation
       runs_restart <- runs_restart %>%
         dplyr::mutate(
-          group_key = paste0(.data$group_key, "|alpha=", .data$alpha_concentration)
+          group_key = paste0(.data$group_key,
+                             "|wm=", .data$warm_method,
+                             "|alpha=", .data$alpha_concentration)
         )
     } else {
-      runs_restart <- dplyr::mutate(runs_restart, alpha_concentration = numeric(0))
+      runs_restart <- dplyr::mutate(runs_restart,
+                                    warm_method = character(0),
+                                    alpha_concentration = numeric(0))
     }
     runs <- dplyr::bind_rows(runs_restart, runs_other)
   } else {
+    runs$warm_method <- NA_character_
     runs$alpha_concentration <- NA_real_
   }
 

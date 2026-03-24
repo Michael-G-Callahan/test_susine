@@ -1252,10 +1252,24 @@ run_use_case <- function(use_case, run_row, data_bundle, job_config, blocked_idx
 
   prior_weights <- base_prior_weights
   warm_init_alpha <- NULL
+  warm_method <- as.character(run_row$warm_method %||% "init_alpha")
   if (identical(run_type, "warm")) {
     restart_seed <- resolve_restart_seed(run_row, restart_id)
     set.seed(restart_seed)
-    warm_init_alpha <- dirichlet_matrix(L, rep(alpha_conc, p))
+    if (identical(warm_method, "init_alpha")) {
+      if (alpha_conc == 0) {
+        # One-hot: each effect picks one random SNP
+        warm_init_alpha <- matrix(0, nrow = L, ncol = p)
+        for (l in seq_len(L)) {
+          warm_init_alpha[l, sample.int(p, 1L)] <- 1
+        }
+      } else {
+        warm_init_alpha <- dirichlet_matrix(L, rep(alpha_conc, p))
+      }
+    } else if (identical(warm_method, "prior_refit")) {
+      # Step 1: Dirichlet prior_weights for exploration; step 2 refits after convergence
+      prior_weights <- as.numeric(dirichlet_matrix(1L, rep(alpha_conc, p)))
+    }
   }
   blocked_idx <- normalize_blocked_idx(blocked_idx, p)
   if (length(blocked_idx)) {
@@ -1350,6 +1364,14 @@ run_use_case <- function(use_case, run_row, data_bundle, job_config, blocked_idx
         current_c <- new_c
       }
     } else {
+      fit <- do.call(susine::susine, args)
+    }
+    # prior_refit step 2: refit with uniform pi + converged alpha as init
+    if (identical(run_type, "warm") && identical(warm_method, "prior_refit") &&
+        !is.null(fit)) {
+      refit_alpha <- do.call(rbind, fit$effect_fits$alpha)
+      args$prior_inclusion_weights <- base_prior_weights
+      args$init_alpha <- refit_alpha
       fit <- do.call(susine::susine, args)
     }
     fit$settings$L <- fit$settings$L %||% L
