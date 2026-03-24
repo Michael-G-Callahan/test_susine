@@ -1109,7 +1109,26 @@ dirichlet_matrix <- function(n, alpha_vec) {
     stop("alpha_vec must have length >= 1")
   }
   draws <- matrix(stats::rgamma(n * k, shape = alpha_vec, rate = 1), nrow = n, byrow = TRUE)
-  draws / rowSums(draws)
+  # With very small shape parameters, rgamma can return all zeros in a row.
+  # Resample any all-zero rows (up to 100 attempts) to avoid 0/0 = NaN.
+  rs <- rowSums(draws)
+  zero_rows <- which(rs == 0)
+  attempts <- 0L
+  while (length(zero_rows) > 0 && attempts < 100L) {
+    draws[zero_rows, ] <- matrix(
+      stats::rgamma(length(zero_rows) * k, shape = alpha_vec, rate = 1),
+      nrow = length(zero_rows), byrow = TRUE
+    )
+    rs <- rowSums(draws)
+    zero_rows <- which(rs == 0)
+    attempts <- attempts + 1L
+  }
+  if (length(zero_rows) > 0) {
+    # Fallback: uniform for any remaining all-zero rows
+    draws[zero_rows, ] <- 1
+    rs <- rowSums(draws)
+  }
+  draws / rs
 }
 
 normalize_susier_fit <- function(fit_raw, X, L) {
@@ -1317,17 +1336,6 @@ run_use_case <- function(use_case, run_row, data_bundle, job_config, blocked_idx
       verbose = FALSE
     )
     if (!is.null(warm_init_alpha)) {
-      ia_rs <- rowSums(warm_init_alpha)
-      if (any(!is.finite(ia_rs)) || any(abs(ia_rs - 1) > 1e-6) ||
-          any(!is.finite(warm_init_alpha))) {
-        message(sprintf(
-          "INIT_ALPHA_DEBUG: run_id=%s, wm=%s, alpha_conc=%s, restart_id=%s, bundle=%s, rowSums=[%s], anyNaN=%s, anyInf=%s",
-          run_row$run_id %||% "NA", warm_method, alpha_conc,
-          restart_id %||% "NA", run_row$dataset_bundle_id %||% "NA",
-          paste(round(ia_rs, 12), collapse = ","),
-          any(is.nan(warm_init_alpha)), any(is.infinite(warm_init_alpha))
-        ))
-      }
       args$init_alpha <- warm_init_alpha
     }
     if (prior_variance_strategy == "fixed") {
@@ -1382,18 +1390,6 @@ run_use_case <- function(use_case, run_row, data_bundle, job_config, blocked_idx
         !is.null(fit)) {
       refit_alpha <- fit$effect_fits$alpha
       refit_alpha <- refit_alpha / rowSums(refit_alpha)
-      refit_rs <- rowSums(refit_alpha)
-      if (any(!is.finite(refit_rs)) || any(abs(refit_rs - 1) > 1e-6) ||
-          any(!is.finite(refit_alpha))) {
-        message(sprintf(
-          "REFIT_ALPHA_DEBUG: run_id=%s, wm=%s, alpha_conc=%s, restart_id=%s, bundle=%s, rowSums=[%s], anyNaN=%s, anyInf=%s, minVal=%s",
-          run_row$run_id %||% "NA", warm_method, alpha_conc,
-          restart_id %||% "NA", run_row$dataset_bundle_id %||% "NA",
-          paste(round(refit_rs, 12), collapse = ","),
-          any(is.nan(refit_alpha)), any(is.infinite(refit_alpha)),
-          min(refit_alpha, na.rm = TRUE)
-        ))
-      }
       args$prior_inclusion_weights <- base_prior_weights
       args$init_alpha <- refit_alpha
       fit <- do.call(susine::susine, args)
