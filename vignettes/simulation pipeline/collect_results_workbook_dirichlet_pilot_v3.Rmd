@@ -269,141 +269,170 @@ if (nrow(tpr_at_fpr_agg) > 0) {
 }
 ```
 
-# 7. AUPRC from Confusion Bins
+# 7. Precision-Recall Curves
 
-```{r auprc-baseline}
-# Baseline AUPRC (default uniform prior, no warm start)
-auprc_baseline <- compute_auprc_from_confusion(conf_baseline, group_vars = character(0))
-baseline_auprc <- auprc_baseline$AUPRC
+Full precision-recall curves from confusion bins, with baseline overlay.
+Shows where on the curve each method differs — far more informative than
+a single AUPRC number.
+
+```{r pr-helper}
+# Build PR curve from confusion bins, returning one row per threshold
+build_pr_curve <- function(confusion_df, label) {
+  confusion_df %>%
+    arrange(desc(pip_threshold)) %>%
+    mutate(
+      TP = cumsum(n_causal_at_bucket),
+      FP = cumsum(n_noncausal_at_bucket),
+      precision = TP / (TP + FP),
+      recall = TP / sum(n_causal_at_bucket)
+    ) %>%
+    filter(!is.na(precision), !is.na(recall)) %>%
+    select(pip_threshold, precision, recall) %>%
+    mutate(source = label)
+}
+
+keep_agg_methods <- c("max_elbo", "elbo_softmax", "uniform", "cluster_weight")
+```
+
+```{r pr-baseline}
+pr_baseline <- build_pr_curve(conf_baseline, "Baseline (default)")
+baseline_auprc <- compute_auprc_single(pr_baseline$precision, pr_baseline$recall)
 cat(sprintf("Baseline AUPRC: %.4f\n", baseline_auprc))
 ```
 
-```{r auprc-individual}
-# Individual fits AUPRC by warm_method and alpha
-auprc_individual <- compute_auprc_from_confusion(
-  conf_fits,
-  group_vars = c("warm_method", "alpha_concentration")
-)
+```{r pr-individual}
+# Individual fits: one PR curve per (warm_method, alpha), baseline overlaid
+for (wm in sort(unique(conf_fits$warm_method))) {
+  conf_wm <- conf_fits %>% filter(warm_method == wm)
+  alphas <- sort(unique(conf_wm$alpha_concentration))
 
-cat("Individual fits — AUPRC:\n")
-print(as.data.frame(auprc_individual))
-```
+  pr_curves <- purrr::map_dfr(alphas, function(a) {
+    conf_wm %>%
+      filter(alpha_concentration == a) %>%
+      build_pr_curve(sprintf("a = %s", a))
+  })
 
-```{r plot-auprc-individual}
-# Separate plot per warm_method (each has its own alpha grid)
-for (wm in sort(unique(auprc_individual$warm_method))) {
-  auprc_wm <- auprc_individual %>% filter(warm_method == wm)
-
-  p_auprc_ind <- ggplot(auprc_wm,
-                         aes(x = factor(alpha_concentration), y = AUPRC)) +
-    geom_col(fill = "steelblue", width = 0.6) +
-    geom_hline(yintercept = baseline_auprc, linetype = "dashed",
-               color = "red", linewidth = 0.7) +
-    annotate("text", x = Inf, y = baseline_auprc,
-             label = sprintf("baseline = %.3f", baseline_auprc),
-             hjust = 1.1, vjust = -0.5, color = "red", size = 3) +
+  p <- ggplot(pr_curves, aes(x = recall, y = precision, color = source)) +
+    geom_line(linewidth = 0.7, alpha = 0.8) +
+    geom_line(data = pr_baseline, aes(x = recall, y = precision),
+              color = "red", linewidth = 1, linetype = "dashed",
+              inherit.aes = FALSE) +
+    geom_hline(yintercept = 0.50, linetype = "dotted", color = "grey50",
+               linewidth = 0.4) +
     labs(
-      x = "Dirichlet alpha",
-      y = "AUPRC",
-      title = sprintf("Individual Fits: AUPRC (%s)", wm),
-      subtitle = "Pooled across all datasets and restarts"
+      x = "Recall (TPR)",
+      y = "Precision",
+      color = "Alpha",
+      title = sprintf("Precision-Recall: Individual Fits (%s)", wm),
+      subtitle = "Red dashed = baseline; dotted = 50%% precision"
     ) +
-    ylim(0, NA)
+    coord_cartesian(xlim = c(0, 1), ylim = c(0, 1)) +
+    theme(legend.position = "right")
 
-  fname <- sprintf("auprc_individual_%s.png", wm)
-  ggsave(file.path(fig_dir, fname), p_auprc_ind, width = 9, height = 5, dpi = 150)
+  fname <- sprintf("pr_curve_individual_%s.png", wm)
+  ggsave(file.path(fig_dir, fname), p, width = 9, height = 6, dpi = 150)
   cat("Saved:", file.path(fig_dir, fname), "\n")
 }
 ```
 
-```{r auprc-aggregated}
-keep_agg_methods <- c("max_elbo", "elbo_softmax", "uniform", "cluster_weight")
+```{r pr-aggregated}
+# Aggregated: one plot per (warm_method, alpha), lines colored by agg_method
+conf_agg_core <- conf_agg %>% filter(agg_method %in% keep_agg_methods)
 
-if (nrow(conf_agg) > 0) {
-  auprc_agg <- compute_auprc_from_confusion(
-    conf_agg %>% filter(agg_method %in% keep_agg_methods),
-    group_vars = c("warm_method", "alpha_concentration", "agg_method")
-  )
+if (nrow(conf_agg_core) > 0) {
+  for (wm in sort(unique(conf_agg_core$warm_method))) {
+    conf_wm <- conf_agg_core %>% filter(warm_method == wm)
+    alphas <- sort(unique(conf_wm$alpha_concentration))
 
-  cat("Aggregated — AUPRC:\n")
-  print(as.data.frame(auprc_agg))
-} else {
-  auprc_agg <- tibble()
-}
-```
+    pr_curves <- purrr::map_dfr(alphas, function(a) {
+      purrr::map_dfr(keep_agg_methods, function(m) {
+        sub <- conf_wm %>% filter(alpha_concentration == a, agg_method == m)
+        if (nrow(sub) == 0) return(tibble())
+        build_pr_curve(sub, m) %>% mutate(alpha_concentration = a)
+      })
+    })
 
-```{r plot-auprc-aggregated}
-if (nrow(auprc_agg) > 0) {
-  # Separate plot per warm_method (each has its own alpha grid)
-  for (wm in sort(unique(auprc_agg$warm_method))) {
-    auprc_wm <- auprc_agg %>% filter(warm_method == wm)
+    if (nrow(pr_curves) == 0) next
 
-    p_auprc_agg <- ggplot(
-      auprc_wm,
-      aes(x = factor(alpha_concentration), y = AUPRC, fill = agg_method)
-    ) +
-      geom_col(position = position_dodge(width = 0.7), width = 0.6) +
-      geom_hline(yintercept = baseline_auprc, linetype = "dashed",
-                 color = "red", linewidth = 0.7) +
-      annotate("text", x = Inf, y = baseline_auprc,
-               label = sprintf("baseline = %.3f", baseline_auprc),
-               hjust = 1.1, vjust = -0.5, color = "red", size = 3) +
+    # Add baseline to each alpha facet
+    pr_base_facet <- purrr::map_dfr(alphas, function(a) {
+      pr_baseline %>% mutate(alpha_concentration = a)
+    })
+
+    p <- ggplot(pr_curves, aes(x = recall, y = precision, color = source)) +
+      geom_line(linewidth = 0.7, alpha = 0.8) +
+      geom_line(data = pr_base_facet, aes(x = recall, y = precision),
+                color = "red", linewidth = 0.8, linetype = "dashed",
+                inherit.aes = FALSE) +
+      geom_hline(yintercept = 0.50, linetype = "dotted", color = "grey50",
+                 linewidth = 0.4) +
+      facet_wrap(~alpha_concentration, labeller = label_both) +
       labs(
-        x = "Dirichlet alpha",
-        y = "AUPRC",
-        fill = "Aggregation",
-        title = sprintf("Aggregated PIPs: AUPRC (%s)", wm),
-        subtitle = "Pooled across all datasets"
+        x = "Recall (TPR)",
+        y = "Precision",
+        color = "Aggregation",
+        title = sprintf("Precision-Recall: Aggregated PIPs (%s)", wm),
+        subtitle = "Red dashed = baseline; dotted = 50%% precision"
       ) +
-      ylim(0, NA)
+      coord_cartesian(xlim = c(0, 1), ylim = c(0, 1)) +
+      theme(legend.position = "bottom")
 
-    fname <- sprintf("auprc_aggregated_%s.png", wm)
-    ggsave(file.path(fig_dir, fname), p_auprc_agg, width = 10, height = 5, dpi = 150)
+    fname <- sprintf("pr_curve_aggregated_%s.png", wm)
+    ggsave(file.path(fig_dir, fname), p, width = 12, height = 10, dpi = 150)
     cat("Saved:", file.path(fig_dir, fname), "\n")
   }
 }
 ```
 
-# 8. Calibration Curves
+# 8. AUPRC Summary Bar Plots
+
+```{r auprc-barplots}
+# Compute AUPRC per (warm_method, alpha, agg_method) from confusion bins
+auprc_agg <- compute_auprc_from_confusion(
+  conf_agg %>% filter(agg_method %in% keep_agg_methods),
+  group_vars = c("warm_method", "alpha_concentration", "agg_method")
+)
+
+p_auprc_bar <- ggplot(
+  auprc_agg,
+  aes(x = factor(alpha_concentration), y = AUPRC, fill = agg_method)
+) +
+  geom_col(position = position_dodge(width = 0.7), width = 0.6) +
+  geom_hline(yintercept = baseline_auprc, linetype = "dashed",
+             color = "red", linewidth = 0.7) +
+  annotate("text", x = Inf, y = baseline_auprc,
+           label = sprintf("baseline = %.3f", baseline_auprc),
+           hjust = 1.1, vjust = -0.5, color = "red", size = 3) +
+  facet_wrap(~warm_method, ncol = 1, scales = "free_x",
+             labeller = labeller(warm_method = c(
+               init_alpha = "init_alpha (trajectory perturbation)",
+               prior_refit = "prior_refit (explore + refit)"
+             ))) +
+  labs(
+    x = "Dirichlet alpha",
+    y = "AUPRC",
+    fill = "Aggregation",
+    title = "Aggregated PIPs: AUPRC by Warm Method, Alpha, and Aggregation",
+    subtitle = "Pooled across all datasets"
+  ) +
+  ylim(0, NA)
+
+ggsave(file.path(fig_dir, "auprc_barplot_by_method.png"),
+       p_auprc_bar, width = 10, height = 8, dpi = 150)
+cat("Saved:", file.path(fig_dir, "auprc_barplot_by_method.png"), "\n")
+```
+
+# 9. Calibration Curves
+
 
 PIP calibration = observed causal fraction per PIP bin vs. predicted PIP.
 We re-bin the variable-width confusion bins into uniform 0.05 increments
-and show per-dataset boxplots at each bin. Each dataset contributes one
-observed causal fraction per bin (bins with zero SNPs in a dataset are
-dropped). The baseline (default uniform prior) calibration is overlaid
-on every panel as a red line for reference.
+and pool counts across all datasets. The baseline (default uniform prior)
+calibration is overlaid on every panel as a red line for reference.
 
 ```{r calibration-helper}
-# Re-bin confusion bins into 0.05 PIP increments and compute per-dataset
-# observed causal fractions. Returns one row per (group_vars..., dataset, pip_bin).
-rebin_calibration <- function(confusion_df, group_vars, bin_width = 0.05) {
-  pip_breaks <- seq(0, 1, by = bin_width)
-  confusion_df %>%
-    dplyr::mutate(
-      pip_bin = pip_breaks[findInterval(pip_threshold, pip_breaks,
-                                        rightmost.closed = TRUE,
-                                        left.open = FALSE)]
-    ) %>%
-    dplyr::group_by(
-      dplyr::across(dplyr::all_of(c(group_vars, "dataset_bundle_id"))),
-      pip_bin
-    ) %>%
-    dplyr::summarise(
-      n_causal = sum(n_causal_at_bucket, na.rm = TRUE),
-      n_noncausal = sum(n_noncausal_at_bucket, na.rm = TRUE),
-      .groups = "drop"
-    ) %>%
-    dplyr::mutate(
-      n_total = n_causal + n_noncausal,
-      observed_causal_frac = dplyr::if_else(
-        n_total > 0, n_causal / n_total, NA_real_
-      ),
-      pip_bin_mid = pip_bin + bin_width / 2
-    ) %>%
-    dplyr::filter(n_total > 0)
-}
-
-# Aggregate calibration across datasets (for baseline overlay line)
+# Re-bin confusion bins into 0.05 PIP increments, pooling across datasets.
+# Returns one row per (group_vars..., pip_bin).
 aggregate_calibration <- function(confusion_df, group_vars, bin_width = 0.05) {
   pip_breaks <- seq(0, 1, by = bin_width)
   confusion_df %>%
@@ -436,19 +465,18 @@ aggregate_calibration <- function(confusion_df, group_vars, bin_width = 0.05) {
 # Baseline calibration (pooled across datasets, for overlay)
 cal_baseline <- aggregate_calibration(conf_baseline, group_vars = character(0))
 
-# Individual fits: per-dataset calibration
-cal_individual <- rebin_calibration(
+# Individual fits: pooled calibration per (warm_method, alpha)
+cal_individual <- aggregate_calibration(
   conf_fits,
   group_vars = c("warm_method", "alpha_concentration")
 )
 
-# Aggregated: filter to core agg methods, per-dataset calibration
-keep_agg_methods <- c("max_elbo", "elbo_softmax", "uniform", "cluster_weight")
+# Aggregated: filter to core agg methods, pooled calibration
 conf_agg_core <- conf_agg %>%
   filter(agg_method %in% keep_agg_methods)
 
 if (nrow(conf_agg_core) > 0) {
-  cal_agg <- rebin_calibration(
+  cal_agg <- aggregate_calibration(
     conf_agg_core,
     group_vars = c("warm_method", "alpha_concentration", "agg_method")
   )
@@ -457,21 +485,21 @@ if (nrow(conf_agg_core) > 0) {
 }
 ```
 
-```{r plot-calibration-individual, fig.width=12, fig.height=10}
+```{r plot-calibration-individual}
 # One page per warm_method, since each has its own alpha grid
 for (wm in sort(unique(cal_individual$warm_method))) {
   cal_wm <- cal_individual %>% filter(warm_method == wm)
 
   p <- ggplot(cal_wm,
-              aes(x = pip_bin_mid, y = observed_causal_frac,
-                  group = pip_bin_mid)) +
-    geom_boxplot(width = 0.035, outlier.size = 0.5, fill = "lightblue",
-                 alpha = 0.7) +
+              aes(x = pip_bin_mid, y = observed_causal_frac)) +
+    geom_line(linewidth = 0.7, color = "steelblue") +
+    geom_point(size = 1.5, color = "steelblue") +
     geom_abline(slope = 1, intercept = 0, linetype = "dashed",
                 color = "grey40") +
     geom_line(data = cal_baseline,
-              aes(x = pip_bin_mid, y = observed_causal_frac, group = 1),
-              color = "red", linewidth = 0.8, inherit.aes = FALSE) +
+              aes(x = pip_bin_mid, y = observed_causal_frac),
+              color = "red", linewidth = 0.8, linetype = "dashed",
+              inherit.aes = FALSE) +
     geom_point(data = cal_baseline,
                aes(x = pip_bin_mid, y = observed_causal_frac),
                color = "red", size = 1.5, inherit.aes = FALSE) +
@@ -480,7 +508,7 @@ for (wm in sort(unique(cal_individual$warm_method))) {
       x = "Predicted PIP (bin midpoint, width = 0.05)",
       y = "Observed causal fraction",
       title = sprintf("PIP Calibration: Individual Fits (%s)", wm),
-      subtitle = "Boxplots over datasets; red = baseline; dashed = perfect calibration"
+      subtitle = "Red dashed = baseline; grey dashed = perfect calibration"
     ) +
     coord_cartesian(xlim = c(0, 1), ylim = c(0, 1))
 
@@ -490,22 +518,22 @@ for (wm in sort(unique(cal_individual$warm_method))) {
 }
 ```
 
-```{r plot-calibration-aggregated, fig.width=14, fig.height=10}
+```{r plot-calibration-aggregated}
 if (nrow(cal_agg) > 0) {
   for (wm in sort(unique(cal_agg$warm_method))) {
     cal_wm <- cal_agg %>% filter(warm_method == wm)
 
     p <- ggplot(cal_wm,
                 aes(x = pip_bin_mid, y = observed_causal_frac,
-                    group = interaction(pip_bin_mid, agg_method),
-                    fill = agg_method)) +
-      geom_boxplot(width = 0.035, outlier.size = 0.5, alpha = 0.7,
-                   position = position_dodge(width = 0.04)) +
+                    color = agg_method)) +
+      geom_line(linewidth = 0.7) +
+      geom_point(size = 1.5) +
       geom_abline(slope = 1, intercept = 0, linetype = "dashed",
                   color = "grey40") +
       geom_line(data = cal_baseline,
-                aes(x = pip_bin_mid, y = observed_causal_frac, group = 1),
-                color = "red", linewidth = 0.8, inherit.aes = FALSE) +
+                aes(x = pip_bin_mid, y = observed_causal_frac),
+                color = "red", linewidth = 0.8, linetype = "dashed",
+                inherit.aes = FALSE) +
       geom_point(data = cal_baseline,
                  aes(x = pip_bin_mid, y = observed_causal_frac),
                  color = "red", size = 1.5, inherit.aes = FALSE) +
@@ -513,21 +541,21 @@ if (nrow(cal_agg) > 0) {
       labs(
         x = "Predicted PIP (bin midpoint, width = 0.05)",
         y = "Observed causal fraction",
-        fill = "Aggregation",
+        color = "Aggregation",
         title = sprintf("PIP Calibration: Aggregated PIPs (%s)", wm),
-        subtitle = "Boxplots over datasets; red = baseline; dashed = perfect calibration"
+        subtitle = "Red dashed = baseline; grey dashed = perfect calibration"
       ) +
-      coord_cartesian(xlim = c(0, 1), ylim = c(0, 1))
+      coord_cartesian(xlim = c(0, 1), ylim = c(0, 1)) +
+      theme(legend.position = "bottom")
 
     fname <- sprintf("calibration_aggregated_%s.png", wm)
-    ggsave(file.path(fig_dir, fname), p, width = 14, height = 10, dpi = 150)
+    ggsave(file.path(fig_dir, fname), p, width = 12, height = 10, dpi = 150)
     cat("Saved:", file.path(fig_dir, fname), "\n")
-    print(p)
   }
 }
 ```
 
-# 9. Precision-Recall: Baseline vs Best Ensemble
+# 10. Precision-Recall: Baseline vs Best Ensemble
 
 ```{r precision-recall-comparison}
 # Helper: build PR curve from confusion bins
@@ -578,7 +606,7 @@ ggsave(file.path(fig_dir, "precision_recall_baseline_vs_ensemble.png"),
 cat("Saved:", file.path(fig_dir, "precision_recall_baseline_vs_ensemble.png"), "\n")
 ```
 
-# 10. Head-to-Head: Best Alpha per Method
+# 11. Head-to-Head: Best Alpha per Method
 
 ```{r best-alpha-comparison}
 if (nrow(tpr_at_fpr_agg) > 0) {
@@ -614,7 +642,7 @@ if (nrow(tpr_at_fpr_agg) > 0) {
 }
 ```
 
-# 10. Multimodal Metrics by Method
+# 12. Multimodal Metrics by Method
 
 ```{r load-multimodal}
 mm_path <- file.path(agg_dir, "multimodal_metrics.csv")
