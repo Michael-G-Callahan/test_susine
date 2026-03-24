@@ -1370,6 +1370,7 @@ run_use_case <- function(use_case, run_row, data_bundle, job_config, blocked_idx
     if (identical(run_type, "warm") && identical(warm_method, "prior_refit") &&
         !is.null(fit)) {
       refit_alpha <- fit$effect_fits$alpha
+      refit_alpha <- refit_alpha / rowSums(refit_alpha)
       args$prior_inclusion_weights <- base_prior_weights
       args$init_alpha <- refit_alpha
       fit <- do.call(susine::susine, args)
