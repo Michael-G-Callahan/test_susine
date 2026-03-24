@@ -104,14 +104,16 @@ conf_baseline <- conf %>%
 
 curves_baseline <- compute_power_fdr_curves(conf_baseline)
 
-# TPR @ FPR thresholds
+# TPR @ FPR thresholds (interpolated)
 baseline_tpr_fpr005 <- {
-  idx <- which(curves_baseline$fpr >= 0.05)[1L]
-  if (is.na(idx)) 0 else curves_baseline$power[idx]
+  df <- arrange(distinct(curves_baseline, fpr, power), fpr)
+  val <- stats::approx(df$fpr, df$power, xout = 0.05, ties = "ordered", rule = 2)$y
+  if (is.na(val)) 0 else val
 }
 baseline_tpr_fpr010 <- {
-  idx <- which(curves_baseline$fpr >= 0.10)[1L]
-  if (is.na(idx)) 0 else curves_baseline$power[idx]
+  df <- arrange(distinct(curves_baseline, fpr, power), fpr)
+  val <- stats::approx(df$fpr, df$power, xout = 0.10, ties = "ordered", rule = 2)$y
+  if (is.na(val)) 0 else val
 }
 
 cat(sprintf("Baseline (uniform prior) reference:\n"))
@@ -129,17 +131,19 @@ curves_individual <- compute_power_fdr_curves(
   group_vars = "alpha_concentration"
 )
 
-# TPR @ FPR = 0.05 (EB ablation convention)
+# TPR @ FPR = 0.05 and 0.10 (interpolated)
 tpr_at_fpr_individual <- curves_individual %>%
   group_by(alpha_concentration) %>%
   summarise(
     tpr_fpr005 = {
-      idx <- which(fpr >= 0.05)[1L]
-      if (is.na(idx)) NA_real_ else power[idx]
+      df <- arrange(distinct(cur_data_all(), fpr, power), fpr)
+      val <- stats::approx(df$fpr, df$power, xout = 0.05, ties = "ordered", rule = 2)$y
+      if (is.na(val)) 0 else val
     },
     tpr_fpr010 = {
-      idx <- which(fpr >= 0.10)[1L]
-      if (is.na(idx)) NA_real_ else power[idx]
+      df <- arrange(distinct(cur_data_all(), fpr, power), fpr)
+      val <- stats::approx(df$fpr, df$power, xout = 0.10, ties = "ordered", rule = 2)$y
+      if (is.na(val)) 0 else val
     },
     .groups = "drop"
   )
@@ -163,12 +167,14 @@ if (nrow(conf_agg) > 0) {
     group_by(alpha_concentration, agg_method) %>%
     summarise(
       tpr_fpr005 = {
-        idx <- which(fpr >= 0.05)[1L]
-        if (is.na(idx)) NA_real_ else power[idx]
+        df <- arrange(distinct(cur_data_all(), fpr, power), fpr)
+        val <- stats::approx(df$fpr, df$power, xout = 0.05, ties = "ordered", rule = 2)$y
+        if (is.na(val)) 0 else val
       },
       tpr_fpr010 = {
-        idx <- which(fpr >= 0.10)[1L]
-        if (is.na(idx)) NA_real_ else power[idx]
+        df <- arrange(distinct(cur_data_all(), fpr, power), fpr)
+        val <- stats::approx(df$fpr, df$power, xout = 0.10, ties = "ordered", rule = 2)$y
+        if (is.na(val)) 0 else val
       },
       .groups = "drop"
     )
@@ -200,11 +206,10 @@ p1 <- ggplot(tpr_at_fpr_individual,
   annotate("text", x = Inf, y = baseline_tpr_fpr005,
            label = sprintf("baseline = %.3f", baseline_tpr_fpr005),
            hjust = 1.1, vjust = -0.5, color = "red", size = 3) +
-  geom_text(aes(label = sprintf("%.3f", tpr_fpr005)), vjust = -0.5, size = 3.5) +
   labs(
     x = "Dirichlet alpha",
     y = "TPR @ FPR = 0.05",
-    title = "Individual Fits: TPR @ FPR = 0.05 by Alpha",
+    title = "Individual Fits: TPR @ FPR = 0.05 by Alpha (interpolated)",
     subtitle = "Pooled across all datasets and restarts"
   ) +
   ylim(0, NA)
@@ -226,16 +231,11 @@ if (nrow(tpr_at_fpr_agg) > 0) {
     annotate("text", x = Inf, y = baseline_tpr_fpr005,
              label = sprintf("baseline = %.3f", baseline_tpr_fpr005),
              hjust = 1.1, vjust = -0.5, color = "red", size = 3) +
-    geom_text(
-      aes(label = sprintf("%.3f", tpr_fpr005)),
-      position = position_dodge(width = 0.7),
-      vjust = -0.5, size = 2.5
-    ) +
     labs(
       x = "Dirichlet alpha",
       y = "TPR @ FPR = 0.05",
       fill = "Aggregation",
-      title = "Aggregated PIPs: TPR @ FPR = 0.05 by Alpha",
+      title = "Aggregated PIPs: TPR @ FPR = 0.05 by Alpha (interpolated)",
       subtitle = "Pooled across all datasets"
     ) +
     ylim(0, NA)
@@ -258,16 +258,11 @@ if (nrow(tpr_at_fpr_agg) > 0) {
     annotate("text", x = Inf, y = baseline_tpr_fpr010,
              label = sprintf("baseline = %.3f", baseline_tpr_fpr010),
              hjust = 1.1, vjust = -0.5, color = "red", size = 3) +
-    geom_text(
-      aes(label = sprintf("%.3f", tpr_fpr010)),
-      position = position_dodge(width = 0.7),
-      vjust = -0.5, size = 2.5
-    ) +
     labs(
       x = "Dirichlet alpha",
       y = "TPR @ FPR = 0.10",
       fill = "Aggregation",
-      title = "Aggregated PIPs: TPR @ FPR = 0.10 by Alpha",
+      title = "Aggregated PIPs: TPR @ FPR = 0.10 by Alpha (interpolated)",
       subtitle = "Pooled across all datasets"
     ) +
     ylim(0, NA)
@@ -455,16 +450,17 @@ if (nrow(mm) > 0) {
     ) %>%
     mutate(
       threshold = dplyr::case_match(col_name,
-        "n_clusters_bjsd_001" ~ 0.01,
-        "n_clusters_bjsd_005" ~ 0.05,
-        "n_clusters_bjsd_010" ~ 0.10,
-        "n_clusters_bjsd_020" ~ 0.20,
-        "n_clusters_bjsd_040" ~ 0.40
+        "n_clusters_bjsd_0001" ~ 0.001,
+        "n_clusters_bjsd_0002" ~ 0.002,
+        "n_clusters_bjsd_0004" ~ 0.004,
+        "n_clusters_bjsd_0006" ~ 0.006,
+        "n_clusters_bjsd_0008" ~ 0.008
       ),
       jsd_type = "Bernoulli"
     )
 
   mm_clust <- bind_rows(mm_clust_cat, mm_clust_bern) %>%
+    filter(!is.na(threshold)) %>%
     mutate(threshold_label = sprintf("h = %s", threshold))
 
   p_clust <- ggplot(mm_clust, aes(x = factor(alpha_concentration), y = n_clusters)) +
