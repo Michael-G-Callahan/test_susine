@@ -269,7 +269,218 @@ if (nrow(tpr_at_fpr_agg) > 0) {
 }
 ```
 
-# 7. Head-to-Head: Best Alpha per Method
+# 7. AUPRC from Confusion Bins
+
+```{r auprc-baseline}
+# Baseline AUPRC (default uniform prior, no warm start)
+auprc_baseline <- compute_auprc_from_confusion(conf_baseline, group_vars = character(0))
+baseline_auprc <- auprc_baseline$AUPRC
+cat(sprintf("Baseline AUPRC: %.4f\n", baseline_auprc))
+```
+
+```{r auprc-individual}
+# Individual fits AUPRC by warm_method and alpha
+auprc_individual <- compute_auprc_from_confusion(
+  conf_fits,
+  group_vars = c("warm_method", "alpha_concentration")
+)
+
+cat("Individual fits — AUPRC:\n")
+print(as.data.frame(auprc_individual))
+```
+
+```{r plot-auprc-individual}
+p_auprc_ind <- ggplot(auprc_individual,
+                       aes(x = factor(alpha_concentration), y = AUPRC,
+                           fill = warm_method)) +
+  geom_col(position = position_dodge(width = 0.7), width = 0.6) +
+  geom_hline(yintercept = baseline_auprc, linetype = "dashed",
+             color = "red", linewidth = 0.7) +
+  annotate("text", x = Inf, y = baseline_auprc,
+           label = sprintf("baseline = %.3f", baseline_auprc),
+           hjust = 1.1, vjust = -0.5, color = "red", size = 3) +
+  labs(
+    x = "Dirichlet alpha",
+    y = "AUPRC",
+    fill = "Warm method",
+    title = "Individual Fits: AUPRC by Method and Alpha",
+    subtitle = "Pooled across all datasets and restarts"
+  ) +
+  ylim(0, NA)
+
+ggsave(file.path(fig_dir, "auprc_individual_by_method.png"),
+       p_auprc_ind, width = 9, height = 5, dpi = 150)
+cat("Saved:", file.path(fig_dir, "auprc_individual_by_method.png"), "\n")
+```
+
+```{r auprc-aggregated}
+if (nrow(conf_agg) > 0) {
+  auprc_agg <- compute_auprc_from_confusion(
+    conf_agg,
+    group_vars = c("warm_method", "alpha_concentration", "agg_method")
+  )
+
+  cat("Aggregated — AUPRC:\n")
+  print(as.data.frame(auprc_agg))
+} else {
+  auprc_agg <- tibble()
+}
+```
+
+```{r plot-auprc-aggregated}
+if (nrow(auprc_agg) > 0) {
+  p_auprc_agg <- ggplot(
+    auprc_agg,
+    aes(x = factor(alpha_concentration), y = AUPRC, fill = agg_method)
+  ) +
+    geom_col(position = position_dodge(width = 0.7), width = 0.6) +
+    geom_hline(yintercept = baseline_auprc, linetype = "dashed",
+               color = "red", linewidth = 0.7) +
+    facet_wrap(~warm_method, ncol = 1,
+               labeller = labeller(warm_method = c(
+                 init_alpha = "init_alpha (trajectory perturbation)",
+                 prior_refit = "prior_refit (explore + refit)"
+               ))) +
+    labs(
+      x = "Dirichlet alpha",
+      y = "AUPRC",
+      fill = "Aggregation",
+      title = "Aggregated PIPs: AUPRC by Method and Alpha",
+      subtitle = "Pooled across all datasets"
+    ) +
+    ylim(0, NA)
+
+  ggsave(file.path(fig_dir, "auprc_aggregated_by_method.png"),
+         p_auprc_agg, width = 10, height = 8, dpi = 150)
+  cat("Saved:", file.path(fig_dir, "auprc_aggregated_by_method.png"), "\n")
+}
+```
+
+# 8. Calibration Curves
+
+Calibration = observed causal fraction per PIP bin vs. predicted PIP (bin
+midpoint). A well-calibrated model lies on the diagonal.
+
+```{r calibration-helper}
+# Compute calibration curve from confusion bins
+compute_calibration_from_confusion <- function(confusion_df, group_vars) {
+  confusion_df %>%
+    dplyr::group_by(dplyr::across(dplyr::all_of(group_vars)), pip_threshold) %>%
+    dplyr::summarise(
+      n_causal = sum(n_causal_at_bucket, na.rm = TRUE),
+      n_noncausal = sum(n_noncausal_at_bucket, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    dplyr::mutate(
+      n_total = n_causal + n_noncausal,
+      observed_causal_frac = dplyr::if_else(
+        n_total > 0, n_causal / n_total, NA_real_
+      )
+    ) %>%
+    dplyr::filter(n_total > 0)
+}
+```
+
+```{r calibration-individual}
+cal_individual <- compute_calibration_from_confusion(
+  conf_fits,
+  group_vars = c("warm_method", "alpha_concentration")
+)
+
+cal_baseline <- compute_calibration_from_confusion(
+  conf_baseline,
+  group_vars = character(0)
+)
+```
+
+```{r plot-calibration-individual}
+# Select a representative alpha per method (smallest) for legibility
+representative_alphas <- sort(unique(cal_individual$alpha_concentration))
+# Show at most 4 alpha values to keep panels readable
+show_alphas <- if (length(representative_alphas) > 4) {
+  representative_alphas[seq(1, length(representative_alphas),
+                            length.out = 4) %>% round() %>% unique()]
+} else {
+  representative_alphas
+}
+
+cal_ind_plot <- cal_individual %>%
+  filter(alpha_concentration %in% show_alphas)
+
+p_cal_ind <- ggplot(cal_ind_plot,
+                     aes(x = pip_threshold, y = observed_causal_frac,
+                         color = warm_method)) +
+  geom_point(size = 1, alpha = 0.7) +
+  geom_line(linewidth = 0.5, alpha = 0.7) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey40") +
+  geom_point(data = cal_baseline, aes(x = pip_threshold, y = observed_causal_frac),
+             color = "red", size = 1, alpha = 0.5, inherit.aes = FALSE) +
+  geom_line(data = cal_baseline, aes(x = pip_threshold, y = observed_causal_frac),
+            color = "red", linewidth = 0.5, linetype = "dotted",
+            inherit.aes = FALSE) +
+  facet_wrap(~alpha_concentration,
+             labeller = label_both) +
+  labs(
+    x = "Predicted PIP (bin lower edge)",
+    y = "Observed causal fraction",
+    color = "Warm method",
+    title = "PIP Calibration: Individual Fits by Method and Alpha",
+    subtitle = "Diagonal = perfect calibration; red dotted = baseline"
+  ) +
+  coord_cartesian(xlim = c(0, 1), ylim = c(0, 1))
+
+ggsave(file.path(fig_dir, "calibration_individual_by_method.png"),
+       p_cal_ind, width = 10, height = 8, dpi = 150)
+cat("Saved:", file.path(fig_dir, "calibration_individual_by_method.png"), "\n")
+```
+
+```{r calibration-aggregated}
+if (nrow(conf_agg) > 0) {
+  cal_agg <- compute_calibration_from_confusion(
+    conf_agg,
+    group_vars = c("warm_method", "alpha_concentration", "agg_method")
+  )
+
+  cal_agg_plot <- cal_agg %>%
+    filter(alpha_concentration %in% show_alphas)
+
+  p_cal_agg <- ggplot(cal_agg_plot,
+                       aes(x = pip_threshold, y = observed_causal_frac,
+                           color = agg_method)) +
+    geom_point(size = 1, alpha = 0.7) +
+    geom_line(linewidth = 0.5, alpha = 0.7) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey40") +
+    geom_point(data = cal_baseline,
+               aes(x = pip_threshold, y = observed_causal_frac),
+               color = "red", size = 1, alpha = 0.5, inherit.aes = FALSE) +
+    geom_line(data = cal_baseline,
+              aes(x = pip_threshold, y = observed_causal_frac),
+              color = "red", linewidth = 0.5, linetype = "dotted",
+              inherit.aes = FALSE) +
+    facet_grid(warm_method ~ alpha_concentration,
+               labeller = labeller(
+                 warm_method = c(
+                   init_alpha = "init_alpha",
+                   prior_refit = "prior_refit"
+                 ),
+                 alpha_concentration = label_both
+               )) +
+    labs(
+      x = "Predicted PIP (bin lower edge)",
+      y = "Observed causal fraction",
+      color = "Aggregation",
+      title = "PIP Calibration: Aggregated PIPs by Method, Alpha, and Aggregation",
+      subtitle = "Diagonal = perfect calibration; red dotted = baseline"
+    ) +
+    coord_cartesian(xlim = c(0, 1), ylim = c(0, 1))
+
+  ggsave(file.path(fig_dir, "calibration_aggregated_by_method.png"),
+         p_cal_agg, width = 12, height = 7, dpi = 150)
+  cat("Saved:", file.path(fig_dir, "calibration_aggregated_by_method.png"), "\n")
+}
+```
+
+# 9. Head-to-Head: Best Alpha per Method
 
 ```{r best-alpha-comparison}
 if (nrow(tpr_at_fpr_agg) > 0) {
@@ -305,7 +516,7 @@ if (nrow(tpr_at_fpr_agg) > 0) {
 }
 ```
 
-# 8. Multimodal Metrics by Method
+# 10. Multimodal Metrics by Method
 
 ```{r load-multimodal}
 mm_path <- file.path(agg_dir, "multimodal_metrics.csv")
