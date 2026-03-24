@@ -1317,6 +1317,17 @@ run_use_case <- function(use_case, run_row, data_bundle, job_config, blocked_idx
       verbose = FALSE
     )
     if (!is.null(warm_init_alpha)) {
+      ia_rs <- rowSums(warm_init_alpha)
+      if (any(!is.finite(ia_rs)) || any(abs(ia_rs - 1) > 1e-6) ||
+          any(!is.finite(warm_init_alpha))) {
+        message(sprintf(
+          "INIT_ALPHA_DEBUG: run_id=%s, wm=%s, alpha_conc=%s, restart_id=%s, bundle=%s, rowSums=[%s], anyNaN=%s, anyInf=%s",
+          run_row$run_id %||% "NA", warm_method, alpha_conc,
+          restart_id %||% "NA", run_row$dataset_bundle_id %||% "NA",
+          paste(round(ia_rs, 12), collapse = ","),
+          any(is.nan(warm_init_alpha)), any(is.infinite(warm_init_alpha))
+        ))
+      }
       args$init_alpha <- warm_init_alpha
     }
     if (prior_variance_strategy == "fixed") {
@@ -1371,6 +1382,18 @@ run_use_case <- function(use_case, run_row, data_bundle, job_config, blocked_idx
         !is.null(fit)) {
       refit_alpha <- fit$effect_fits$alpha
       refit_alpha <- refit_alpha / rowSums(refit_alpha)
+      refit_rs <- rowSums(refit_alpha)
+      if (any(!is.finite(refit_rs)) || any(abs(refit_rs - 1) > 1e-6) ||
+          any(!is.finite(refit_alpha))) {
+        message(sprintf(
+          "REFIT_ALPHA_DEBUG: run_id=%s, wm=%s, alpha_conc=%s, restart_id=%s, bundle=%s, rowSums=[%s], anyNaN=%s, anyInf=%s, minVal=%s",
+          run_row$run_id %||% "NA", warm_method, alpha_conc,
+          restart_id %||% "NA", run_row$dataset_bundle_id %||% "NA",
+          paste(round(refit_rs, 12), collapse = ","),
+          any(is.nan(refit_alpha)), any(is.infinite(refit_alpha)),
+          min(refit_alpha, na.rm = TRUE)
+        ))
+      }
       args$prior_inclusion_weights <- base_prior_weights
       args$init_alpha <- refit_alpha
       fit <- do.call(susine::susine, args)
