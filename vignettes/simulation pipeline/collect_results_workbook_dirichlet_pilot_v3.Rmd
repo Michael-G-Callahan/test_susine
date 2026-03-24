@@ -313,7 +313,6 @@ for (wm in sort(unique(auprc_individual$warm_method))) {
   fname <- sprintf("auprc_individual_%s.png", wm)
   ggsave(file.path(fig_dir, fname), p_auprc_ind, width = 9, height = 5, dpi = 150)
   cat("Saved:", file.path(fig_dir, fname), "\n")
-  print(p_auprc_ind)
 }
 ```
 
@@ -361,7 +360,6 @@ if (nrow(auprc_agg) > 0) {
     fname <- sprintf("auprc_aggregated_%s.png", wm)
     ggsave(file.path(fig_dir, fname), p_auprc_agg, width = 10, height = 5, dpi = 150)
     cat("Saved:", file.path(fig_dir, fname), "\n")
-    print(p_auprc_agg)
   }
 }
 ```
@@ -489,7 +487,6 @@ for (wm in sort(unique(cal_individual$warm_method))) {
   fname <- sprintf("calibration_individual_%s.png", wm)
   ggsave(file.path(fig_dir, fname), p, width = 12, height = 10, dpi = 150)
   cat("Saved:", file.path(fig_dir, fname), "\n")
-  print(p)
 }
 ```
 
@@ -579,7 +576,6 @@ p_pr <- ggplot(pr_combined, aes(x = recall, y = precision, color = source)) +
 ggsave(file.path(fig_dir, "precision_recall_baseline_vs_ensemble.png"),
        p_pr, width = 8, height = 6, dpi = 150)
 cat("Saved:", file.path(fig_dir, "precision_recall_baseline_vs_ensemble.png"), "\n")
-print(p_pr)
 ```
 
 # 10. Head-to-Head: Best Alpha per Method
