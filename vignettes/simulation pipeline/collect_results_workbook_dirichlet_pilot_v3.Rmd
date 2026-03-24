@@ -1,0 +1,474 @@
+---
+title: "Warm Start Pilot v3 — Collect & Visualize"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+Summary: Collects staging outputs from the warm start pilot v3
+(init_alpha + prior_refit), then computes TPR @ FPR and multimodal
+metrics split by warm_method and alpha_concentration.
+
+```{r setup, message=FALSE}
+here::i_am(
+  "vignettes/simulation pipeline/collect_results_workbook_dirichlet_pilot_v3.Rmd"
+)
+library(here)
+here()
+
+library(devtools)
+devtools::load_all(".")
+
+susine_path <- here("..", "susine")
+if (file.exists(file.path(susine_path, "DESCRIPTION"))) {
+  devtools::load_all(susine_path)
+} else {
+  warning("susine package not found at: ", susine_path)
+}
+
+library(dplyr)
+library(tidyr)
+library(readr)
+library(ggplot2)
+library(stringr)
+theme_set(theme_bw(base_size = 13))
+```
+
+# 1. Job Settings
+
+```{r settings}
+job_name <- "warm_start_pilot_dual"
+parent_job_id <- "FILL_IN"
+output_root <- here("output")
+
+agg_dir <- file.path(
+  output_root, "slurm_output", job_name, parent_job_id, "aggregated"
+)
+fig_dir <- file.path(agg_dir, "figures")
+dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
+```
+
+# 2. Aggregate Staging Outputs
+
+```{r aggregate}
+if (!dir.exists(agg_dir) || !file.exists(file.path(agg_dir, "confusion_bins.csv"))) {
+  aggregate_staging_outputs(
+    job_name = job_name,
+    parent_job_id = parent_job_id,
+    output_root = output_root,
+    validate = TRUE
+  )
+}
+
+stopifnot(file.exists(file.path(agg_dir, "confusion_bins.csv")))
+cat("Aggregated outputs found at:", agg_dir, "\n")
+```
+
+# 3. Load Data
+
+```{r load-data}
+conf <- readr::read_csv(
+  file.path(agg_dir, "confusion_bins.csv"),
+  show_col_types = FALSE
+)
+
+# Parse warm_method from group_key if not already a column
+if (!"warm_method" %in% names(conf) && "group_key" %in% names(conf)) {
+  conf <- conf %>%
+    mutate(warm_method = stringr::str_extract(group_key, "(?<=wm=)[a-z_]+"))
+}
+
+stopifnot("alpha_concentration" %in% names(conf))
+cat("Confusion bins rows:", nrow(conf), "\n")
+cat("Warm methods:", sort(unique(conf$warm_method)), "\n")
+cat("Alpha values:", sort(unique(conf$alpha_concentration)), "\n")
+```
+
+# 4. Baseline Reference
+
+```{r baseline-reference}
+# Default runs are identical across all (warm_method, alpha) groups — take any one
+baseline_alpha <- sort(unique(conf$alpha_concentration))[1L]
+conf_baseline <- conf %>%
+  filter(
+    (is.na(agg_method) | agg_method == ""),
+    run_type == "default"
+  ) %>%
+  # Deduplicate: baseline is shared, take first alpha/method combo
+  filter(alpha_concentration == baseline_alpha) %>%
+  filter(warm_method == first(warm_method) | is.na(warm_method))
+
+curves_baseline <- compute_power_fdr_curves(conf_baseline)
+
+baseline_tpr_fpr005 <- {
+  df <- arrange(distinct(curves_baseline, fpr, power), fpr)
+  val <- stats::approx(df$fpr, df$power, xout = 0.05, ties = "ordered", rule = 2)$y
+  if (is.na(val)) 0 else val
+}
+baseline_tpr_fpr010 <- {
+  df <- arrange(distinct(curves_baseline, fpr, power), fpr)
+  val <- stats::approx(df$fpr, df$power, xout = 0.10, ties = "ordered", rule = 2)$y
+  if (is.na(val)) 0 else val
+}
+
+cat(sprintf("Baseline (uniform prior, no warm start) reference:\n"))
+cat(sprintf("  TPR @ FPR=0.05: %.4f\n", baseline_tpr_fpr005))
+cat(sprintf("  TPR @ FPR=0.10: %.4f\n", baseline_tpr_fpr010))
+```
+
+# 5. TPR @ FPR — Individual Fits by Method
+
+```{r tpr-at-fpr-individual}
+conf_fits <- conf %>%
+  filter(is.na(agg_method) | agg_method == "")
+
+curves_individual <- compute_power_fdr_curves(
+  conf_fits,
+  group_vars = c("warm_method", "alpha_concentration")
+)
+
+tpr_at_fpr_individual <- curves_individual %>%
+  group_by(warm_method, alpha_concentration) %>%
+  summarise(
+    tpr_fpr005 = {
+      df <- arrange(distinct(cur_data_all(), fpr, power), fpr)
+      val <- stats::approx(df$fpr, df$power, xout = 0.05, ties = "ordered", rule = 2)$y
+      if (is.na(val)) 0 else val
+    },
+    tpr_fpr010 = {
+      df <- arrange(distinct(cur_data_all(), fpr, power), fpr)
+      val <- stats::approx(df$fpr, df$power, xout = 0.10, ties = "ordered", rule = 2)$y
+      if (is.na(val)) 0 else val
+    },
+    .groups = "drop"
+  )
+
+cat("Individual fits — TPR @ FPR thresholds:\n")
+print(as.data.frame(tpr_at_fpr_individual))
+```
+
+```{r plot-fpr-individual}
+p1 <- ggplot(tpr_at_fpr_individual,
+             aes(x = factor(alpha_concentration), y = tpr_fpr005,
+                 fill = warm_method)) +
+  geom_col(position = position_dodge(width = 0.7), width = 0.6) +
+  geom_hline(yintercept = baseline_tpr_fpr005, linetype = "dashed",
+             color = "red", linewidth = 0.7) +
+  annotate("text", x = Inf, y = baseline_tpr_fpr005,
+           label = sprintf("baseline = %.3f", baseline_tpr_fpr005),
+           hjust = 1.1, vjust = -0.5, color = "red", size = 3) +
+  labs(
+    x = "Dirichlet alpha",
+    y = "TPR @ FPR = 0.05",
+    fill = "Warm method",
+    title = "Individual Fits: TPR @ FPR = 0.05 by Method and Alpha",
+    subtitle = "Pooled across all datasets and restarts"
+  ) +
+  ylim(0, NA)
+
+ggsave(file.path(fig_dir, "tpr_fpr005_individual_by_method.png"),
+       p1, width = 9, height = 5, dpi = 150)
+cat("Saved:", file.path(fig_dir, "tpr_fpr005_individual_by_method.png"), "\n")
+```
+
+# 6. TPR @ FPR — Aggregated PIPs by Method
+
+```{r tpr-at-fpr-aggregated}
+conf_agg <- conf %>%
+  filter(!is.na(agg_method) & agg_method != "")
+
+if (nrow(conf_agg) > 0) {
+  curves_agg <- compute_power_fdr_curves(
+    conf_agg,
+    group_vars = c("warm_method", "alpha_concentration", "agg_method")
+  )
+
+  tpr_at_fpr_agg <- curves_agg %>%
+    group_by(warm_method, alpha_concentration, agg_method) %>%
+    summarise(
+      tpr_fpr005 = {
+        df <- arrange(distinct(cur_data_all(), fpr, power), fpr)
+        val <- stats::approx(df$fpr, df$power, xout = 0.05, ties = "ordered", rule = 2)$y
+        if (is.na(val)) 0 else val
+      },
+      tpr_fpr010 = {
+        df <- arrange(distinct(cur_data_all(), fpr, power), fpr)
+        val <- stats::approx(df$fpr, df$power, xout = 0.10, ties = "ordered", rule = 2)$y
+        if (is.na(val)) 0 else val
+      },
+      .groups = "drop"
+    )
+
+  cat("Aggregated — TPR @ FPR thresholds:\n")
+  print(as.data.frame(tpr_at_fpr_agg))
+} else {
+  tpr_at_fpr_agg <- tibble()
+}
+```
+
+```{r plot-fpr-aggregated}
+if (nrow(tpr_at_fpr_agg) > 0) {
+  p2 <- ggplot(
+    tpr_at_fpr_agg,
+    aes(x = factor(alpha_concentration), y = tpr_fpr005, fill = agg_method)
+  ) +
+    geom_col(position = position_dodge(width = 0.7), width = 0.6) +
+    geom_hline(yintercept = baseline_tpr_fpr005, linetype = "dashed",
+               color = "red", linewidth = 0.7) +
+    facet_wrap(~warm_method, ncol = 1,
+               labeller = labeller(warm_method = c(
+                 init_alpha = "init_alpha (trajectory perturbation)",
+                 prior_refit = "prior_refit (explore + refit)"
+               ))) +
+    labs(
+      x = "Dirichlet alpha",
+      y = "TPR @ FPR = 0.05",
+      fill = "Aggregation",
+      title = "Aggregated PIPs: TPR @ FPR = 0.05 by Method and Alpha",
+      subtitle = "Pooled across all datasets"
+    ) +
+    ylim(0, NA)
+
+  ggsave(file.path(fig_dir, "tpr_fpr005_aggregated_by_method.png"),
+         p2, width = 10, height = 8, dpi = 150)
+  cat("Saved:", file.path(fig_dir, "tpr_fpr005_aggregated_by_method.png"), "\n")
+}
+```
+
+```{r plot-fpr010-aggregated}
+if (nrow(tpr_at_fpr_agg) > 0) {
+  p2b <- ggplot(
+    tpr_at_fpr_agg,
+    aes(x = factor(alpha_concentration), y = tpr_fpr010, fill = agg_method)
+  ) +
+    geom_col(position = position_dodge(width = 0.7), width = 0.6) +
+    geom_hline(yintercept = baseline_tpr_fpr010, linetype = "dashed",
+               color = "red", linewidth = 0.7) +
+    facet_wrap(~warm_method, ncol = 1,
+               labeller = labeller(warm_method = c(
+                 init_alpha = "init_alpha (trajectory perturbation)",
+                 prior_refit = "prior_refit (explore + refit)"
+               ))) +
+    labs(
+      x = "Dirichlet alpha",
+      y = "TPR @ FPR = 0.10",
+      fill = "Aggregation",
+      title = "Aggregated PIPs: TPR @ FPR = 0.10 by Method and Alpha",
+      subtitle = "Pooled across all datasets"
+    ) +
+    ylim(0, NA)
+
+  ggsave(file.path(fig_dir, "tpr_fpr010_aggregated_by_method.png"),
+         p2b, width = 10, height = 8, dpi = 150)
+  cat("Saved:", file.path(fig_dir, "tpr_fpr010_aggregated_by_method.png"), "\n")
+}
+```
+
+# 7. Head-to-Head: Best Alpha per Method
+
+```{r best-alpha-comparison}
+if (nrow(tpr_at_fpr_agg) > 0) {
+  best_per_method <- tpr_at_fpr_agg %>%
+    group_by(warm_method, agg_method) %>%
+    slice_max(tpr_fpr005, n = 1, with_ties = FALSE) %>%
+    ungroup()
+
+  cat("Best alpha per (warm_method, agg_method):\n")
+  print(as.data.frame(best_per_method))
+
+  p_h2h <- ggplot(
+    best_per_method,
+    aes(x = agg_method, y = tpr_fpr005, fill = warm_method)
+  ) +
+    geom_col(position = position_dodge(width = 0.7), width = 0.6) +
+    geom_hline(yintercept = baseline_tpr_fpr005, linetype = "dashed",
+               color = "red", linewidth = 0.7) +
+    geom_text(aes(label = sprintf("a=%.0e", alpha_concentration)),
+              position = position_dodge(width = 0.7), vjust = -0.3, size = 2.5) +
+    labs(
+      x = "Aggregation Method",
+      y = "TPR @ FPR = 0.05",
+      fill = "Warm method",
+      title = "Best Alpha per Method: TPR @ FPR = 0.05",
+      subtitle = "Labels show the best alpha_concentration for each bar"
+    ) +
+    ylim(0, NA)
+
+  ggsave(file.path(fig_dir, "head_to_head_best_alpha.png"),
+         p_h2h, width = 9, height = 5, dpi = 150)
+  cat("Saved:", file.path(fig_dir, "head_to_head_best_alpha.png"), "\n")
+}
+```
+
+# 8. Multimodal Metrics by Method
+
+```{r load-multimodal}
+mm_path <- file.path(agg_dir, "multimodal_metrics.csv")
+if (file.exists(mm_path)) {
+  mm <- readr::read_csv(mm_path, show_col_types = FALSE)
+
+  # Parse warm_method and alpha from group_label
+  mm <- mm %>%
+    mutate(
+      warm_method = stringr::str_extract(group_label, "(?<=wm=)[a-z_]+"),
+      alpha_concentration = as.numeric(
+        stringr::str_extract(group_label, "(?<=alpha=)[0-9.e-]+")
+      )
+    )
+
+  cat("Multimodal metrics rows:", nrow(mm), "\n")
+  cat("Warm methods:", sort(unique(mm$warm_method)), "\n")
+  cat("Alpha values:", sort(unique(mm$alpha_concentration)), "\n")
+} else {
+  mm <- tibble()
+  cat("No multimodal_metrics.csv found.\n")
+}
+```
+
+```{r multimodal-summary}
+if (nrow(mm) > 0) {
+  cat("=== Mean JSD by warm_method and alpha ===\n")
+  mm %>%
+    filter(!is.na(alpha_concentration)) %>%
+    group_by(warm_method, alpha_concentration) %>%
+    summarise(
+      n = n(),
+      mean_jsd = mean(mean_jsd, na.rm = TRUE),
+      mean_max_jsd = mean(max_jsd, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    arrange(warm_method, alpha_concentration) %>%
+    print(n = Inf)
+}
+```
+
+```{r plot-multimodal-jsd-by-method}
+if (nrow(mm) > 0 && any(!is.na(mm$warm_method))) {
+  mm_jsd <- mm %>%
+    filter(!is.na(alpha_concentration), !is.na(warm_method)) %>%
+    select(warm_method, alpha_concentration, mean_jsd, max_jsd) %>%
+    tidyr::pivot_longer(
+      cols = c(mean_jsd, max_jsd),
+      names_to = "metric",
+      values_to = "value"
+    ) %>%
+    mutate(metric = dplyr::recode(metric,
+      mean_jsd = "Mean pairwise JSD",
+      max_jsd = "Max pairwise JSD"
+    ))
+
+  p_jsd <- ggplot(mm_jsd, aes(x = factor(alpha_concentration), y = value,
+                               fill = warm_method)) +
+    geom_boxplot(outlier.size = 0.5) +
+    facet_wrap(~metric, scales = "free_y", ncol = 1) +
+    labs(x = "Dirichlet alpha", fill = "Warm method",
+         title = "PIP Diversity (JSD) by Method and Alpha") +
+    theme(axis.text.x = element_text(size = 9))
+
+  ggsave(file.path(fig_dir, "multimodal_jsd_by_method.png"),
+         p_jsd, width = 10, height = 7, dpi = 150)
+  cat("Saved:", file.path(fig_dir, "multimodal_jsd_by_method.png"), "\n")
+}
+```
+
+```{r plot-multimodal-agnostic-by-method}
+if (nrow(mm) > 0 && any(!is.na(mm$warm_method))) {
+  mm_agnostic <- mm %>%
+    filter(!is.na(alpha_concentration), !is.na(warm_method)) %>%
+    select(warm_method, alpha_concentration, jaccard_top10, mean_pip_var) %>%
+    tidyr::pivot_longer(
+      cols = c(jaccard_top10, mean_pip_var),
+      names_to = "metric",
+      values_to = "value"
+    )
+
+  p_agnostic <- ggplot(mm_agnostic,
+                        aes(x = factor(alpha_concentration), y = value,
+                            fill = warm_method)) +
+    geom_boxplot(outlier.size = 0.5) +
+    facet_wrap(~metric, scales = "free_y", ncol = 2) +
+    labs(x = "Dirichlet alpha", fill = "Warm method",
+         title = "JSD-Agnostic Multimodal Metrics by Method and Alpha") +
+    theme(axis.text.x = element_text(size = 9))
+
+  ggsave(file.path(fig_dir, "multimodal_agnostic_by_method.png"),
+         p_agnostic, width = 10, height = 5, dpi = 150)
+  cat("Saved:", file.path(fig_dir, "multimodal_agnostic_by_method.png"), "\n")
+}
+```
+
+```{r plot-multimodal-n-clusters}
+if (nrow(mm) > 0) {
+  jsd_clust_cols <- grep("^n_clusters_jsd_", names(mm), value = TRUE)
+  bjsd_clust_cols <- grep("^n_clusters_bjsd_", names(mm), value = TRUE)
+
+  mm_clust_cat <- mm %>%
+    filter(!is.na(alpha_concentration), !is.na(warm_method)) %>%
+    select(warm_method, alpha_concentration, all_of(jsd_clust_cols)) %>%
+    tidyr::pivot_longer(
+      cols = -c(warm_method, alpha_concentration),
+      names_to = "col_name",
+      values_to = "n_clusters"
+    ) %>%
+    mutate(
+      threshold = dplyr::case_match(col_name,
+        "n_clusters_jsd_015" ~ 0.15,
+        "n_clusters_jsd_050" ~ 0.50,
+        "n_clusters_jsd_100" ~ 1.00,
+        "n_clusters_jsd_200" ~ 2.00,
+        "n_clusters_jsd_300" ~ 3.00,
+        "n_clusters_jsd_500" ~ 5.00
+      ),
+      jsd_type = "Categorical"
+    )
+
+  mm_clust_bern <- mm %>%
+    filter(!is.na(alpha_concentration), !is.na(warm_method)) %>%
+    select(warm_method, alpha_concentration, all_of(bjsd_clust_cols)) %>%
+    tidyr::pivot_longer(
+      cols = -c(warm_method, alpha_concentration),
+      names_to = "col_name",
+      values_to = "n_clusters"
+    ) %>%
+    mutate(
+      threshold = dplyr::case_match(col_name,
+        "n_clusters_bjsd_0001" ~ 0.001,
+        "n_clusters_bjsd_0002" ~ 0.002,
+        "n_clusters_bjsd_0004" ~ 0.004,
+        "n_clusters_bjsd_0006" ~ 0.006,
+        "n_clusters_bjsd_0008" ~ 0.008,
+        "n_clusters_bjsd_000" ~ 0.001,
+        "n_clusters_bjsd_001" ~ 0.01,
+        "n_clusters_bjsd_005" ~ 0.05,
+        "n_clusters_bjsd_010" ~ 0.10,
+        "n_clusters_bjsd_020" ~ 0.20,
+        "n_clusters_bjsd_040" ~ 0.40
+      ),
+      jsd_type = "Bernoulli"
+    )
+
+  mm_clust <- bind_rows(mm_clust_cat, mm_clust_bern) %>%
+    filter(!is.na(threshold)) %>%
+    mutate(threshold_label = sprintf("h = %s", threshold))
+
+  p_clust <- ggplot(mm_clust,
+                     aes(x = factor(alpha_concentration), y = n_clusters,
+                         fill = warm_method)) +
+    geom_boxplot(outlier.size = 0.5) +
+    facet_grid(jsd_type ~ threshold_label, scales = "free") +
+    labs(x = "Dirichlet alpha", y = "Number of clusters",
+         fill = "Warm method",
+         title = "Cluster Count by Method, JSD Type, and Threshold") +
+    theme(axis.text.x = element_text(size = 7, angle = 45, hjust = 1),
+          strip.text = element_text(size = 8))
+
+  ggsave(file.path(fig_dir, "multimodal_n_clusters_by_method.png"),
+         p_clust, width = 16, height = 7, dpi = 150)
+  cat("Saved:", file.path(fig_dir, "multimodal_n_clusters_by_method.png"), "\n")
+}
+```
