@@ -422,6 +422,351 @@ ggsave(file.path(fig_dir, "auprc_barplot_by_method.png"),
 cat("Saved:", file.path(fig_dir, "auprc_barplot_by_method.png"), "\n")
 ```
 
+# 8b. Bucket-Aware PR / AUPRC Diagnostics
+
+These diagnostics keep the existing figures unchanged and add a second,
+more bucket-aware view of PR performance:
+
+- exact PR step curves from the stored confusion bins
+- exact step-area AUPRC from the stored confusion bins
+- a separate `0.01` re-binned sensitivity check, using a uniform-within-bin
+  approximation only for diagnosis
+
+```{r bucket-aware-pr-helpers}
+build_pr_curve_step_single <- function(confusion_df, label) {
+  curve_df <- confusion_df %>%
+    dplyr::group_by(.data$pip_threshold) %>%
+    dplyr::summarise(
+      n_causal_at_bucket = sum(.data$n_causal_at_bucket, na.rm = TRUE),
+      n_noncausal_at_bucket = sum(.data$n_noncausal_at_bucket, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    dplyr::arrange(dplyr::desc(.data$pip_threshold)) %>%
+    dplyr::mutate(
+      TP = cumsum(.data$n_causal_at_bucket),
+      FP = cumsum(.data$n_noncausal_at_bucket),
+      total_causal = sum(.data$n_causal_at_bucket),
+      precision = dplyr::if_else(.data$TP + .data$FP > 0,
+                                 .data$TP / (.data$TP + .data$FP),
+                                 NA_real_),
+      recall = dplyr::if_else(.data$total_causal > 0,
+                              .data$TP / .data$total_causal,
+                              NA_real_)
+    ) %>%
+    dplyr::filter(!is.na(.data$precision), !is.na(.data$recall)) %>%
+    dplyr::select(.data$pip_threshold, .data$precision, .data$recall) %>%
+    dplyr::arrange(.data$recall, dplyr::desc(.data$pip_threshold))
+
+  if (nrow(curve_df) == 0) {
+    return(tibble())
+  }
+
+  if (min(curve_df$recall) > 0) {
+    curve_df <- dplyr::bind_rows(
+      tibble::tibble(pip_threshold = Inf, precision = 1, recall = 0),
+      curve_df
+    )
+  }
+
+  curve_df %>%
+    dplyr::mutate(source = label)
+}
+
+compute_auprc_step_single <- function(precision, recall) {
+  df <- tibble::tibble(precision = precision, recall = recall) %>%
+    dplyr::filter(!is.na(.data$precision), !is.na(.data$recall)) %>%
+    dplyr::arrange(.data$recall)
+
+  if (nrow(df) == 0) return(NA_real_)
+
+  if (min(df$recall) > 0) {
+    df <- dplyr::bind_rows(
+      tibble::tibble(recall = 0, precision = 1),
+      df
+    )
+  }
+
+  # Average-precision style step area: precision is held constant between
+  # recall jumps at each stored threshold.
+  sum(diff(df$recall) * utils::tail(df$precision, -1))
+}
+
+compute_auprc_step_from_confusion <- function(confusion_df, group_vars) {
+  curves <- compute_power_fdr_curves(confusion_df, group_vars = group_vars)
+
+  curves %>%
+    dplyr::group_by(dplyr::across(dplyr::all_of(group_vars))) %>%
+    dplyr::summarise(
+      AUPRC_step = compute_auprc_step_single(.data$precision, .data$recall),
+      .groups = "drop"
+    )
+}
+
+rebin_confusion_uniform <- function(confusion_df, group_vars,
+                                    target_width = 0.01) {
+  stopifnot(target_width > 0, target_width <= 1)
+
+  target_breaks <- seq(0, 1, by = target_width)
+  target_starts <- round(target_breaks[target_breaks < 1], 10)
+
+  aggregated <- confusion_df %>%
+    dplyr::group_by(dplyr::across(dplyr::all_of(c(group_vars, "pip_threshold")))) %>%
+    dplyr::summarise(
+      n_causal_at_bucket = sum(.data$n_causal_at_bucket, na.rm = TRUE),
+      n_noncausal_at_bucket = sum(.data$n_noncausal_at_bucket, na.rm = TRUE),
+      .groups = "drop"
+    )
+
+  if (nrow(aggregated) == 0) {
+    return(aggregated)
+  }
+
+  if (length(group_vars) > 0) {
+    grouped <- aggregated %>%
+      dplyr::group_by(dplyr::across(dplyr::all_of(group_vars))) %>%
+      tidyr::nest()
+  } else {
+    grouped <- tibble::tibble(data = list(aggregated))
+  }
+
+  rebinned <- lapply(seq_len(nrow(grouped)), function(i) {
+    source_df <- grouped$data[[i]] %>%
+      dplyr::arrange(.data$pip_threshold)
+    upper_edge <- dplyr::lead(source_df$pip_threshold, default = 1)
+
+    pieces <- lapply(seq_len(nrow(source_df)), function(j) {
+      lower <- source_df$pip_threshold[j]
+      upper <- upper_edge[j]
+      n_causal <- source_df$n_causal_at_bucket[j]
+      n_noncausal <- source_df$n_noncausal_at_bucket[j]
+
+      if (!is.finite(lower) || !is.finite(upper)) {
+        return(NULL)
+      }
+
+      if (upper > lower) {
+        overlap <- pmax(
+          0,
+          pmin(target_starts + target_width, upper) -
+            pmax(target_starts, lower)
+        )
+        keep <- overlap > 0
+        if (!any(keep)) {
+          return(NULL)
+        }
+        weights <- overlap[keep] / sum(overlap[keep])
+        tibble::tibble(
+          pip_threshold = target_starts[keep],
+          n_causal_at_bucket = n_causal * weights,
+          n_noncausal_at_bucket = n_noncausal * weights
+        )
+      } else {
+        target_bin <- if (lower >= 1) {
+          1 - target_width
+        } else {
+          floor(lower / target_width) * target_width
+        }
+        tibble::tibble(
+          pip_threshold = round(target_bin, 10),
+          n_causal_at_bucket = n_causal,
+          n_noncausal_at_bucket = n_noncausal
+        )
+      }
+    })
+
+    piece_df <- dplyr::bind_rows(pieces) %>%
+      dplyr::group_by(.data$pip_threshold) %>%
+      dplyr::summarise(
+        n_causal_at_bucket = sum(.data$n_causal_at_bucket, na.rm = TRUE),
+        n_noncausal_at_bucket = sum(.data$n_noncausal_at_bucket, na.rm = TRUE),
+        .groups = "drop"
+      )
+
+    if (length(group_vars) > 0) {
+      dplyr::bind_cols(grouped[i, group_vars, drop = FALSE], piece_df)
+    } else {
+      piece_df
+    }
+  })
+
+  dplyr::bind_rows(rebinned)
+}
+```
+
+```{r pr-aggregated-step}
+pr_baseline_step <- build_pr_curve_step_single(conf_baseline, "Baseline (default)")
+baseline_auprc_step <- compute_auprc_step_single(
+  pr_baseline_step$precision,
+  pr_baseline_step$recall
+)
+cat(sprintf("Baseline AUPRC (stored bins, step): %.4f\n", baseline_auprc_step))
+
+if (nrow(conf_agg_core) > 0) {
+  for (wm in sort(unique(conf_agg_core$warm_method))) {
+    conf_wm <- conf_agg_core %>% filter(warm_method == wm)
+    alphas <- sort(unique(conf_wm$alpha_concentration))
+
+    pr_curves_step <- purrr::map_dfr(alphas, function(a) {
+      purrr::map_dfr(keep_agg_methods, function(m) {
+        sub <- conf_wm %>% filter(alpha_concentration == a, agg_method == m)
+        if (nrow(sub) == 0) return(tibble())
+        build_pr_curve_step_single(sub, m) %>%
+          mutate(alpha_concentration = a)
+      })
+    })
+
+    if (nrow(pr_curves_step) == 0) next
+
+    pr_base_facet_step <- purrr::map_dfr(alphas, function(a) {
+      pr_baseline_step %>% mutate(alpha_concentration = a)
+    })
+
+    p_step <- ggplot(pr_curves_step, aes(x = recall, y = precision, color = source)) +
+      geom_step(direction = "vh", linewidth = 0.7, alpha = 0.85) +
+      geom_step(
+        data = pr_base_facet_step,
+        aes(x = recall, y = precision),
+        color = "red",
+        linewidth = 0.8,
+        linetype = "dashed",
+        direction = "vh",
+        inherit.aes = FALSE
+      ) +
+      geom_hline(yintercept = 0.50, linetype = "dotted", color = "grey50",
+                 linewidth = 0.4) +
+      facet_wrap(~alpha_concentration, labeller = label_both) +
+      labs(
+        x = "Recall (TPR)",
+        y = "Precision",
+        color = "Aggregation",
+        title = sprintf("Precision-Recall Step Curves: Aggregated PIPs (%s)", wm),
+        subtitle = "Stored confusion bins only; red dashed = baseline"
+      ) +
+      coord_cartesian(xlim = c(0, 1), ylim = c(0, 1)) +
+      theme(legend.position = "bottom")
+
+    fname <- sprintf("pr_curve_step_aggregated_%s.png", wm)
+    ggsave(file.path(fig_dir, fname), p_step, width = 12, height = 10, dpi = 150)
+    cat("Saved:", file.path(fig_dir, fname), "\n")
+  }
+}
+```
+
+```{r auprc-bucket-aware-diagnostics}
+group_vars_agg <- c("warm_method", "alpha_concentration", "agg_method")
+
+auprc_agg_step <- compute_auprc_step_from_confusion(
+  conf_agg_core,
+  group_vars = group_vars_agg
+)
+
+conf_baseline_rebin001 <- rebin_confusion_uniform(
+  conf_baseline,
+  group_vars = character(),
+  target_width = 0.01
+)
+pr_baseline_rebin001 <- build_pr_curve_step_single(
+  conf_baseline_rebin001,
+  "Baseline (default)"
+)
+baseline_auprc_step_rebin001 <- compute_auprc_step_single(
+  pr_baseline_rebin001$precision,
+  pr_baseline_rebin001$recall
+)
+
+conf_agg_rebin001 <- rebin_confusion_uniform(
+  conf_agg_core,
+  group_vars = group_vars_agg,
+  target_width = 0.01
+)
+auprc_agg_step_rebin001 <- compute_auprc_step_from_confusion(
+  conf_agg_rebin001,
+  group_vars = group_vars_agg
+) %>%
+  dplyr::rename(AUPRC_step_rebin001 = .data$AUPRC_step)
+
+auprc_diagnostics <- auprc_agg %>%
+  dplyr::rename(AUPRC_trapezoid = .data$AUPRC) %>%
+  dplyr::left_join(auprc_agg_step, by = group_vars_agg) %>%
+  dplyr::left_join(auprc_agg_step_rebin001, by = group_vars_agg) %>%
+  dplyr::mutate(
+    delta_step_minus_trapezoid = .data$AUPRC_step - .data$AUPRC_trapezoid,
+    delta_rebin001_minus_step = .data$AUPRC_step_rebin001 - .data$AUPRC_step
+  ) %>%
+  dplyr::arrange(.data$warm_method, .data$alpha_concentration, .data$agg_method)
+
+diag_path <- file.path(fig_dir, "auprc_metric_diagnostics.csv")
+readr::write_csv(auprc_diagnostics, diag_path)
+cat("Saved:", diag_path, "\n")
+
+baseline_metric_df <- tidyr::crossing(
+  warm_method = sort(unique(conf_agg_core$warm_method)),
+  metric = c(
+    "Stored bins: trapezoid (current)",
+    "Stored bins: step (recommended)",
+    "0.01 re-bin: step (sensitivity)"
+  )
+) %>%
+  dplyr::mutate(
+    baseline_auprc = dplyr::case_when(
+      .data$metric == "Stored bins: trapezoid (current)" ~ baseline_auprc,
+      .data$metric == "Stored bins: step (recommended)" ~ baseline_auprc_step,
+      TRUE ~ baseline_auprc_step_rebin001
+    )
+  )
+
+auprc_diag_plot_df <- auprc_diagnostics %>%
+  dplyr::select(
+    .data$warm_method,
+    .data$alpha_concentration,
+    .data$agg_method,
+    .data$AUPRC_trapezoid,
+    .data$AUPRC_step,
+    .data$AUPRC_step_rebin001
+  ) %>%
+  tidyr::pivot_longer(
+    cols = c(.data$AUPRC_trapezoid, .data$AUPRC_step, .data$AUPRC_step_rebin001),
+    names_to = "metric",
+    values_to = "AUPRC"
+  ) %>%
+  dplyr::mutate(
+    metric = dplyr::recode(
+      .data$metric,
+      AUPRC_trapezoid = "Stored bins: trapezoid (current)",
+      AUPRC_step = "Stored bins: step (recommended)",
+      AUPRC_step_rebin001 = "0.01 re-bin: step (sensitivity)"
+    )
+  )
+
+p_auprc_diag <- ggplot(
+  auprc_diag_plot_df,
+  aes(x = factor(alpha_concentration), y = AUPRC, fill = agg_method)
+) +
+  geom_col(position = position_dodge(width = 0.7), width = 0.6) +
+  geom_hline(
+    data = baseline_metric_df,
+    aes(yintercept = baseline_auprc),
+    linetype = "dashed",
+    color = "red",
+    linewidth = 0.7,
+    inherit.aes = FALSE
+  ) +
+  facet_grid(metric ~ warm_method, scales = "free_x") +
+  labs(
+    x = "Dirichlet alpha",
+    y = "AUPRC",
+    fill = "Aggregation",
+    title = "AUPRC Sensitivity to PR Integration and Re-binning",
+    subtitle = "Current trapezoid vs exact step area; 0.01 re-bin shown only as a sensitivity check"
+  ) +
+  ylim(0, NA) +
+  theme(legend.position = "bottom")
+
+ggsave(file.path(fig_dir, "auprc_metric_sensitivity_by_method.png"),
+       p_auprc_diag, width = 12, height = 10, dpi = 150)
+cat("Saved:", file.path(fig_dir, "auprc_metric_sensitivity_by_method.png"), "\n")
+```
+
 # 9. Calibration Curves
 
 
