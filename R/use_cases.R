@@ -69,7 +69,8 @@ exploration_catalog <- function() {
     "restart", "Restart via randomized prior inclusion vectors",
     "c_grid",  "Grid over c for mu_0 = c*a",
     "tau_grid","Grid over tau for pi = softmax(|a|/tau)",
-    "refine",  "Harness-level refinement (BFS)"
+    "refine",        "Harness-level refinement (perturb + refit BFS)",
+    "sigma_0_2_grid","Grid over prior variance sigma_0_2"
   )
 }
 
@@ -80,10 +81,11 @@ exploration_catalog <- function() {
 aggregation_catalog <- function() {
   tibble::tribble(
     ~aggregation_id, ~label,
-    "max_elbo",      "Max ELBO",
-    "uniform",       "Uniform average",
-    "elbo_softmax",  "ELBO softmax",
-    "cluster_weight","Cluster-then-ELBO-softmax (Method A)"
+    "max_elbo",          "Max ELBO",
+    "uniform",           "Uniform average",
+    "elbo_softmax",      "ELBO softmax",
+    "cluster_weight",    "Cluster-then-ELBO-softmax (JSD 0.15)",
+    "cluster_weight_jsd_050","Cluster-then-ELBO-softmax (JSD 0.50)"
   )
 }
 
@@ -112,6 +114,7 @@ valid_exploration_for_prior <- function(prior_spec_ids = NULL,
         prior_specs,
         .data$prior_spec_id,
         .data$prior_mean_strategy,
+        .data$prior_variance_strategy,
         .data$inclusion_prior_strategy,
         .data$eb_method
       ),
@@ -130,6 +133,8 @@ valid_exploration_for_prior <- function(prior_spec_ids = NULL,
         .data$exploration_id == "c_grid" ~
           .data$prior_mean_strategy == "functional_mu" & !.data$.eb_optimizes_c,
         .data$exploration_id == "tau_grid" ~ .data$inclusion_prior_strategy == "functional_pi",
+        .data$exploration_id == "sigma_0_2_grid" ~
+          .data$prior_variance_strategy == "fixed",
         TRUE ~ FALSE
       )
     ) %>%

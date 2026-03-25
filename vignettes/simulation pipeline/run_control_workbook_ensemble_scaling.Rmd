@@ -1,0 +1,451 @@
+---
+title: "Ensemble Scaling Experiment — Run Control"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+Experiment plan: `refs/ensemble_scaling_experiment_plan.md`
+
+Builds a single heterogeneous job config with all specs (A-R through
+C-CSFR) plus standalone truth-warm-start baselines.
+
+```{r setup, message=FALSE}
+here::i_am("vignettes/simulation pipeline/run_control_workbook_ensemble_scaling.Rmd")
+library(here)
+here()
+
+library(devtools)
+devtools::load_all(".")
+
+susine_path <- here("..", "susine")
+if (file.exists(file.path(susine_path, "DESCRIPTION"))) {
+  devtools::load_all(susine_path)
+} else {
+  warning("susine package not found at: ", susine_path)
+}
+
+library(dplyr)
+library(tidyr)
+library(readr)
+library(knitr)
+```
+
+# 1. Grid Value Definitions
+
+```{r grid-values}
+# c_grid values: seq(0, 1.5, length.out = N)
+c_grid_64 <- seq(0, 1.5, length.out = 64)
+c_grid_8  <- seq(0, 1.5, length.out = 8)
+c_grid_4  <- seq(0, 1.5, length.out = 4)
+c_grid_3  <- seq(0, 1.5, length.out = 3)
+
+# sigma_0_2 grid values: hand-picked with 0.2 ensured
+sigma_grid_64 <- {
+  v <- 10^seq(-2, 0, length.out = 64)
+  v[which.min(abs(v - 0.2))] <- 0.2
+  sort(unique(v))
+}
+sigma_grid_8 <- c(0.01, 0.03, 0.07, 0.1, 0.2, 0.4, 0.7, 1.0)
+sigma_grid_4 <- c(0.02, 0.1, 0.2, 0.5)
+sigma_grid_3 <- c(0.05, 0.2, 1.0)
+
+# Verify 0.2 is included in all grids
+stopifnot(0.2 %in% sigma_grid_64)
+stopifnot(0.2 %in% sigma_grid_8)
+stopifnot(0.2 %in% sigma_grid_4)
+stopifnot(0.2 %in% sigma_grid_3)
+```
+
+# 2. Exploration Specs
+
+Each spec defines one row in the method catalog from the experiment plan.
+
+```{r exploration-specs}
+# Shared restart / refine settings
+restart_64 <- list(n_inits = 64L, alpha_concentration = 0.001)
+restart_8  <- list(n_inits = 8L,  alpha_concentration = 0.001)
+restart_4  <- list(n_inits = 4L,  alpha_concentration = 0.001)
+restart_3  <- list(n_inits = 3L,  alpha_concentration = 0.001)
+
+refine_32 <- list(n_steps = 32L, cs_source = "filtered", purity_threshold = 0.95)
+refine_8  <- list(n_steps = 8L,  cs_source = "filtered", purity_threshold = 0.95)
+refine_4  <- list(n_steps = 4L,  cs_source = "filtered", purity_threshold = 0.95)
+refine_3  <- list(n_steps = 3L,  cs_source = "filtered", purity_threshold = 0.95)
+
+# ── Group A: Baseline SuSiE (no annotations) ──
+spec_A_R <- list(
+  name = "A-R",
+  use_case_ids = "susie_vanilla",
+  exploration_methods = "restart",
+  exploration_mode = "separate",
+  K = 64L,
+  restart_settings = restart_64
+)
+
+spec_A_F <- list(
+  name = "A-F",
+  use_case_ids = "susie_vanilla",
+  exploration_methods = "refine",
+  exploration_mode = "separate",
+  K = 32L,
+  refine_settings = refine_32
+)
+
+spec_A_S <- list(
+  name = "A-S",
+  use_case_ids = "susie_vanilla",
+  exploration_methods = "sigma_0_2_grid",
+  exploration_mode = "separate",
+  K = 64L,
+  sigma_0_2_grid_values = sigma_grid_64
+)
+
+spec_A_RF <- list(
+  name = "A-RF",
+  use_case_ids = "susie_vanilla",
+  exploration_methods = c("restart", "refine"),
+  exploration_mode = "intersect",
+  K = 64L,
+  restart_settings = restart_8,
+  refine_settings = refine_8
+)
+
+spec_A_RS <- list(
+  name = "A-RS",
+  use_case_ids = "susie_vanilla",
+  exploration_methods = c("restart", "sigma_0_2_grid"),
+  exploration_mode = "intersect",
+  K = 64L,
+  restart_settings = restart_8,
+  sigma_0_2_grid_values = sigma_grid_8
+)
+
+spec_A_FS <- list(
+  name = "A-FS",
+  use_case_ids = "susie_vanilla",
+  exploration_methods = c("refine", "sigma_0_2_grid"),
+  exploration_mode = "intersect",
+  K = 64L,
+  refine_settings = refine_8,
+  sigma_0_2_grid_values = sigma_grid_8
+)
+
+spec_A_RFS <- list(
+  name = "A-RFS",
+  use_case_ids = "susie_vanilla",
+  exploration_methods = c("restart", "refine", "sigma_0_2_grid"),
+  exploration_mode = "intersect",
+  K = 64L,
+  restart_settings = restart_4,
+  refine_settings = refine_4,
+  sigma_0_2_grid_values = sigma_grid_4
+)
+
+# ── Group B: EB SuSiNE (annotations via EB) ──
+spec_B_R <- list(
+  name = "B-R",
+  use_case_ids = "susine_eb_clamped_scale_var_nonneg",
+  exploration_methods = "restart",
+  exploration_mode = "separate",
+  K = 64L,
+  restart_settings = restart_64
+)
+
+spec_B_F <- list(
+  name = "B-F",
+  use_case_ids = "susine_eb_clamped_scale_var_nonneg",
+  exploration_methods = "refine",
+  exploration_mode = "separate",
+  K = 32L,
+  refine_settings = refine_32
+)
+
+spec_B_RF <- list(
+  name = "B-RF",
+  use_case_ids = "susine_eb_clamped_scale_var_nonneg",
+  exploration_methods = c("restart", "refine"),
+  exploration_mode = "intersect",
+  K = 64L,
+  restart_settings = restart_8,
+  refine_settings = refine_8
+)
+
+# ── Group C: Grid SuSiNE (annotations, no EB) ──
+spec_C_C <- list(
+  name = "C-C",
+  use_case_ids = "susine_functional_mu",
+  exploration_methods = "c_grid",
+  exploration_mode = "separate",
+  K = 64L,
+  c_grid_values = c_grid_64
+)
+
+spec_C_CS <- list(
+  name = "C-CS",
+  use_case_ids = "susine_functional_mu",
+  exploration_methods = c("c_grid", "sigma_0_2_grid"),
+  exploration_mode = "intersect",
+  K = 64L,
+  c_grid_values = c_grid_8,
+  sigma_0_2_grid_values = sigma_grid_8
+)
+
+spec_C_CSFR <- list(
+  name = "C-CSFR",
+  use_case_ids = "susine_functional_mu",
+  exploration_methods = c("c_grid", "sigma_0_2_grid", "refine", "restart"),
+  exploration_mode = "intersect",
+  K = 81L,
+  c_grid_values = c_grid_3,
+  sigma_0_2_grid_values = sigma_grid_3,
+  refine_settings = refine_3,
+  restart_settings = restart_3
+)
+
+spec_C_CFR <- list(
+  name = "C-CFR",
+  use_case_ids = "susine_functional_mu",
+  exploration_methods = c("c_grid", "refine", "restart"),
+  exploration_mode = "intersect",
+  K = 64L,
+  c_grid_values = c_grid_4,
+  refine_settings = refine_4,
+  restart_settings = restart_4
+)
+
+# ── Standalone single-fit baselines ──
+spec_baseline_single <- list(
+  name = "baseline-single",
+  use_case_ids = c("susie_vanilla", "susine_eb_clamped_scale_var_nonneg",
+                   "susine_functional_mu"),
+  exploration_methods = "single",
+  exploration_mode = "separate",
+  K = 1L
+)
+
+all_specs <- list(
+  spec_A_R, spec_A_F, spec_A_S,
+  spec_A_RF, spec_A_RS, spec_A_FS, spec_A_RFS,
+  spec_B_R, spec_B_F, spec_B_RF,
+  spec_C_C, spec_C_CS, spec_C_CSFR, spec_C_CFR,
+  spec_baseline_single
+)
+
+cat("Total specs:", length(all_specs), "\n")
+for (s in all_specs) {
+  cat(sprintf("  %-20s K=%-4d methods=%s\n",
+              s$name, s$K, paste(s$exploration_methods, collapse="x")))
+}
+```
+
+# 3. Build Job Config
+
+```{r build-config}
+# Data matrix catalog: all 150 loci
+data_matrix_catalog <- test_susine:::build_data_matrix_catalog(
+  requested_scenarios = "scenario_1",
+  repo_root = here(),
+  summary_path = here(
+    "data", "sampled_simulated_genotypes", "scenario_sampling_summary.csv"
+  )
+)
+cat("Available genotype matrices:", nrow(data_matrix_catalog), "\n")
+
+cfg <- make_job_config(
+  job_name = "ensemble_scaling_v1",
+  HPC = TRUE,
+  time = "05:59:59",
+  mem = "8G",
+  email = "mgc5166@psu.edu",
+  output_root = here("output"),
+  grid_mode = "full",
+
+  # Use case IDs (union across all specs — overridden per spec)
+  use_case_ids = c("susie_vanilla",
+                   "susine_eb_clamped_scale_var_nonneg",
+                   "susine_functional_mu"),
+
+  # Heterogeneous exploration specs
+  exploration_specs = all_specs,
+
+  # Dataset grid
+  L_grid = 10L,
+  y_noise_grid = NA_real_,
+  p_star_grid = NA_integer_,
+  architecture_grid = "susie2_oligogenic",
+  seeds = 1:3,
+
+  # Annotation quality
+  prior_quality = tibble::tibble(
+    annotation_r2 = c(0, 0.2, 0.5),
+    inflate_match = c(1, 1, 1)
+  ),
+
+  # Prior variance (default for non-gridded runs)
+  sigma_0_2_scalars = 0.2,
+
+  # Data source
+  data_scenarios = "scenario_1",
+  repo_root = here(),
+  data_matrix_catalog = data_matrix_catalog,
+  sampled_scenario_summary = here(
+    "data", "sampled_simulated_genotypes", "scenario_sampling_summary.csv"
+  ),
+
+  # Task packing
+  task_unit = "dataset",
+  bundles_per_task = 1L,
+  task_assignment_seed = 42L,
+
+  # Model settings
+  max_iter = 100L,
+
+  # Aggregation
+  aggregation_methods = c("max_elbo", "uniform", "elbo_softmax", "cluster_weight"),
+  include_overall_pool = FALSE,
+  softmax_temperature = 1,
+
+  # Output flags
+  credible_set_rho = 0.95,
+  purity_threshold = 0.50,
+  verbose_file_output = FALSE,
+  write_snps_parquet = TRUE,
+  write_confusion_bins = TRUE,
+  write_tier_cs_metrics = TRUE,
+
+  # Metrics: variable-resolution PIP breaks
+  # 0.02 steps: 1.00 to 0.10 (46 breaks)
+  # 0.01 steps: 0.10 to 0.05 (5 breaks)
+  # 0.005 steps: 0.05 to 0.00 (10 breaks)
+  metrics_settings = list(
+    pip_breaks = sort(unique(c(
+      seq(0.00, 0.05, by = 0.005),
+      seq(0.05, 0.10, by = 0.01),
+      seq(0.10, 1.00, by = 0.02)
+    ))),
+    z_top_k = 10,
+    jsd_threshold = 0.15
+  )
+)
+```
+
+# 3b. Append Truth-Warm-Start Standalone Baselines
+
+These are single-run benchmarks warm-started on the true top-10 causal
+variants (one variant per effect). Not part of the 4-lever scaling grids.
+Added post-hoc to the run table.
+
+```{r truth-warm-baselines}
+# Build truth-warm rows for each dataset bundle x use case combo.
+# Three baselines:
+# 1. susine_vanilla + truth warm start
+# 2. susine_eb_clamped_scale_var_nonneg + truth warm start
+# 3. susine_functional_mu (c=0.5, sigma_0_2=0.2) + truth warm start
+
+runs <- cfg$tables$runs
+bundles <- cfg$tables$dataset_bundles
+
+truth_warm_use_cases <- tibble::tribble(
+  ~use_case_id,                          ~c_value, ~sigma_0_2_scalar,
+  "susine_vanilla",                      NA_real_, "0.2",
+  "susine_eb_clamped_scale_var_nonneg",  NA_real_, NA_character_,
+  "susine_functional_mu",               0.5,       "0.2"
+)
+
+# Template from existing runs for column structure
+template <- runs[1, , drop = FALSE]
+
+truth_warm_rows <- list()
+for (bi in seq_len(nrow(bundles))) {
+  bundle <- bundles[bi, , drop = FALSE]
+  for (ti in seq_len(nrow(truth_warm_use_cases))) {
+    tw <- truth_warm_use_cases[ti, , drop = FALSE]
+    # For annotated use cases, expand across annotation R-squared levels
+    uc_spec <- dplyr::filter(cfg$tables$use_cases,
+                              prior_spec_id == tw$use_case_id)
+    needs_ann <- isTRUE(uc_spec$supports_annotation[1])
+
+    if (needs_ann) {
+      ann_levels <- c(0, 0.2, 0.5)
+    } else {
+      ann_levels <- NA_real_
+    }
+    for (ann_r2 in ann_levels) {
+      row <- template
+      row$dataset_bundle_id <- bundle$dataset_bundle_id
+      row$use_case_id <- tw$use_case_id
+      row$prior_spec_id <- tw$use_case_id
+      row$L <- 10L
+      row$phenotype_seed <- bundle$phenotype_seed
+      row$exploration_methods <- "single"
+      row$exploration_mode <- "separate"
+      row$run_type <- "warm"
+      row$warm_method <- "truth_warm"
+      row$restart_id <- NA_integer_
+      row$refine_step <- NA_integer_
+      row$c_value <- tw$c_value
+      row$sigma_0_2_scalar <- tw$sigma_0_2_scalar
+      row$annotation_r2 <- ann_r2
+      row$inflate_match <- if (is.na(ann_r2)) NA_real_ else 1
+      row$spec_name <- "truth-warm"
+      row$group_key <- paste0("L=10|r2=", ann_r2, "|inflate=",
+                              if (is.na(ann_r2)) "NA" else "1")
+      truth_warm_rows[[length(truth_warm_rows) + 1L]] <- row
+    }
+  }
+}
+
+truth_warm_tbl <- dplyr::bind_rows(truth_warm_rows)
+# Assign run_ids continuing from existing max
+max_run_id <- max(runs$run_id, na.rm = TRUE)
+truth_warm_tbl$run_id <- seq(max_run_id + 1L, length.out = nrow(truth_warm_tbl))
+
+runs <- dplyr::bind_rows(runs, truth_warm_tbl)
+cfg$tables$runs <- runs
+cat("Truth-warm baseline rows added:", nrow(truth_warm_tbl), "\n")
+cat("Total runs after truth-warm:", nrow(runs), "\n")
+```
+
+# 4. Budget Summary
+
+```{r budget-summary}
+runs <- cfg$tables$runs
+
+cat("Total runs (gross):", nrow(runs), "\n")
+cat("Datasets:", length(unique(runs$dataset_bundle_id)), "\n")
+
+if ("spec_name" %in% names(runs)) {
+  runs %>%
+    dplyr::group_by(spec_name) %>%
+    dplyr::summarise(
+      n_runs = dplyr::n(),
+      n_use_cases = dplyr::n_distinct(use_case_id),
+      n_datasets = dplyr::n_distinct(dataset_bundle_id),
+      .groups = "drop"
+    ) %>%
+    knitr::kable(caption = "Runs per spec")
+}
+```
+
+# 5. Write Artifacts
+
+```{r write-artifacts, eval=FALSE}
+arts <- write_job_artifacts(
+  job_config = cfg,
+  run_task_script = here("inst", "scripts", "run_task.R")
+)
+cat("Job config written to:", arts$job_config_path, "\n")
+cat("SLURM script:", arts$slurm_script_path, "\n")
+```
+
+# 6. Submit
+
+```{r submit, eval=FALSE}
+# sbatch <slurm_script_path>
+```

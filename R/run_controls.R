@@ -159,6 +159,7 @@ make_run_tables <- function(use_case_ids,
                             data_matrix_catalog = NULL,
                             c_grid_values = NULL,
                             tau_grid_values = NULL,
+                            sigma_0_2_grid_values = NULL,
                             restart_settings = list(),
                             refine_settings = list()) {
   if (!is.data.frame(prior_quality) ||
@@ -315,6 +316,13 @@ make_run_tables <- function(use_case_ids,
     if (what == "tau_grid") {
       return(seq(0.25, 3, length.out = k))
     }
+    if (what == "sigma_0_2_grid") {
+      vals <- 10^seq(-2, 0, length.out = k)
+      # Snap nearest value to exactly 0.2 (required by experiment plan)
+      nearest_idx <- which.min(abs(vals - 0.2))
+      vals[nearest_idx] <- 0.2
+      return(sort(unique(vals)))
+    }
     stop("Unsupported default grid type: ", what)
   }
 
@@ -323,6 +331,7 @@ make_run_tables <- function(use_case_ids,
                                     k,
                                     c_vals,
                                     tau_vals,
+                                    sigma_0_2_vals = NULL,
                                     restart_n = NULL,
                                     refine_n = NULL,
                                     allow_infer_restart = FALSE,
@@ -378,6 +387,17 @@ make_run_tables <- function(use_case_ids,
       }
       return(tibble::tibble(tau_value = vals))
     }
+    if (method == "sigma_0_2_grid") {
+      vals <- sigma_0_2_vals
+      if (is.null(vals) || !length(vals)) {
+        vals <- make_default_grid("sigma_0_2_grid", if (mode == "separate") k else 1L)
+      }
+      vals <- as.numeric(vals)
+      if (mode == "separate" && length(vals) != k) {
+        stop("sigma_0_2_grid values must have length K for separate mode.")
+      }
+      return(tibble::tibble(sigma_0_2_scalar = vals))
+    }
     if (method == "refine") {
       n_refine <- refine_n %||% NA_integer_
       if (!is.finite(n_refine)) {
@@ -425,6 +445,7 @@ make_run_tables <- function(use_case_ids,
           k = K,
           c_vals = c_grid_values,
           tau_vals = tau_grid_values,
+          sigma_0_2_vals = sigma_0_2_grid_values,
           restart_n = restart_settings$n_inits %||% NULL,
           refine_n = refine_settings$n_steps %||% NULL
         )
@@ -460,6 +481,13 @@ make_run_tables <- function(use_case_ids,
       }
       non_restart_prod <- non_restart_prod * length(t_vals)
     }
+    if ("sigma_0_2_grid" %in% methods_intersect) {
+      s_vals <- sigma_0_2_grid_values
+      if (is.null(s_vals) || !length(s_vals)) {
+        stop("sigma_0_2_grid_values must be provided for intersect mode when sigma_0_2_grid is used.")
+      }
+      non_restart_prod <- non_restart_prod * length(s_vals)
+    }
     if ("single" %in% methods_intersect && length(methods_intersect) > 1L) {
       methods_intersect <- setdiff(methods_intersect, "single")
     }
@@ -472,6 +500,7 @@ make_run_tables <- function(use_case_ids,
         k = K,
         c_vals = c_grid_values,
         tau_vals = tau_grid_values,
+        sigma_0_2_vals = sigma_0_2_grid_values,
         restart_n = restart_settings$n_inits %||% NULL,
         refine_n = refine_settings$n_steps %||% NULL,
         allow_infer_restart = TRUE,
@@ -711,6 +740,7 @@ make_job_config <- function(job_name,
                             sigma_0_2_scalars = NULL,
                             c_grid_values = NULL,
                             tau_grid_values = NULL,
+                            sigma_0_2_grid_values = NULL,
                             restart_settings = list(
                               n_inits = NULL,
                               alpha_concentration = 1
@@ -724,6 +754,7 @@ make_job_config <- function(job_name,
                             max_iter = 100L,
                             aggregation_methods = c("elbo_softmax"),
                             overall_aggregation_methods = NULL,
+                            exploration_specs = NULL,
                             include_overall_pool = TRUE,
                             softmax_temperature = 1,
                             metrics_settings = list(
@@ -749,26 +780,75 @@ make_job_config <- function(job_name,
     )
   }
 
-  tables <- make_run_tables(
-    use_case_ids = use_case_ids,
-    exploration_methods = exploration_methods,
-    exploration_mode = exploration_mode,
-    K = K,
-    L_grid = L_grid,
-    y_noise_grid = y_noise_grid,
-    prior_quality = prior_quality,
-    p_star_grid = p_star_grid,
-    seeds = seeds,
-    architecture_grid = architecture_grid,
-    data_scenarios = data_scenarios,
-    grid_mode = grid_mode,
-    pair_L_p_star = pair_L_p_star,
-    data_matrix_catalog = data_matrix_catalog,
-    c_grid_values = c_grid_values,
-    tau_grid_values = tau_grid_values,
-    restart_settings = restart_settings,
-    refine_settings = refine_settings
-  )
+  # Build run tables: either from a single global config or from
+
+  # heterogeneous exploration_specs (list of per-spec overrides).
+  if (!is.null(exploration_specs) && length(exploration_specs) > 0) {
+    # Heterogeneous mode: one make_run_tables call per spec, then merge.
+    all_runs <- list()
+    shared_tables <- NULL
+    for (si in seq_along(exploration_specs)) {
+      spec <- exploration_specs[[si]]
+      spec_name <- spec$name %||% paste0("spec_", si)
+      spec_tables <- make_run_tables(
+        use_case_ids = spec$use_case_ids %||% use_case_ids,
+        exploration_methods = spec$exploration_methods %||% exploration_methods,
+        exploration_mode = spec$exploration_mode %||% exploration_mode,
+        K = spec$K %||% K,
+        L_grid = L_grid,
+        y_noise_grid = y_noise_grid,
+        prior_quality = prior_quality,
+        p_star_grid = p_star_grid,
+        seeds = seeds,
+        architecture_grid = architecture_grid,
+        data_scenarios = data_scenarios,
+        grid_mode = grid_mode,
+        pair_L_p_star = pair_L_p_star,
+        data_matrix_catalog = data_matrix_catalog,
+        c_grid_values = spec$c_grid_values %||% c_grid_values,
+        tau_grid_values = spec$tau_grid_values %||% tau_grid_values,
+        sigma_0_2_grid_values = spec$sigma_0_2_grid_values %||% sigma_0_2_grid_values,
+        restart_settings = spec$restart_settings %||% restart_settings,
+        refine_settings = spec$refine_settings %||% refine_settings
+      )
+      spec_runs <- spec_tables$runs %>%
+        dplyr::mutate(spec_name = spec_name)
+      all_runs[[si]] <- spec_runs
+      if (is.null(shared_tables)) {
+        shared_tables <- spec_tables
+      } else {
+        # Union use_cases across specs
+        shared_tables$use_cases <- dplyr::bind_rows(
+          shared_tables$use_cases, spec_tables$use_cases
+        ) %>% dplyr::distinct(.data$prior_spec_id, .keep_all = TRUE)
+      }
+    }
+    tables <- shared_tables
+    tables$runs <- dplyr::bind_rows(all_runs)
+  } else {
+    # Single-config mode (original behavior)
+    tables <- make_run_tables(
+      use_case_ids = use_case_ids,
+      exploration_methods = exploration_methods,
+      exploration_mode = exploration_mode,
+      K = K,
+      L_grid = L_grid,
+      y_noise_grid = y_noise_grid,
+      prior_quality = prior_quality,
+      p_star_grid = p_star_grid,
+      seeds = seeds,
+      architecture_grid = architecture_grid,
+      data_scenarios = data_scenarios,
+      grid_mode = grid_mode,
+      pair_L_p_star = pair_L_p_star,
+      data_matrix_catalog = data_matrix_catalog,
+      c_grid_values = c_grid_values,
+      tau_grid_values = tau_grid_values,
+      sigma_0_2_grid_values = sigma_0_2_grid_values,
+      restart_settings = restart_settings,
+      refine_settings = refine_settings
+    )
+  }
 
   prior_specs <- tables$use_cases
   runs <- tables$runs
@@ -789,27 +869,44 @@ make_job_config <- function(job_name,
   runs_non_fixed <- runs %>%
     dplyr::filter(!(.data$prior_spec_id %in% needs_sigma_ids)) %>%
     dplyr::mutate(sigma_0_2_scalar = NA_character_)
-  if (nrow(runs_fixed)) {
+
+  # Runs from sigma_0_2_grid exploration already have sigma_0_2_scalar set;
+
+  # only expand sigma_0_2_scalars for runs without a pre-set value.
+  has_sigma <- "sigma_0_2_scalar" %in% names(runs_fixed) &
+    !all(is.na(runs_fixed$sigma_0_2_scalar))
+  if (has_sigma) {
+    runs_fixed_preset <- runs_fixed %>%
+      dplyr::filter(!is.na(.data$sigma_0_2_scalar))
+    runs_fixed_needs <- runs_fixed %>%
+      dplyr::filter(is.na(.data$sigma_0_2_scalar)) %>%
+      dplyr::select(-.data$sigma_0_2_scalar)
+  } else {
+    runs_fixed_preset <- runs_fixed[0, , drop = FALSE]
+    runs_fixed_needs <- runs_fixed
+  }
+  if (nrow(runs_fixed_needs)) {
     if (grid_mode == "minimal") {
-      # Cycle sigma values across specs: each spec gets 1 sigma, cycling
       sigma_vals <- as.character(sigma_0_2_scalars)
-      spec_sigma_map <- runs_fixed %>%
+      spec_sigma_map <- runs_fixed_needs %>%
         dplyr::distinct(.data$prior_spec_id) %>%
         dplyr::mutate(
           .sigma_idx = ((dplyr::row_number() - 1L) %% length(sigma_vals)) + 1L,
           sigma_0_2_scalar = sigma_vals[.sigma_idx]
         ) %>%
         dplyr::select(.data$prior_spec_id, .data$sigma_0_2_scalar)
-      runs_fixed <- runs_fixed %>%
+      runs_fixed_needs <- runs_fixed_needs %>%
         dplyr::inner_join(spec_sigma_map, by = "prior_spec_id")
     } else {
-      runs_fixed <- runs_fixed %>%
+      runs_fixed_needs <- runs_fixed_needs %>%
         tidyr::crossing(sigma_0_2_scalar = as.character(sigma_0_2_scalars))
     }
   } else {
-    runs_fixed <- dplyr::mutate(runs_fixed, sigma_0_2_scalar = character(0))
+    runs_fixed_needs <- dplyr::mutate(runs_fixed_needs, sigma_0_2_scalar = character(0))
   }
-  runs <- dplyr::bind_rows(runs_fixed, runs_non_fixed)
+  runs_fixed_preset <- dplyr::mutate(runs_fixed_preset,
+                                      sigma_0_2_scalar = as.character(.data$sigma_0_2_scalar))
+  runs <- dplyr::bind_rows(runs_fixed_preset, runs_fixed_needs, runs_non_fixed)
 
   # Warm-start grid expansion: cross restart runs with (warm_method, alpha) pairs
   ws_grid <- warm_start_grid
@@ -933,6 +1030,7 @@ make_job_config <- function(job_name,
     K = as.integer(K),
     exploration_methods = exploration_methods,
     exploration_mode = exploration_mode,
+    exploration_specs = exploration_specs,
     aggregation_methods = aggregation_methods,
     overall_aggregation_methods = overall_aggregation_methods,
     include_overall_pool = isTRUE(include_overall_pool),

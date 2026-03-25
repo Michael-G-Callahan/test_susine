@@ -1,0 +1,414 @@
+---
+title: "Ensemble Scaling — Smoke Test"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+Minimal smoke test: 2 matrices, 1 seed, 1 R², small K values. Tests
+the full pipeline end-to-end: heterogeneous specs, two-step refinement,
+sigma_0_2_grid, truth-warm baselines, all aggregation methods.
+
+```{r setup, message=FALSE}
+here::i_am("vignettes/simulation pipeline/run_control_workbook_ensemble_scaling_smoke.Rmd")
+library(here)
+here()
+
+library(devtools)
+devtools::load_all(".")
+
+susine_path <- here("..", "susine")
+if (file.exists(file.path(susine_path, "DESCRIPTION"))) {
+  devtools::load_all(susine_path)
+} else {
+  stop("susine package not found at: ", susine_path)
+}
+
+library(dplyr)
+library(tidyr)
+library(readr)
+library(knitr)
+```
+
+# 1. Smoke Test Grid Values
+
+Small grids (K=4) to keep runtime under a few minutes.
+
+```{r grid-values}
+c_grid_4 <- seq(0, 1.5, length.out = 4)    # 0, 0.5, 1.0, 1.5
+c_grid_2 <- seq(0, 1.5, length.out = 2)    # 0, 1.5
+
+sigma_grid_4 <- c(0.02, 0.1, 0.2, 0.5)
+sigma_grid_2 <- c(0.1, 0.2)
+
+stopifnot(0.2 %in% sigma_grid_4)
+stopifnot(0.2 %in% sigma_grid_2)
+
+cat("c_grid_4:", c_grid_4, "\n")
+cat("sigma_grid_4:", sigma_grid_4, "\n")
+```
+
+# 2. Smoke Test Specs
+
+Subset of the full experiment: 1 pure spec per group + 1 interaction +
+baseline + truth-warm. Tests every code path.
+
+```{r specs}
+restart_4 <- list(n_inits = 4L, alpha_concentration = 0.001)
+restart_2 <- list(n_inits = 2L, alpha_concentration = 0.001)
+
+refine_2 <- list(n_steps = 2L, cs_source = "filtered", purity_threshold = 0.95)
+
+# ── Group A: one pure lever + one interaction ──
+spec_A_R <- list(
+  name = "A-R",
+  use_case_ids = "susie_vanilla",
+  exploration_methods = "restart",
+  exploration_mode = "separate",
+  K = 4L,
+  restart_settings = restart_4
+)
+
+spec_A_F <- list(
+  name = "A-F",
+  use_case_ids = "susie_vanilla",
+  exploration_methods = "refine",
+  exploration_mode = "separate",
+  K = 2L,
+  refine_settings = refine_2
+)
+
+spec_A_S <- list(
+  name = "A-S",
+  use_case_ids = "susie_vanilla",
+  exploration_methods = "sigma_0_2_grid",
+  exploration_mode = "separate",
+  K = 4L,
+  sigma_0_2_grid_values = sigma_grid_4
+)
+
+spec_A_RF <- list(
+  name = "A-RF",
+  use_case_ids = "susie_vanilla",
+  exploration_methods = c("restart", "refine"),
+  exploration_mode = "intersect",
+  K = 4L,
+  restart_settings = restart_2,
+  refine_settings = refine_2
+)
+
+# ── Group B: one pure lever ──
+spec_B_R <- list(
+  name = "B-R",
+  use_case_ids = "susine_eb_clamped_scale_var_nonneg",
+  exploration_methods = "restart",
+  exploration_mode = "separate",
+  K = 4L,
+  restart_settings = restart_4
+)
+
+# ── Group C: one pure lever + one interaction ──
+spec_C_C <- list(
+  name = "C-C",
+  use_case_ids = "susine_functional_mu",
+  exploration_methods = "c_grid",
+  exploration_mode = "separate",
+  K = 4L,
+  c_grid_values = c_grid_4
+)
+
+spec_C_CS <- list(
+  name = "C-CS",
+  use_case_ids = "susine_functional_mu",
+  exploration_methods = c("c_grid", "sigma_0_2_grid"),
+  exploration_mode = "intersect",
+  K = 4L,
+  c_grid_values = c_grid_2,
+  sigma_0_2_grid_values = sigma_grid_2
+)
+
+# ── Single-fit baselines ──
+spec_baseline <- list(
+  name = "baseline-single",
+  use_case_ids = c("susie_vanilla", "susine_eb_clamped_scale_var_nonneg",
+                   "susine_functional_mu"),
+  exploration_methods = "single",
+  exploration_mode = "separate",
+  K = 1L
+)
+
+smoke_specs <- list(
+  spec_A_R, spec_A_F, spec_A_S, spec_A_RF,
+  spec_B_R,
+  spec_C_C, spec_C_CS,
+  spec_baseline
+)
+
+cat("Smoke test specs:\n")
+for (s in smoke_specs) {
+  cat(sprintf("  %-20s K=%-4d methods=%s\n",
+              s$name, s$K, paste(s$exploration_methods, collapse="x")))
+}
+```
+
+# 3. Build Smoke Test Config
+
+```{r build-config}
+# Use first 2 matrices only
+data_matrix_catalog_full <- test_susine:::build_data_matrix_catalog(
+  requested_scenarios = "scenario_1",
+  repo_root = here(),
+  summary_path = here(
+    "data", "sampled_simulated_genotypes", "scenario_sampling_summary.csv"
+  )
+)
+cat("Full catalog:", nrow(data_matrix_catalog_full), "matrices\n")
+
+# Take first 2
+data_matrix_catalog <- data_matrix_catalog_full %>%
+  dplyr::slice_head(n = 2)
+cat("Smoke test matrices:", nrow(data_matrix_catalog), "\n")
+
+cfg <- make_job_config(
+  job_name = "ensemble_scaling_smoke",
+  HPC = FALSE,
+  time = "00:30:00",
+  mem = "4G",
+  email = "mgc5166@psu.edu",
+  output_root = here("output"),
+  grid_mode = "full",
+
+  use_case_ids = c("susie_vanilla",
+                   "susine_eb_clamped_scale_var_nonneg",
+                   "susine_functional_mu"),
+
+  exploration_specs = smoke_specs,
+
+  # Minimal dataset grid: 2 matrices, 1 seed, 1 architecture
+  L_grid = 10L,
+  y_noise_grid = NA_real_,
+  p_star_grid = NA_integer_,
+  architecture_grid = "susie2_oligogenic",
+  seeds = 1L,
+
+  # Single annotation R-squared level for smoke
+  prior_quality = tibble::tibble(
+    annotation_r2 = 0.2,
+    inflate_match = 1
+  ),
+
+  sigma_0_2_scalars = 0.2,
+
+  data_scenarios = "scenario_1",
+  repo_root = here(),
+  data_matrix_catalog = data_matrix_catalog,
+  sampled_scenario_summary = here(
+    "data", "sampled_simulated_genotypes", "scenario_sampling_summary.csv"
+  ),
+
+  task_unit = "dataset",
+  bundles_per_task = 2L,
+  task_assignment_seed = 1L,
+
+  # Fast convergence for smoke test
+  max_iter = 50L,
+
+  aggregation_methods = c("max_elbo", "uniform", "elbo_softmax", "cluster_weight"),
+  include_overall_pool = FALSE,
+  softmax_temperature = 1,
+
+  credible_set_rho = 0.95,
+  purity_threshold = 0.50,
+  verbose_file_output = FALSE,
+  write_snps_parquet = TRUE,
+  write_confusion_bins = TRUE,
+  write_tier_cs_metrics = TRUE,
+
+  metrics_settings = list(
+    pip_breaks = sort(unique(c(
+      seq(0.00, 0.05, by = 0.005),
+      seq(0.05, 0.10, by = 0.01),
+      seq(0.10, 1.00, by = 0.02)
+    ))),
+    z_top_k = 10,
+    jsd_threshold = 0.15
+  )
+)
+```
+
+# 3b. Truth-Warm Baselines
+
+```{r truth-warm}
+runs <- cfg$tables$runs
+bundles <- cfg$tables$dataset_bundles
+
+truth_warm_use_cases <- tibble::tribble(
+  ~use_case_id,                          ~c_value, ~sigma_0_2_scalar,
+  "susine_vanilla",                      NA_real_, "0.2",
+  "susine_eb_clamped_scale_var_nonneg",  NA_real_, NA_character_,
+  "susine_functional_mu",               0.5,       "0.2"
+)
+
+template <- runs[1, , drop = FALSE]
+
+truth_warm_rows <- list()
+for (bi in seq_len(nrow(bundles))) {
+  bundle <- bundles[bi, , drop = FALSE]
+  for (ti in seq_len(nrow(truth_warm_use_cases))) {
+    tw <- truth_warm_use_cases[ti, , drop = FALSE]
+    uc_spec <- dplyr::filter(cfg$tables$use_cases,
+                              prior_spec_id == tw$use_case_id)
+    needs_ann <- isTRUE(uc_spec$supports_annotation[1])
+    ann_levels <- if (needs_ann) 0.2 else NA_real_
+
+    for (ann_r2 in ann_levels) {
+      row <- template
+      row$dataset_bundle_id <- bundle$dataset_bundle_id
+      row$use_case_id <- tw$use_case_id
+      row$prior_spec_id <- tw$use_case_id
+      row$L <- 10L
+      row$phenotype_seed <- bundle$phenotype_seed
+      row$exploration_methods <- "single"
+      row$exploration_mode <- "separate"
+      row$run_type <- "warm"
+      row$warm_method <- "truth_warm"
+      row$restart_id <- NA_integer_
+      row$refine_step <- NA_integer_
+      row$c_value <- tw$c_value
+      row$sigma_0_2_scalar <- tw$sigma_0_2_scalar
+      row$annotation_r2 <- ann_r2
+      row$inflate_match <- if (is.na(ann_r2)) NA_real_ else 1
+      row$spec_name <- "truth-warm"
+      row$group_key <- paste0("L=10|r2=", ann_r2, "|inflate=",
+                              if (is.na(ann_r2)) "NA" else "1")
+      truth_warm_rows[[length(truth_warm_rows) + 1L]] <- row
+    }
+  }
+}
+
+truth_warm_tbl <- dplyr::bind_rows(truth_warm_rows)
+max_run_id <- max(runs$run_id, na.rm = TRUE)
+truth_warm_tbl$run_id <- seq(max_run_id + 1L, length.out = nrow(truth_warm_tbl))
+
+runs <- dplyr::bind_rows(runs, truth_warm_tbl)
+cfg$tables$runs <- runs
+cat("Truth-warm rows added:", nrow(truth_warm_tbl), "\n")
+cat("Total runs:", nrow(runs), "\n")
+```
+
+# 4. Budget Summary
+
+```{r budget}
+runs <- cfg$tables$runs
+
+cat("\n=== SMOKE TEST BUDGET ===\n")
+cat("Total runs:", nrow(runs), "\n")
+cat("Datasets:", length(unique(runs$dataset_bundle_id)), "\n")
+
+if ("spec_name" %in% names(runs)) {
+  runs %>%
+    dplyr::group_by(spec_name) %>%
+    dplyr::summarise(
+      n_runs = dplyr::n(),
+      n_use_cases = dplyr::n_distinct(use_case_id),
+      n_datasets = dplyr::n_distinct(dataset_bundle_id),
+      .groups = "drop"
+    ) %>%
+    knitr::kable(caption = "Smoke test runs per spec")
+}
+```
+
+# 5. Run Locally
+
+Execute the smoke test directly (no SLURM). Runs all tasks sequentially.
+
+```{r run-smoke, eval=FALSE}
+# Write artifacts first
+arts <- write_job_artifacts(
+  job_config = cfg,
+  run_task_script = here("inst", "scripts", "run_task.R")
+)
+
+# Run all tasks locally
+n_tasks <- cfg$job$n_tasks
+cat("Running", n_tasks, "tasks locally...\n")
+
+for (tid in seq_len(n_tasks)) {
+  cat("\n--- Task", tid, "of", n_tasks, "---\n")
+  run_task(
+    job_config_path = file.path(arts$temp_dir, "job_config.json"),
+    task_id = tid,
+    quiet = FALSE
+  )
+}
+cat("\nSmoke test complete.\n")
+```
+
+# 6. Quick Validation
+
+```{r validate, eval=FALSE}
+# Check that outputs were produced
+staging_dir <- file.path(cfg$paths$temp_dir, "staging")
+if (dir.exists(staging_dir)) {
+  staging_files <- list.files(staging_dir, recursive = TRUE)
+  cat("Staging files:", length(staging_files), "\n")
+  cat("File types:\n")
+  print(table(tools::file_ext(staging_files)))
+} else {
+  cat("No staging directory found — check for errors above.\n")
+}
+
+# Verify key outputs exist
+model_metrics_files <- list.files(staging_dir, pattern = "model_metrics",
+                                   recursive = TRUE)
+cat("\nModel metrics files:", length(model_metrics_files), "\n")
+
+confusion_files <- list.files(staging_dir, pattern = "confusion",
+                               recursive = TRUE)
+cat("Confusion bin files:", length(confusion_files), "\n")
+
+snp_files <- list.files(staging_dir, pattern = "\\.parquet$",
+                         recursive = TRUE)
+cat("SNP parquet files:", length(snp_files), "\n")
+
+# Check for per-spec coverage
+if (length(model_metrics_files)) {
+  mm_sample <- readr::read_csv(
+    file.path(staging_dir, model_metrics_files[1]),
+    show_col_types = FALSE
+  )
+  cat("\nSpecs represented in first flush file:\n")
+  if ("spec_name" %in% names(mm_sample)) {
+    print(table(mm_sample$spec_name))
+  }
+  cat("\nExplore methods:\n")
+  if ("explore_method" %in% names(mm_sample)) {
+    print(table(mm_sample$explore_method))
+  }
+}
+```
+
+# 7. Smoke Test Checks
+
+```{r checks, eval=FALSE}
+# After running, verify:
+# 1. Every spec_name in the run table produced at least one output row
+# 2. Refinement specs (A-F, A-RF) produced both perturb (not stored) and
+#    refit (stored) — check that run count matches expected
+# 3. sigma_0_2_grid runs (A-S, C-CS) have distinct sigma values
+# 4. Truth-warm runs converged and produced reasonable PIPs
+# 5. Aggregation methods all ran without error
+
+cat("=== Smoke test validation checklist ===\n")
+cat("[ ] All specs produced output rows\n")
+cat("[ ] Refinement two-step (perturb+refit) worked\n")
+cat("[ ] sigma_0_2_grid has distinct sigma values per run\n")
+cat("[ ] Truth-warm baselines converged\n")
+cat("[ ] All 4 aggregation methods produced results\n")
+cat("[ ] PIP breaks match variable-resolution config\n")
+```

@@ -672,7 +672,8 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
     run_and_record <- function(run_row,
                                group_key,
                                blocked_idx = integer(0),
-                               meta_override = list()) {
+                               meta_override = list(),
+                               init_alpha_override = NULL) {
       cache_key <- execution_cache_key(
         use_case = use_case,
         run_row = run_row,
@@ -681,7 +682,10 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
         blocked_idx = blocked_idx
       )
 
-      cache_hit <- exists(cache_key, envir = execution_cache, inherits = FALSE)
+      # Skip cache for refinement refit steps — each has a unique
+      # init_alpha_override that the cache key cannot distinguish.
+      cache_hit <- is.null(init_alpha_override) &&
+        exists(cache_key, envir = execution_cache, inherits = FALSE)
       if (cache_hit) {
         cached <- get(cache_key, envir = execution_cache, inherits = FALSE)
         fit <- cached$fit
@@ -697,7 +701,8 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
           run_row = run_row,
           data_bundle = data_bundle,
           job_config = job_config,
-          blocked_idx = blocked_idx
+          blocked_idx = blocked_idx,
+          init_alpha_override = init_alpha_override
         )
         fit <- model_result$fits[[1]]
         meta <- model_result$fit_meta[[1]]
@@ -849,7 +854,17 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
       group_rows <- group_rows %>%
         dplyr::arrange(dplyr::coalesce(.data$refine_step, .data$run_id), .data$run_id)
 
-      queue <- list(list(blocked = integer(0)))
+      # Two-step refinement BFS: perturb (blocked weights) -> refit (restored
+      # weights + init_alpha from perturb). The root node (step 1) is a
+      # baseline fit with no blocking.  Each subsequent node costs 2 model
+      # fits (perturb + refit) but only the refit is stored in ensemble PIPs.
+      # The perturb fit is intermediate.
+
+      refine_purity_threshold <- as.numeric(
+        job_config$job$compute$refine$purity_threshold %||% 0.95
+      )
+
+      queue <- list(list(blocked = integer(0), parent_fit = NULL))
       seen_block_sets <- new.env(parent = emptyenv())
       assign(".root", TRUE, envir = seen_block_sets)
       processed <- 0L
@@ -866,28 +881,78 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
         }
         run_row <- group_rows[ii, , drop = FALSE]
         step_id <- as.integer(run_row$refine_step %||% ii)
-        out <- run_and_record(
-          run_row = run_row,
-          group_key = gk,
-          blocked_idx = node$blocked,
-          meta_override = list(
-            explore_method = "refine",
-            variant_id = step_id,
-            run_type = ifelse(step_id <= 1L, "default", "warm"),
-            is_restart = FALSE
-          )
-        )
-        processed <- processed + 1L
+        is_root <- (step_id <= 1L && length(node$blocked) == 0L)
 
-        cs_sets <- out$eval_res$effects_filtered$indices
-        if (is.null(cs_sets) || !length(cs_sets)) {
-          cs_sets <- out$eval_res$effects_unfiltered$indices
+        if (is_root) {
+          # Root: baseline fit (no blocking, no warm start) -----
+          out <- run_and_record(
+            run_row = run_row,
+            group_key = gk,
+            blocked_idx = integer(0),
+            meta_override = list(
+              explore_method = "refine",
+              variant_id = step_id,
+              run_type = "default",
+              is_restart = FALSE
+            )
+          )
+          processed <- processed + 1L
+          stored_fit <- out$fit
+          stored_eval <- out$eval_res
+        } else {
+          # Non-root: two-step perturb + refit -----
+          # Step 1 (perturb): fit with blocked prior weights.  This is an
+          # intermediate model whose alpha we extract for the warm start.
+          # We call run_use_case directly so the perturb is NOT recorded
+          # in ensemble PIPs or written to outputs.
+          perturb_result <- run_use_case(
+            use_case = use_case,
+            run_row = run_row,
+            data_bundle = data_bundle,
+            job_config = job_config,
+            blocked_idx = node$blocked
+          )
+          perturb_fit <- perturb_result$fits[[1]]
+          perturb_alpha <- perturb_fit$effect_fits$alpha
+
+          # Step 2 (refit): restore uniform prior weights, warm-start
+          # from perturbed model's alpha.  The init_alpha_override
+          # bypasses normal warm-start logic and injects perturbed
+          # alpha directly.  This is stored as the actual ensemble member.
+          out <- run_and_record(
+            run_row = run_row,
+            group_key = gk,
+            blocked_idx = integer(0),
+            meta_override = list(
+              explore_method = "refine",
+              variant_id = step_id,
+              run_type = "warm",
+              is_restart = FALSE
+            ),
+            init_alpha_override = perturb_alpha
+          )
+          processed <- processed + 1L
+          stored_fit <- out$fit
+          stored_eval <- out$eval_res
         }
-        if (is.null(cs_sets) || !length(cs_sets)) {
+
+        # Extract eligible CSs from the stored (refit/root) model for
+        # branching.  Only CSs with purity above threshold are eligible.
+        cs_sets <- list()
+        eff_filt <- stored_eval$effects_filtered
+        if (!is.null(eff_filt) && !is.null(eff_filt$indices) &&
+            !is.null(eff_filt$purity)) {
+          for (ci in seq_along(eff_filt$indices)) {
+            pur <- as.numeric(eff_filt$purity[[ci]])
+            if (is.finite(pur) && pur >= refine_purity_threshold) {
+              cs_sets[[length(cs_sets) + 1L]] <- as.integer(eff_filt$indices[[ci]])
+            }
+          }
+        }
+        if (!length(cs_sets)) {
           next
         }
         for (cs in cs_sets) {
-          cs <- as.integer(cs)
           cs <- cs[is.finite(cs)]
           if (!length(cs)) {
             next
@@ -899,7 +964,10 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
           key <- paste(child_blocked, collapse = ",")
           if (!exists(key, envir = seen_block_sets, inherits = FALSE)) {
             assign(key, TRUE, envir = seen_block_sets)
-            queue[[length(queue) + 1L]] <- list(blocked = child_blocked)
+            queue[[length(queue) + 1L]] <- list(
+              blocked = child_blocked,
+              parent_fit = stored_fit
+            )
           }
         }
       }
@@ -1213,7 +1281,9 @@ extract_prior_diagnostics <- function(fit, run_id, backend) {
 
 #' Fit one run row under a prior spec (susine or susieR backend).
 #' @keywords internal
-run_use_case <- function(use_case, run_row, data_bundle, job_config, blocked_idx = integer(0)) {
+run_use_case <- function(use_case, run_row, data_bundle, job_config,
+                         blocked_idx = integer(0),
+                         init_alpha_override = NULL) {
   L <- as.integer(run_row$L)
   max_iter <- as.integer(job_config$job$max_iter %||% 100L)
   tol <- as.numeric(job_config$job$tol %||% 1e-3)
@@ -1288,7 +1358,32 @@ run_use_case <- function(use_case, run_row, data_bundle, job_config, blocked_idx
     } else if (identical(warm_method, "prior_refit")) {
       # Step 1: Dirichlet prior_weights for exploration; step 2 refits after convergence
       prior_weights <- as.numeric(dirichlet_matrix(1L, rep(alpha_conc, p)))
+    } else if (identical(warm_method, "truth_warm")) {
+      # Warm-start from true causal variants: one effect per causal SNP,
+      # each effect concentrates all mass on a single true causal.
+      causal_idx <- data_bundle$causal_idx
+      if (is.null(causal_idx) || !length(causal_idx)) {
+        warning("truth_warm requested but no causal_idx in data_bundle. Falling back to default init.")
+      } else {
+        # Use top L causal variants by absolute effect size
+        beta <- data_bundle$beta
+        if (!is.null(beta) && length(beta) == p) {
+          causal_order <- causal_idx[order(abs(beta[causal_idx]), decreasing = TRUE)]
+        } else {
+          causal_order <- causal_idx
+        }
+        n_warm <- min(L, length(causal_order))
+        warm_init_alpha <- matrix(1 / p, nrow = L, ncol = p)
+        for (l in seq_len(n_warm)) {
+          warm_init_alpha[l, ] <- 0
+          warm_init_alpha[l, causal_order[l]] <- 1
+        }
+      }
     }
+  }
+  # Override init_alpha if provided directly (e.g., from refinement refit step)
+  if (!is.null(init_alpha_override)) {
+    warm_init_alpha <- init_alpha_override
   }
   blocked_idx <- normalize_blocked_idx(blocked_idx, p)
   if (length(blocked_idx)) {
