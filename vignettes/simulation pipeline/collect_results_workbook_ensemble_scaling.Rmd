@@ -31,11 +31,15 @@ library(knitr)
 # 1. Locate Output
 
 ```{r locate}
-# Job-level directory (contains task-001/, task-002/, etc.)
-job_dir  <- "~/work/SuSiNE - 2.0/test_susine/output/slurm_output/ensemble_scaling_v1/50200044"
+job_name      <- "ensemble_scaling_v1"
+parent_job_id <- "50200044"
+output_root   <- here("output")
 
-# Job config written by write_job_artifacts (lives in run_history alongside the CSVs)
-cfg_path <- "~/work/SuSiNE - 2.0/test_susine/output/run_history/ensemble_scaling_v1/50200044/job_config.json"
+# Job-level directory (contains task-001/, task-002/, etc.)
+job_dir  <- file.path(output_root, "slurm_output", job_name, parent_job_id)
+
+# Job config written by write_job_artifacts
+cfg_path <- file.path(output_root, "run_history", job_name, parent_job_id, "job_config.json")
 cfg <- test_susine:::load_job_config(cfg_path)
 
 # Find all task directories

@@ -35,7 +35,11 @@ theme_set(theme_bw(base_size = 12))
 
 ```{r load}
 # Point to job-level consolidated output from collect workbook
-job_dir <- here("output", "slurm_output", "local_test")
+job_name      <- "ensemble_scaling_v1"
+parent_job_id <- "50200044"
+output_root   <- here("output")
+
+job_dir          <- file.path(output_root, "slurm_output", job_name, parent_job_id)
 consolidated_dir <- file.path(job_dir, "consolidated")
 
 auprc_agg <- readr::read_csv(
