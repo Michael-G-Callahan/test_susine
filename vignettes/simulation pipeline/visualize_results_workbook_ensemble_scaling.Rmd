@@ -790,6 +790,184 @@ if (exists("dataset_metrics") && "M1" %in% names(dataset_metrics)) {
     ggsave(file.path(fig_root, "dataset_difficulty",
                      "difficulty_scatter.png"),
            p_scatter, width = 10, height = 5)
+
+    # Multi-panel scatter: baseline AUPRC vs all available difficulty metrics
+    x_metrics <- intersect(
+      c("M1", "z_topk_ratio", "z_max_abs", "z_count_abs_gt_3", "z_eff_signals"),
+      names(dm_scatter)
+    )
+    if (length(x_metrics) > 1L) {
+      dm_multi <- dm_scatter %>%
+        tidyr::pivot_longer(
+          cols      = dplyr::any_of(x_metrics),
+          names_to  = "x_metric",
+          values_to = "x_value"
+        )
+      p_multi <- ggplot(dm_multi, aes(x = x_value, y = auprc_baseline)) +
+        geom_point(alpha = 0.5) +
+        geom_smooth(method = "lm", se = TRUE, color = "red") +
+        facet_wrap(~x_metric, scales = "free_x") +
+        labs(x = "Dataset metric", y = "Baseline AUPRC",
+             title = "Baseline AUPRC vs all dataset difficulty metrics")
+      ggsave(file.path(fig_root, "dataset_difficulty",
+                       "auprc_vs_all_metrics_scatter.png"),
+             p_multi, width = 14, height = 8)
+    }
+  }
+}
+```
+
+## 3d. Multimodality Metrics vs M1
+
+```{r fig-3d, fig.width=14, fig.height=8}
+{
+  mm_local <- if (exists("mm") && is.data.frame(mm)) mm else {
+    mm_p <- file.path(consolidated_dir, "multimodal_metrics.csv")
+    if (file.exists(mm_p)) readr::read_csv(mm_p, show_col_types = FALSE) else NULL
+  }
+  # Attach spec_name if missing (join via run_id -> model_metrics_full)
+  if (!is.null(mm_local) && !"spec_name" %in% names(mm_local) &&
+      "run_id" %in% names(mm_local)) {
+    spec_map <- model_metrics %>% dplyr::distinct(.data$run_id, .data$spec_name)
+    mm_local <- mm_local %>% dplyr::left_join(spec_map, by = "run_id")
+  }
+
+  if (!is.null(mm_local) && exists("dataset_metrics") &&
+      "dataset_bundle_id" %in% names(mm_local) &&
+      "dataset_bundle_id" %in% names(dataset_metrics) &&
+      "M1" %in% names(dataset_metrics)) {
+
+    mm_m1 <- mm_local %>%
+      dplyr::inner_join(
+        dataset_metrics %>% dplyr::select(dataset_bundle_id, M1),
+        by = "dataset_bundle_id"
+      )
+
+    mm_metrics <- intersect(
+      c("mean_jsd", "n_clusters", "jaccard_top10", "mean_pip_var"),
+      names(mm_m1)
+    )
+    if (nrow(mm_m1) > 1L && length(mm_metrics) > 0L &&
+        "spec_name" %in% names(mm_m1)) {
+      mm_long <- mm_m1 %>%
+        dplyr::filter(!is.na(.data$spec_name)) %>%
+        tidyr::pivot_longer(
+          cols      = dplyr::any_of(mm_metrics),
+          names_to  = "metric",
+          values_to = "value"
+        )
+      p_3d <- ggplot(mm_long, aes(x = M1, y = value, color = spec_name)) +
+        geom_point(alpha = 0.5, size = 1.2) +
+        geom_smooth(method = "lm", se = FALSE, linewidth = 0.6) +
+        facet_wrap(~metric, scales = "free_y") +
+        labs(x = "M1 (LD complexity)", y = "Multimodality metric",
+             color = "Spec",
+             title = "Multimodality metrics vs M1 (all specs)") +
+        theme(legend.position = "bottom")
+      ggsave(file.path(fig_root, "dataset_difficulty",
+                       "multimodality_vs_m1.png"),
+             p_3d, width = 14, height = 8)
+      cat("Fig 3d saved.\n")
+    } else {
+      cat("Fig 3d skipped: insufficient data.\n")
+    }
+  } else {
+    cat("Fig 3d skipped: multimodal_metrics or dataset_metrics not available.\n")
+  }
+}
+```
+
+## 3e. Compute-Confound Diversity Comparison (A-R vs C-C)
+
+```{r fig-3e, fig.width=12, fig.height=6}
+{
+  mm_local_e <- if (exists("mm_local") && is.data.frame(mm_local)) mm_local else {
+    mm_p <- file.path(consolidated_dir, "multimodal_metrics.csv")
+    if (file.exists(mm_p)) {
+      tmp <- readr::read_csv(mm_p, show_col_types = FALSE)
+      if (!"spec_name" %in% names(tmp) && "run_id" %in% names(tmp)) {
+        spec_map <- model_metrics %>% dplyr::distinct(.data$run_id, .data$spec_name)
+        tmp <- tmp %>% dplyr::left_join(spec_map, by = "run_id")
+      }
+      tmp
+    } else { NULL }
+  }
+
+  if (!is.null(mm_local_e) && "spec_name" %in% names(mm_local_e)) {
+    cc_specs  <- c("A-R", "C-C")
+    mm_cc     <- mm_local_e %>% dplyr::filter(.data$spec_name %in% cc_specs)
+    div_metrics <- intersect(
+      c("mean_jsd", "n_clusters", "jaccard_top10", "mean_pip_var"),
+      names(mm_cc)
+    )
+    if (nrow(mm_cc) > 0L && length(div_metrics) > 0L &&
+        length(unique(mm_cc$spec_name)) >= 2L) {
+      mm_cc_long <- mm_cc %>%
+        tidyr::pivot_longer(
+          cols      = dplyr::any_of(div_metrics),
+          names_to  = "metric",
+          values_to = "value"
+        )
+      p_3e <- ggplot(mm_cc_long,
+                     aes(x = spec_name, y = value, fill = spec_name)) +
+        geom_boxplot(alpha = 0.7, outlier.size = 0.8) +
+        facet_wrap(~metric, scales = "free_y") +
+        labs(x = "Spec", y = "Value",
+             title = "Diversity comparison: A-R (random restarts) vs C-C (c-grid)") +
+        theme(legend.position = "none")
+      ggsave(file.path(fig_root, "dataset_difficulty",
+                       "diversity_comparison_AR_CC.png"),
+             p_3e, width = 12, height = 6)
+      cat("Fig 3e saved.\n")
+    } else {
+      cat("Fig 3e skipped: A-R and/or C-C not both present in multimodal_metrics.\n")
+    }
+  } else {
+    cat("Fig 3e skipped: multimodal_metrics not available.\n")
+  }
+}
+```
+
+## 3f. Failure Map (M1 × Z_primary, colored by baseline AUPRC)
+
+```{r fig-3f, fig.width=10, fig.height=6}
+{
+  z_candidates <- c("z_topk_ratio", "z_max_abs", "z_count_abs_gt_3", "z_eff_signals")
+  if (exists("dm_scatter") && is.data.frame(dm_scatter) && nrow(dm_scatter) >= 4L &&
+      exists("dataset_metrics") && "M1" %in% names(dm_scatter)) {
+    z_avail   <- intersect(z_candidates, names(dataset_metrics))
+    z_primary <- if (length(z_avail) > 0L) z_avail[1L] else NA_character_
+    if (!is.na(z_primary)) {
+      dm_fm <- dm_scatter %>%
+        dplyr::left_join(
+          dataset_metrics %>%
+            dplyr::select(dataset_bundle_id, dplyr::any_of(z_candidates)),
+          by = "dataset_bundle_id"
+        )
+      if (z_primary %in% names(dm_fm) &&
+          sum(!is.na(dm_fm[[z_primary]])) >= 4L) {
+        p_3f <- ggplot(dm_fm,
+                       aes(x = M1, y = .data[[z_primary]],
+                           color = auprc_baseline)) +
+          geom_point(size = 2.5, alpha = 0.85) +
+          ggplot2::scale_color_viridis_c(option = "plasma",
+                                         name = "Baseline\nAUPRC") +
+          labs(x = "M1 (LD complexity)",
+               y = z_primary,
+               title = paste0("Failure map: M1 \u00d7 ", z_primary,
+                              " (color = baseline AUPRC)")) +
+          theme_bw()
+        ggsave(file.path(fig_root, "dataset_difficulty", "failure_map.png"),
+               p_3f, width = 10, height = 6)
+        cat("Fig 3f saved.\n")
+      } else {
+        cat("Fig 3f skipped: z_primary column not available or < 4 non-NA rows.\n")
+      }
+    } else {
+      cat("Fig 3f skipped: no z-metrics found in dataset_metrics.\n")
+    }
+  } else {
+    cat("Fig 3f skipped: dm_scatter not available or < 4 datasets.\n")
   }
 }
 ```
@@ -833,19 +1011,49 @@ if (!is.null(rd_full) && nrow(rd_full) > 0L &&
   ggsave(file.path(fig_root, "ensemble_scaling", "refine_depth_completion_rate.png"),
          p_rate, width = 14, height = 6)
 
-  # Histogram of n_refine_processed, faceted by spec; red dashed = median n_requested
-  n_req_vals <- rd %>%
+  # Histogram of n_refine_processed: proportion y-axis, adaptive binwidth per facet.
+  # binwidth = 1 when n_requested <= 8 (integer ticks); ceil(n_requested/8) otherwise.
+  # Pre-compute frequency tables per group so ggplot2 doesn't pool counts cross-facet.
+  n_req_by_group <- rd %>%
     dplyr::group_by(.data[[x_var]]) %>%
-    dplyr::summarise(n_refine_requested = median(.data$n_refine_requested), .groups = "drop")
+    dplyr::summarise(n_requested = as.integer(median(.data$n_refine_requested)),
+                     .groups = "drop")
 
-  p_hist <- ggplot(rd, aes(x = n_refine_processed)) +
-    geom_histogram(binwidth = 1, fill = "steelblue", color = "white", alpha = 0.8) +
-    geom_vline(data = n_req_vals,
-               aes(xintercept = n_refine_requested),
+  hist_freq <- rd %>%
+    dplyr::left_join(n_req_by_group, by = x_var) %>%
+    dplyr::mutate(
+      bw      = dplyr::if_else(.data$n_requested <= 8L, 1L,
+                               as.integer(ceiling(.data$n_requested / 8L))),
+      bin_idx = floor(.data$n_refine_processed / .data$bw),
+      bin_lo  = .data$bin_idx * .data$bw,
+      bin_hi  = (.data$bin_idx + 1L) * .data$bw
+    ) %>%
+    dplyr::group_by(.data[[x_var]], .data$n_requested, .data$bw,
+                    .data$bin_lo, .data$bin_hi) %>%
+    dplyr::summarise(n = dplyr::n(), .groups = "drop") %>%
+    dplyr::group_by(.data[[x_var]]) %>%
+    dplyr::mutate(
+      proportion  = .data$n / sum(.data$n),
+      bin_center  = .data$bin_lo + 0.5 * (.data$bw - 1L)
+    ) %>%
+    dplyr::ungroup()
+
+  p_hist <- ggplot(hist_freq,
+                   aes(x = bin_center, y = proportion, width = bw - 0.1)) +
+    geom_col(fill = "steelblue", color = "white", alpha = 0.8) +
+    geom_vline(data = n_req_by_group,
+               aes(xintercept = n_requested),
                linetype = "dashed", color = "red") +
     facet_wrap(as.formula(paste("~", x_var)), scales = "free_x") +
-    labs(x = "n_refine_processed", y = "Count",
-         title = "Refine depth per parent (red dashed = n_requested)") +
+    scale_x_continuous(breaks = function(lims) {
+      # Show bin centers: step size matches the binwidth used for this facet's range.
+      n_req <- max(lims)
+      bw_val <- if (n_req <= 8) 1L else as.integer(ceiling(n_req / 8L))
+      seq(0L, ceiling(lims[2]), by = bw_val)
+    }) +
+    scale_y_continuous(limits = c(0, 1), labels = scales::percent_format(accuracy = 1)) +
+    labs(x = "Refine steps processed (per parent node)", y = "Proportion",
+         title = "Refine steps processed per parent (red dashed = n_requested)") +
     theme_bw()
   ggsave(file.path(fig_root, "ensemble_scaling", "refine_depth_histogram.png"),
          p_hist, width = 14, height = 6)
@@ -858,26 +1066,80 @@ if (!is.null(rd_full) && nrow(rd_full) > 0L &&
 # 4. Ensemble Scaling Plots (Category 4)
 
 Figures 4a–4d show AUPRC and TPR@0.05 as a function of ensemble size.
-Computed by `compute_scaling_curves()` and `compute_interaction_scaling()`
-in the collect workbook; loaded from `scaling_curves.csv` and
-`interaction_scaling.csv` in the consolidated directory.
+Scaling confusion bins are computed during the SLURM run and pooled in the
+collect workbook; loaded here from `scaling_bins_pooled.csv`.
 
 ```{r load-scaling}
-scaling_path     <- file.path(consolidated_dir, "scaling_curves.csv")
-interaction_path <- file.path(consolidated_dir, "interaction_scaling.csv")
+scaling_bins_path <- file.path(consolidated_dir, "scaling_bins_pooled.csv")
 
-scaling_curves <- if (file.exists(scaling_path)) {
-  readr::read_csv(scaling_path, show_col_types = FALSE)
-} else {
-  message("scaling_curves.csv not found — Category 4 plots will be skipped.")
-  NULL
-}
+if (file.exists(scaling_bins_path)) {
+  scaling_bins_pooled <- readr::read_csv(scaling_bins_path, show_col_types = FALSE)
+  cat("Scaling bins pooled rows:", nrow(scaling_bins_pooled), "\n")
 
-interaction_scaling <- if (file.exists(interaction_path)) {
-  readr::read_csv(interaction_path, show_col_types = FALSE)
+  # Helper: compute AUPRC from a pooled confusion-bins tibble.
+  auprc_from_bins <- function(bins) {
+    b       <- bins %>% dplyr::arrange(dplyr::desc(.data$pip_threshold))
+    cum_tp  <- cumsum(b$n_causal_at_bucket)
+    cum_fp  <- cumsum(b$n_noncausal_at_bucket)
+    total_p <- sum(b$n_causal_at_bucket)
+    total_n <- sum(b$n_noncausal_at_bucket)
+    if (total_p == 0L || total_n == 0L) return(NA_real_)
+    recall    <- cum_tp / total_p
+    precision <- cum_tp / pmax(cum_tp + cum_fp, 1L)
+    auprc_average_precision(recall, precision)
+  }
+
+  # Helper: TPR at FPR <= threshold.
+  tpr05_from_bins <- function(bins, fpr_threshold = 0.05) {
+    b       <- bins %>% dplyr::arrange(dplyr::desc(.data$pip_threshold))
+    cum_tp  <- cumsum(b$n_causal_at_bucket)
+    cum_fp  <- cumsum(b$n_noncausal_at_bucket)
+    total_p <- sum(b$n_causal_at_bucket)
+    total_n <- sum(b$n_noncausal_at_bucket)
+    if (total_p == 0L || total_n == 0L) return(NA_real_)
+    tpr <- cum_tp / total_p
+    fpr <- cum_fp / total_n
+    idx <- which(fpr <= fpr_threshold)
+    if (!length(idx)) return(NA_real_)
+    max(tpr[idx])
+  }
+
+  # Compute per-rep AUPRC and TPR@0.05 from pooled bins.
+  scaling_metrics_by_rep <- scaling_bins_pooled %>%
+    dplyr::group_by(spec_name, annotation_r2, n_ensemble, resolution, agg_method, rep) %>%
+    dplyr::summarise(
+      AUPRC = auprc_from_bins(dplyr::pick(dplyr::everything())),
+      tpr05 = tpr05_from_bins(dplyr::pick(dplyr::everything())),
+      .groups = "drop"
+    )
+
+  # Summarise over reps: mean +/- SE.  SE is NA when only 1 rep (deterministic specs).
+  scaling_summary <- scaling_metrics_by_rep %>%
+    dplyr::group_by(spec_name, annotation_r2, n_ensemble, resolution, agg_method) %>%
+    dplyr::summarise(
+      AUPRC_mean = mean(AUPRC, na.rm = TRUE),
+      AUPRC_se   = ifelse(dplyr::n() > 1L,
+                          sd(AUPRC, na.rm = TRUE) / sqrt(sum(!is.na(AUPRC))),
+                          NA_real_),
+      tpr05_mean = mean(tpr05, na.rm = TRUE),
+      tpr05_se   = ifelse(dplyr::n() > 1L,
+                          sd(tpr05, na.rm = TRUE) / sqrt(sum(!is.na(tpr05))),
+                          NA_real_),
+      n_reps     = dplyr::n(),
+      .groups = "drop"
+    )
+
+  # Separate pure-lever and interaction subsets.
+  scaling_curves      <- scaling_summary %>% dplyr::filter(is.na(.data$resolution))
+  interaction_scaling <- scaling_summary %>% dplyr::filter(!is.na(.data$resolution))
+
+  cat("Scaling curves rows:", nrow(scaling_curves), "\n")
+  cat("Interaction scaling rows:", nrow(interaction_scaling), "\n")
 } else {
-  message("interaction_scaling.csv not found — Category 4c/4d plots will be skipped.")
-  NULL
+  scaling_bins_pooled <- NULL
+  scaling_curves      <- NULL
+  interaction_scaling <- NULL
+  message("scaling_bins_pooled.csv not found — Category 4 plots will be skipped.")
 }
 ```
 
@@ -957,7 +1219,7 @@ if (!is.null(scaling_curves) && nrow(scaling_curves) > 0L) {
   }
   cat("Fig 4a saved.\n")
 } else {
-  cat("scaling_curves.csv not found — fig 4a skipped.\n")
+  cat("scaling_bins_pooled.csv not found — fig 4a skipped.\n")
 }
 ```
 
@@ -1025,7 +1287,7 @@ if (!is.null(interaction_scaling) && nrow(interaction_scaling) > 0L) {
 
   p4c_overall <- make_interaction_plot(
     interaction_scaling %>% dplyr::filter(is.na(.data$annotation_r2)),
-    y_col   = "AUPRC",
+    y_col   = "AUPRC_mean",
     y_label = "AUPRC (pooled across datasets)",
     title   = "Interaction grid scaling \u2014 AUPRC at 4\u00d74 vs 8\u00d78"
   )
@@ -1038,7 +1300,7 @@ if (!is.null(interaction_scaling) && nrow(interaction_scaling) > 0L) {
   for (r2 in sort(unique(na.omit(interaction_scaling$annotation_r2)))) {
     p4c_r2 <- make_interaction_plot(
       interaction_scaling %>% dplyr::filter(.data$annotation_r2 == r2),
-      y_col   = "AUPRC",
+      y_col   = "AUPRC_mean",
       y_label = "AUPRC (pooled across datasets)",
       title   = sprintf("Interaction grid scaling \u2014 AUPRC (R\u00b2=%.1f)", r2)
     )
@@ -1050,7 +1312,7 @@ if (!is.null(interaction_scaling) && nrow(interaction_scaling) > 0L) {
   }
   cat("Fig 4c saved.\n")
 } else {
-  cat("interaction_scaling.csv not found — fig 4c skipped.\n")
+  cat("scaling_bins_pooled.csv not found — fig 4c skipped.\n")
 }
 ```
 
@@ -1059,7 +1321,7 @@ if (!is.null(interaction_scaling) && nrow(interaction_scaling) > 0L) {
 if (!is.null(interaction_scaling) && nrow(interaction_scaling) > 0L) {
   p4d_overall <- make_interaction_plot(
     interaction_scaling %>% dplyr::filter(is.na(.data$annotation_r2)),
-    y_col   = "tpr05",
+    y_col   = "tpr05_mean",
     y_label = "TPR at FPR \u2264 0.05 (pooled)",
     title   = "Interaction grid scaling \u2014 TPR@FPR=0.05 at 4\u00d74 vs 8\u00d78"
   )
@@ -1072,7 +1334,7 @@ if (!is.null(interaction_scaling) && nrow(interaction_scaling) > 0L) {
   for (r2 in sort(unique(na.omit(interaction_scaling$annotation_r2)))) {
     p4d_r2 <- make_interaction_plot(
       interaction_scaling %>% dplyr::filter(.data$annotation_r2 == r2),
-      y_col   = "tpr05",
+      y_col   = "tpr05_mean",
       y_label = "TPR at FPR \u2264 0.05 (pooled)",
       title   = sprintf(
         "Interaction grid scaling \u2014 TPR@FPR=0.05 (R\u00b2=%.1f)", r2)
@@ -1085,7 +1347,39 @@ if (!is.null(interaction_scaling) && nrow(interaction_scaling) > 0L) {
   }
   cat("Fig 4d saved.\n")
 } else {
-  cat("interaction_scaling.csv not found — fig 4d skipped.\n")
+  cat("scaling_bins_pooled.csv not found — fig 4d skipped.\n")
+}
+```
+
+# Summary Table
+
+```{r summary-table}
+if (exists("auprc_pooled_agg") && nrow(auprc_pooled_agg) > 0L) {
+  summary_tbl <- auprc_pooled_agg %>%
+    dplyr::filter(!is.na(.data$spec_name)) %>%
+    dplyr::select(spec_name, agg_method, AUPRC) %>%
+    dplyr::left_join(
+      tpr05_pooled_agg %>%
+        dplyr::filter(!is.na(.data$spec_name)) %>%
+        dplyr::select(spec_name, agg_method, tpr_fpr05),
+      by = c("spec_name", "agg_method")
+    ) %>%
+    dplyr::arrange(.data$spec_name, .data$agg_method) %>%
+    dplyr::mutate(
+      AUPRC     = round(.data$AUPRC,     4L),
+      tpr_fpr05 = round(.data$tpr_fpr05, 4L)
+    )
+
+  print(knitr::kable(
+    summary_tbl,
+    col.names = c("Spec", "Aggregation", "Pooled AUPRC", "TPR @ FPR=0.05"),
+    caption   = "Pooled AUPRC and TPR@FPR=0.05 by ensemble spec and aggregation method"
+  ))
+  readr::write_csv(summary_tbl,
+                   file.path(consolidated_dir, "summary_table.csv"))
+  cat("Summary table written.\n")
+} else {
+  cat("Summary table skipped: auprc_pooled_agg not available.\n")
 }
 ```
 
