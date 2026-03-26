@@ -580,7 +580,7 @@ if (file.exists(mm_path)) {
 
   metrics_to_plot <- intersect(
     c("jaccard_top10", "mean_jsd", "median_jsd", "max_jsd",
-      "mean_pip_var", "n_clusters"),
+      "mean_pip_var", "n_clusters", "n_clusters_jsd_050"),
     names(mm)
   )
 
@@ -793,7 +793,8 @@ if (exists("dataset_metrics") && "M1" %in% names(dataset_metrics)) {
 
     # Multi-panel scatter: baseline AUPRC vs all available difficulty metrics
     x_metrics <- intersect(
-      c("M1", "z_topk_ratio", "z_max_abs", "z_count_abs_gt_3", "z_eff_signals"),
+      c("M1", "z_topk_ratio", "z_max_abs", "z_count_abs_gt_3", "z_eff_signals",
+        "high_ld_count_095", "high_ld_count_095_per_snp", "high_ld_frac_095"),
       names(dm_scatter)
     )
     if (length(x_metrics) > 1L) {
