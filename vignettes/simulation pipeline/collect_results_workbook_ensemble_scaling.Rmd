@@ -331,26 +331,35 @@ auprc_pooled_individual %>%
 ```{r load-snps}
 # Load individual (non-aggregated) PIPs from the snps parquet.
 # Requires aggregate_staging_outputs() to have been run with write_snps_parquet = TRUE.
+# Skipped automatically if the aggregated snps directory does not exist.
 snps_parquet_path <- file.path(job_dir, "aggregated", "snps")
+snps_available    <- dir.exists(snps_parquet_path)
 
-snps_individual <- arrow::open_dataset(snps_parquet_path) %>%
-  dplyr::filter(is.na(.data$agg_method)) %>%
-  dplyr::select(run_id, snp_index, pip, causal) %>%
-  dplyr::collect() %>%
-  dplyr::left_join(
-    run_info %>% dplyr::select(
-      run_id, spec_name, dataset_bundle_id, annotation_r2,
-      restart_id, refine_step, c_value, sigma_0_2_scalar
-    ),
-    by = "run_id"
-  )
+if (snps_available) {
+  snps_individual <- arrow::open_dataset(snps_parquet_path) %>%
+    dplyr::filter(is.na(.data$agg_method)) %>%
+    dplyr::select(run_id, snp_index, pip, causal) %>%
+    dplyr::collect() %>%
+    dplyr::left_join(
+      run_info %>% dplyr::select(
+        run_id, spec_name, dataset_bundle_id, annotation_r2,
+        restart_id, refine_step, c_value, sigma_0_2_scalar
+      ),
+      by = "run_id"
+    )
 
-elbo_info <- model_metrics %>%
-  dplyr::filter(is.na(.data$agg_method)) %>%
-  dplyr::distinct(run_id, elbo_final)
+  elbo_info <- model_metrics %>%
+    dplyr::filter(is.na(.data$agg_method)) %>%
+    dplyr::distinct(run_id, elbo_final)
 
-cat("SNP rows loaded:", nrow(snps_individual), "\n")
-cat("Runs with ELBO:", nrow(elbo_info), "\n")
+  cat("SNP rows loaded:", nrow(snps_individual), "\n")
+  cat("Runs with ELBO:", nrow(elbo_info), "\n")
+} else {
+  snps_individual <- NULL
+  elbo_info       <- NULL
+  message("Aggregated snps parquet not found — skipping subscaling analysis.",
+          "\nRun aggregate_staging_outputs() with write_snps_parquet = TRUE first.")
+}
 ```
 
 ```{r compute-scaling}
