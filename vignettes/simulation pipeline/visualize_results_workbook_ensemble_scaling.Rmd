@@ -525,7 +525,6 @@ if (nrow(pr_curves_overall) > 0L) {
     file.path(fig_root, "ensemble_performance", "pr_curves_overall.png"),
     p2a, width = 14, height = 5, dpi = 150
   )
-  print(p2a)
 
   # Per annotation_r2
   pr_curves_by_r2 <- build_pr_curves(
@@ -831,7 +830,6 @@ if (!is.null(rd_full) && nrow(rd_full) > 0L &&
          title = "Refine BFS completion rate per parent node") +
     theme_bw() +
     theme(axis.text.x = element_text(angle = 30, hjust = 1))
-  print(p_rate)
   ggsave(file.path(fig_root, "ensemble_scaling", "refine_depth_completion_rate.png"),
          p_rate, width = 14, height = 6)
 
@@ -849,7 +847,6 @@ if (!is.null(rd_full) && nrow(rd_full) > 0L &&
     labs(x = "n_refine_processed", y = "Count",
          title = "Refine depth per parent (red dashed = n_requested)") +
     theme_bw()
-  print(p_hist)
   ggsave(file.path(fig_root, "ensemble_scaling", "refine_depth_histogram.png"),
          p_hist, width = 14, height = 6)
 
@@ -941,7 +938,7 @@ if (!is.null(scaling_curves) && nrow(scaling_curves) > 0L) {
     file.path(fig_root, "ensemble_scaling", "auprc_scaling_curves_overall.png"),
     p4a_overall, width = 12, height = 6, dpi = 150
   )
-  print(p4a_overall)
+
 
   # Per annotation_r2
   for (r2 in sort(unique(na.omit(scaling_curves$annotation_r2)))) {
@@ -978,7 +975,7 @@ if (!is.null(scaling_curves) && nrow(scaling_curves) > 0L) {
     file.path(fig_root, "ensemble_scaling", "tpr05_scaling_curves_overall.png"),
     p4b_overall, width = 12, height = 6, dpi = 150
   )
-  print(p4b_overall)
+
 
   for (r2 in sort(unique(na.omit(scaling_curves$annotation_r2)))) {
     p4b_r2 <- make_scaling_plot(
@@ -1036,7 +1033,7 @@ if (!is.null(interaction_scaling) && nrow(interaction_scaling) > 0L) {
     file.path(fig_root, "ensemble_scaling", "auprc_interaction_scaling_overall.png"),
     p4c_overall, width = 10, height = 4, dpi = 150
   )
-  print(p4c_overall)
+
 
   for (r2 in sort(unique(na.omit(interaction_scaling$annotation_r2)))) {
     p4c_r2 <- make_interaction_plot(
@@ -1070,7 +1067,7 @@ if (!is.null(interaction_scaling) && nrow(interaction_scaling) > 0L) {
     file.path(fig_root, "ensemble_scaling", "tpr05_interaction_scaling_overall.png"),
     p4d_overall, width = 10, height = 4, dpi = 150
   )
-  print(p4d_overall)
+
 
   for (r2 in sort(unique(na.omit(interaction_scaling$annotation_r2)))) {
     p4d_r2 <- make_interaction_plot(
