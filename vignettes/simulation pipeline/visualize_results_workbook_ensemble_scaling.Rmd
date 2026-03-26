@@ -569,14 +569,13 @@ mm_path <- file.path(consolidated_dir, "multimodal_metrics.csv")
 if (file.exists(mm_path)) {
   mm <- readr::read_csv(mm_path, show_col_types = FALSE)
 
-  # Join spec_name from run_info if needed
-  if (!"spec_name" %in% names(mm) && "run_id" %in% names(mm)) {
-    run_info <- readr::read_csv(
-      file.path(consolidated_dir, "model_metrics_full.csv"),
-      show_col_types = FALSE
-    ) %>%
-      dplyr::distinct(run_id, spec_name)
-    mm <- mm %>% dplyr::left_join(run_info, by = "run_id")
+  # Join spec_name via group_key (strip "model_grid|" prefix from group_label)
+  if (!"spec_name" %in% names(mm) && "group_label" %in% names(mm)) {
+    spec_map <- model_metrics %>% dplyr::distinct(.data$group_key, .data$spec_name)
+    mm <- mm %>%
+      dplyr::mutate(group_key = sub("^model_grid\\|", "", .data$group_label)) %>%
+      dplyr::left_join(spec_map, by = "group_key") %>%
+      dplyr::select(-group_key)
   }
 
   metrics_to_plot <- intersect(
@@ -744,7 +743,8 @@ make_tpr05_barplot(r2_filter = 0.5)   # annotation r2 = 0.5
 ```{r fig-3a, fig.width=12, fig.height=8}
 dm_path <- file.path(consolidated_dir, "dataset_metrics.csv")
 if (file.exists(dm_path)) {
-  dataset_metrics <- readr::read_csv(dm_path, show_col_types = FALSE)
+  dataset_metrics <- readr::read_csv(dm_path, show_col_types = FALSE) %>%
+    dplyr::distinct(dataset_bundle_id, .keep_all = TRUE)
 
   metric_cols <- intersect(
     c("M1", "z_topk_ratio", "z_max_abs", "z_count_abs_gt_3",
@@ -825,11 +825,14 @@ if (exists("dataset_metrics") && "M1" %in% names(dataset_metrics)) {
     mm_p <- file.path(consolidated_dir, "multimodal_metrics.csv")
     if (file.exists(mm_p)) readr::read_csv(mm_p, show_col_types = FALSE) else NULL
   }
-  # Attach spec_name if missing (join via run_id -> model_metrics_full)
+  # Attach spec_name via group_key (strip "model_grid|" prefix from group_label)
   if (!is.null(mm_local) && !"spec_name" %in% names(mm_local) &&
-      "run_id" %in% names(mm_local)) {
-    spec_map <- model_metrics %>% dplyr::distinct(.data$run_id, .data$spec_name)
-    mm_local <- mm_local %>% dplyr::left_join(spec_map, by = "run_id")
+      "group_label" %in% names(mm_local)) {
+    spec_map <- model_metrics %>% dplyr::distinct(.data$group_key, .data$spec_name)
+    mm_local <- mm_local %>%
+      dplyr::mutate(group_key = sub("^model_grid\\|", "", .data$group_label)) %>%
+      dplyr::left_join(spec_map, by = "group_key") %>%
+      dplyr::select(-group_key)
   }
 
   if (!is.null(mm_local) && exists("dataset_metrics") &&
