@@ -226,6 +226,28 @@ tpr_fpr_agg <- compute_tpr_fpr_pooled(
   group_vars = c("spec_name", "agg_method")
 )
 
+# Oracle: best-by-AUPRC individual run per (spec_name, dataset_bundle_id)
+if ("run_id" %in% names(confusion_bins) &&
+    "run_id" %in% names(auprc_individual) &&
+    "dataset_bundle_id" %in% names(auprc_individual)) {
+  oracle_src <- auprc_individual %>% dplyr::filter(!is.na(.data$spec_name))
+  if ("agg_method" %in% names(oracle_src))
+    oracle_src <- dplyr::filter(oracle_src, is.na(.data$agg_method))
+  oracle_sel <- oracle_src %>%
+    dplyr::group_by(.data$spec_name, .data$dataset_bundle_id) %>%
+    dplyr::slice_max(.data$AUPRC, n = 1L, with_ties = FALSE) %>%
+    dplyr::ungroup() %>%
+    dplyr::pull(run_id)
+  oracle_bins_roc <- confusion_bins %>%
+    dplyr::filter(is.na(.data$agg_method), .data$run_id %in% oracle_sel) %>%
+    dplyr::mutate(agg_method = "oracle")
+  if (nrow(oracle_bins_roc) > 0L)
+    tpr_fpr_agg <- dplyr::bind_rows(
+      tpr_fpr_agg,
+      compute_tpr_fpr_pooled(oracle_bins_roc, group_vars = c("spec_name", "agg_method"))
+    )
+}
+
 # Baseline single-fit curve (no agg_method) — replicated to all facets
 baseline_roc_raw <- compute_tpr_fpr_pooled(
   confusion_bins %>%
