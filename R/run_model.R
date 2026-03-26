@@ -36,8 +36,10 @@ run_task <- function(job_name,
       dataset_metrics = list(),
       multimodal = list(),
       refine_depth = list(),
+      scaling_bins = list(),
       validation = list(),
-      prior_diagnostics = list()
+      prior_diagnostics = list(),
+      hg2_by_agg = list()
     )
     buffer_ctx$base_output <- determine_base_output(job_config)
     buffer_ctx$task_id <- task_id
@@ -668,6 +670,8 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
 
     primary_pips_by_group <- list()
     primary_elbos_by_group <- list()
+    primary_run_meta_by_group <- list()
+    fitted_y_by_group <- list()
     group_run_map <- list()
 
     run_and_record <- function(run_row,
@@ -799,6 +803,26 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
         }
         primary_pips_by_group[[group_key]] <<- c(primary_pips_by_group[[group_key]], list(fit$model_fit$PIPs))
         primary_elbos_by_group[[group_key]] <<- c(primary_elbos_by_group[[group_key]], elbo_val)
+        fy_val <- tryCatch(as.numeric(fit$model_fit$fitted_y), error = function(e) NULL)
+        if (is.null(fy_val)) {
+          b_val <- tryCatch(
+            fit$model_fit$std_coef %||% fit$model_fit$coef, error = function(e) NULL
+          )
+          if (!is.null(b_val)) fy_val <- as.numeric(data_bundle$X %*% b_val)
+        }
+        fitted_y_by_group[[group_key]] <<- c(fitted_y_by_group[[group_key]], list(fy_val))
+        primary_run_meta_by_group[[group_key]] <<- c(
+          primary_run_meta_by_group[[group_key]],
+          list(list(
+            run_id           = as.integer(run_row$run_id),
+            spec_name        = as.character(run_row$spec_name %||% NA_character_),
+            restart_id       = as.integer(run_row$restart_id %||% NA_integer_),
+            refine_step      = as.integer(run_row$refine_step %||% NA_integer_),
+            c_value          = as.numeric(run_row$c_value %||% NA_real_),
+            sigma_0_2_scalar = as.numeric(run_row$sigma_0_2_scalar %||% NA_real_),
+            annotation_r2    = as.numeric(run_row$annotation_r2 %||% NA_real_)
+          ))
+        )
         global_primary_pips[[length(global_primary_pips) + 1L]] <<- fit$model_fit$PIPs
         global_primary_elbos <<- c(global_primary_elbos, elbo_val)
         if (is.null(global_run_template)) {
@@ -1057,6 +1081,64 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
               buffer_ctx = buffer_ctx,
               variant_meta = agg_meta
             )
+          }
+        }
+      }
+    }
+
+    # Scaling confusion bins (subsample-N ensemble analysis stored as bins).
+    if (!is.null(buffer_ctx) && isTRUE(job_config$job$compute$write_scaling_confusion_bins)) {
+      sc_n_sizes     <- as.integer(job_config$job$compute$scaling_n_ens_sizes %||% c(4L, 8L, 16L, 32L, 64L))
+      sc_restart_reps <- as.integer(job_config$job$compute$scaling_restart_reps %||% 50L)
+      sc_pip_breaks  <- job_config$job$metrics$pip_breaks
+      sc_pip_bw      <- as.numeric(job_config$job$metrics$pip_bucket_width %||% 0.01)
+      causal_vec_sc  <- as.integer(seq_along(data_bundle$beta) %in% data_bundle$causal_idx)
+      for (group_key in names(primary_pips_by_group)) {
+        pip_list  <- primary_pips_by_group[[group_key]]
+        elbo_vec  <- primary_elbos_by_group[[group_key]]
+        meta_list <- primary_run_meta_by_group[[group_key]]
+        if (length(pip_list) < 2L || length(meta_list) < 2L) next
+        sc_bins <- compute_scaling_confusion_bins_for_group(
+          pip_list         = pip_list,
+          elbo_vec         = elbo_vec,
+          meta_list        = meta_list,
+          causal_vec       = causal_vec_sc,
+          causal_mask      = top8_causal_mask,
+          group_run_row    = group_run_map[[group_key]] %||% uc_runs[1, , drop = FALSE],
+          n_ens_sizes      = sc_n_sizes,
+          n_restart_reps   = sc_restart_reps,
+          pip_breaks       = sc_pip_breaks,
+          pip_bw           = sc_pip_bw,
+          dataset_bundle_id = bundle_id
+        )
+        if (!is.null(sc_bins) && nrow(sc_bins)) {
+          buffer_ctx$buffers$scaling_bins[[
+            length(buffer_ctx$buffers$scaling_bins) + 1L
+          ]] <- sc_bins
+        }
+      }
+    }
+
+    # hg2 by aggregation method (one scalar per agg_method per group, full K fits).
+    if (!is.null(buffer_ctx)) {
+      for (group_key in names(primary_pips_by_group)) {
+        pip_list    <- primary_pips_by_group[[group_key]]
+        elbo_vec    <- primary_elbos_by_group[[group_key]]
+        fy_list     <- fitted_y_by_group[[group_key]]
+        grr         <- group_run_map[[group_key]] %||% uc_runs[1, , drop = FALSE]
+        if (length(pip_list) >= 2L && !is.null(fy_list)) {
+          hg2_tbl <- compute_hg2_by_agg(
+            pip_list          = pip_list,
+            fitted_y_list     = fy_list,
+            elbo_vec          = elbo_vec,
+            y                 = data_bundle$y,
+            group_run_row     = grr,
+            dataset_bundle_id = bundle_id
+          )
+          if (!is.null(hg2_tbl) && nrow(hg2_tbl) > 0L) {
+            buffer_ctx$buffers$hg2_by_agg[[
+              length(buffer_ctx$buffers$hg2_by_agg) + 1L
+            ]] <- hg2_tbl
           }
         }
       }
@@ -2103,13 +2185,220 @@ buffer_task_outputs <- function(buffer_ctx,
   }
 }
 
+# Compute scaling confusion bins for one group (one spec × one dataset).
+# Called from execute_dataset_bundle when write_scaling_confusion_bins = TRUE.
+# Returns a tibble with per-(n_ensemble, agg_method, rep) pooled confusion bins
+# including spec_name, dataset_bundle_id, annotation_r2, resolution columns.
+#' @keywords internal
+compute_scaling_confusion_bins_for_group <- function(pip_list,
+                                                      elbo_vec,
+                                                      meta_list,
+                                                      causal_vec,
+                                                      causal_mask = NULL,
+                                                      group_run_row,
+                                                      n_ens_sizes = c(4L, 8L, 16L, 32L, 64L),
+                                                      n_restart_reps = 50L,
+                                                      pip_breaks = NULL,
+                                                      pip_bw = 0.01,
+                                                      dataset_bundle_id = NA_character_) {
+  N <- length(pip_list)
+  pip_mat <- do.call(cbind, pip_list)  # p x N
+
+  run_meta <- dplyr::bind_rows(lapply(meta_list, tibble::as_tibble))
+
+  spec_nm   <- as.character(run_meta$spec_name[[1]] %||% NA_character_)
+  r2_val    <- as.numeric(run_meta$annotation_r2[[1]] %||% NA_real_)
+
+  expl_raw  <- as.character(group_run_row$exploration_methods[[1]] %||% "")
+  method_ids <- unique(trimws(strsplit(expl_raw, "x", fixed = TRUE)[[1]]))
+  is_interaction <- length(method_ids) > 1L && "refine" %in% method_ids
+
+  agg_methods <- c("uniform", "max_elbo", "elbo_softmax", "cluster_weight", "cluster_weight_050")
+
+  results <- list()
+
+  if (is_interaction) {
+    # Interaction specs: compare 4x4 vs 8x8 grid resolutions (deterministic).
+    axis_cols <- c(
+      if ("restart"   %in% method_ids) "restart_id"       else NULL,
+      if ("refine"    %in% method_ids) "refine_step"      else NULL,
+      if ("c_grid"    %in% method_ids) "c_value"          else NULL,
+      if ("sigma_0_2" %in% method_ids) "sigma_0_2_scalar" else NULL
+    )
+    for (res in c(4L, 8L)) {
+      sub_meta <- run_meta
+      for (col in axis_cols) {
+        if (!col %in% names(sub_meta)) next
+        vals <- sort(unique(sub_meta[[col]]))
+        n_keep <- min(res, length(vals))
+        keep_vals <- vals[round(seq(1, length(vals), length.out = n_keep))]
+        sub_meta <- dplyr::filter(sub_meta, .data[[col]] %in% keep_vals)
+      }
+      sel_idx <- match(sub_meta$run_id, run_meta$run_id)
+      sel_idx <- sel_idx[!is.na(sel_idx)]
+      if (!length(sel_idx)) next
+      sub_pip_mat <- pip_mat[, sel_idx, drop = FALSE]
+      sub_elbos   <- elbo_vec[sel_idx]
+      for (am in agg_methods) {
+        agg_pip <- tryCatch(
+          aggregate_pip_matrix(sub_pip_mat, sub_elbos, am),
+          error = function(e) NULL
+        )
+        if (is.null(agg_pip)) next
+        bins <- compute_confusion_bins(
+          agg_pip, causal_vec,
+          pip_bucket_width = pip_bw, pip_breaks = pip_breaks,
+          causal_mask = causal_mask
+        )
+        if (!is.null(bins) && nrow(bins)) {
+          results[[length(results) + 1L]] <- dplyr::mutate(bins,
+            spec_name         = spec_nm,
+            annotation_r2     = r2_val,
+            dataset_bundle_id = as.character(dataset_bundle_id),
+            n_ensemble        = as.integer(length(sel_idx)),
+            resolution        = paste0(res, "x", res),
+            agg_method        = am,
+            rep               = 1L
+          )
+        }
+      }
+    }
+  } else {
+    # Pure-lever specs: subsample N fits across valid sizes.
+    lever_type <- if ("restart"   %in% method_ids) "restart"   else
+                  if ("refine"    %in% method_ids) "refine"    else
+                  if ("sigma_0_2" %in% method_ids) "sigma_0_2" else
+                  if ("c_grid"    %in% method_ids) "c_grid"    else NA_character_
+    if (is.na(lever_type)) return(NULL)
+
+    n_reps <- if (lever_type == "restart") n_restart_reps else 1L
+    valid_sizes <- n_ens_sizes[n_ens_sizes <= N]
+
+    for (n_ens in valid_sizes) {
+      for (rep_i in seq_len(n_reps)) {
+        sel_ids <- select_subsample_run_ids(run_meta, n_ens, lever_type, rep_i)
+        sel_idx <- match(sel_ids, run_meta$run_id)
+        sel_idx <- sel_idx[!is.na(sel_idx)]
+        if (!length(sel_idx)) next
+        sub_pip_mat <- pip_mat[, sel_idx, drop = FALSE]
+        sub_elbos   <- elbo_vec[sel_idx]
+        for (am in agg_methods) {
+          agg_pip <- tryCatch(
+            aggregate_pip_matrix(sub_pip_mat, sub_elbos, am),
+            error = function(e) NULL
+          )
+          if (is.null(agg_pip)) next
+          bins <- compute_confusion_bins(
+            agg_pip, causal_vec,
+            pip_bucket_width = pip_bw, pip_breaks = pip_breaks,
+            causal_mask = causal_mask
+          )
+          if (!is.null(bins) && nrow(bins)) {
+            results[[length(results) + 1L]] <- dplyr::mutate(bins,
+              spec_name         = spec_nm,
+              annotation_r2     = r2_val,
+              dataset_bundle_id = as.character(dataset_bundle_id),
+              n_ensemble        = as.integer(n_ens),
+              resolution        = NA_character_,
+              agg_method        = am,
+              rep               = as.integer(rep_i)
+            )
+          }
+        }
+      }
+    }
+  }
+
+  if (!length(results)) return(NULL)
+  dplyr::bind_rows(results)
+}
+
+#' Compute estimated heritability per aggregation method for one ensemble group.
+#'
+#' Uses the full pool of K fits (no subsampling). Weights are derived from PIP
+#' vectors (same JSD-based clustering used in confusion bins), then applied to
+#' fitted_y vectors to produce an exact aggregated hg2 scalar per method.
+#'
+#' @keywords internal
+compute_hg2_by_agg <- function(pip_list,
+                                fitted_y_list,
+                                elbo_vec,
+                                y,
+                                group_run_row,
+                                dataset_bundle_id = NA_character_) {
+  valid <- !vapply(fitted_y_list, is.null, logical(1L))
+  pip_list      <- pip_list[valid]
+  fitted_y_list <- fitted_y_list[valid]
+  elbo_vec      <- elbo_vec[valid]
+  K <- length(fitted_y_list)
+  if (K == 0L || is.null(y)) return(NULL)
+  vy <- stats::var(as.numeric(y))
+  if (!is.finite(vy) || vy <= 0) return(NULL)
+
+  # K x n matrix of fitted values; K x p matrix of PIPs (for JSD clustering)
+  fy_mat  <- do.call(rbind, lapply(fitted_y_list, as.numeric))  # K x n
+  pip_mat <- do.call(rbind, lapply(pip_list, as.numeric))       # K x p
+
+  # JSD-based hierarchical clustering on PIP vectors (same as confusion bins)
+  hc <- NULL
+  if (K > 1L) {
+    hc <- tryCatch({
+      n_pip <- nrow(pip_mat)
+      jsd_mat <- matrix(0, n_pip, n_pip)
+      for (i in seq_len(n_pip - 1L)) {
+        for (j in seq(i + 1L, n_pip)) {
+          d <- js_distance(pip_mat[i, ], pip_mat[j, ])
+          jsd_mat[i, j] <- d
+          jsd_mat[j, i] <- d
+        }
+      }
+      stats::hclust(stats::as.dist(jsd_mat), method = "complete")
+    }, error = function(e) NULL)
+  }
+
+  agg_methods <- c("uniform", "max_elbo", "elbo_softmax",
+                   "cluster_weight", "cluster_weight_050")
+  rows <- lapply(agg_methods, function(am) {
+    w <- switch(am,
+      "uniform"           = rep(1 / K, K),
+      "max_elbo"          = {
+        idx <- which.max(elbo_vec)
+        w2 <- rep(0, K); w2[idx] <- 1; w2
+      },
+      "elbo_softmax"      = softmax_weights(elbo_vec),
+      "cluster_weight"    = if (!is.null(hc))
+                              .cluster_weight_from_hc(hc, 0.15, elbo_vec, pip_mat)
+                            else softmax_weights(elbo_vec),
+      "cluster_weight_050"= if (!is.null(hc))
+                              .cluster_weight_from_hc(hc, 0.50, elbo_vec, pip_mat)
+                            else softmax_weights(elbo_vec)
+    )
+    fy_agg <- as.numeric(crossprod(w, fy_mat))   # length n
+    hg2    <- max(0, min(1, stats::var(fy_agg) / vy))
+    tibble::tibble(agg_method = am, hg2 = hg2, n_fits = K)
+  })
+
+  dplyr::bind_rows(rows) %>%
+    dplyr::mutate(
+      dataset_bundle_id = as.character(dataset_bundle_id),
+      use_case_id       = as.character(group_run_row$use_case_id %||% NA_character_),
+      group_label       = as.character(
+        group_run_row$group_label %||%
+          paste0("model_grid|", group_run_row$group_key %||% NA_character_)
+      ),
+      explore_method    = as.character(group_run_row$explore_method %||% NA_character_),
+      variant_id        = as.character(group_run_row$variant_id %||% NA_character_)
+    )
+}
+
 flush_task_buffers <- function(buffer_ctx) {
   buf <- buffer_ctx$buffers
   if (is.null(buf) ||
       !length(buf$model) && !length(buf$effect) && !length(buf$snps) &&
       !length(buf$confusion) && !length(buf$dataset_metrics) && !length(buf$multimodal) &&
-      !length(buf$refine_depth) && !length(buf$validation) && !length(buf$prior_diagnostics) &&
-      !length(buf$tier_cs_metrics)) {
+      !length(buf$refine_depth) && !length(buf$scaling_bins) &&
+      !length(buf$validation) && !length(buf$prior_diagnostics) &&
+      !length(buf$tier_cs_metrics) && !length(buf$hg2_by_agg)) {
     return(invisible(NULL))
   }
   base_output <- buffer_ctx$base_output
@@ -2131,9 +2420,11 @@ flush_task_buffers <- function(buffer_ctx) {
   confusion_tbl <- if (length(buf$confusion)) dplyr::bind_rows(buf$confusion) else NULL
   dataset_tbl <- if (length(buf$dataset_metrics)) dplyr::bind_rows(buf$dataset_metrics) else NULL
   multimodal_tbl <- if (length(buf$multimodal)) dplyr::bind_rows(buf$multimodal) else NULL
-  refine_depth_tbl <- if (length(buf$refine_depth)) dplyr::bind_rows(buf$refine_depth) else NULL
-  prior_diag_tbl  <- if (length(buf$prior_diagnostics)) dplyr::bind_rows(buf$prior_diagnostics) else NULL
-  tier_cs_tbl     <- if (length(buf$tier_cs_metrics))   dplyr::bind_rows(buf$tier_cs_metrics)   else NULL
+  refine_depth_tbl   <- if (length(buf$refine_depth))      dplyr::bind_rows(buf$refine_depth)      else NULL
+  scaling_bins_tbl   <- if (length(buf$scaling_bins))      dplyr::bind_rows(buf$scaling_bins)      else NULL
+  prior_diag_tbl     <- if (length(buf$prior_diagnostics)) dplyr::bind_rows(buf$prior_diagnostics) else NULL
+  tier_cs_tbl        <- if (length(buf$tier_cs_metrics))   dplyr::bind_rows(buf$tier_cs_metrics)   else NULL
+  hg2_by_agg_tbl     <- if (length(buf$hg2_by_agg))        dplyr::bind_rows(buf$hg2_by_agg)        else NULL
 
   write_flush_outputs(
     staging_dir = staging_dir,
@@ -2147,8 +2438,10 @@ flush_task_buffers <- function(buffer_ctx) {
     dataset_metrics = dataset_tbl,
     multimodal_metrics = multimodal_tbl,
     refine_depth = refine_depth_tbl,
+    scaling_bins = scaling_bins_tbl,
     prior_diagnostics = prior_diag_tbl,
-    tier_cs_metrics = tier_cs_tbl
+    tier_cs_metrics = tier_cs_tbl,
+    hg2_by_agg = hg2_by_agg_tbl
   )
 
   if (is.null(validation_tbl) || !nrow(validation_tbl)) {
@@ -2169,9 +2462,11 @@ flush_task_buffers <- function(buffer_ctx) {
     dataset_metrics = list(),
     multimodal = list(),
     refine_depth = list(),
+    scaling_bins = list(),
     validation = list(),
     prior_diagnostics = list(),
-    tier_cs_metrics = list()
+    tier_cs_metrics = list(),
+    hg2_by_agg = list()
   )
   buffer_ctx$flush_index <- buffer_ctx$flush_index + 1L
 }
@@ -2187,8 +2482,10 @@ write_flush_outputs <- function(staging_dir,
                                 dataset_metrics = NULL,
                                 multimodal_metrics = NULL,
                                 refine_depth = NULL,
+                                scaling_bins = NULL,
                                 prior_diagnostics = NULL,
-                                tier_cs_metrics = NULL) {
+                                tier_cs_metrics = NULL,
+                                hg2_by_agg = NULL) {
   if (!is.null(model_metrics) && nrow(model_metrics)) {
     model_metrics <- dplyr::mutate(model_metrics, task_id = task_id, flush_id = flush_label)
     readr::write_csv(model_metrics, file.path(staging_dir, sprintf("%s_model_metrics.csv", flush_label)))
@@ -2221,6 +2518,10 @@ write_flush_outputs <- function(staging_dir,
     refine_depth <- dplyr::mutate(refine_depth, task_id = task_id, flush_id = flush_label)
     readr::write_csv(refine_depth, file.path(staging_dir, sprintf("%s_refine_depth.csv", flush_label)))
   }
+  if (!is.null(scaling_bins) && nrow(scaling_bins)) {
+    scaling_bins <- dplyr::mutate(scaling_bins, task_id = task_id, flush_id = flush_label)
+    readr::write_csv(scaling_bins, file.path(staging_dir, sprintf("%s_scaling_bins.csv", flush_label)))
+  }
   if (!is.null(prior_diagnostics) && nrow(prior_diagnostics)) {
     prior_diagnostics <- dplyr::mutate(prior_diagnostics, task_id = task_id, flush_id = flush_label)
     readr::write_csv(prior_diagnostics, file.path(staging_dir, sprintf("%s_prior_diagnostics.csv", flush_label)))
@@ -2228,6 +2529,10 @@ write_flush_outputs <- function(staging_dir,
   if (!is.null(tier_cs_metrics) && nrow(tier_cs_metrics)) {
     tier_cs_metrics <- dplyr::mutate(tier_cs_metrics, task_id = task_id, flush_id = flush_label)
     readr::write_csv(tier_cs_metrics, file.path(staging_dir, sprintf("%s_tier_cs_metrics.csv", flush_label)))
+  }
+  if (!is.null(hg2_by_agg) && nrow(hg2_by_agg)) {
+    hg2_by_agg <- dplyr::mutate(hg2_by_agg, task_id = task_id, flush_id = flush_label)
+    readr::write_csv(hg2_by_agg, file.path(staging_dir, sprintf("%s_hg2_by_agg.csv", flush_label)))
   }
 }
 

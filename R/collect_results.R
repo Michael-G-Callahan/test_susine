@@ -61,6 +61,8 @@ index_staging_outputs <- function(job_name,
     if (grepl("_multimodal_metrics\\.csv$", fname)) return("multimodal_metrics")
     if (grepl("_prior_diagnostics\\.csv$", fname)) return("prior_diagnostics")
     if (grepl("_tier_cs_metrics\\.csv$", fname)) return("tier_cs_metrics")
+    if (grepl("_scaling_bins\\.csv$", fname)) return("scaling_bins")
+    if (grepl("_hg2_by_agg\\.csv$", fname)) return("hg2_by_agg")
     if (grepl("_snps\\.parquet$", fname)) return("snps")
     NA_character_
   }
@@ -275,6 +277,8 @@ aggregate_staging_outputs <- function(job_name,
   multimodal_files <- dplyr::filter(idx, .data$type == "multimodal_metrics")$path
   prior_diag_files   <- dplyr::filter(idx, .data$type == "prior_diagnostics")$path
   tier_cs_files      <- dplyr::filter(idx, .data$type == "tier_cs_metrics")$path
+  scaling_bin_files <- dplyr::filter(idx, .data$type == "scaling_bins")$path
+  hg2_by_agg_files  <- dplyr::filter(idx, .data$type == "hg2_by_agg")$path
   snp_files <- dplyr::filter(idx, .data$type == "snps")$path
 
   # Column lists for join-enrichment — match the original aggregated schemas.
@@ -349,6 +353,21 @@ aggregate_staging_outputs <- function(job_name,
     readr::write_csv(tier_cs_tbl, file.path(output_dir, "tier_cs_metrics.csv"))
     log_progress("Wrote tier_cs_metrics.csv")
     rm(tier_cs_tbl, tier_cs_files)
+    gc()
+  }
+  if (length(scaling_bin_files)) {
+    scaling_bins_tbl <- read_csv_safe(scaling_bin_files, idx)
+    readr::write_csv(scaling_bins_tbl, file.path(output_dir, "scaling_bins.csv"))
+    log_progress("Wrote scaling_bins.csv")
+    rm(scaling_bins_tbl, scaling_bin_files)
+    gc()
+  }
+  if (length(hg2_by_agg_files)) {
+    hg2_by_agg_tbl <- read_csv_safe(hg2_by_agg_files, idx) %>%
+      enrich_from_bundle_table(cols = bundle_enrich_cols)
+    readr::write_csv(hg2_by_agg_tbl, file.path(output_dir, "hg2_by_agg.csv"))
+    log_progress("Wrote hg2_by_agg.csv")
+    rm(hg2_by_agg_tbl, hg2_by_agg_files)
     gc()
   }
   if (length(snp_files) && isTRUE(write_snps_dataset)) {
@@ -432,6 +451,92 @@ compute_model_rank <- function(model_metrics_tbl) {
     ) %>%
     dplyr::ungroup() %>%
     dplyr::select("run_id", "auprc_rank", "n_competitors")
+}
+
+# ---- Scaling analysis helpers -----
+
+#' Aggregate a p x N PIP matrix to a single length-p PIP vector.
+#'
+#' @param pip_mat Numeric matrix (p rows × N columns).
+#' @param elbos Length-N ELBO vector.
+#' @param method One of "uniform", "max_elbo", "elbo_softmax",
+#'   "cluster_weight", "cluster_weight_050".
+#' @param jsd_threshold JSD cutoff for cluster_weight (default 0.15).
+#' @keywords internal
+aggregate_pip_matrix <- function(pip_mat, elbos, method, jsd_threshold = 0.15) {
+  N <- ncol(pip_mat)
+  if (N == 1L) return(as.vector(pip_mat))
+  switch(method,
+    uniform = rowMeans(pip_mat),
+    max_elbo = as.vector(pip_mat[, which.max(elbos), drop = TRUE]),
+    elbo_softmax = {
+      w <- exp(elbos - max(elbos)); w <- w / sum(w)
+      as.vector(pip_mat %*% w)
+    },
+    cluster_weight     = .aggregate_cluster_weight(pip_mat, elbos, jsd_threshold),
+    cluster_weight_050 = .aggregate_cluster_weight(pip_mat, elbos, 0.50),
+    stop("Unknown aggregation method: ", method)
+  )
+}
+
+.aggregate_cluster_weight <- function(pip_mat, elbos, jsd_threshold) {
+  N <- ncol(pip_mat); eps <- 1e-10
+  H <- apply(pip_mat + eps, 2L, function(pv) -sum(pv * log(pv)))
+  jsd <- matrix(0, N, N)
+  for (i in seq_len(N - 1L)) {
+    for (j in seq(i + 1L, N)) {
+      mix        <- 0.5 * (pip_mat[, i] + pip_mat[, j]) + eps
+      jsd[i, j]  <- jsd[j, i] <- max(-sum(mix * log(mix)) - 0.5 * (H[i] + H[j]), 0)
+    }
+  }
+  clusters <- cutree(hclust(as.dist(jsd), method = "complete"), h = jsd_threshold)
+  K <- max(clusters)
+  w <- numeric(N)
+  for (k in seq_len(K)) {
+    idx    <- which(clusters == k)
+    ew     <- exp(elbos[idx] - max(elbos[idx]))
+    w[idx] <- ew / sum(ew) / K
+  }
+  as.vector(pip_mat %*% w)
+}
+
+#' Select run_ids for a subsample of size n_ens from run_meta.
+#'
+#' @param run_meta Tibble with columns run_id and lever columns
+#'   (restart_id, refine_step, c_value, sigma_0_2_scalar).
+#' @param n_ens Number of fits to select.
+#' @param lever_type One of "restart", "refine", "sigma_0_2", "c_grid".
+#' @param rep_i Random-seed index (used for restart lever; default 1L).
+#' @keywords internal
+select_subsample_run_ids <- function(run_meta, n_ens, lever_type, rep_i = 1L) {
+  n_sel <- min(n_ens, nrow(run_meta))
+  switch(lever_type,
+    restart = {
+      set.seed(rep_i * 7919L)
+      dplyr::slice_sample(run_meta, n = n_sel)$run_id
+    },
+    refine = {
+      run_meta %>%
+        dplyr::arrange(.data$refine_step) %>%
+        dplyr::slice_head(n = n_sel) %>%
+        dplyr::pull(run_id)
+    },
+    sigma_0_2 = {
+      vals <- sort(unique(run_meta$sigma_0_2_scalar))
+      keep <- vals[round(seq(1, length(vals), length.out = n_sel))]
+      run_meta %>%
+        dplyr::filter(.data$sigma_0_2_scalar %in% keep) %>%
+        dplyr::pull(run_id)
+    },
+    c_grid = {
+      vals <- sort(unique(run_meta$c_value))
+      keep <- vals[round(seq(1, length(vals), length.out = n_sel))]
+      run_meta %>%
+        dplyr::filter(.data$c_value %in% keep) %>%
+        dplyr::pull(run_id)
+    },
+    stop("Unknown lever_type: ", lever_type)
+  )
 }
 
 #' Build pre-aggregated confusion matrix from SNPs dataset.

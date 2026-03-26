@@ -332,101 +332,50 @@ auprc_pooled_individual %>%
 
 # 6b. Subscaling Analysis
 
-```{r load-snps}
-# Load individual (non-aggregated) PIPs from the snps parquet.
-# Requires aggregate_staging_outputs() to have been run with write_snps_parquet = TRUE.
-# Skipped automatically if the aggregated snps directory does not exist.
-snps_parquet_path <- file.path(job_dir, "aggregated", "snps")
-snps_available    <- dir.exists(snps_parquet_path)
-
-if (snps_available) {
-  snps_individual <- arrow::open_dataset(snps_parquet_path) %>%
-    dplyr::filter(is.na(.data$agg_method)) %>%
-    dplyr::select(run_id, snp_index, pip, causal) %>%
-    dplyr::collect() %>%
-    dplyr::left_join(
-      run_info %>% dplyr::select(
-        run_id, spec_name, dataset_bundle_id, annotation_r2,
-        restart_id, refine_step, c_value, sigma_0_2_scalar
-      ),
-      by = "run_id"
-    )
-
-  elbo_info <- model_metrics %>%
-    dplyr::filter(is.na(.data$agg_method)) %>%
-    dplyr::distinct(run_id, elbo_final)
-
-  cat("SNP rows loaded:", nrow(snps_individual), "\n")
-  cat("Runs with ELBO:", nrow(elbo_info), "\n")
+```{r load-scaling-bins}
+# Scaling confusion bins are computed during the SLURM run (per dataset bundle)
+# when write_scaling_confusion_bins = TRUE in the job config, then merged by
+# aggregate_staging_outputs() into scaling_bins.csv.
+# Skipped automatically if the file is absent.
+scaling_bins_path <- file.path(job_dir, "aggregated", "scaling_bins.csv")
+if (file.exists(scaling_bins_path)) {
+  scaling_bins_raw <- readr::read_csv(scaling_bins_path, show_col_types = FALSE)
+  cat("Scaling bins rows:", nrow(scaling_bins_raw), "\n")
+  cat("Specs present:", paste(sort(unique(na.omit(scaling_bins_raw$spec_name))), collapse = ", "), "\n")
 } else {
-  snps_individual <- NULL
-  elbo_info       <- NULL
-  message("Aggregated snps parquet not found — skipping subscaling analysis.",
-          "\nRun aggregate_staging_outputs() with write_snps_parquet = TRUE first.")
+  scaling_bins_raw <- NULL
+  message("scaling_bins.csv not found — subscaling analysis skipped.",
+          "\nRe-run with write_scaling_confusion_bins = TRUE in the job config.")
 }
 ```
 
-```{r compute-scaling}
-# PIP breaks matching run_control definition (variable resolution)
-pip_breaks_vec <- sort(unique(c(
-  seq(0,    0.05, by = 0.005),
-  seq(0.05, 0.10, by = 0.01),
-  seq(0.10, 1.0,  by = 0.02)
-)))
-
-pure_lever_catalog <- tibble::tibble(
-  spec_name        = c("A-R", "A-F", "A-S", "B-R", "B-F", "C-C"),
-  lever_type       = c("restart", "refine", "sigma_0_2", "restart", "refine", "c_grid"),
-  n_random_subsets = c(50L, 1L, 1L, 50L, 1L, 1L)
-)
-
-# Only compute for specs present in the data
-pure_lever_catalog <- pure_lever_catalog %>%
-  dplyr::filter(.data$spec_name %in% unique(snps_individual$spec_name))
-
-if (nrow(pure_lever_catalog) > 0L) {
-  scaling_curves <- compute_scaling_curves(
-    snps_indiv        = snps_individual,
-    elbo_info         = elbo_info,
-    spec_catalog      = pure_lever_catalog,
-    pip_breaks        = pip_breaks_vec,
-    n_subsample_sizes = c(4L, 8L, 16L, 32L, 64L)
-  )
-  cat("Scaling curves rows:", nrow(scaling_curves), "\n")
+```{r pool-scaling-bins}
+# Pool confusion bins across datasets for each (spec_name, n_ensemble, agg_method, rep).
+# Downstream AUPRC / TPR computation operates on these pooled bins.
+if (!is.null(scaling_bins_raw) && nrow(scaling_bins_raw) > 0L) {
+  scaling_bins_pooled <- scaling_bins_raw %>%
+    dplyr::group_by(
+      spec_name, annotation_r2, n_ensemble, resolution, agg_method, rep, pip_threshold
+    ) %>%
+    dplyr::summarise(
+      n_causal_at_bucket    = sum(n_causal_at_bucket,    na.rm = TRUE),
+      n_noncausal_at_bucket = sum(n_noncausal_at_bucket, na.rm = TRUE),
+      n_datasets            = dplyr::n_distinct(dataset_bundle_id),
+      .groups = "drop"
+    )
+  cat("Pooled scaling bins rows:", nrow(scaling_bins_pooled), "\n")
 } else {
-  scaling_curves <- tibble::tibble()
-  message("No pure-lever specs found in data — scaling_curves is empty.")
-}
-
-interaction_spec_names <- c("A-RF", "A-RS", "A-FS", "C-CS")
-interaction_spec_names <- interaction_spec_names[
-  interaction_spec_names %in% unique(snps_individual$spec_name)
-]
-
-if (length(interaction_spec_names) > 0L) {
-  interaction_scaling <- compute_interaction_scaling(
-    snps_indiv             = snps_individual,
-    elbo_info              = elbo_info,
-    interaction_spec_names = interaction_spec_names,
-    pip_breaks             = pip_breaks_vec
-  )
-  cat("Interaction scaling rows:", nrow(interaction_scaling), "\n")
-} else {
-  interaction_scaling <- tibble::tibble()
-  message("No interaction specs found in data — interaction_scaling is empty.")
+  scaling_bins_pooled <- NULL
 }
 ```
 
 # 7. Export Consolidated Outputs
 
 ```{r export-scaling}
-if (nrow(scaling_curves) > 0L) {
-  readr::write_csv(scaling_curves,
-                   file.path(out_dir, "scaling_curves.csv"))
-}
-if (nrow(interaction_scaling) > 0L) {
-  readr::write_csv(interaction_scaling,
-                   file.path(out_dir, "interaction_scaling.csv"))
+if (!is.null(scaling_bins_pooled) && nrow(scaling_bins_pooled) > 0L) {
+  readr::write_csv(scaling_bins_pooled,
+                   file.path(out_dir, "scaling_bins_pooled.csv"))
+  cat("Wrote scaling_bins_pooled.csv\n")
 }
 ```
 

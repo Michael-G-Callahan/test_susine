@@ -259,8 +259,8 @@ for (s in all_specs) {
 # 3. Build Job Config
 
 ```{r matrix-selection}
-# Smoke test settings — change these to scale up:
-n_matrices_target <- 4L   # number of matrices, M1-stratified
+# Pilot settings: 10 M1-stratified matrices, 2 seeds each = 20 datasets.
+n_matrices_target <- 10L  # number of matrices, M1-stratified
 seeds             <- 1:2  # seeds per matrix
 
 data_matrix_catalog_full <- test_susine:::build_data_matrix_catalog(

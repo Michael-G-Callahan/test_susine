@@ -303,13 +303,57 @@ pool_pip_cal <- function(bins) {
     )
 }
 
+# Replicate-level PIP calibration with SE error bars.
+# Stage 1: per-dataset observed fraction per PIP bin.
+# Stage 2: mean +/- SE across datasets (the independent unit).
+pool_pip_cal_with_se <- function(bins) {
+  per_dataset <- bins %>%
+    dplyr::mutate(pip_bin = floor(.data$pip_threshold / 0.10) * 0.10) %>%
+    dplyr::group_by(dplyr::across(dplyr::any_of(
+      c("spec_name", "agg_method", "pip_bin", "dataset_bundle_id")
+    ))) %>%
+    dplyr::summarise(
+      n_causal    = sum(.data$n_causal_at_bucket,    na.rm = TRUE),
+      n_noncausal = sum(.data$n_noncausal_at_bucket, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    dplyr::mutate(
+      n_total       = .data$n_causal + .data$n_noncausal,
+      observed_frac = dplyr::if_else(
+        .data$n_total > 0L, .data$n_causal / .data$n_total, NA_real_
+      )
+    )
+
+  per_dataset %>%
+    dplyr::group_by(dplyr::across(dplyr::any_of(
+      c("spec_name", "agg_method", "pip_bin")
+    ))) %>%
+    dplyr::summarise(
+      mean_frac       = mean(.data$observed_frac, na.rm = TRUE),
+      se_frac         = sd(.data$observed_frac,   na.rm = TRUE) /
+                          sqrt(sum(!is.na(.data$observed_frac))),
+      n_datasets      = sum(!is.na(.data$observed_frac)),
+      total_causal    = sum(.data$n_causal,    na.rm = TRUE),
+      total_noncausal = sum(.data$n_noncausal, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    dplyr::mutate(
+      total       = .data$total_causal + .data$total_noncausal,
+      pooled_frac = dplyr::if_else(
+        .data$total > 0L, .data$total_causal / .data$total, NA_real_
+      ),
+      ci_lo = pmax(0, .data$mean_frac - 1.96 * .data$se_frac),
+      ci_hi = pmin(1, .data$mean_frac + 1.96 * .data$se_frac)
+    )
+}
+
 # Ensemble aggregation calibration
-pip_cal_data <- pool_pip_cal(
+pip_cal_data <- pool_pip_cal_with_se(
   confusion_bins %>% dplyr::filter(!is.na(agg_method))
 )
 
 # Baseline single-fit calibration (replicated to all agg_method facets)
-baseline_cal_raw <- pool_pip_cal(
+baseline_cal_raw <- pool_pip_cal_with_se(
   confusion_bins %>%
     dplyr::filter(spec_name == "baseline-single", is.na(agg_method))
 )
@@ -319,8 +363,9 @@ if (nrow(pip_cal_data) > 0) {
   baseline_cal <- if (nrow(baseline_cal_raw) > 0) {
     tidyr::crossing(
       baseline_cal_raw %>%
-        dplyr::select(spec_name, pip_bin, total_causal, total_noncausal,
-                      total, observed_frac),
+        dplyr::select(spec_name, pip_bin, mean_frac, se_frac, n_datasets,
+                      total_causal, total_noncausal, total, pooled_frac,
+                      ci_lo, ci_hi),
       tibble::tibble(agg_method = agg_methods)
     )
   } else { tibble::tibble() }
@@ -328,8 +373,10 @@ if (nrow(pip_cal_data) > 0) {
   pip_cal_all <- dplyr::bind_rows(pip_cal_data, baseline_cal) %>%
     dplyr::mutate(is_baseline = spec_name == "baseline-single")
 
-  p_cal <- ggplot(pip_cal_all, aes(x = pip_bin + 0.05, y = observed_frac,
+  p_cal <- ggplot(pip_cal_all, aes(x = pip_bin + 0.05, y = mean_frac,
                                     color = spec_name, linetype = is_baseline)) +
+    geom_errorbar(aes(ymin = ci_lo, ymax = ci_hi),
+                  width = 0.02, linewidth = 0.4, alpha = 0.6) +
     geom_point(size = 2) +
     geom_line() +
     scale_linetype_manual(values = c("FALSE" = "solid", "TRUE" = "dashed"),
@@ -338,7 +385,7 @@ if (nrow(pip_cal_data) > 0) {
     facet_wrap(~agg_method) +
     labs(x = "Mean PIP (bin midpoint)", y = "Observed fraction causal",
          color = "Ensemble Method",
-         title = "PIP Calibration (pooled across datasets)") +
+         title = "PIP Calibration (mean \u00b1 1.96 SE across datasets)") +
     xlim(0, 1) + ylim(0, 1) +
     theme(legend.position = "bottom")
   ggsave(file.path(fig_root, "susie2_plots", "pip_calibration.png"),
@@ -443,48 +490,66 @@ if (exists("tier_avg") && nrow(tier_avg) > 0) {
 
 ## 1c. Estimated Heritability (hg2) Boxplot
 
-```{r fig-1c, fig.width=14, fig.height=6}
-# hg2 from model_metrics, max-ELBO run per ensemble group.
-# truth-warm is split by use_case_id (vanilla / EB / grid) since each reflects
-# a distinct prior specification, not a single model.
-if ("hg2" %in% names(model_metrics)) {
+```{r fig-1c, fig.width=14, fig.height=10}
+# hg2 per aggregation method, from hg2_by_agg.csv produced by the updated harness.
+# Falls back to single-method (max-ELBO only) from model_metrics if the new file
+# is not available (pre-update runs).
+hg2_path <- file.path(consolidated_dir, "hg2_by_agg.csv")
+if (file.exists(hg2_path)) {
+  hg2_dat <- readr::read_csv(hg2_path, show_col_types = FALSE)
+
+  # Derive spec_name via group_key if missing (same pattern as fig-2b, fig-3d)
+  if (!"spec_name" %in% names(hg2_dat) && "group_label" %in% names(hg2_dat)) {
+    spec_map <- model_metrics %>% dplyr::distinct(.data$group_key, .data$spec_name)
+    hg2_dat <- hg2_dat %>%
+      dplyr::mutate(group_key = sub("^model_grid\\|", "", .data$group_label)) %>%
+      dplyr::left_join(spec_map, by = "group_key") %>%
+      dplyr::select(-group_key)
+  }
+
+  if (nrow(hg2_dat) > 0L && "spec_name" %in% names(hg2_dat)) {
+    p_1c <- ggplot(hg2_dat, aes(x = .data$spec_name, y = .data$hg2,
+                                 fill = .data$spec_name)) +
+      geom_boxplot(outlier.size = 0.5, alpha = 0.8) +
+      facet_wrap(~agg_method, ncol = 3) +
+      labs(x = "Ensemble Spec", y = expression(hat(h)[g]^2),
+           title = "Estimated Heritability by Ensemble Spec and Aggregation Method") +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1),
+            legend.position = "none")
+    ggsave(file.path(fig_root, "susie2_plots", "hg2_boxplot.png"),
+           p_1c, width = 14, height = 10)
+    cat("Plot 1c saved (all agg methods).\n")
+  } else {
+    cat("Plot 1c skipped: hg2_by_agg.csv has no usable rows.\n")
+  }
+} else if ("hg2" %in% names(model_metrics)) {
+  # Fallback: max-ELBO only from model_metrics (pre-update runs)
   hg2_data <- if (exists("best_runs") && nrow(best_runs) > 0) {
     model_metrics %>%
       dplyr::filter(.data$filtering == "purity_filtered",
                     !is.na(.data$hg2), !is.na(.data$spec_name)) %>%
       dplyr::semi_join(best_runs, by = "run_id")
   } else {
-    # Fallback: use all purity-filtered runs
     model_metrics %>%
       dplyr::filter(.data$filtering == "purity_filtered",
                     !is.na(.data$hg2), !is.na(.data$spec_name))
   }
-
   if (nrow(hg2_data) > 0) {
-    # Build x-axis label: truth-warm -> use_case_id; all others -> spec_name
-    hg2_data <- hg2_data %>%
-      dplyr::mutate(
-        hg2_label = dplyr::if_else(
-          .data$spec_name == "truth-warm" & "use_case_id" %in% names(.),
-          paste0("truth-warm\n(", .data$use_case_id, ")"),
-          .data$spec_name
-        )
-      )
-
-    p_1c <- ggplot(hg2_data, aes(x = .data$hg2_label, y = .data$hg2,
-                                  fill = .data$hg2_label)) +
+    p_1c <- ggplot(hg2_data, aes(x = .data$spec_name, y = .data$hg2,
+                                  fill = .data$spec_name)) +
       geom_boxplot(outlier.size = 0.5, alpha = 0.8) +
-      labs(x = "Ensemble Method", y = "hg2 (estimated heritability)",
-           title = "Estimated Heritability by Ensemble Method (max-ELBO run per group)") +
+      labs(x = "Ensemble Spec", y = expression(hat(h)[g]^2),
+           title = "Estimated Heritability by Ensemble Spec (max-ELBO fallback)") +
       theme(axis.text.x = element_text(angle = 30, hjust = 1),
             legend.position = "none")
     ggsave(file.path(fig_root, "susie2_plots", "hg2_boxplot.png"),
            p_1c, width = 14, height = 6)
+    cat("Plot 1c saved (max-ELBO fallback — re-run harness for all agg methods).\n")
   } else {
-    cat("Plot 1c skipped: no hg2 data after max-ELBO selection.\n")
+    cat("Plot 1c skipped: no hg2 data after filtering.\n")
   }
 } else {
-  cat("Plot 1c skipped: hg2 column not found in model_metrics.\n")
+  cat("Plot 1c skipped: hg2_by_agg.csv not found and hg2 column absent from model_metrics.\n")
 }
 ```
 
