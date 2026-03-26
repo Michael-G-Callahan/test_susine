@@ -2403,11 +2403,17 @@ compute_hg2_by_agg <- function(pip_list,
       dataset_bundle_id = as.character(dataset_bundle_id),
       use_case_id       = as.character(group_run_row$use_case_id %||% NA_character_),
       group_label       = as.character(
-        group_run_row$group_label %||%
-          paste0("model_grid|", group_run_row$group_key %||% NA_character_)
+        if ("group_label" %in% names(group_run_row)) group_run_row$group_label
+        else paste0("model_grid|", group_run_row$group_key %||% NA_character_)
       ),
-      explore_method    = as.character(group_run_row$explore_method %||% NA_character_),
-      variant_id        = as.character(group_run_row$variant_id %||% NA_character_)
+      explore_method    = as.character(
+        if ("explore_method" %in% names(group_run_row)) group_run_row$explore_method
+        else NA_character_
+      ),
+      variant_id        = as.character(
+        if ("variant_id" %in% names(group_run_row)) group_run_row$variant_id
+        else NA_character_
+      )
     )
 }
 
