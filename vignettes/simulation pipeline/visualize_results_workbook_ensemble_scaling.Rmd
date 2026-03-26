@@ -941,12 +941,7 @@ if (exists("dataset_metrics") && "M1" %in% names(dataset_metrics)) {
     z_avail   <- intersect(z_candidates, names(dataset_metrics))
     z_primary <- if (length(z_avail) > 0L) z_avail[1L] else NA_character_
     if (!is.na(z_primary)) {
-      dm_fm <- dm_scatter %>%
-        dplyr::left_join(
-          dataset_metrics %>%
-            dplyr::select(dataset_bundle_id, dplyr::any_of(z_candidates)),
-          by = "dataset_bundle_id"
-        )
+      dm_fm <- dm_scatter   # dm_scatter already contains all dataset_metrics columns
       if (z_primary %in% names(dm_fm) &&
           sum(!is.na(dm_fm[[z_primary]])) >= 4L) {
         p_3f <- ggplot(dm_fm,
