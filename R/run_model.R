@@ -1736,11 +1736,15 @@ aggregate_use_case_pips <- function(pip_list,
   res
 }
 
-#' Apply cluster-then-weight aggregation from a pre-computed hclust object.
+#' Compute cluster-then-weight representative indices and weights.
+#'
+#' Returns a list with rep_idx (which rows are cluster representatives) and
+#' w_rep (their normalized importance weights). Used by both PIP aggregation
+#' and hg2 aggregation.
 #' @keywords internal
-.cluster_weight_from_hc <- function(hc, threshold, elbo_vec, pips_mat,
-                                    softmax_temperature = 1) {
-  n <- nrow(pips_mat)
+.cluster_weights_from_hc <- function(hc, threshold, elbo_vec,
+                                     n_fits,
+                                     softmax_temperature = 1) {
   clusters <- stats::cutree(hc, h = threshold)
   cl_levels <- sort(unique(clusters))
   rep_idx <- integer(length(cl_levels))
@@ -1749,15 +1753,26 @@ aggregate_use_case_pips <- function(pip_list,
   for (k in seq_along(cl_levels)) {
     cid <- cl_levels[[k]]
     idxs <- which(clusters == cid)
-    freq[k] <- length(idxs) / n
+    freq[k] <- length(idxs) / n_fits
     pick <- idxs[which.max(elbo_vec[idxs])]
     rep_idx[k] <- pick
     elbo_rep[k] <- elbo_vec[pick]
   }
   w_rep <- softmax_weights(elbo_rep, temperature = softmax_temperature) / freq
   w_rep <- w_rep / sum(w_rep)
-  ens <- as.numeric(crossprod(w_rep, pips_mat[rep_idx, , drop = FALSE]))
-  attr(ens, "ess") <- as.numeric(1 / sum(w_rep^2))
+  list(rep_idx = rep_idx, w_rep = w_rep,
+       ess = as.numeric(1 / sum(w_rep^2)))
+}
+
+#' Apply cluster-then-weight aggregation from a pre-computed hclust object.
+#' @keywords internal
+.cluster_weight_from_hc <- function(hc, threshold, elbo_vec, pips_mat,
+                                    softmax_temperature = 1) {
+  cw <- .cluster_weights_from_hc(hc, threshold, elbo_vec,
+                                  n_fits = nrow(pips_mat),
+                                  softmax_temperature = softmax_temperature)
+  ens <- as.numeric(crossprod(cw$w_rep, pips_mat[cw$rep_idx, , drop = FALSE]))
+  attr(ens, "ess") <- cw$ess
   ens
 }
 
@@ -2359,22 +2374,27 @@ compute_hg2_by_agg <- function(pip_list,
   agg_methods <- c("uniform", "max_elbo", "elbo_softmax",
                    "cluster_weight", "cluster_weight_050")
   rows <- lapply(agg_methods, function(am) {
-    w <- switch(am,
-      "uniform"           = rep(1 / K, K),
-      "max_elbo"          = {
-        idx <- which.max(elbo_vec)
-        w2 <- rep(0, K); w2[idx] <- 1; w2
-      },
-      "elbo_softmax"      = softmax_weights(elbo_vec),
-      "cluster_weight"    = if (!is.null(hc))
-                              .cluster_weight_from_hc(hc, 0.15, elbo_vec, pip_mat)
-                            else softmax_weights(elbo_vec),
-      "cluster_weight_050"= if (!is.null(hc))
-                              .cluster_weight_from_hc(hc, 0.50, elbo_vec, pip_mat)
-                            else softmax_weights(elbo_vec)
-    )
-    fy_agg <- as.numeric(crossprod(w, fy_mat))   # length n
-    hg2    <- max(0, min(1, stats::var(fy_agg) / vy))
+    if (am %in% c("cluster_weight", "cluster_weight_050") && !is.null(hc)) {
+      thr <- if (am == "cluster_weight") 0.15 else 0.50
+      cw <- .cluster_weights_from_hc(hc, thr, elbo_vec,
+                                      n_fits = K)
+      fy_agg <- as.numeric(crossprod(cw$w_rep,
+                                      fy_mat[cw$rep_idx, , drop = FALSE]))
+    } else {
+      w <- switch(am,
+        "uniform"           = rep(1 / K, K),
+        "max_elbo"          = {
+          idx <- which.max(elbo_vec)
+          w2 <- rep(0, K); w2[idx] <- 1; w2
+        },
+        "elbo_softmax"      = softmax_weights(elbo_vec),
+        # fallback for cluster methods when hc is NULL
+        "cluster_weight"    = softmax_weights(elbo_vec),
+        "cluster_weight_050"= softmax_weights(elbo_vec)
+      )
+      fy_agg <- as.numeric(crossprod(w, fy_mat))
+    }
+    hg2 <- max(0, min(1, stats::var(fy_agg) / vy))
     tibble::tibble(agg_method = am, hg2 = hg2, n_fits = K)
   })
 
