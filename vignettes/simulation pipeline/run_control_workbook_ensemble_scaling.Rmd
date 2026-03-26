@@ -77,11 +77,12 @@ refine_32 <- list(n_steps = 32L, cs_source = "filtered", purity_threshold = 0.95
 refine_8  <- list(n_steps = 8L,  cs_source = "filtered", purity_threshold = 0.95)
 refine_4  <- list(n_steps = 4L,  cs_source = "filtered", purity_threshold = 0.95)
 refine_3  <- list(n_steps = 3L,  cs_source = "filtered", purity_threshold = 0.95)
+refine_2  <- list(n_steps = 2L,  cs_source = "filtered", purity_threshold = 0.95)
 
 # ── Group A: Baseline SuSiE (no annotations) ──
 spec_A_R <- list(
   name = "A-R",
-  use_case_ids = "susie_vanilla",
+  use_case_ids = "susine_vanilla",
   exploration_methods = "restart",
   exploration_mode = "separate",
   K = 64L,
@@ -90,7 +91,7 @@ spec_A_R <- list(
 
 spec_A_F <- list(
   name = "A-F",
-  use_case_ids = "susie_vanilla",
+  use_case_ids = "susine_vanilla",
   exploration_methods = "refine",
   exploration_mode = "separate",
   K = 32L,
@@ -99,7 +100,7 @@ spec_A_F <- list(
 
 spec_A_S <- list(
   name = "A-S",
-  use_case_ids = "susie_vanilla",
+  use_case_ids = "susine_vanilla",
   exploration_methods = "sigma_0_2_grid",
   exploration_mode = "separate",
   K = 64L,
@@ -108,17 +109,17 @@ spec_A_S <- list(
 
 spec_A_RF <- list(
   name = "A-RF",
-  use_case_ids = "susie_vanilla",
+  use_case_ids = "susine_vanilla",
   exploration_methods = c("restart", "refine"),
   exploration_mode = "intersect",
   K = 64L,
   restart_settings = restart_8,
-  refine_settings = refine_8
+  refine_settings = refine_4   # 8 restarts × 4 refine steps × 2 fits/step ≈ 64 fits
 )
 
 spec_A_RS <- list(
   name = "A-RS",
-  use_case_ids = "susie_vanilla",
+  use_case_ids = "susine_vanilla",
   exploration_methods = c("restart", "sigma_0_2_grid"),
   exploration_mode = "intersect",
   K = 64L,
@@ -128,22 +129,22 @@ spec_A_RS <- list(
 
 spec_A_FS <- list(
   name = "A-FS",
-  use_case_ids = "susie_vanilla",
+  use_case_ids = "susine_vanilla",
   exploration_methods = c("refine", "sigma_0_2_grid"),
   exploration_mode = "intersect",
   K = 64L,
-  refine_settings = refine_8,
+  refine_settings = refine_4,   # 8 sigma × 4 refine steps × 2 fits/step ≈ 64 fits
   sigma_0_2_grid_values = sigma_grid_8
 )
 
 spec_A_RFS <- list(
   name = "A-RFS",
-  use_case_ids = "susie_vanilla",
+  use_case_ids = "susine_vanilla",
   exploration_methods = c("restart", "refine", "sigma_0_2_grid"),
   exploration_mode = "intersect",
   K = 64L,
   restart_settings = restart_4,
-  refine_settings = refine_4,
+  refine_settings = refine_2,   # 4 restarts × 4 sigma × 2 refine steps × 2 fits/step = 64 fits
   sigma_0_2_grid_values = sigma_grid_4
 )
 
@@ -173,7 +174,7 @@ spec_B_RF <- list(
   exploration_mode = "intersect",
   K = 64L,
   restart_settings = restart_8,
-  refine_settings = refine_8
+  refine_settings = refine_4   # 8 restarts × 4 refine steps × 2 fits/step ≈ 64 fits
 )
 
 # ── Group C: Grid SuSiNE (annotations, no EB) ──
@@ -215,14 +216,25 @@ spec_C_CFR <- list(
   exploration_mode = "intersect",
   K = 64L,
   c_grid_values = c_grid_4,
-  refine_settings = refine_4,
+  refine_settings = refine_2,   # 4 c × 4 restart × 2 refine steps × 2 fits/step = 64 fits
   restart_settings = restart_4
+)
+
+spec_C_CF <- list(
+  name = "C-CF",
+  use_case_ids = "susine_functional_mu",
+  exploration_methods = c("c_grid", "refine"),
+  exploration_mode = "intersect",
+  K = 64L,
+  c_grid_values = c_grid_8,
+  refine_settings = refine_4    # 8 c × 4 refine steps × 2 fits/step = 64 fits
+  # sigma fixed to 0.2 via global sigma_0_2_scalars; no restart axis
 )
 
 # ── Standalone single-fit baselines ──
 spec_baseline_single <- list(
   name = "baseline-single",
-  use_case_ids = c("susie_vanilla", "susine_eb_clamped_scale_var_nonneg",
+  use_case_ids = c("susine_vanilla", "susine_eb_clamped_scale_var_nonneg",
                    "susine_functional_mu"),
   exploration_methods = "single",
   exploration_mode = "separate",
@@ -233,7 +245,7 @@ all_specs <- list(
   spec_A_R, spec_A_F, spec_A_S,
   spec_A_RF, spec_A_RS, spec_A_FS, spec_A_RFS,
   spec_B_R, spec_B_F, spec_B_RF,
-  spec_C_C, spec_C_CS, spec_C_CSFR, spec_C_CFR,
+  spec_C_C, spec_C_CS, spec_C_CSFR, spec_C_CFR, spec_C_CF,
   spec_baseline_single
 )
 
@@ -246,16 +258,69 @@ for (s in all_specs) {
 
 # 3. Build Job Config
 
-```{r build-config}
-# Data matrix catalog: all 150 loci
-data_matrix_catalog <- test_susine:::build_data_matrix_catalog(
+```{r matrix-selection}
+# Smoke test settings — change these to scale up:
+n_matrices_target <- 4L   # number of matrices, M1-stratified
+seeds             <- 1:2  # seeds per matrix
+
+data_matrix_catalog_full <- test_susine:::build_data_matrix_catalog(
   requested_scenarios = "scenario_1",
   repo_root = here(),
   summary_path = here(
     "data", "sampled_simulated_genotypes", "scenario_sampling_summary.csv"
   )
 )
-cat("Available genotype matrices:", nrow(data_matrix_catalog), "\n")
+cat("Total available genotype matrices:", nrow(data_matrix_catalog_full), "\n")
+
+# M1-stratified selection: sort by M1, pick evenly-spaced matrices
+m1_summary_path <- here(
+  "data", "sampled_simulated_genotypes", "scenario_sampling_summary_with_m1.csv"
+)
+if (file.exists(m1_summary_path)) {
+  catalog_with_m1 <- readr::read_csv(m1_summary_path, show_col_types = FALSE)
+} else {
+  m1_tbl <- test_susine::build_x_metrics_table(
+    matrix_paths_df = data_matrix_catalog_full %>%
+      dplyr::select(matrix_id, matrix_path),
+    base_dir = here()
+  ) %>%
+    dplyr::select(matrix_id, M1)
+  catalog_with_m1 <- data_matrix_catalog_full %>%
+    dplyr::left_join(m1_tbl, by = "matrix_id")
+  readr::write_csv(catalog_with_m1, m1_summary_path)
+}
+
+# Recover matrix_id if the cached CSV omitted it (handles gene / dataset_label variants)
+if (!"matrix_id" %in% names(catalog_with_m1)) {
+  if ("gene" %in% names(catalog_with_m1)) {
+    catalog_with_m1 <- dplyr::rename(catalog_with_m1, dataset_label = gene)
+  }
+  join_col <- intersect(c("dataset_label", "matrix_path"),
+                        names(catalog_with_m1))[[1L]]
+  catalog_with_m1 <- catalog_with_m1 %>%
+    dplyr::left_join(
+      data_matrix_catalog_full %>%
+        dplyr::select(matrix_id, dplyr::all_of(join_col)),
+      by = join_col
+    )
+}
+
+catalog_with_m1 <- catalog_with_m1 %>%
+  dplyr::filter(!is.na(M1)) %>%
+  dplyr::arrange(M1)
+
+n_target <- min(n_matrices_target, nrow(catalog_with_m1))
+idx      <- unique(round(seq(1, nrow(catalog_with_m1), length.out = n_target)))
+selected <- catalog_with_m1[idx, , drop = FALSE]
+
+data_matrix_catalog <- data_matrix_catalog_full %>%
+  dplyr::semi_join(dplyr::select(selected, matrix_id), by = "matrix_id")
+
+cat("Matrices selected (M1-stratified):", nrow(data_matrix_catalog), "\n")
+cat("Seeds:", paste(seeds, collapse = ", "), "\n")
+```
+
+```{r build-config}
 
 cfg <- make_job_config(
   job_name = "ensemble_scaling_v1",
@@ -267,7 +332,7 @@ cfg <- make_job_config(
   grid_mode = "full",
 
   # Use case IDs (union across all specs — overridden per spec)
-  use_case_ids = c("susie_vanilla",
+  use_case_ids = c("susine_vanilla",
                    "susine_eb_clamped_scale_var_nonneg",
                    "susine_functional_mu"),
 
@@ -279,7 +344,7 @@ cfg <- make_job_config(
   y_noise_grid = NA_real_,
   p_star_grid = NA_integer_,
   architecture_grid = "susie2_oligogenic",
-  seeds = 1:3,
+  seeds = seeds,
 
   # Annotation quality
   prior_quality = tibble::tibble(
@@ -440,8 +505,8 @@ arts <- write_job_artifacts(
   job_config = cfg,
   run_task_script = here("inst", "scripts", "run_task.R")
 )
-cat("Job config written to:", arts$job_config_path, "\n")
-cat("SLURM script:", arts$slurm_script_path, "\n")
+cat("Job config written to:", arts$job_config, "\n")
+cat("SLURM script:", arts$slurm_script, "\n")
 ```
 
 # 6. Submit

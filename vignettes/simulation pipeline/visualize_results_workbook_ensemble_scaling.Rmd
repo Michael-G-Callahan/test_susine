@@ -10,8 +10,8 @@ editor_options:
     wrap: 72
 ---
 
-All figures from `refs/ensemble_scaling_experiment_plan.md`.
-Organized into 4 categories with subfolder output.
+Reads consolidated outputs from the collect workbook. Generates all
+4 figure categories from `refs/ensemble_scaling_experiment_plan.md`.
 
 ```{r setup, message=FALSE}
 here::i_am("vignettes/simulation pipeline/visualize_results_workbook_ensemble_scaling.Rmd")
@@ -31,421 +31,1071 @@ library(knitr)
 theme_set(theme_bw(base_size = 12))
 ```
 
-# 0. Load Data
+# 0. Load Consolidated Data
 
-```{r load-data}
-job_name <- "ensemble_scaling_v1"
-job_id <- "XXXXXX"  # TODO: update after SLURM run
+```{r load}
+# Point to job-level consolidated output from collect workbook
+job_dir <- here("output", "slurm_output", "local_test")
+consolidated_dir <- file.path(job_dir, "consolidated")
 
-agg_dir <- here("output", "run_history", job_name, job_id, "aggregate")
-fig_root <- file.path(agg_dir, "figures")
+auprc_agg <- readr::read_csv(
+  file.path(consolidated_dir, "auprc_aggregated.csv"),
+  show_col_types = FALSE
+)
+auprc_individual <- readr::read_csv(
+  file.path(consolidated_dir, "auprc_individual.csv"),
+  show_col_types = FALSE
+)
+model_metrics <- readr::read_csv(
+  file.path(consolidated_dir, "model_metrics_full.csv"),
+  show_col_types = FALSE
+)
+confusion_bins <- readr::read_csv(
+  file.path(consolidated_dir, "confusion_bins_full.csv"),
+  show_col_types = FALSE
+)
 
-# Create figure subdirectories
+tier_cs_path <- file.path(consolidated_dir, "tier_cs_metrics_full.csv")
+tier_cs_metrics_full <- if (file.exists(tier_cs_path)) {
+  readr::read_csv(tier_cs_path, show_col_types = FALSE)
+} else {
+  message("tier_cs_metrics_full.csv not found — plots 1a/1b will be skipped.")
+  NULL
+}
+
+# Figure output directories
+fig_root <- file.path(job_dir, "figures")
 fig_dirs <- c("susie2_plots", "ensemble_performance",
               "dataset_difficulty", "ensemble_scaling")
 for (d in fig_dirs) {
   dir.create(file.path(fig_root, d), recursive = TRUE, showWarnings = FALSE)
 }
 
-# Load consolidated outputs
-model_metrics <- readr::read_csv(
-  file.path(agg_dir, "model_metrics_with_oracle.csv"),
+cat("AUPRC aggregated rows:", nrow(auprc_agg), "\n")
+cat("AUPRC individual rows:", nrow(auprc_individual), "\n")
+cat("Figure root:", fig_root, "\n")
+```
+
+```{r baselines}
+# Load all pooled AUPRC tables
+auprc_pooled_agg <- readr::read_csv(
+  file.path(consolidated_dir, "auprc_pooled_aggregated.csv"),
+  show_col_types = FALSE
+)
+auprc_pooled_agg_by_r2 <- readr::read_csv(
+  file.path(consolidated_dir, "auprc_pooled_agg_by_r2.csv"),
+  show_col_types = FALSE
+)
+auprc_pooled_individual_overall <- readr::read_csv(
+  file.path(consolidated_dir, "auprc_pooled_individual_overall.csv"),
+  show_col_types = FALSE
+)
+auprc_pooled_individual <- readr::read_csv(
+  file.path(consolidated_dir, "auprc_pooled_individual.csv"),
   show_col_types = FALSE
 )
 
-# Baseline reference line: single-fit susine at sigma_0_2 = 0.2
-baseline_auprc <- model_metrics %>%
-  dplyr::filter(
-    spec_name == "baseline-single",
-    use_case_id == "susine_vanilla",
-    !isTRUE(is_agg)
-  ) %>%
-  dplyr::summarise(median_auprc = median(auprc, na.rm = TRUE)) %>%
-  dplyr::pull(median_auprc)
+# Baseline reference: single-fit susine_vanilla, pooled across all r2
+baseline_auprc <- auprc_pooled_individual_overall %>%
+  dplyr::filter(spec_name == "baseline-single",
+                use_case_id == "susine_vanilla") %>%
+  dplyr::pull(AUPRC)
 
-# Truth-warm baselines
-truth_warm <- model_metrics %>%
-  dplyr::filter(spec_name == "truth-warm")
+cat("Baseline pooled AUPRC:", round(baseline_auprc, 4), "\n")
 
-# Scaling curves (from collect workbook)
-scaling_path <- file.path(agg_dir, "scaling_curves.csv")
-if (file.exists(scaling_path)) {
-  scaling_curves <- readr::read_csv(scaling_path, show_col_types = FALSE)
-} else {
-  scaling_curves <- NULL
-}
+# Truth-warm for OVERALL plot: pooled across all r2, no r2 in label
+truth_warm_overall <- auprc_pooled_individual_overall %>%
+  dplyr::filter(spec_name == "truth-warm") %>%
+  dplyr::select(use_case_id, AUPRC) %>%
+  dplyr::mutate(
+    label = dplyr::case_when(
+      use_case_id == "susine_vanilla" ~ "truth-warm vanilla",
+      use_case_id == "susine_eb_clamped_scale_var_nonneg" ~ "truth-warm EB",
+      use_case_id == "susine_functional_mu" ~ "truth-warm grid (c=0.5)",
+      TRUE ~ use_case_id
+    ),
+    annotation_r2 = NA_real_
+  )
 
-# Dataset metrics
-dm_path <- file.path(agg_dir, "dataset_metrics.csv")
-if (file.exists(dm_path)) {
-  dataset_metrics <- readr::read_csv(dm_path, show_col_types = FALSE)
-} else {
-  dataset_metrics <- NULL
-}
+# Truth-warm for PER-R2 plots: one row per use_case x annotation_r2, r2 in label
+truth_warm_by_r2 <- auprc_pooled_individual %>%
+  dplyr::filter(spec_name == "truth-warm") %>%
+  dplyr::select(use_case_id, annotation_r2, AUPRC) %>%
+  dplyr::mutate(
+    label = dplyr::case_when(
+      use_case_id == "susine_vanilla" ~ "truth-warm vanilla",
+      use_case_id == "susine_eb_clamped_scale_var_nonneg" ~
+        paste0("truth-warm EB (r\u00b2=", annotation_r2, ")"),
+      use_case_id == "susine_functional_mu" ~
+        paste0("truth-warm grid (c=0.5, r\u00b2=", annotation_r2, ")"),
+      TRUE ~ use_case_id
+    )
+  )
+
+cat("Truth-warm overall:\n"); print(truth_warm_overall)
+cat("Truth-warm by r2:\n"); print(truth_warm_by_r2)
+
+# Load TPR@0.05 pooled tables
+tpr05_pooled_agg <- readr::read_csv(
+  file.path(consolidated_dir, "tpr05_pooled_aggregated.csv"),
+  show_col_types = FALSE
+)
+tpr05_pooled_agg_by_r2 <- readr::read_csv(
+  file.path(consolidated_dir, "tpr05_pooled_agg_by_r2.csv"),
+  show_col_types = FALSE
+)
+tpr05_pooled_individual_overall <- readr::read_csv(
+  file.path(consolidated_dir, "tpr05_pooled_individual_overall.csv"),
+  show_col_types = FALSE
+)
+tpr05_pooled_individual <- readr::read_csv(
+  file.path(consolidated_dir, "tpr05_pooled_individual.csv"),
+  show_col_types = FALSE
+)
+
+# Baseline TPR@0.05 (single-fit susine_vanilla, pooled across all r2)
+baseline_tpr05 <- tpr05_pooled_individual_overall %>%
+  dplyr::filter(spec_name == "baseline-single",
+                use_case_id == "susine_vanilla") %>%
+  dplyr::pull(tpr_fpr05)
+cat("Baseline pooled TPR@0.05:", round(baseline_tpr05, 4), "\n")
+
+# Truth-warm TPR@0.05 for OVERALL plot
+truth_warm_tpr05_overall <- tpr05_pooled_individual_overall %>%
+  dplyr::filter(spec_name == "truth-warm") %>%
+  dplyr::select(use_case_id, tpr_fpr05) %>%
+  dplyr::mutate(
+    label = dplyr::case_when(
+      use_case_id == "susine_vanilla" ~ "truth-warm vanilla",
+      use_case_id == "susine_eb_clamped_scale_var_nonneg" ~ "truth-warm EB",
+      use_case_id == "susine_functional_mu" ~ "truth-warm grid (c=0.5)",
+      TRUE ~ use_case_id
+    ),
+    annotation_r2 = NA_real_
+  )
+
+# Truth-warm TPR@0.05 for PER-R2 plots
+truth_warm_tpr05_by_r2 <- tpr05_pooled_individual %>%
+  dplyr::filter(spec_name == "truth-warm") %>%
+  dplyr::select(use_case_id, annotation_r2, tpr_fpr05) %>%
+  dplyr::mutate(
+    label = dplyr::case_when(
+      use_case_id == "susine_vanilla" ~ "truth-warm vanilla",
+      use_case_id == "susine_eb_clamped_scale_var_nonneg" ~
+        paste0("truth-warm EB (r\u00b2=", annotation_r2, ")"),
+      use_case_id == "susine_functional_mu" ~
+        paste0("truth-warm grid (c=0.5, r\u00b2=", annotation_r2, ")"),
+      TRUE ~ use_case_id
+    )
+  )
 ```
 
 # 1. SuSiE2-Style Plots (Category 1)
 
-Individual model metrics using max-ELBO model selection per ensemble.
-
-```{r cat1-setup}
-# For Category 1 plots: select single best model per ensemble by max ELBO
-max_elbo_models <- model_metrics %>%
-  dplyr::filter(agg_method == "max_elbo" | is.na(agg_method), !isTRUE(is_agg))
-```
-
-## 1a. CS Power vs top-n-as-causal
-
-```{r fig-1a, fig.width=8, fig.height=5}
-# TODO: implement sweep over top_n grading thresholds.
-# For each ensemble, select max-ELBO model, compute CS power at each n.
-# Color by ensemble method (spec_name), full ensembles only.
-
-# Placeholder structure:
-# ggplot(cs_power_data, aes(x = top_n, y = cs_power, color = spec_name)) +
-#   geom_line() +
-#   labs(x = "Top n variants treated as causal", y = "CS Power") +
-#   theme(legend.position = "bottom")
-# ggsave(file.path(fig_root, "susie2_plots", "cs_power_vs_topn.png"),
-#        width = 8, height = 5)
-```
-
-## 1b. CS FDR vs top-n-as-causal
-
-```{r fig-1b, fig.width=8, fig.height=5}
-# Same structure as 1a but Y = CS FDR
-# ggsave(file.path(fig_root, "susie2_plots", "cs_fdr_vs_topn.png"), ...)
-```
-
-## 1c. Pearson R-squared (effect size prediction)
-
-```{r fig-1c, fig.width=8, fig.height=5}
-# Y: R-squared between estimated and true effect sizes
-# Color by ensemble method, full ensembles only
-# ggsave(file.path(fig_root, "susie2_plots", "effect_r2.png"), ...)
-```
+These use individual model metrics (CS properties, effect sizes).
+For ensembles, select single best model by max ELBO.
 
 ## 1d. TPR vs FPR (FPR 0 to 0.1)
 
-```{r fig-1d, fig.width=12, fig.height=8}
-# Uses PIPs -> all aggregation methods (including oracle)
-# Facet by aggregation method, color by ensemble method
-# Grade using top 8 as causal
-# ggsave(file.path(fig_root, "susie2_plots", "tpr_fpr_curve.png"), ...)
+```{r fig-1d, fig.width=14, fig.height=8}
+# Pooled TPR/FPR: combine all datasets' bins, one curve per (spec, agg_method).
+# No per-dataset averaging — same pooling approach as AUPRC.
+compute_tpr_fpr_pooled <- function(bins, group_vars) {
+  bins %>%
+    dplyr::group_by(dplyr::across(dplyr::all_of(group_vars))) %>%
+    dplyr::arrange(dplyr::desc(pip_threshold), .by_group = TRUE) %>%
+    dplyr::mutate(
+      cum_tp  = cumsum(n_causal_at_bucket),
+      cum_fp  = cumsum(n_noncausal_at_bucket),
+      total_p = sum(n_causal_at_bucket),
+      total_n = sum(n_noncausal_at_bucket)
+    ) %>%
+    dplyr::filter(total_p > 0, total_n > 0) %>%
+    dplyr::mutate(tpr = cum_tp / total_p, fpr = cum_fp / total_n) %>%
+    dplyr::filter(fpr <= 0.10) %>%
+    dplyr::ungroup()
+}
+
+# Ensemble aggregation curves
+tpr_fpr_agg <- compute_tpr_fpr_pooled(
+  confusion_bins %>% dplyr::filter(!is.na(agg_method)),
+  group_vars = c("spec_name", "agg_method")
+)
+
+# Baseline single-fit curve (no agg_method) — replicated to all facets
+baseline_roc_raw <- compute_tpr_fpr_pooled(
+  confusion_bins %>%
+    dplyr::filter(spec_name == "baseline-single", is.na(agg_method)),
+  group_vars = "spec_name"
+)
+
+if (nrow(tpr_fpr_agg) > 0) {
+  agg_methods <- sort(unique(tpr_fpr_agg$agg_method))
+  baseline_roc <- if (nrow(baseline_roc_raw) > 0) {
+    tidyr::crossing(
+      baseline_roc_raw %>% dplyr::select(spec_name, fpr, tpr, pip_threshold),
+      tibble::tibble(agg_method = agg_methods)
+    )
+  } else { tibble::tibble() }
+
+  tpr_fpr_plot <- dplyr::bind_rows(tpr_fpr_agg, baseline_roc) %>%
+    dplyr::mutate(is_baseline = spec_name == "baseline-single")
+
+  p_roc <- ggplot(tpr_fpr_plot, aes(x = fpr, y = tpr, color = spec_name,
+                                     linetype = is_baseline)) +
+    geom_line(linewidth = 0.8) +
+    scale_linetype_manual(values = c("FALSE" = "solid", "TRUE" = "dashed"),
+                          guide = "none") +
+    facet_wrap(~agg_method) +
+    labs(x = "FPR", y = "TPR", color = "Ensemble Method",
+         title = "TPR vs FPR (FPR 0-0.1, pooled across datasets)") +
+    theme(legend.position = "bottom")
+  ggsave(file.path(fig_root, "susie2_plots", "tpr_fpr_curve.png"),
+         p_roc, width = 14, height = 8)
+}
 ```
 
 ## 1e. PIP Calibration
 
-```{r fig-1e, fig.width=12, fig.height=8}
-# Bin PIPs in 0.10-width bins (10 bins)
-# Plot observed fraction causal vs mean PIP per bin
-# Facet by aggregation method, color by ensemble method
-# ggsave(file.path(fig_root, "susie2_plots", "pip_calibration.png"), ...)
+```{r fig-1e, fig.width=14, fig.height=8}
+# Pool all datasets' bins before binning — same pooling approach as AUPRC.
+# Bin PIPs in 0.10-width bins, compute observed fraction causal per bin.
+pool_pip_cal <- function(bins) {
+  bins %>%
+    dplyr::mutate(pip_bin = floor(pip_threshold / 0.10) * 0.10) %>%
+    dplyr::group_by(dplyr::across(dplyr::any_of(
+      c("spec_name", "agg_method", "pip_bin")
+    ))) %>%
+    dplyr::summarise(
+      total_causal   = sum(n_causal_at_bucket,    na.rm = TRUE),
+      total_noncausal = sum(n_noncausal_at_bucket, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    dplyr::mutate(
+      total         = total_causal + total_noncausal,
+      observed_frac = dplyr::if_else(total > 0, total_causal / total, NA_real_)
+    )
+}
+
+# Ensemble aggregation calibration
+pip_cal_data <- pool_pip_cal(
+  confusion_bins %>% dplyr::filter(!is.na(agg_method))
+)
+
+# Baseline single-fit calibration (replicated to all agg_method facets)
+baseline_cal_raw <- pool_pip_cal(
+  confusion_bins %>%
+    dplyr::filter(spec_name == "baseline-single", is.na(agg_method))
+)
+
+if (nrow(pip_cal_data) > 0) {
+  agg_methods <- sort(unique(pip_cal_data$agg_method))
+  baseline_cal <- if (nrow(baseline_cal_raw) > 0) {
+    tidyr::crossing(
+      baseline_cal_raw %>%
+        dplyr::select(spec_name, pip_bin, total_causal, total_noncausal,
+                      total, observed_frac),
+      tibble::tibble(agg_method = agg_methods)
+    )
+  } else { tibble::tibble() }
+
+  pip_cal_all <- dplyr::bind_rows(pip_cal_data, baseline_cal) %>%
+    dplyr::mutate(is_baseline = spec_name == "baseline-single")
+
+  p_cal <- ggplot(pip_cal_all, aes(x = pip_bin + 0.05, y = observed_frac,
+                                    color = spec_name, linetype = is_baseline)) +
+    geom_point(size = 2) +
+    geom_line() +
+    scale_linetype_manual(values = c("FALSE" = "solid", "TRUE" = "dashed"),
+                          guide = "none") +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey50") +
+    facet_wrap(~agg_method) +
+    labs(x = "Mean PIP (bin midpoint)", y = "Observed fraction causal",
+         color = "Ensemble Method",
+         title = "PIP Calibration (pooled across datasets)") +
+    xlim(0, 1) + ylim(0, 1) +
+    theme(legend.position = "bottom")
+  ggsave(file.path(fig_root, "susie2_plots", "pip_calibration.png"),
+         p_cal, width = 14, height = 8)
+}
+```
+
+## 1a. CS Power vs top-n-as-causal
+
+```{r fig-1a, fig.width=12, fig.height=6}
+# Requires tier_cs_metrics_full.csv from collect workbook.
+# Select max-ELBO run per ensemble group (spec_name x dataset_bundle_id x group_key),
+# then average cs_power across datasets per (spec_name, n_top).
+if (!is.null(tier_cs_metrics_full) && nrow(tier_cs_metrics_full) > 0) {
+
+  # Max-ELBO run per ensemble group from purity-filtered model metrics
+  best_runs <- model_metrics %>%
+    dplyr::filter(.data$filtering == "purity_filtered",
+                  !is.na(.data$elbo_final),
+                  !is.na(.data$spec_name)) %>%
+    dplyr::group_by(.data$spec_name, .data$dataset_bundle_id, .data$group_key) %>%
+    dplyr::slice_max(.data$elbo_final, n = 1, with_ties = FALSE) %>%
+    dplyr::ungroup() %>%
+    dplyr::select(.data$run_id, .data$spec_name, .data$dataset_bundle_id,
+                  .data$group_key)
+
+  # Tier CS metrics for those runs only (individual model fits: is.na(agg_method))
+  tier_best <- tier_cs_metrics_full %>%
+    dplyr::filter(.data$filtering == "purity_filtered",
+                  is.na(.data$agg_method)) %>%
+    dplyr::semi_join(best_runs, by = "run_id")
+
+  # Pool counts across datasets per (spec_name, n_top), then derive overall rates.
+  # cs_power: sum(n_causal_covered) / sum(n_causal_total)  [overall, not mean]
+  # cs_fdr:   sum(n_false_cs)       / sum(n_cs_total)      [overall, not mean]
+  tier_avg <- tier_best %>%
+    dplyr::group_by(.data$spec_name, .data$n_top) %>%
+    dplyr::summarise(
+      sum_causal_covered = sum(.data$n_causal_covered, na.rm = TRUE),
+      sum_causal_total   = sum(.data$n_causal_total,   na.rm = TRUE),
+      sum_false_cs       = sum(.data$n_false_cs,       na.rm = TRUE),
+      sum_cs_total       = sum(.data$n_cs_total,       na.rm = TRUE),
+      n_datasets         = dplyr::n_distinct(.data$dataset_bundle_id),
+      .groups = "drop"
+    ) %>%
+    dplyr::mutate(
+      cs_power = dplyr::if_else(.data$sum_causal_total > 0,
+                                .data$sum_causal_covered / .data$sum_causal_total,
+                                NA_real_),
+      cs_fdr   = dplyr::if_else(.data$sum_cs_total > 0,
+                                .data$sum_false_cs / .data$sum_cs_total,
+                                NA_real_)
+    )
+
+  if (nrow(tier_avg) > 0) {
+    p_1a <- ggplot(tier_avg, aes(x = factor(.data$n_top), y = .data$cs_power,
+                                  color = .data$spec_name, group = .data$spec_name,
+                                  linetype = .data$spec_name == "baseline-single")) +
+      geom_point(size = 2) +
+      geom_line() +
+      scale_linetype_manual(values = c("FALSE" = "solid", "TRUE" = "dashed"),
+                            guide = "none") +
+      labs(x = "Top-N treated as causal", y = "CS Power",
+           color = "Ensemble Method",
+           title = "CS Power vs Top-N (max-ELBO run per ensemble, pooled across datasets)") +
+      theme(legend.position = "bottom")
+    ggsave(file.path(fig_root, "susie2_plots", "cs_power_vs_ntop.png"),
+           p_1a, width = 12, height = 6)
+  } else {
+    cat("No tier CS data available after max-ELBO selection.\n")
+  }
+} else {
+  cat("Plot 1a skipped: tier_cs_metrics_full.csv not available.\n")
+}
+```
+
+## 1b. CS FDR vs top-n-as-causal
+
+```{r fig-1b, fig.width=12, fig.height=6}
+if (exists("tier_avg") && nrow(tier_avg) > 0) {
+  p_1b <- ggplot(tier_avg, aes(x = factor(.data$n_top), y = .data$cs_fdr,
+                                color = .data$spec_name, group = .data$spec_name,
+                                linetype = .data$spec_name == "baseline-single")) +
+    geom_point(size = 2) +
+    geom_line() +
+    scale_linetype_manual(values = c("FALSE" = "solid", "TRUE" = "dashed"),
+                          guide = "none") +
+    geom_hline(yintercept = 0.05, linetype = "dashed", color = "red",
+               linewidth = 0.8) +
+    annotate("text", x = 1, y = 0.05, label = "FDR = 0.05",
+             vjust = -0.5, hjust = 0, color = "red", size = 3) +
+    labs(x = "Top-N treated as causal", y = "CS FDR",
+         color = "Ensemble Method",
+         title = "CS FDR vs Top-N (max-ELBO run per ensemble, pooled across datasets)") +
+    theme(legend.position = "bottom")
+  ggsave(file.path(fig_root, "susie2_plots", "cs_fdr_vs_ntop.png"),
+         p_1b, width = 12, height = 6)
+} else {
+  cat("Plot 1b skipped: tier_avg not available.\n")
+}
+```
+
+## 1c. Estimated Heritability (hg2) Boxplot
+
+```{r fig-1c, fig.width=14, fig.height=6}
+# hg2 from model_metrics, max-ELBO run per ensemble group.
+# truth-warm is split by use_case_id (vanilla / EB / grid) since each reflects
+# a distinct prior specification, not a single model.
+if ("hg2" %in% names(model_metrics)) {
+  hg2_data <- if (exists("best_runs") && nrow(best_runs) > 0) {
+    model_metrics %>%
+      dplyr::filter(.data$filtering == "purity_filtered",
+                    !is.na(.data$hg2), !is.na(.data$spec_name)) %>%
+      dplyr::semi_join(best_runs, by = "run_id")
+  } else {
+    # Fallback: use all purity-filtered runs
+    model_metrics %>%
+      dplyr::filter(.data$filtering == "purity_filtered",
+                    !is.na(.data$hg2), !is.na(.data$spec_name))
+  }
+
+  if (nrow(hg2_data) > 0) {
+    # Build x-axis label: truth-warm -> use_case_id; all others -> spec_name
+    hg2_data <- hg2_data %>%
+      dplyr::mutate(
+        hg2_label = dplyr::if_else(
+          .data$spec_name == "truth-warm" & "use_case_id" %in% names(.),
+          paste0("truth-warm\n(", .data$use_case_id, ")"),
+          .data$spec_name
+        )
+      )
+
+    p_1c <- ggplot(hg2_data, aes(x = .data$hg2_label, y = .data$hg2,
+                                  fill = .data$hg2_label)) +
+      geom_boxplot(outlier.size = 0.5, alpha = 0.8) +
+      labs(x = "Ensemble Method", y = "hg2 (estimated heritability)",
+           title = "Estimated Heritability by Ensemble Method (max-ELBO run per group)") +
+      theme(axis.text.x = element_text(angle = 30, hjust = 1),
+            legend.position = "none")
+    ggsave(file.path(fig_root, "susie2_plots", "hg2_boxplot.png"),
+           p_1c, width = 14, height = 6)
+  } else {
+    cat("Plot 1c skipped: no hg2 data after max-ELBO selection.\n")
+  }
+} else {
+  cat("Plot 1c skipped: hg2 column not found in model_metrics.\n")
+}
 ```
 
 # 2. Ensemble Performance Plots (Category 2)
 
-PIP-based metrics, all aggregation methods.
-
 ## 2a. Precision-Recall Curves
 
-```{r fig-2a, fig.width=12, fig.height=8}
-# Grade using top 8 as causal
-# Facet by aggregation method (including oracle)
-# Color by ensemble method (spec_name)
-# ggsave(file.path(fig_root, "ensemble_performance", "pr_curves.png"), ...)
+PR curves pooled across all datasets (trapezoidal). Color = ensemble spec,
+facet = aggregation method. Grading uses the architecture's causal SNPs as
+stored in the flush confusion bins (all 23 for `susie2_oligogenic`; the 15
+tiny polygenic effects inflate N_positives slightly vs strict top-8 grading,
+but the relative ranking across methods is unaffected).
+
+```{r fig-2a-helper}
+# Build a pooled PR-curve tibble from confusion bins grouped by group_vars.
+# Returns tibble with group_vars + recall, precision columns.
+build_pr_curves <- function(bins, group_vars) {
+  bins %>%
+    dplyr::filter(!is.na(.data$agg_method)) %>%
+    dplyr::group_by(dplyr::across(dplyr::all_of(group_vars))) %>%
+    dplyr::arrange(dplyr::desc(.data$pip_threshold), .by_group = TRUE) %>%
+    dplyr::mutate(
+      cum_tp  = cumsum(.data$n_causal_at_bucket),
+      cum_fp  = cumsum(.data$n_noncausal_at_bucket),
+      total_p = sum(.data$n_causal_at_bucket)
+    ) %>%
+    dplyr::filter(.data$total_p > 0L, (.data$cum_tp + .data$cum_fp) > 0L) %>%
+    dplyr::mutate(
+      recall    = .data$cum_tp / .data$total_p,
+      precision = .data$cum_tp / (.data$cum_tp + .data$cum_fp)
+    ) %>%
+    dplyr::ungroup() %>%
+    dplyr::select(dplyr::all_of(group_vars), recall, precision)
+}
+```
+
+```{r fig-2a, fig.width=14, fig.height=6}
+pr_group_vars <- c("spec_name", "agg_method")
+pr_curves_overall <- build_pr_curves(confusion_bins, pr_group_vars)
+
+if (nrow(pr_curves_overall) > 0L) {
+  p2a <- ggplot2::ggplot(
+    pr_curves_overall,
+    ggplot2::aes(x = recall, y = precision, color = spec_name, group = spec_name)
+  ) +
+    ggplot2::geom_line(linewidth = 0.7) +
+    ggplot2::facet_wrap(~ agg_method, nrow = 1) +
+    ggplot2::scale_x_continuous(limits = c(0, 1), breaks = c(0, 0.5, 1)) +
+    ggplot2::scale_y_continuous(limits = c(0, 1), breaks = c(0, 0.5, 1)) +
+    ggplot2::labs(
+      x     = "Recall",
+      y     = "Precision",
+      color = "Ensemble spec",
+      title = "Precision-Recall curves (pooled across datasets, all annotation R\u00b2)"
+    ) +
+    ggplot2::theme_bw() +
+    ggplot2::theme(legend.position = "bottom")
+
+  ggplot2::ggsave(
+    file.path(fig_root, "ensemble_performance", "pr_curves_overall.png"),
+    p2a, width = 14, height = 5, dpi = 150
+  )
+  print(p2a)
+
+  # Per annotation_r2
+  pr_curves_by_r2 <- build_pr_curves(
+    confusion_bins,
+    c("spec_name", "agg_method", "annotation_r2")
+  )
+  for (r2 in sort(unique(na.omit(pr_curves_by_r2$annotation_r2)))) {
+    p2a_r2 <- ggplot2::ggplot(
+      pr_curves_by_r2 %>% dplyr::filter(.data$annotation_r2 == r2),
+      ggplot2::aes(x = recall, y = precision, color = spec_name, group = spec_name)
+    ) +
+      ggplot2::geom_line(linewidth = 0.7) +
+      ggplot2::facet_wrap(~ agg_method, nrow = 1) +
+      ggplot2::scale_x_continuous(limits = c(0, 1), breaks = c(0, 0.5, 1)) +
+      ggplot2::scale_y_continuous(limits = c(0, 1), breaks = c(0, 0.5, 1)) +
+      ggplot2::labs(
+        x     = "Recall",
+        y     = "Precision",
+        color = "Ensemble spec",
+        title = sprintf(
+          "Precision-Recall curves (pooled, annotation R\u00b2 = %.1f)", r2)
+      ) +
+      ggplot2::theme_bw() +
+      ggplot2::theme(legend.position = "bottom")
+
+    ggplot2::ggsave(
+      file.path(fig_root, "ensemble_performance",
+                sprintf("pr_curves_r2_%.1f.png", r2)),
+      p2a_r2, width = 14, height = 5, dpi = 150
+    )
+  }
+  cat("Fig 2a saved.\n")
+} else {
+  cat("No aggregated confusion bins found — fig 2a skipped.\n")
+}
 ```
 
 ## 2b. Multimodality Metrics Boxplots
 
-```{r fig-2b, fig.width=14, fig.height=10}
-# Load multimodal metrics if available
-mm_path <- file.path(agg_dir, "multimodal_metrics.csv")
+```{r fig-2b, fig.width=14, fig.height=8}
+mm_path <- file.path(consolidated_dir, "multimodal_metrics.csv")
 if (file.exists(mm_path)) {
   mm <- readr::read_csv(mm_path, show_col_types = FALSE)
 
-  metrics_to_plot <- c("jaccard_top10", "mean_jsd", "median_jsd",
-                       "max_jsd", "mean_pip_var", "n_clusters")
+  # Join spec_name from run_info if needed
+  if (!"spec_name" %in% names(mm) && "run_id" %in% names(mm)) {
+    run_info <- readr::read_csv(
+      file.path(consolidated_dir, "model_metrics_full.csv"),
+      show_col_types = FALSE
+    ) %>%
+      dplyr::distinct(run_id, spec_name)
+    mm <- mm %>% dplyr::left_join(run_info, by = "run_id")
+  }
 
-  mm_long <- mm %>%
-    dplyr::select(dplyr::any_of(c("spec_name", metrics_to_plot))) %>%
-    tidyr::pivot_longer(cols = dplyr::any_of(metrics_to_plot),
-                        names_to = "metric", values_to = "value")
+  metrics_to_plot <- intersect(
+    c("jaccard_top10", "mean_jsd", "median_jsd", "max_jsd",
+      "mean_pip_var", "n_clusters"),
+    names(mm)
+  )
 
-  p_mm <- ggplot(mm_long, aes(x = spec_name, y = value, fill = spec_name)) +
-    geom_boxplot() +
-    facet_wrap(~metric, scales = "free_y") +
-    labs(x = NULL, y = "Value") +
-    theme(axis.text.x = element_text(angle = 45, hjust = 1),
-          legend.position = "none")
-  print(p_mm)
-  ggsave(file.path(fig_root, "ensemble_performance",
-                   "multimodality_boxplots.png"),
-         p_mm, width = 14, height = 10)
+  if (length(metrics_to_plot) > 0 && "spec_name" %in% names(mm)) {
+    mm_long <- mm %>%
+      dplyr::select(dplyr::any_of(c("spec_name", metrics_to_plot))) %>%
+      dplyr::filter(!is.na(spec_name)) %>%
+      tidyr::pivot_longer(cols = dplyr::any_of(metrics_to_plot),
+                          names_to = "metric", values_to = "value")
+
+    p_mm <- ggplot(mm_long, aes(x = spec_name, y = value, fill = spec_name)) +
+      geom_boxplot() +
+      facet_wrap(~metric, scales = "free_y") +
+      labs(x = NULL, y = "Value", title = "Multimodality Metrics") +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1),
+            legend.position = "none")
+    ggsave(file.path(fig_root, "ensemble_performance",
+                     "multimodality_boxplots.png"),
+           p_mm, width = 14, height = 8)
+  }
 }
 ```
 
 ## 2c. AUPRC Bar Chart by Method (primary figure)
 
-```{r fig-2c, fig.width=12, fig.height=6}
-# X = ensemble method, color = aggregation method (including oracle)
-# Red dashed line = baseline single-fit susine sigma_0_2 = 0.2
-# Include truth-warm baselines
+Four plots: overall (all annotation R² pooled) plus one per R² level.
+Annotation-independent specs (Group A) appear on all plots. Annotation-
+dependent specs (Groups B, C) are filtered to the matching R² on per-R²
+plots. Truth-warm lines follow the same logic.
 
-agg_summary <- model_metrics %>%
-  dplyr::filter(isTRUE(is_agg) | agg_method == "oracle") %>%
-  dplyr::group_by(spec_name, agg_method) %>%
-  dplyr::summarise(
-    mean_auprc = mean(auprc, na.rm = TRUE),
-    se_auprc = sd(auprc, na.rm = TRUE) / sqrt(dplyr::n()),
-    .groups = "drop"
-  )
+```{r fig-2c-helper}
+tw_colors <- c("susine_vanilla" = "blue",
+               "susine_eb_clamped_scale_var_nonneg" = "darkgreen",
+               "susine_functional_mu" = "purple")
 
-if (nrow(agg_summary) > 0) {
-  p_bar <- ggplot(agg_summary, aes(x = spec_name, y = mean_auprc,
-                                    fill = agg_method)) +
+make_auprc_barplot <- function(r2_filter = NULL) {
+  if (is.null(r2_filter)) {
+    plot_data <- auprc_pooled_agg %>% dplyr::filter(!is.na(spec_name))
+    tw_data   <- truth_warm_overall
+    title_str <- "AUPRC by Ensemble Method and Aggregation (all annotation R\u00b2 pooled)"
+    fname     <- "auprc_barplot_by_method_overall.png"
+  } else {
+    # Annotation-independent specs have annotation_r2 = NA — always include.
+    # Annotation-dependent specs: filter to the target r2 level.
+    plot_data <- auprc_pooled_agg_by_r2 %>%
+      dplyr::filter(!is.na(spec_name),
+                    is.na(annotation_r2) | annotation_r2 == r2_filter)
+    # Truth-warm: vanilla (NA r2) always; EB/grid at matching r2 only.
+    tw_data <- truth_warm_by_r2 %>%
+      dplyr::filter(is.na(annotation_r2) | annotation_r2 == r2_filter)
+    title_str <- paste0("AUPRC by Ensemble Method and Aggregation (annotation R\u00b2 = ",
+                        r2_filter, ")")
+    fname <- paste0("auprc_barplot_by_method_r2_",
+                    gsub("\\.", "p", as.character(r2_filter)), ".png")
+  }
+
+  if (nrow(plot_data) == 0) return(invisible(NULL))
+
+  p <- ggplot(plot_data, aes(x = spec_name, y = AUPRC, fill = agg_method)) +
     geom_col(position = position_dodge(width = 0.8), width = 0.7) +
-    geom_errorbar(aes(ymin = mean_auprc - se_auprc,
-                       ymax = mean_auprc + se_auprc),
-                  position = position_dodge(width = 0.8), width = 0.2) +
     geom_hline(yintercept = baseline_auprc, linetype = "dashed",
                color = "red", linewidth = 0.8) +
-    labs(x = "Ensemble Method", y = "Mean AUPRC", fill = "Aggregation") +
+    annotate("text", x = 0.5, y = baseline_auprc, label = "baseline single-fit",
+             vjust = -0.5, hjust = 0, color = "red", size = 3) +
+    labs(x = "Ensemble Method", y = "Pooled AUPRC", fill = "Aggregation",
+         title = title_str) +
     theme(axis.text.x = element_text(angle = 45, hjust = 1))
-  print(p_bar)
-  ggsave(file.path(fig_root, "ensemble_performance",
-                   "auprc_barplot_by_method.png"),
-         p_bar, width = 12, height = 6)
+
+  for (i in seq_len(nrow(tw_data))) {
+    uc <- tw_data$use_case_id[i]
+    p <- p +
+      geom_hline(yintercept = tw_data$AUPRC[i], linetype = "dotted",
+                 color = tw_colors[uc] %||% "blue", linewidth = 0.6) +
+      annotate("text", x = Inf, y = tw_data$AUPRC[i],
+               label = tw_data$label[i],
+               vjust = -0.5, hjust = 1,
+               color = tw_colors[uc] %||% "blue", size = 2.8)
+  }
+
+  ggsave(file.path(fig_root, "ensemble_performance", fname),
+         p, width = 12, height = 6)
+  invisible(p)
 }
+```
+
+```{r fig-2c, fig.width=12, fig.height=6}
+make_auprc_barplot(r2_filter = NULL)  # overall (all r2 pooled)
+make_auprc_barplot(r2_filter = 0)     # annotation r2 = 0 (null annotations)
+make_auprc_barplot(r2_filter = 0.2)   # annotation r2 = 0.2
+make_auprc_barplot(r2_filter = 0.5)   # annotation r2 = 0.5
+```
+
+## 2d. TPR @ FPR=0.05 Bar Chart by Method
+
+Mirrors the AUPRC barplot exactly but shows pooled TPR at FPR=0.05.
+Four plots: overall + one per annotation R² level.
+
+```{r fig-2d-helper}
+make_tpr05_barplot <- function(r2_filter = NULL) {
+  if (is.null(r2_filter)) {
+    plot_data <- tpr05_pooled_agg %>% dplyr::filter(!is.na(spec_name))
+    tw_data   <- truth_warm_tpr05_overall
+    title_str <- "TPR @ FPR=0.05 by Ensemble Method and Aggregation (all annotation R\u00b2 pooled)"
+    fname     <- "tpr05_barplot_by_method_overall.png"
+    base_val  <- baseline_tpr05
+  } else {
+    plot_data <- tpr05_pooled_agg_by_r2 %>%
+      dplyr::filter(!is.na(spec_name),
+                    is.na(annotation_r2) | annotation_r2 == r2_filter)
+    tw_data <- truth_warm_tpr05_by_r2 %>%
+      dplyr::filter(is.na(annotation_r2) | annotation_r2 == r2_filter)
+    # Baseline is annotation-independent; use same pooled overall value
+    base_val  <- baseline_tpr05
+    title_str <- paste0("TPR @ FPR=0.05 by Ensemble Method and Aggregation (annotation R\u00b2 = ",
+                        r2_filter, ")")
+    fname <- paste0("tpr05_barplot_by_method_r2_",
+                    gsub("\\.", "p", as.character(r2_filter)), ".png")
+  }
+
+  if (nrow(plot_data) == 0 || length(base_val) == 0) return(invisible(NULL))
+
+  p <- ggplot(plot_data, aes(x = spec_name, y = tpr_fpr05, fill = agg_method)) +
+    geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+    geom_hline(yintercept = base_val, linetype = "dashed",
+               color = "red", linewidth = 0.8) +
+    annotate("text", x = 0.5, y = base_val, label = "baseline single-fit",
+             vjust = -0.5, hjust = 0, color = "red", size = 3) +
+    labs(x = "Ensemble Method", y = "Pooled TPR @ FPR=0.05", fill = "Aggregation",
+         title = title_str) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+  for (i in seq_len(nrow(tw_data))) {
+    uc <- tw_data$use_case_id[i]
+    p <- p +
+      geom_hline(yintercept = tw_data$tpr_fpr05[i], linetype = "dotted",
+                 color = tw_colors[uc] %||% "blue", linewidth = 0.6) +
+      annotate("text", x = Inf, y = tw_data$tpr_fpr05[i],
+               label = tw_data$label[i],
+               vjust = -0.5, hjust = 1,
+               color = tw_colors[uc] %||% "blue", size = 2.8)
+  }
+
+  ggsave(file.path(fig_root, "ensemble_performance", fname),
+         p, width = 12, height = 6)
+  invisible(p)
+}
+```
+
+```{r fig-2d, fig.width=12, fig.height=6}
+make_tpr05_barplot(r2_filter = NULL)  # overall (all r2 pooled)
+make_tpr05_barplot(r2_filter = 0)     # annotation r2 = 0 (null annotations)
+make_tpr05_barplot(r2_filter = 0.2)   # annotation r2 = 0.2
+make_tpr05_barplot(r2_filter = 0.5)   # annotation r2 = 0.5
 ```
 
 # 3. Dataset Difficulty Plots (Category 3)
 
-## 3a. Dataset Metrics Histograms + Correlation
+## 3a. Dataset Metrics
 
-```{r fig-3a, fig.width=12, fig.height=10}
-if (!is.null(dataset_metrics)) {
-  metric_cols <- c("M1", "z_topk_ratio", "z_max_abs",
-                   "z_count_abs_gt_3", "z_eff_signals", "high_ld_count_095")
-  available <- intersect(metric_cols, names(dataset_metrics))
+```{r fig-3a, fig.width=12, fig.height=8}
+dm_path <- file.path(consolidated_dir, "dataset_metrics.csv")
+if (file.exists(dm_path)) {
+  dataset_metrics <- readr::read_csv(dm_path, show_col_types = FALSE)
 
-  if (length(available) > 0) {
+  metric_cols <- intersect(
+    c("M1", "z_topk_ratio", "z_max_abs", "z_count_abs_gt_3",
+      "z_eff_signals", "high_ld_count_095"),
+    names(dataset_metrics)
+  )
+
+  if (length(metric_cols) > 0) {
     dm_long <- dataset_metrics %>%
-      dplyr::select(dplyr::any_of(available)) %>%
+      dplyr::select(dplyr::any_of(metric_cols)) %>%
       tidyr::pivot_longer(everything(), names_to = "metric", values_to = "value")
 
     p_hist <- ggplot(dm_long, aes(x = value)) +
-      geom_histogram(bins = 30, fill = "steelblue", alpha = 0.7) +
+      geom_histogram(bins = 20, fill = "steelblue", alpha = 0.7) +
       facet_wrap(~metric, scales = "free") +
-      labs(x = "Value", y = "Count")
-    print(p_hist)
+      labs(x = "Value", y = "Count", title = "Dataset Metrics")
     ggsave(file.path(fig_root, "dataset_difficulty",
                      "metric_histograms.png"),
-           p_hist, width = 12, height = 10)
-
-    # Correlation matrix
-    dm_mat <- dataset_metrics %>%
-      dplyr::select(dplyr::any_of(available)) %>%
-      stats::cor(use = "pairwise.complete.obs")
-    png(file.path(fig_root, "dataset_difficulty", "metric_correlations.png"),
-        width = 800, height = 800)
-    corrplot::corrplot(dm_mat, method = "color", type = "upper",
-                       addCoef.col = "black", number.cex = 0.8,
-                       tl.cex = 0.9)
-    dev.off()
+           p_hist, width = 12, height = 8)
   }
 }
 ```
 
-## 3b. Dataset Difficulty Scatter (M1 as primary predictor)
+## 3b. Dataset Difficulty Scatter
 
-```{r fig-3b, fig.width=14, fig.height=5}
-if (!is.null(dataset_metrics)) {
-  # Baseline performance: single-fit susine at sigma_0_2=0.2
-  baseline_perf <- model_metrics %>%
-    dplyr::filter(
-      spec_name == "baseline-single",
-      use_case_id == "susine_vanilla",
-      !isTRUE(is_agg)
-    ) %>%
-    dplyr::select(dataset_bundle_id, auprc_baseline = auprc)
+```{r fig-3b, fig.width=10, fig.height=5}
+if (exists("dataset_metrics") && "M1" %in% names(dataset_metrics)) {
+  # Join baseline AUPRC to dataset metrics
+  baseline_per_dataset <- auprc_individual %>%
+    dplyr::filter(spec_name == "baseline-single",
+                  use_case_id == "susine_vanilla") %>%
+    dplyr::select(dataset_bundle_id, auprc_baseline = AUPRC)
 
-  dm_with_perf <- dataset_metrics %>%
-    dplyr::inner_join(baseline_perf, by = "dataset_bundle_id")
+  dm_scatter <- dataset_metrics %>%
+    dplyr::inner_join(baseline_per_dataset, by = "dataset_bundle_id")
 
-  if ("M1" %in% names(dm_with_perf) && nrow(dm_with_perf) > 0) {
-    # Find best supplementary metrics via multiple regression
-    z_candidates <- intersect(
-      c("z_topk_ratio", "z_max_abs", "z_count_abs_gt_3", "z_eff_signals"),
-      names(dm_with_perf)
-    )
-    ld_candidates <- intersect(
-      c("high_ld_count_095"),
-      names(dm_with_perf)
-    )
-
-    best_r2 <- 0
-    best_z <- z_candidates[1]
-    best_ld <- ld_candidates[1]
-
-    for (zc in z_candidates) {
-      for (lc in ld_candidates) {
-        fml <- as.formula(paste("auprc_baseline ~ M1 +", zc, "+", lc))
-        fit <- lm(fml, data = dm_with_perf)
-        r2 <- summary(fit)$r.squared
-        if (r2 > best_r2) {
-          best_r2 <- r2
-          best_z <- zc
-          best_ld <- lc
-        }
-      }
-    }
-
-    cat("Best 3-predictor model: M1 +", best_z, "+", best_ld,
-        "-> R2 =", round(best_r2, 4), "\n")
-
-    # Fit combined model for regression lines
-    fml_best <- as.formula(
-      paste("auprc_baseline ~ M1 +", best_z, "+", best_ld)
-    )
-    lm_best <- lm(fml_best, data = dm_with_perf)
-    dm_with_perf$predicted <- predict(lm_best, dm_with_perf)
-
-    # Find best ensemble methods (no-annotation and with-annotation)
-    ens_perf <- model_metrics %>%
-      dplyr::filter(isTRUE(is_agg)) %>%
-      dplyr::group_by(spec_name, agg_method) %>%
-      dplyr::summarise(mean_auprc = mean(auprc, na.rm = TRUE),
-                       .groups = "drop")
-
-    # Group A = no annotations, Group B/C = with annotations
-    best_no_ann <- ens_perf %>%
-      dplyr::filter(grepl("^A-", spec_name)) %>%
-      dplyr::slice_max(mean_auprc, n = 1)
-    best_ann <- ens_perf %>%
-      dplyr::filter(grepl("^[BC]-", spec_name)) %>%
-      dplyr::slice_max(mean_auprc, n = 1)
-
-    # Get per-dataset AUPRC for best methods
-    best_no_ann_perf <- model_metrics %>%
-      dplyr::filter(spec_name == best_no_ann$spec_name[1],
-                    agg_method == best_no_ann$agg_method[1]) %>%
-      dplyr::select(dataset_bundle_id, auprc_no_ann = auprc)
-
-    best_ann_perf <- model_metrics %>%
-      dplyr::filter(spec_name == best_ann$spec_name[1],
-                    agg_method == best_ann$agg_method[1]) %>%
-      dplyr::select(dataset_bundle_id, auprc_ann = auprc)
-
-    dm_scatter <- dm_with_perf %>%
-      dplyr::left_join(best_no_ann_perf, by = "dataset_bundle_id") %>%
-      dplyr::left_join(best_ann_perf, by = "dataset_bundle_id")
-
-    # 3 scatter panels: M1, best_z, best_ld
-    scatter_vars <- c("M1", best_z, best_ld)
-    scatter_plots <- list()
-    for (sv in scatter_vars) {
-      p <- ggplot(dm_scatter, aes(x = .data[[sv]])) +
-        geom_point(aes(y = auprc_baseline), color = "grey50", alpha = 0.4) +
-        geom_point(aes(y = auprc_no_ann), color = "dodgerblue", alpha = 0.4) +
-        geom_point(aes(y = auprc_ann), color = "darkgreen", alpha = 0.4) +
-        geom_line(aes(y = predicted), color = "red", linewidth = 0.8) +
-        labs(x = sv, y = "AUPRC") +
-        ylim(0, 1)
-      scatter_plots[[sv]] <- p
-    }
-    p_combined <- patchwork::wrap_plots(scatter_plots, nrow = 1)
-    print(p_combined)
+  if (nrow(dm_scatter) > 1) {
+    p_scatter <- ggplot(dm_scatter, aes(x = M1, y = auprc_baseline)) +
+      geom_point(alpha = 0.6) +
+      geom_smooth(method = "lm", se = TRUE, color = "red") +
+      labs(x = "M1 (LD complexity)", y = "Baseline AUPRC",
+           title = "Dataset Difficulty: AUPRC vs M1")
     ggsave(file.path(fig_root, "dataset_difficulty",
                      "difficulty_scatter.png"),
-           p_combined, width = 14, height = 5)
+           p_scatter, width = 10, height = 5)
   }
+}
+```
+
+## 3c. Refine Depth Diagnostics
+
+```{r fig-3c-refine-depth, fig.width=14, fig.height=6}
+# Per-parent refine depth: n_refine_processed vs n_refine_requested.
+# One row per (dataset × ensemble group × parent combination).
+# Loaded from refine_depth.csv written by the collect workbook.
+rd_path <- file.path(consolidated_dir, "refine_depth.csv")
+rd_full <- if (file.exists(rd_path)) {
+  readr::read_csv(rd_path, show_col_types = FALSE)
+} else {
+  NULL
+}
+
+if (!is.null(rd_full) && nrow(rd_full) > 0L &&
+    all(c("n_refine_requested", "n_refine_processed", "group_label") %in% names(rd_full))) {
+
+  # Attach spec_name via group_label → run_info join if available
+  rd <- rd_full %>%
+    dplyr::mutate(completion_rate = .data$n_refine_processed / .data$n_refine_requested)
+  if (exists("run_info") && "spec_name" %in% names(run_info) && "group_label" %in% names(run_info)) {
+    spec_map <- run_info %>% dplyr::distinct(.data$group_label, .data$spec_name)
+    rd <- dplyr::left_join(rd, spec_map, by = "group_label")
+  }
+  x_var <- if ("spec_name" %in% names(rd)) "spec_name" else "group_label"
+
+  ensure_dir(file.path(fig_root, "ensemble_scaling"))
+
+  # Completion rate boxplot: one point per parent node
+  p_rate <- ggplot(rd, aes(x = .data[[x_var]], y = completion_rate)) +
+    geom_boxplot(alpha = 0.7, outlier.size = 1, fill = "steelblue") +
+    geom_hline(yintercept = 1, linetype = "dashed", color = "red") +
+    scale_y_continuous(limits = c(0, 1.05), labels = scales::percent) +
+    labs(x = "Spec", y = "Completion rate (processed / requested)",
+         title = "Refine BFS completion rate per parent node") +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 30, hjust = 1))
+  print(p_rate)
+  ggsave(file.path(fig_root, "ensemble_scaling", "refine_depth_completion_rate.png"),
+         p_rate, width = 14, height = 6)
+
+  # Histogram of n_refine_processed, faceted by spec; red dashed = median n_requested
+  n_req_vals <- rd %>%
+    dplyr::group_by(.data[[x_var]]) %>%
+    dplyr::summarise(n_refine_requested = median(.data$n_refine_requested), .groups = "drop")
+
+  p_hist <- ggplot(rd, aes(x = n_refine_processed)) +
+    geom_histogram(binwidth = 1, fill = "steelblue", color = "white", alpha = 0.8) +
+    geom_vline(data = n_req_vals,
+               aes(xintercept = n_refine_requested),
+               linetype = "dashed", color = "red") +
+    facet_wrap(as.formula(paste("~", x_var)), scales = "free_x") +
+    labs(x = "n_refine_processed", y = "Count",
+         title = "Refine depth per parent (red dashed = n_requested)") +
+    theme_bw()
+  print(p_hist)
+  ggsave(file.path(fig_root, "ensemble_scaling", "refine_depth_histogram.png"),
+         p_hist, width = 14, height = 6)
+
+} else {
+  message("refine_depth.csv not found or empty; skipping fig-3c.")
 }
 ```
 
 # 4. Ensemble Scaling Plots (Category 4)
 
-## 4a. 64-Grid Scaling: AUPRC
+Figures 4a–4d show AUPRC and TPR@0.05 as a function of ensemble size.
+Computed by `compute_scaling_curves()` and `compute_interaction_scaling()`
+in the collect workbook; loaded from `scaling_curves.csv` and
+`interaction_scaling.csv` in the consolidated directory.
 
-```{r fig-4a, fig.width=14, fig.height=8}
-if (!is.null(scaling_curves)) {
-  pure_specs <- c("A-R", "A-F", "A-S", "B-R", "B-F", "C-C")
-  sc_pure <- scaling_curves %>%
-    dplyr::filter(spec_name %in% pure_specs)
+```{r load-scaling}
+scaling_path     <- file.path(consolidated_dir, "scaling_curves.csv")
+interaction_path <- file.path(consolidated_dir, "interaction_scaling.csv")
 
-  if (nrow(sc_pure) > 0) {
-    sc_summary <- sc_pure %>%
-      dplyr::group_by(spec_name, subsample_size, agg_method) %>%
-      dplyr::summarise(
-        mean_auprc = mean(auprc, na.rm = TRUE),
-        se_auprc = sd(auprc, na.rm = TRUE) / sqrt(dplyr::n()),
-        .groups = "drop"
+scaling_curves <- if (file.exists(scaling_path)) {
+  readr::read_csv(scaling_path, show_col_types = FALSE)
+} else {
+  message("scaling_curves.csv not found — Category 4 plots will be skipped.")
+  NULL
+}
+
+interaction_scaling <- if (file.exists(interaction_path)) {
+  readr::read_csv(interaction_path, show_col_types = FALSE)
+} else {
+  message("interaction_scaling.csv not found — Category 4c/4d plots will be skipped.")
+  NULL
+}
+```
+
+```{r fig-4a}
+# AUPRC scaling curves: ensemble size vs pooled AUPRC, faceted by spec.
+# Ribbon shows ±1 SE for restart specs (50 reps); no ribbon for deterministic specs.
+if (!is.null(scaling_curves) && nrow(scaling_curves) > 0L) {
+  make_scaling_plot <- function(data, y_col, se_col, y_label, title) {
+    p <- ggplot2::ggplot(
+      data,
+      ggplot2::aes(
+        x     = n_ensemble,
+        y     = .data[[y_col]],
+        color = agg_method,
+        group = agg_method
       )
+    ) +
+      ggplot2::geom_line() +
+      ggplot2::geom_point(size = 1.8)
 
-    p_scale <- ggplot(sc_summary,
-                      aes(x = subsample_size, y = mean_auprc,
-                          color = agg_method)) +
-      geom_line() +
-      geom_point() +
-      geom_errorbar(aes(ymin = mean_auprc - se_auprc,
-                         ymax = mean_auprc + se_auprc), width = 0.05) +
-      facet_wrap(~spec_name, scales = "free_y") +
-      scale_x_log10() +
-      labs(x = "Ensemble Size", y = "AUPRC", color = "Aggregation") +
-      theme(legend.position = "bottom")
-    print(p_scale)
-    ggsave(file.path(fig_root, "ensemble_scaling",
-                     "scaling_64_auprc.png"),
-           p_scale, width = 14, height = 8)
+    # Add SE ribbon only where se is non-NA
+    ribbon_data <- data %>% dplyr::filter(!is.na(.data[[se_col]]))
+    if (nrow(ribbon_data) > 0L) {
+      p <- p + ggplot2::geom_ribbon(
+        data = ribbon_data,
+        ggplot2::aes(
+          ymin = .data[[y_col]] - .data[[se_col]],
+          ymax = .data[[y_col]] + .data[[se_col]],
+          fill = agg_method
+        ),
+        alpha = 0.15, color = NA
+      )
+    }
+
+    p +
+      ggplot2::scale_x_continuous(breaks = c(4, 8, 16, 32, 64)) +
+      ggplot2::facet_wrap(~ spec_name, nrow = 2) +
+      ggplot2::labs(
+        x     = "Ensemble size (# fits)",
+        y     = y_label,
+        color = "Aggregation",
+        fill  = "Aggregation",
+        title = title
+      ) +
+      ggplot2::theme_bw() +
+      ggplot2::theme(legend.position = "bottom")
   }
+
+  # Overall (pooled across all annotation_r2)
+  p4a_overall <- make_scaling_plot(
+    scaling_curves %>% dplyr::filter(is.na(.data$annotation_r2)),
+    y_col    = "AUPRC_mean",
+    se_col   = "AUPRC_se",
+    y_label  = "AUPRC (pooled across datasets)",
+    title    = "AUPRC scaling — all annotation R\u00b2"
+  )
+  ggplot2::ggsave(
+    file.path(fig_root, "ensemble_scaling", "auprc_scaling_curves_overall.png"),
+    p4a_overall, width = 12, height = 6, dpi = 150
+  )
+  print(p4a_overall)
+
+  # Per annotation_r2
+  for (r2 in sort(unique(na.omit(scaling_curves$annotation_r2)))) {
+    p4a_r2 <- make_scaling_plot(
+      scaling_curves %>% dplyr::filter(.data$annotation_r2 == r2),
+      y_col    = "AUPRC_mean",
+      se_col   = "AUPRC_se",
+      y_label  = "AUPRC (pooled across datasets)",
+      title    = sprintf("AUPRC scaling \u2014 annotation R\u00b2 = %.1f", r2)
+    )
+    ggplot2::ggsave(
+      file.path(fig_root, "ensemble_scaling",
+                sprintf("auprc_scaling_curves_r2_%.1f.png", r2)),
+      p4a_r2, width = 12, height = 6, dpi = 150
+    )
+  }
+  cat("Fig 4a saved.\n")
+} else {
+  cat("scaling_curves.csv not found — fig 4a skipped.\n")
 }
 ```
 
-## 4b. 64-Grid Scaling: TPR at FPR=0.05
+```{r fig-4b}
+# TPR@FPR=0.05 scaling curves: same structure as 4a.
+if (!is.null(scaling_curves) && nrow(scaling_curves) > 0L) {
+  p4b_overall <- make_scaling_plot(
+    scaling_curves %>% dplyr::filter(is.na(.data$annotation_r2)),
+    y_col    = "tpr05_mean",
+    se_col   = "tpr05_se",
+    y_label  = "TPR at FPR \u2264 0.05 (pooled)",
+    title    = "TPR@FPR=0.05 scaling \u2014 all annotation R\u00b2"
+  )
+  ggplot2::ggsave(
+    file.path(fig_root, "ensemble_scaling", "tpr05_scaling_curves_overall.png"),
+    p4b_overall, width = 12, height = 6, dpi = 150
+  )
+  print(p4b_overall)
 
-```{r fig-4b, fig.width=14, fig.height=8}
-# Same as 4a but Y = TPR at fixed FPR=0.05
-# Requires per-subsample TPR computation from confusion bins
-# ggsave(file.path(fig_root, "ensemble_scaling",
-#                  "scaling_64_tpr_fpr05.png"), ...)
-```
-
-## 4c. 8x8 Interaction Scaling: AUPRC
-
-```{r fig-4c, fig.width=12, fig.height=6}
-# Y: AUPRC, X: grid resolution {4x4, 8x8}
-# Color by aggregation method
-# Facet by interaction spec (A-RF, A-RS, A-FS, C-CS)
-
-interaction_path <- file.path(agg_dir, "interaction_scaling.csv")
-if (file.exists(interaction_path)) {
-  int_scaling <- readr::read_csv(interaction_path, show_col_types = FALSE)
-
-  if (nrow(int_scaling) > 0) {
-    p_int <- ggplot(int_scaling,
-                    aes(x = factor(grid_resolution), y = mean_auprc,
-                        fill = agg_method)) +
-      geom_col(position = position_dodge(width = 0.8), width = 0.7) +
-      facet_wrap(~spec_name) +
-      labs(x = "Grid Resolution", y = "AUPRC", fill = "Aggregation")
-    print(p_int)
-    ggsave(file.path(fig_root, "ensemble_scaling",
-                     "scaling_8x8_auprc.png"),
-           p_int, width = 12, height = 6)
+  for (r2 in sort(unique(na.omit(scaling_curves$annotation_r2)))) {
+    p4b_r2 <- make_scaling_plot(
+      scaling_curves %>% dplyr::filter(.data$annotation_r2 == r2),
+      y_col    = "tpr05_mean",
+      se_col   = "tpr05_se",
+      y_label  = "TPR at FPR \u2264 0.05 (pooled)",
+      title    = sprintf("TPR@FPR=0.05 scaling \u2014 annotation R\u00b2 = %.1f", r2)
+    )
+    ggplot2::ggsave(
+      file.path(fig_root, "ensemble_scaling",
+                sprintf("tpr05_scaling_curves_r2_%.1f.png", r2)),
+      p4b_r2, width = 12, height = 6, dpi = 150
+    )
   }
+  cat("Fig 4b saved.\n")
+} else {
+  cat("scaling_curves.csv not found — fig 4b skipped.\n")
 }
 ```
 
-## 4d. 8x8 Interaction Scaling: TPR at FPR=0.05
+```{r fig-4c}
+# 2-lever interaction AUPRC: compare 4x4 vs 8x8 grid resolutions.
+if (!is.null(interaction_scaling) && nrow(interaction_scaling) > 0L) {
+  make_interaction_plot <- function(data, y_col, y_label, title) {
+    ggplot2::ggplot(
+      data,
+      ggplot2::aes(
+        x     = resolution,
+        y     = .data[[y_col]],
+        color = agg_method,
+        group = agg_method
+      )
+    ) +
+      ggplot2::geom_line() +
+      ggplot2::geom_point(size = 2.5) +
+      ggplot2::facet_wrap(~ spec_name, nrow = 1) +
+      ggplot2::labs(
+        x     = "Grid resolution",
+        y     = y_label,
+        color = "Aggregation",
+        title = title
+      ) +
+      ggplot2::theme_bw() +
+      ggplot2::theme(legend.position = "bottom")
+  }
 
-```{r fig-4d, fig.width=12, fig.height=6}
-# Same as 4c but Y = TPR at fixed FPR=0.05
-# ggsave(file.path(fig_root, "ensemble_scaling",
-#                  "scaling_8x8_tpr_fpr05.png"), ...)
+  p4c_overall <- make_interaction_plot(
+    interaction_scaling %>% dplyr::filter(is.na(.data$annotation_r2)),
+    y_col   = "AUPRC",
+    y_label = "AUPRC (pooled across datasets)",
+    title   = "Interaction grid scaling \u2014 AUPRC at 4\u00d74 vs 8\u00d78"
+  )
+  ggplot2::ggsave(
+    file.path(fig_root, "ensemble_scaling", "auprc_interaction_scaling_overall.png"),
+    p4c_overall, width = 10, height = 4, dpi = 150
+  )
+  print(p4c_overall)
+
+  for (r2 in sort(unique(na.omit(interaction_scaling$annotation_r2)))) {
+    p4c_r2 <- make_interaction_plot(
+      interaction_scaling %>% dplyr::filter(.data$annotation_r2 == r2),
+      y_col   = "AUPRC",
+      y_label = "AUPRC (pooled across datasets)",
+      title   = sprintf("Interaction grid scaling \u2014 AUPRC (R\u00b2=%.1f)", r2)
+    )
+    ggplot2::ggsave(
+      file.path(fig_root, "ensemble_scaling",
+                sprintf("auprc_interaction_scaling_r2_%.1f.png", r2)),
+      p4c_r2, width = 10, height = 4, dpi = 150
+    )
+  }
+  cat("Fig 4c saved.\n")
+} else {
+  cat("interaction_scaling.csv not found — fig 4c skipped.\n")
+}
+```
+
+```{r fig-4d}
+# 2-lever interaction TPR@0.05: same structure as 4c.
+if (!is.null(interaction_scaling) && nrow(interaction_scaling) > 0L) {
+  p4d_overall <- make_interaction_plot(
+    interaction_scaling %>% dplyr::filter(is.na(.data$annotation_r2)),
+    y_col   = "tpr05",
+    y_label = "TPR at FPR \u2264 0.05 (pooled)",
+    title   = "Interaction grid scaling \u2014 TPR@FPR=0.05 at 4\u00d74 vs 8\u00d78"
+  )
+  ggplot2::ggsave(
+    file.path(fig_root, "ensemble_scaling", "tpr05_interaction_scaling_overall.png"),
+    p4d_overall, width = 10, height = 4, dpi = 150
+  )
+  print(p4d_overall)
+
+  for (r2 in sort(unique(na.omit(interaction_scaling$annotation_r2)))) {
+    p4d_r2 <- make_interaction_plot(
+      interaction_scaling %>% dplyr::filter(.data$annotation_r2 == r2),
+      y_col   = "tpr05",
+      y_label = "TPR at FPR \u2264 0.05 (pooled)",
+      title   = sprintf(
+        "Interaction grid scaling \u2014 TPR@FPR=0.05 (R\u00b2=%.1f)", r2)
+    )
+    ggplot2::ggsave(
+      file.path(fig_root, "ensemble_scaling",
+                sprintf("tpr05_interaction_scaling_r2_%.1f.png", r2)),
+      p4d_r2, width = 10, height = 4, dpi = 150
+    )
+  }
+  cat("Fig 4d saved.\n")
+} else {
+  cat("interaction_scaling.csv not found — fig 4d skipped.\n")
+}
 ```
 
 # Session Info
 
 ```{r session}
+cat("\nFigures written to:", fig_root, "\n")
+cat("Files:\n")
+for (d in fig_dirs) {
+  figs <- list.files(file.path(fig_root, d))
+  if (length(figs)) cat(sprintf("  %s/: %s\n", d, paste(figs, collapse = ", ")))
+}
 sessionInfo()
 ```

@@ -10,8 +10,8 @@ editor_options:
     wrap: 72
 ---
 
-Post-hoc aggregation, subsampling analysis, oracle computation.
-See `refs/ensemble_scaling_experiment_plan.md` for full spec.
+Post-hoc collection: merge flush files, join metadata, compute AUPRC
+from confusion bins, add oracle aggregation.
 
 ```{r setup, message=FALSE}
 here::i_am("vignettes/simulation pipeline/collect_results_workbook_ensemble_scaling.Rmd")
@@ -25,250 +25,444 @@ if (file.exists(file.path(susine_path, "DESCRIPTION"))) {
 library(dplyr)
 library(tidyr)
 library(readr)
-library(arrow)
 library(knitr)
 ```
 
-# 1. Load Job Outputs
+# 1. Locate Output
 
-```{r load-config}
-# TODO: update with actual job_id after SLURM run
-job_name <- "ensemble_scaling_v1"
-job_id <- "XXXXXX"
+```{r locate}
+# Job-level directory (contains task-001/, task-002/, etc.)
+job_dir <- here("output", "slurm_output", "local_test")
 
-job_dir <- here("output", "run_history", job_name, job_id)
-cfg <- jsonlite::fromJSON(file.path(job_dir, "job_config.json"),
-                           simplifyVector = FALSE)
-run_table <- readr::read_csv(file.path(job_dir, "run_table.csv"),
-                              show_col_types = FALSE)
+# Load the job config used for the run
+cfg_path <- here("output", "temp", "ensemble_scaling_smoke", "job_config.json")
+cfg <- test_susine:::load_job_config(cfg_path)
 
-cat("Total runs:", nrow(run_table), "\n")
-cat("Specs:", paste(unique(run_table$spec_name), collapse = ", "), "\n")
+# Find all task directories
+task_dirs <- list.dirs(job_dir, recursive = FALSE, full.names = TRUE)
+task_dirs <- task_dirs[grepl("task-", basename(task_dirs))]
+cat("Job dir:", job_dir, "\n")
+cat("Task directories:", length(task_dirs), "\n")
+cat(" ", paste(basename(task_dirs), collapse = ", "), "\n")
 ```
 
-```{r load-staging}
-# Aggregate staging outputs (flush files -> merged CSVs/parquets)
-agg_dir <- file.path(job_dir, "aggregate")
-if (!dir.exists(agg_dir)) {
-  dir.create(agg_dir, recursive = TRUE)
+# 2. Merge Flush Files
+
+```{r merge-flush}
+merge_flush_csv <- function(task_dirs, pattern) {
+  files <- unlist(lapply(task_dirs, list.files, pattern = pattern,
+                          full.names = TRUE))
+  if (!length(files)) return(tibble::tibble())
+  purrr::map_dfr(files, readr::read_csv, show_col_types = FALSE)
 }
 
-# Run the standard staging aggregation if not already done
-staging_dir <- file.path(job_dir, "staging")
-if (dir.exists(staging_dir)) {
-  aggregate_staging_outputs(
-    staging_dir = staging_dir,
-    output_dir = agg_dir,
-    job_config_path = file.path(job_dir, "job_config.json")
+model_metrics <- merge_flush_csv(task_dirs, "model_metrics\\.csv$")
+confusion_bins <- merge_flush_csv(task_dirs, "confusion_bins\\.csv$")
+dataset_metrics <- merge_flush_csv(task_dirs, "dataset_metrics\\.csv$")
+multimodal_metrics <- merge_flush_csv(task_dirs, "multimodal_metrics\\.csv$")
+refine_depth       <- merge_flush_csv(task_dirs, "refine_depth\\.csv$")
+effect_metrics    <- merge_flush_csv(task_dirs, "effect_metrics\\.csv$")
+tier_cs_metrics   <- merge_flush_csv(task_dirs, "tier_cs_metrics\\.csv$")
+
+cat("Model metrics:", nrow(model_metrics), "rows\n")
+cat("Confusion bins:", nrow(confusion_bins), "rows\n")
+cat("Dataset metrics:", nrow(dataset_metrics), "rows\n")
+cat("Multimodal metrics:", nrow(multimodal_metrics), "rows\n")
+cat("Refine depth:", nrow(refine_depth), "rows\n")
+cat("Tier CS metrics:", nrow(tier_cs_metrics), "rows\n")
+```
+
+# 3. Join Run Table Metadata
+
+The flush outputs only have `run_id`. Join with the run table for
+`spec_name`, `use_case_id`, `dataset_bundle_id`, `sigma_0_2_scalar`,
+`warm_method`, etc.
+
+```{r join-metadata}
+run_info <- cfg$tables$runs %>%
+  dplyr::select(
+    run_id, dataset_bundle_id, spec_name, use_case_id, prior_spec_id,
+    exploration_methods, sigma_0_2_scalar, warm_method, c_value,
+    refine_step, restart_id, annotation_r2, inflate_match, group_key
   )
-}
 
-# Load merged outputs
-model_metrics <- readr::read_csv(
-  file.path(agg_dir, "model_metrics.csv"), show_col_types = FALSE
+model_metrics <- model_metrics %>%
+  dplyr::left_join(run_info, by = "run_id")
+
+tier_cs_metrics <- tier_cs_metrics %>%
+  dplyr::left_join(
+    run_info %>% dplyr::select(run_id, dataset_bundle_id, spec_name,
+                                use_case_id, group_key, annotation_r2),
+    by = "run_id"
+  )
+
+cat("Model metrics with metadata:", nrow(model_metrics), "rows\n")
+cat("Tier CS metrics with metadata:", nrow(tier_cs_metrics), "rows\n")
+cat("Specs present:", paste(unique(na.omit(model_metrics$spec_name)), collapse = ", "), "\n")
+```
+
+For confusion bins, aggregated rows share a `run_id` with the group's
+representative run. Join to get dataset/spec context.
+
+```{r join-confusion}
+# Individual fit rows (agg_method = NA) join directly
+cb_individual <- confusion_bins %>%
+  dplyr::filter(is.na(agg_method)) %>%
+  dplyr::left_join(run_info, by = "run_id")
+
+# Aggregated rows: run_id is the group representative
+cb_agg <- confusion_bins %>%
+  dplyr::filter(!is.na(agg_method)) %>%
+  dplyr::left_join(
+    run_info %>% dplyr::select(run_id, dataset_bundle_id, spec_name,
+                                use_case_id, annotation_r2, group_key),
+    by = "run_id"
+  )
+
+confusion_bins_full <- dplyr::bind_rows(cb_individual, cb_agg)
+cat("Confusion bins with metadata:", nrow(confusion_bins_full), "rows\n")
+```
+
+# 4. Compute AUPRC from Confusion Bins
+
+Uses `test_susine::compute_auprc_from_confusion()` which pools bins by
+`group_vars` then integrates the precision-recall curve (trapezoidal,
+anchored at recall=0/precision=1).
+
+```{r compute-auprc}
+# Per-dataset AUPRC (needed for oracle selection per dataset)
+auprc_per_dataset <- compute_auprc_from_confusion(
+  confusion_bins_full,
+  group_vars = c("dataset_bundle_id", "run_id", "spec_name",
+                  "use_case_id", "annotation_r2", "group_key",
+                  "explore_method", "agg_method", "variant_id")
 )
-cat("Model metric rows:", nrow(model_metrics), "\n")
+auprc_individual <- auprc_per_dataset %>% dplyr::filter(is.na(agg_method))
+auprc_agg_per_ds <- auprc_per_dataset %>% dplyr::filter(!is.na(agg_method))
+
+cat("Per-dataset AUPRC:", nrow(auprc_per_dataset), "rows\n")
+cat("  Individual fits:", nrow(auprc_individual), "\n")
+cat("  Aggregated:", nrow(auprc_agg_per_ds), "\n")
+
+# Pooled AUPRC: combine confusion bins across ALL datasets, then
+# compute one AUPRC per (spec, agg_method). Used for overall barplot.
+auprc_pooled_agg <- compute_auprc_from_confusion(
+  confusion_bins_full %>% dplyr::filter(!is.na(agg_method)),
+  group_vars = c("spec_name", "use_case_id", "agg_method")
+)
+
+# By-annotation-r2 pooled agg: one AUPRC per (spec, agg_method, annotation_r2).
+# Used for per-r2 barplots; annotation-independent specs have annotation_r2=NA.
+auprc_pooled_agg_by_r2 <- compute_auprc_from_confusion(
+  confusion_bins_full %>% dplyr::filter(!is.na(agg_method)),
+  group_vars = c("spec_name", "use_case_id", "agg_method", "annotation_r2")
+)
+
+# Overall pooled individual (pooled across all r2 — for overall barplot truth-warm lines)
+auprc_pooled_individual_overall <- compute_auprc_from_confusion(
+  confusion_bins_full %>% dplyr::filter(is.na(agg_method)),
+  group_vars = c("spec_name", "use_case_id")
+)
+
+# By-r2 pooled individual (for per-r2 barplot truth-warm lines)
+auprc_pooled_individual <- compute_auprc_from_confusion(
+  confusion_bins_full %>% dplyr::filter(is.na(agg_method)),
+  group_vars = c("spec_name", "use_case_id", "annotation_r2")
+)
+
+cat("Pooled aggregated (overall):", nrow(auprc_pooled_agg), "combos\n")
+cat("Pooled aggregated (by r2):", nrow(auprc_pooled_agg_by_r2), "combos\n")
+cat("Pooled individual (overall):", nrow(auprc_pooled_individual_overall), "combos\n")
+cat("Pooled individual (by r2):", nrow(auprc_pooled_individual), "combos\n")
+
+# Pooled TPR/FPR curves (for ROC-style plots)
+curves_pooled_agg <- compute_power_fdr_curves(
+  confusion_bins_full %>% dplyr::filter(!is.na(agg_method)),
+  group_vars = c("spec_name", "agg_method")
+)
 ```
 
-# 2. Load Per-Run PIP Vectors
+# 4b. TPR @ FPR=0.05 from Confusion Bins
 
-```{r load-pips}
-# Read per-run SNP-level PIPs from parquet
-snps_dir <- file.path(agg_dir, "snps_dataset")
-if (dir.exists(snps_dir)) {
-  snps_files <- list.files(snps_dir, pattern = "\\.parquet$", full.names = TRUE)
-  snps_all <- arrow::open_dataset(snps_dir) %>%
-    dplyr::collect()
-  cat("SNP-level rows:", nrow(snps_all), "\n")
-} else {
-  warning("snps_dataset directory not found. PIP-level analysis unavailable.")
-  snps_all <- NULL
+Uses the same pooling approach as AUPRC: bins combined across ALL datasets,
+then scan thresholds to find TPR at the FPR = 0.05 crossing. No per-dataset
+averaging.
+
+```{r compute-tpr05}
+compute_tpr05_from_confusion <- function(bins, group_vars, fpr_target = 0.05) {
+  bins %>%
+    dplyr::group_by(dplyr::across(dplyr::all_of(group_vars))) %>%
+    dplyr::arrange(dplyr::desc(pip_threshold), .by_group = TRUE) %>%
+    dplyr::mutate(
+      cum_tp  = cumsum(n_causal_at_bucket),
+      cum_fp  = cumsum(n_noncausal_at_bucket),
+      total_p = sum(n_causal_at_bucket),
+      total_n = sum(n_noncausal_at_bucket)
+    ) %>%
+    dplyr::filter(total_p > 0, total_n > 0) %>%
+    dplyr::mutate(tpr = cum_tp / total_p, fpr = cum_fp / total_n) %>%
+    dplyr::filter(fpr <= fpr_target) %>%
+    dplyr::slice_tail(n = 1) %>%
+    dplyr::ungroup() %>%
+    dplyr::select(dplyr::all_of(group_vars), tpr_fpr05 = tpr)
 }
+
+tpr05_pooled_agg <- compute_tpr05_from_confusion(
+  confusion_bins_full %>% dplyr::filter(!is.na(agg_method)),
+  group_vars = c("spec_name", "use_case_id", "agg_method")
+)
+
+tpr05_pooled_agg_by_r2 <- compute_tpr05_from_confusion(
+  confusion_bins_full %>% dplyr::filter(!is.na(agg_method)),
+  group_vars = c("spec_name", "use_case_id", "agg_method", "annotation_r2")
+)
+
+tpr05_pooled_individual_overall <- compute_tpr05_from_confusion(
+  confusion_bins_full %>% dplyr::filter(is.na(agg_method)),
+  group_vars = c("spec_name", "use_case_id")
+)
+
+tpr05_pooled_individual <- compute_tpr05_from_confusion(
+  confusion_bins_full %>% dplyr::filter(is.na(agg_method)),
+  group_vars = c("spec_name", "use_case_id", "annotation_r2")
+)
+
+cat("TPR@0.05 pooled aggregated (overall):", nrow(tpr05_pooled_agg), "combos\n")
+cat("TPR@0.05 pooled aggregated (by r2):", nrow(tpr05_pooled_agg_by_r2), "combos\n")
+cat("TPR@0.05 pooled individual (overall):", nrow(tpr05_pooled_individual_overall), "combos\n")
+cat("TPR@0.05 pooled individual (by r2):", nrow(tpr05_pooled_individual), "combos\n")
 ```
 
-# 3. Grading: Top 8 as Causal
+# 5. Oracle Aggregation
 
-For susie2_oligogenic, grade using top 8 causal variants (3 sparse +
-5 oligogenic effects) by absolute effect size. The 15 polygenic effects
-are too weak to detect.
-
-```{r grading}
-grade_top_k <- 8L
-
-# Build per-dataset grading index: top 8 causal by |beta|
-grading_index <- model_metrics %>%
-  dplyr::filter(!is.na(auprc)) %>%
-  dplyr::distinct(dataset_bundle_id) %>%
-  dplyr::mutate(top_k_causal = grade_top_k)
-
-# The actual causal subsetting happens inside evaluation; the grading
-# convention is enforced when computing AUPRC, power, FDR below.
-```
-
-# 4. Oracle Aggregation
-
-Oracle = truth-aware ceiling. For each ensemble group (dataset x spec x
-annotation_r2), select the single model with the best AUPRC.
+For each ensemble group, select the single best individual fit by AUPRC
+(truth-aware upper bound on aggregation performance).
 
 ```{r oracle}
-# Oracle: best single model per group by AUPRC
-oracle_rows <- model_metrics %>%
-  dplyr::filter(!is.na(auprc), !isTRUE(is_agg)) %>%
-  dplyr::group_by(dataset_bundle_id, spec_name, annotation_r2, group_key) %>%
-  dplyr::slice_max(order_by = auprc, n = 1, with_ties = FALSE) %>%
+# Per-dataset oracle: best individual run per (dataset, spec, group_key)
+oracle_run_ids <- auprc_individual %>%
+  dplyr::filter(!is.na(spec_name), !spec_name %in% c("baseline-single", "truth-warm")) %>%
+  dplyr::group_by(dataset_bundle_id, spec_name, use_case_id,
+                   annotation_r2, group_key) %>%
+  dplyr::slice_max(order_by = AUPRC, n = 1, with_ties = FALSE) %>%
   dplyr::ungroup() %>%
+  dplyr::select(run_id, dataset_bundle_id, spec_name, use_case_id,
+                annotation_r2, group_key, AUPRC)
+
+cat("Oracle rows (per-dataset):", nrow(oracle_run_ids), "\n")
+
+# Per-dataset oracle AUPRC table (for auprc_combined)
+oracle_per_ds <- oracle_run_ids %>%
+  dplyr::mutate(agg_method = "oracle", explore_method = "aggregation")
+
+# Combine all per-dataset AUPRC results
+auprc_combined <- dplyr::bind_rows(auprc_agg_per_ds, oracle_per_ds)
+
+# Pooled oracle AUPRC: pull confusion bins for the oracle-selected runs,
+# pool across all datasets, then compute one AUPRC per spec.
+oracle_confusion <- confusion_bins_full %>%
+  dplyr::filter(is.na(agg_method)) %>%
+  dplyr::semi_join(oracle_run_ids, by = c("run_id", "spec_name", "use_case_id"))
+
+auprc_pooled_oracle <- compute_auprc_from_confusion(
+  oracle_confusion,
+  group_vars = c("spec_name", "use_case_id")
+) %>%
   dplyr::mutate(agg_method = "oracle")
 
-cat("Oracle rows:", nrow(oracle_rows), "\n")
+auprc_pooled_oracle_by_r2 <- compute_auprc_from_confusion(
+  oracle_confusion,
+  group_vars = c("spec_name", "use_case_id", "annotation_r2")
+) %>%
+  dplyr::mutate(agg_method = "oracle")
+
+cat("Pooled oracle rows (overall):", nrow(auprc_pooled_oracle), "\n")
+cat("Pooled oracle rows (by r2):", nrow(auprc_pooled_oracle_by_r2), "\n")
+
+# Add oracle to both pooled aggregated tables
+auprc_pooled_agg <- dplyr::bind_rows(auprc_pooled_agg, auprc_pooled_oracle)
+auprc_pooled_agg_by_r2 <- dplyr::bind_rows(auprc_pooled_agg_by_r2, auprc_pooled_oracle_by_r2)
+
+# Oracle TPR@0.05 (uses same oracle_confusion bins)
+tpr05_pooled_oracle <- compute_tpr05_from_confusion(
+  oracle_confusion,
+  group_vars = c("spec_name", "use_case_id")
+) %>%
+  dplyr::mutate(agg_method = "oracle")
+
+tpr05_pooled_oracle_by_r2 <- compute_tpr05_from_confusion(
+  oracle_confusion,
+  group_vars = c("spec_name", "use_case_id", "annotation_r2")
+) %>%
+  dplyr::mutate(agg_method = "oracle")
+
+tpr05_pooled_agg <- dplyr::bind_rows(tpr05_pooled_agg, tpr05_pooled_oracle)
+tpr05_pooled_agg_by_r2 <- dplyr::bind_rows(tpr05_pooled_agg_by_r2, tpr05_pooled_oracle_by_r2)
+
+cat("TPR@0.05 pooled oracle rows (overall):", nrow(tpr05_pooled_oracle), "\n")
+cat("TPR@0.05 pooled oracle rows (by r2):", nrow(tpr05_pooled_oracle_by_r2), "\n")
 ```
 
-# 5. Subsampling Analysis
+# 6. Summary Tables
 
-## 5a. Single-Lever Scaling (64x grids -> {4, 8, 16, 32, 64})
-
-```{r subsample-64, eval=FALSE}
-# For each pure 64-run spec, subsample ensembles at smaller sizes.
-# This produces scaling curves without additional model fits.
-
-pure_64_specs <- c("A-R", "A-F", "A-S", "B-R", "B-F", "C-C")
-subsample_sizes <- c(4L, 8L, 16L, 32L, 64L)
-n_draws <- 50L  # random subsets for restart-type specs
-
-scaling_results <- list()
-
-for (spec in pure_64_specs) {
-  spec_runs <- model_metrics %>%
-    dplyr::filter(spec_name == spec, !isTRUE(is_agg))
-
-  spec_pips <- snps_all %>%
-    dplyr::semi_join(spec_runs, by = "run_id")
-
-  for (n_sub in subsample_sizes) {
-    for (draw_i in seq_len(n_draws)) {
-      # Subsample n_sub runs from this spec's full set per dataset
-      # For grids (c, sigma_0_2): structured subsampling (every k-th)
-      # For restarts: random subset
-      # For refinements: prefix (first n_sub/2 BFS steps)
-
-      # TODO: implement subsample logic per spec type
-      # subsample_pips <- ...
-      # agg_pips <- aggregate_use_case_pips(subsample_pips, ...)
-      # auprc <- compute_auprc(agg_pips, truth)
-
-      scaling_results[[length(scaling_results) + 1L]] <- tibble::tibble(
-        spec_name = spec,
-        subsample_size = n_sub,
-        draw = draw_i,
-        agg_method = "placeholder",
-        auprc = NA_real_
-      )
-    }
-  }
-}
-
-scaling_curves <- dplyr::bind_rows(scaling_results)
-readr::write_csv(scaling_curves, file.path(agg_dir, "scaling_curves.csv"))
-```
-
-## 5b. Interaction Scaling (8x8 -> 4x4)
-
-```{r subsample-8x8, eval=FALSE}
-# For 8x8 interaction specs, subsample to 4x4 by taking every other
-# point on each axis.
-
-interaction_specs <- c("A-RF", "A-RS", "A-FS", "C-CS")
-
-interaction_scaling <- list()
-for (spec in interaction_specs) {
-  # TODO: structured 4x4 subsampling of 8x8 grids
-  # Take every other restart_id x every other refine_step (or sigma value)
-}
-
-interaction_scaling_df <- dplyr::bind_rows(interaction_scaling)
-readr::write_csv(interaction_scaling_df,
-                  file.path(agg_dir, "interaction_scaling.csv"))
-```
-
-# 6. Fixed-Budget Comparison
-
-```{r budget-comparison, eval=FALSE}
-# At budget B=64, compare performance across all specs.
-# Each spec that uses exactly 64 runs is directly comparable.
-
-budget_64_specs <- c("A-R", "A-S",
-                     "A-RF", "A-RS", "A-FS", "A-RFS",
-                     "B-R", "B-RF",
-                     "C-C", "C-CS", "C-CFR")
-
-budget_comparison <- model_metrics %>%
-  dplyr::filter(spec_name %in% budget_64_specs, isTRUE(is_agg)) %>%
-  dplyr::select(dataset_bundle_id, spec_name, annotation_r2,
-                agg_method, auprc, power, mean_size, mean_purity)
-
-readr::write_csv(budget_comparison,
-                  file.path(agg_dir, "budget_comparison.csv"))
-```
-
-# 7. Aggregation Method Comparison
-
-```{r aggregation-comparison}
-# Compare all 5 aggregation methods across all specs and ensemble sizes.
-agg_comparison <- model_metrics %>%
-  dplyr::filter(isTRUE(is_agg) | agg_method == "oracle") %>%
-  dplyr::bind_rows(oracle_rows) %>%
-  dplyr::group_by(spec_name, agg_method, annotation_r2) %>%
+```{r summary-by-spec}
+cat("=== AUPRC by spec x aggregation method ===\n")
+auprc_combined %>%
+  dplyr::group_by(spec_name, agg_method) %>%
   dplyr::summarise(
-    mean_auprc = mean(auprc, na.rm = TRUE),
-    sd_auprc = sd(auprc, na.rm = TRUE),
+    mean_AUPRC = mean(AUPRC, na.rm = TRUE),
+    sd_AUPRC = sd(AUPRC, na.rm = TRUE),
     n = dplyr::n(),
     .groups = "drop"
+  ) %>%
+  dplyr::arrange(spec_name, agg_method) %>%
+  knitr::kable(digits = 4, caption = "Aggregated AUPRC by spec and method")
+```
+
+```{r summary-baselines}
+cat("\n=== Baseline and truth-warm AUPRC ===\n")
+auprc_pooled_individual %>%
+  dplyr::filter(spec_name %in% c("baseline-single", "truth-warm")) %>%
+  knitr::kable(digits = 4, caption = "Baseline and truth-warm pooled AUPRC")
+```
+
+# 6b. Subscaling Analysis
+
+```{r load-snps}
+# Load individual (non-aggregated) PIPs from the snps parquet.
+# Requires aggregate_staging_outputs() to have been run with write_snps_parquet = TRUE.
+snps_parquet_path <- file.path(job_dir, "aggregated", "snps")
+
+snps_individual <- arrow::open_dataset(snps_parquet_path) %>%
+  dplyr::filter(is.na(.data$agg_method)) %>%
+  dplyr::select(run_id, snp_index, pip, causal) %>%
+  dplyr::collect() %>%
+  dplyr::left_join(
+    run_info %>% dplyr::select(
+      run_id, spec_name, dataset_bundle_id, annotation_r2,
+      restart_id, refine_step, c_value, sigma_0_2_scalar
+    ),
+    by = "run_id"
   )
 
-readr::write_csv(agg_comparison,
-                  file.path(agg_dir, "aggregation_comparison.csv"))
-knitr::kable(agg_comparison, digits = 4,
-             caption = "Aggregation method comparison")
+elbo_info <- model_metrics %>%
+  dplyr::filter(is.na(.data$agg_method)) %>%
+  dplyr::distinct(run_id, elbo_final)
+
+cat("SNP rows loaded:", nrow(snps_individual), "\n")
+cat("Runs with ELBO:", nrow(elbo_info), "\n")
 ```
 
-# 8. Dataset Metrics
+```{r compute-scaling}
+# PIP breaks matching run_control definition (variable resolution)
+pip_breaks_vec <- sort(unique(c(
+  seq(0,    0.05, by = 0.005),
+  seq(0.05, 0.10, by = 0.01),
+  seq(0.10, 1.0,  by = 0.02)
+)))
 
-```{r dataset-metrics}
-dataset_metrics_path <- file.path(agg_dir, "dataset_metrics.csv")
-if (file.exists(dataset_metrics_path)) {
-  dataset_metrics <- readr::read_csv(dataset_metrics_path,
-                                      show_col_types = FALSE)
-  cat("Dataset metric rows:", nrow(dataset_metrics), "\n")
+pure_lever_catalog <- tibble::tibble(
+  spec_name        = c("A-R", "A-F", "A-S", "B-R", "B-F", "C-C"),
+  lever_type       = c("restart", "refine", "sigma_0_2", "restart", "refine", "c_grid"),
+  n_random_subsets = c(50L, 1L, 1L, 50L, 1L, 1L)
+)
+
+# Only compute for specs present in the data
+pure_lever_catalog <- pure_lever_catalog %>%
+  dplyr::filter(.data$spec_name %in% unique(snps_individual$spec_name))
+
+if (nrow(pure_lever_catalog) > 0L) {
+  scaling_curves <- compute_scaling_curves(
+    snps_indiv        = snps_individual,
+    elbo_info         = elbo_info,
+    spec_catalog      = pure_lever_catalog,
+    pip_breaks        = pip_breaks_vec,
+    n_subsample_sizes = c(4L, 8L, 16L, 32L, 64L)
+  )
+  cat("Scaling curves rows:", nrow(scaling_curves), "\n")
 } else {
-  warning("dataset_metrics.csv not found.")
-  dataset_metrics <- NULL
+  scaling_curves <- tibble::tibble()
+  message("No pure-lever specs found in data — scaling_curves is empty.")
+}
+
+interaction_spec_names <- c("A-RF", "A-RS", "A-FS", "C-CS")
+interaction_spec_names <- interaction_spec_names[
+  interaction_spec_names %in% unique(snps_individual$spec_name)
+]
+
+if (length(interaction_spec_names) > 0L) {
+  interaction_scaling <- compute_interaction_scaling(
+    snps_indiv             = snps_individual,
+    elbo_info              = elbo_info,
+    interaction_spec_names = interaction_spec_names,
+    pip_breaks             = pip_breaks_vec
+  )
+  cat("Interaction scaling rows:", nrow(interaction_scaling), "\n")
+} else {
+  interaction_scaling <- tibble::tibble()
+  message("No interaction specs found in data — interaction_scaling is empty.")
 }
 ```
 
-# 9. Export Consolidated Outputs
+# 7. Export Consolidated Outputs
+
+```{r export-scaling}
+if (nrow(scaling_curves) > 0L) {
+  readr::write_csv(scaling_curves,
+                   file.path(out_dir, "scaling_curves.csv"))
+}
+if (nrow(interaction_scaling) > 0L) {
+  readr::write_csv(interaction_scaling,
+                   file.path(out_dir, "interaction_scaling.csv"))
+}
+```
 
 ```{r export}
-# Write oracle rows to consolidated model_metrics
-model_metrics_with_oracle <- dplyr::bind_rows(model_metrics, oracle_rows)
-readr::write_csv(model_metrics_with_oracle,
-                  file.path(agg_dir, "model_metrics_with_oracle.csv"))
-cat("Consolidated model_metrics written with",
-    nrow(oracle_rows), "oracle rows.\n")
+out_dir <- file.path(job_dir, "consolidated")
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+readr::write_csv(auprc_combined, file.path(out_dir, "auprc_aggregated.csv"))
+readr::write_csv(auprc_individual, file.path(out_dir, "auprc_individual.csv"))
+readr::write_csv(auprc_pooled_agg, file.path(out_dir, "auprc_pooled_aggregated.csv"))
+readr::write_csv(auprc_pooled_agg_by_r2, file.path(out_dir, "auprc_pooled_agg_by_r2.csv"))
+readr::write_csv(auprc_pooled_individual_overall, file.path(out_dir, "auprc_pooled_individual_overall.csv"))
+readr::write_csv(auprc_pooled_individual, file.path(out_dir, "auprc_pooled_individual.csv"))
+readr::write_csv(model_metrics, file.path(out_dir, "model_metrics_full.csv"))
+readr::write_csv(confusion_bins_full, file.path(out_dir, "confusion_bins_full.csv"))
+if (nrow(dataset_metrics)) {
+  readr::write_csv(dataset_metrics, file.path(out_dir, "dataset_metrics.csv"))
+}
+if (nrow(multimodal_metrics)) {
+  readr::write_csv(multimodal_metrics, file.path(out_dir, "multimodal_metrics.csv"))
+}
+if (nrow(refine_depth)) {
+  readr::write_csv(refine_depth, file.path(out_dir, "refine_depth.csv"))
+}
+if (nrow(tier_cs_metrics)) {
+  readr::write_csv(tier_cs_metrics, file.path(out_dir, "tier_cs_metrics_full.csv"))
+}
+
+readr::write_csv(tpr05_pooled_agg, file.path(out_dir, "tpr05_pooled_aggregated.csv"))
+readr::write_csv(tpr05_pooled_agg_by_r2, file.path(out_dir, "tpr05_pooled_agg_by_r2.csv"))
+readr::write_csv(tpr05_pooled_individual_overall, file.path(out_dir, "tpr05_pooled_individual_overall.csv"))
+readr::write_csv(tpr05_pooled_individual, file.path(out_dir, "tpr05_pooled_individual.csv"))
+
+cat("Consolidated outputs written to:", out_dir, "\n")
+cat("Files:", paste(list.files(out_dir), collapse = ", "), "\n")
 ```
 
-# 10. Runtime Summary
+# 8. Runtime Summary
 
 ```{r runtime}
-if ("wall_time_sec" %in% names(model_metrics)) {
-  model_metrics %>%
-    dplyr::filter(!is.na(wall_time_sec), !isTRUE(is_agg)) %>%
-    dplyr::group_by(spec_name) %>%
-    dplyr::summarise(
-      mean_sec = mean(wall_time_sec, na.rm = TRUE),
-      median_sec = median(wall_time_sec, na.rm = TRUE),
-      total_hrs = sum(wall_time_sec, na.rm = TRUE) / 3600,
-      n_runs = dplyr::n(),
-      .groups = "drop"
-    ) %>%
-    knitr::kable(digits = 2, caption = "Runtime by spec")
-}
+model_metrics %>%
+  dplyr::filter(filtering == "purity_filtered", !is.na(spec_name)) %>%
+  dplyr::group_by(spec_name) %>%
+  dplyr::summarise(
+    mean_sec = mean(wall_time_sec, na.rm = TRUE),
+    median_sec = median(wall_time_sec, na.rm = TRUE),
+    total_min = sum(wall_time_sec, na.rm = TRUE) / 60,
+    n_runs = dplyr::n(),
+    .groups = "drop"
+  ) %>%
+  knitr::kable(digits = 2, caption = "Runtime by spec")
 ```

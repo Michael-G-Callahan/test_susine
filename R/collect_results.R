@@ -719,3 +719,376 @@ build_confusion_matrix <- function(snps_dataset_path,
 
   invisible(result)
 }
+
+
+# Ensemble scaling analysis helpers ----------------------------------------
+
+# Compute AUPRC from a pooled confusion-bins tibble via trapezoidal PR-curve.
+# bins: tibble with pip_threshold, n_causal_at_bucket, n_noncausal_at_bucket
+# Returns a scalar or NA_real_.
+#' @keywords internal
+auprc_from_pooled_bins <- function(bins) {
+  if (is.null(bins) || nrow(bins) == 0L) return(NA_real_)
+  b       <- bins %>% dplyr::arrange(dplyr::desc(.data$pip_threshold))
+  cum_tp  <- cumsum(b$n_causal_at_bucket)
+  cum_fp  <- cumsum(b$n_noncausal_at_bucket)
+  total_p <- sum(b$n_causal_at_bucket)
+  if (total_p == 0L) return(NA_real_)
+  keep      <- (cum_tp + cum_fp) > 0L
+  precision <- (cum_tp / (cum_tp + cum_fp))[keep]
+  recall    <- (cum_tp / total_p)[keep]
+  if (length(recall) < 2L) return(NA_real_)
+  sum(diff(recall) * 0.5 * (precision[-length(precision)] + precision[-1L]))
+}
+
+# Aggregate a p x N PIP matrix to a length-p vector using the specified method.
+# pip_mat: numeric matrix, p rows (SNPs), N columns (fits)
+# elbos:   length-N numeric (NAs treated as -Inf for max_elbo / softmax)
+# method:  "max_elbo", "uniform", "elbo_softmax",
+#          "cluster_weight" (JSD threshold 0.15), or "cluster_weight_050" (0.50)
+#' @keywords internal
+aggregate_pip_matrix <- function(pip_mat, elbos, method, jsd_threshold = 0.15) {
+  N <- ncol(pip_mat)
+  if (N == 1L) return(as.vector(pip_mat))
+  switch(method,
+    uniform = rowMeans(pip_mat, na.rm = TRUE),
+    max_elbo = {
+      best <- which.max(ifelse(is.na(elbos), -Inf, elbos))
+      pip_mat[, best, drop = TRUE]
+    },
+    elbo_softmax = {
+      e <- ifelse(is.na(elbos), -Inf, elbos)
+      w <- exp(e - max(e)); w <- w / sum(w)
+      as.vector(pip_mat %*% w)
+    },
+    cluster_weight     = .aggregate_cluster_weight(pip_mat, elbos, jsd_threshold),
+    cluster_weight_050 = .aggregate_cluster_weight(pip_mat, elbos, 0.50),
+    stop("Unknown aggregation method: ", method)
+  )
+}
+
+# Internal JSD-based cluster-then-ELBO-softmax aggregation.
+#' @keywords internal
+.aggregate_cluster_weight <- function(pip_mat, elbos, jsd_threshold) {
+  N   <- ncol(pip_mat)
+  eps <- 1e-10
+  H   <- apply(pip_mat + eps, 2L, function(pv) -sum(pv * log(pv)))
+  jsd <- matrix(0, N, N)
+  for (i in seq_len(N - 1L)) {
+    for (j in seq(i + 1L, N)) {
+      mix        <- 0.5 * (pip_mat[, i] + pip_mat[, j]) + eps
+      jsd[i, j]  <- jsd[j, i] <- max(-sum(mix * log(mix)) - 0.5 * (H[i] + H[j]), 0)
+    }
+  }
+  clusters <- cutree(hclust(as.dist(jsd), method = "complete"), h = jsd_threshold)
+  K        <- max(clusters)
+  w        <- numeric(N)
+  e        <- ifelse(is.na(elbos), -Inf, elbos)
+  for (k in seq_len(K)) {
+    idx    <- which(clusters == k)
+    ew     <- exp(e[idx] - max(e[idx]))
+    w[idx] <- ew / sum(ew) / K
+  }
+  as.vector(pip_mat %*% w)
+}
+
+# Select n_ens run_ids from run_meta using the appropriate lever strategy.
+# run_meta: tibble with columns run_id, restart_id, refine_step, c_value, sigma_0_2_scalar
+# lever_type: "restart", "refine", "sigma_0_2", or "c_grid"
+# rep_i: replicate index (seeds RNG for "restart"; ignored for deterministic levers)
+#' @keywords internal
+select_subsample_run_ids <- function(run_meta, n_ens, lever_type, rep_i = 1L) {
+  n_sel <- min(as.integer(n_ens), nrow(run_meta))
+  switch(lever_type,
+    restart = {
+      set.seed(rep_i * 7919L)
+      dplyr::slice_sample(run_meta, n = n_sel)$run_id
+    },
+    refine = {
+      run_meta %>%
+        dplyr::arrange(.data$refine_step) %>%
+        dplyr::slice_head(n = n_sel) %>%
+        dplyr::pull(run_id)
+    },
+    sigma_0_2 = {
+      vals <- sort(unique(run_meta$sigma_0_2_scalar))
+      keep <- vals[unique(round(seq(1, length(vals), length.out = n_sel)))]
+      run_meta %>%
+        dplyr::filter(.data$sigma_0_2_scalar %in% keep) %>%
+        dplyr::pull(run_id)
+    },
+    c_grid = {
+      vals <- sort(unique(run_meta$c_value))
+      keep <- vals[unique(round(seq(1, length(vals), length.out = n_sel)))]
+      run_meta %>%
+        dplyr::filter(.data$c_value %in% keep) %>%
+        dplyr::pull(run_id)
+    },
+    stop("Unknown lever_type: ", lever_type)
+  )
+}
+
+# Accumulate new_bins into pooled_bins[[method]], summing bucket counts.
+#' @keywords internal
+.accumulate_bins <- function(pooled_bins, method, new_bins) {
+  if (is.null(pooled_bins[[method]])) {
+    pooled_bins[[method]] <- new_bins
+  } else {
+    pooled_bins[[method]] <- dplyr::bind_rows(pooled_bins[[method]], new_bins) %>%
+      dplyr::group_by(.data$pip_threshold) %>%
+      dplyr::summarise(
+        n_causal_at_bucket    = sum(.data$n_causal_at_bucket),
+        n_noncausal_at_bucket = sum(.data$n_noncausal_at_bucket),
+        .groups = "drop"
+      )
+  }
+  pooled_bins
+}
+
+# Compute AUPRC + TPR@0.05 for each agg_method from a named bins list.
+# Returns tibble(agg_method, AUPRC, tpr05).
+#' @keywords internal
+.metrics_from_bins_list <- function(pooled_bins, agg_methods) {
+  purrr::map_dfr(agg_methods, function(method) {
+    pb <- pooled_bins[[method]]
+    tibble::tibble(
+      agg_method = method,
+      AUPRC      = auprc_from_pooled_bins(pb),
+      tpr05      = if (!is.null(pb) && nrow(pb) > 0L)
+        tpr_at_fpr_threshold(pb) else NA_real_
+    )
+  })
+}
+
+# Build a p x N PIP matrix, causal_vec, and elbos vector from a dataset's
+# snps tibble and a vector of selected run_ids. Returns a named list.
+#' @keywords internal
+.build_pip_mat <- function(ds_snps, sel_ids, elbo_info) {
+  run_order <- sort(sel_ids)
+  ds_sub    <- ds_snps %>% dplyr::filter(.data$run_id %in% run_order)
+
+  pip_wide <- ds_sub %>%
+    dplyr::select(snp_index, run_id, pip) %>%
+    tidyr::pivot_wider(
+      id_cols     = snp_index,
+      names_from  = run_id,
+      values_from = pip,
+      values_fill = 0,
+      names_sort  = TRUE
+    ) %>%
+    dplyr::arrange(.data$snp_index)
+
+  pip_mat <- as.matrix(pip_wide[, as.character(run_order), drop = FALSE])
+
+  causal_vec <- ds_sub %>%
+    dplyr::distinct(.data$snp_index, .data$causal) %>%
+    dplyr::arrange(.data$snp_index) %>%
+    dplyr::pull(.data$causal)
+
+  elbos <- elbo_info %>%
+    dplyr::filter(.data$run_id %in% run_order) %>%
+    dplyr::arrange(.data$run_id) %>%
+    dplyr::pull(.data$elbo_final)
+
+  list(pip_mat = pip_mat, causal_vec = causal_vec, elbos = elbos)
+}
+
+#' Compute post-hoc subscaling curves for pure-lever ensemble specs.
+#'
+#' For each spec in spec_catalog, subsamples from the full 64-run grid at
+#' ensemble sizes n_subsample_sizes, aggregates PIPs, and returns pooled
+#' AUPRC + TPR@FPR=0.05 as a function of ensemble size.
+#'
+#' @param snps_indiv Per-run per-SNP tibble (from snps parquet, individual fits only)
+#'   with columns: run_id, snp_index, pip, causal, spec_name, dataset_bundle_id,
+#'   annotation_r2, restart_id, refine_step, c_value, sigma_0_2_scalar.
+#' @param elbo_info Tibble with columns run_id, elbo_final.
+#' @param spec_catalog Tibble with columns spec_name, lever_type, n_random_subsets.
+#' @param pip_breaks Numeric vector of PIP bucket break points.
+#' @param n_subsample_sizes Integer vector of ensemble sizes to evaluate.
+#' @return Tibble: spec_name, annotation_r2 (NA = overall pooled), n_ensemble,
+#'   agg_method, AUPRC_mean, AUPRC_se, tpr05_mean, tpr05_se.
+#' @export
+compute_scaling_curves <- function(snps_indiv, elbo_info, spec_catalog,
+                                   pip_breaks,
+                                   n_subsample_sizes = c(4L, 8L, 16L, 32L, 64L)) {
+  agg_methods <- c("max_elbo", "uniform", "elbo_softmax",
+                   "cluster_weight", "cluster_weight_050")
+
+  purrr::map_dfr(seq_len(nrow(spec_catalog)), function(si) {
+    spec_nm    <- spec_catalog$spec_name[si]
+    lever_type <- spec_catalog$lever_type[si]
+    n_reps     <- spec_catalog$n_random_subsets[si]
+
+    snps_spec <- snps_indiv %>% dplyr::filter(.data$spec_name == spec_nm)
+    datasets  <- unique(snps_spec$dataset_bundle_id)
+    r2_levels <- sort(unique(snps_spec$annotation_r2))
+
+    run_meta_list <- lapply(datasets, function(bid) {
+      snps_spec %>%
+        dplyr::filter(.data$dataset_bundle_id == bid) %>%
+        dplyr::distinct(run_id, restart_id, refine_step, c_value, sigma_0_2_scalar) %>%
+        dplyr::left_join(elbo_info, by = "run_id")
+    })
+
+    purrr::map_dfr(as.integer(n_subsample_sizes), function(n_ens) {
+      rep_rows <- purrr::map_dfr(seq_len(n_reps), function(rep_i) {
+        overall_bins <- stats::setNames(
+          vector("list", length(agg_methods)), agg_methods)
+        r2_bins <- stats::setNames(
+          lapply(r2_levels, function(x) {
+            stats::setNames(vector("list", length(agg_methods)), agg_methods)
+          }),
+          as.character(r2_levels)
+        )
+
+        for (bid_i in seq_along(datasets)) {
+          bid      <- datasets[bid_i]
+          run_meta <- run_meta_list[[bid_i]]
+          ds_snps  <- snps_spec %>% dplyr::filter(.data$dataset_bundle_id == bid)
+          r2_val   <- unique(ds_snps$annotation_r2)[[1L]]
+          r2_key   <- as.character(r2_val)
+
+          sel_ids <- select_subsample_run_ids(run_meta, n_ens, lever_type, rep_i)
+          if (length(sel_ids) == 0L) next
+
+          pm <- .build_pip_mat(ds_snps, sel_ids, elbo_info)
+
+          for (method in agg_methods) {
+            agg_pip      <- aggregate_pip_matrix(pm$pip_mat, pm$elbos, method)
+            bins         <- compute_bins_from_pip_vec(agg_pip, pm$causal_vec, pip_breaks)
+            overall_bins <- .accumulate_bins(overall_bins, method, bins)
+            r2_bins[[r2_key]] <- .accumulate_bins(r2_bins[[r2_key]], method, bins)
+          }
+        }
+
+        overall_m <- .metrics_from_bins_list(overall_bins, agg_methods) %>%
+          dplyr::mutate(annotation_r2 = NA_real_)
+        r2_m <- purrr::map_dfr(as.character(r2_levels), function(r2k) {
+          .metrics_from_bins_list(r2_bins[[r2k]], agg_methods) %>%
+            dplyr::mutate(annotation_r2 = as.numeric(r2k))
+        })
+        dplyr::bind_rows(overall_m, r2_m) %>% dplyr::mutate(rep_i = rep_i)
+      })
+
+      rep_rows %>%
+        dplyr::group_by(.data$agg_method, .data$annotation_r2) %>%
+        dplyr::summarise(
+          AUPRC_mean = mean(.data$AUPRC, na.rm = TRUE),
+          AUPRC_se   = if (dplyr::n() > 1L)
+            stats::sd(.data$AUPRC, na.rm = TRUE) / sqrt(sum(!is.na(.data$AUPRC)))
+          else NA_real_,
+          tpr05_mean = mean(.data$tpr05, na.rm = TRUE),
+          tpr05_se   = if (dplyr::n() > 1L)
+            stats::sd(.data$tpr05, na.rm = TRUE) / sqrt(sum(!is.na(.data$tpr05)))
+          else NA_real_,
+          .groups = "drop"
+        ) %>%
+        dplyr::mutate(spec_name = spec_nm, n_ensemble = n_ens)
+    })
+  }) %>%
+    dplyr::select(spec_name, annotation_r2, n_ensemble, agg_method,
+                  AUPRC_mean, AUPRC_se, tpr05_mean, tpr05_se)
+}
+
+# Map a 2-lever interaction spec name to its two axis column names.
+#' @keywords internal
+.get_interaction_axes <- function(spec_name) {
+  switch(spec_name,
+    "A-RF" = c("restart_id",  "refine_step"),
+    "A-RS" = c("restart_id",  "sigma_0_2_scalar"),
+    "A-FS" = c("refine_step", "sigma_0_2_scalar"),
+    "C-CS" = c("c_value",     "sigma_0_2_scalar"),
+    stop("Unknown interaction spec: ", spec_name)
+  )
+}
+
+#' Compute AUPRC and TPR@0.05 for 2-lever interaction specs at 4x4 vs 8x8 resolution.
+#'
+#' For each spec, selects R evenly-spaced values on each of the two grid axes,
+#' producing R x R = R^2 fits, then aggregates and evaluates.
+#'
+#' @param snps_indiv Same format as compute_scaling_curves().
+#' @param elbo_info Tibble with columns run_id, elbo_final.
+#' @param interaction_spec_names Character vector, e.g. c("A-RF","A-RS","A-FS","C-CS").
+#' @param pip_breaks Numeric vector of PIP bucket break points.
+#' @return Tibble: spec_name, annotation_r2 (NA = overall), resolution ("4x4"/"8x8"),
+#'   agg_method, AUPRC, tpr05.
+#' @export
+compute_interaction_scaling <- function(snps_indiv, elbo_info,
+                                        interaction_spec_names, pip_breaks) {
+  agg_methods <- c("max_elbo", "uniform", "elbo_softmax",
+                   "cluster_weight", "cluster_weight_050")
+  resolutions <- c("4x4", "8x8")
+
+  purrr::map_dfr(interaction_spec_names, function(spec_nm) {
+    axes      <- .get_interaction_axes(spec_nm)
+    snps_spec <- snps_indiv %>% dplyr::filter(.data$spec_name == spec_nm)
+    datasets  <- unique(snps_spec$dataset_bundle_id)
+    r2_levels <- sort(unique(snps_spec$annotation_r2))
+
+    run_meta_list <- lapply(datasets, function(bid) {
+      snps_spec %>%
+        dplyr::filter(.data$dataset_bundle_id == bid) %>%
+        dplyr::distinct(run_id, dplyr::all_of(axes)) %>%
+        dplyr::left_join(elbo_info, by = "run_id")
+    })
+
+    purrr::map_dfr(resolutions, function(res) {
+      R <- as.integer(sub("x.*", "", res))
+
+      overall_bins <- stats::setNames(
+        vector("list", length(agg_methods)), agg_methods)
+      r2_bins <- stats::setNames(
+        lapply(r2_levels, function(x) {
+          stats::setNames(vector("list", length(agg_methods)), agg_methods)
+        }),
+        as.character(r2_levels)
+      )
+
+      for (bid_i in seq_along(datasets)) {
+        bid      <- datasets[bid_i]
+        run_meta <- run_meta_list[[bid_i]]
+        ds_snps  <- snps_spec %>% dplyr::filter(.data$dataset_bundle_id == bid)
+        r2_val   <- unique(ds_snps$annotation_r2)[[1L]]
+        r2_key   <- as.character(r2_val)
+
+        ax1_vals <- sort(unique(run_meta[[axes[[1L]]]]))
+        ax2_vals <- sort(unique(run_meta[[axes[[2L]]]]))
+
+        keep1 <- ax1_vals[unique(round(
+          seq(1, length(ax1_vals), length.out = min(R, length(ax1_vals)))))]
+        keep2 <- ax2_vals[unique(round(
+          seq(1, length(ax2_vals), length.out = min(R, length(ax2_vals)))))]
+
+        sel_ids <- run_meta %>%
+          dplyr::filter(
+            .data[[axes[[1L]]]] %in% keep1,
+            .data[[axes[[2L]]]] %in% keep2
+          ) %>%
+          dplyr::pull(run_id)
+
+        if (length(sel_ids) == 0L) next
+
+        pm <- .build_pip_mat(ds_snps, sel_ids, elbo_info)
+
+        for (method in agg_methods) {
+          agg_pip      <- aggregate_pip_matrix(pm$pip_mat, pm$elbos, method)
+          bins         <- compute_bins_from_pip_vec(agg_pip, pm$causal_vec, pip_breaks)
+          overall_bins <- .accumulate_bins(overall_bins, method, bins)
+          r2_bins[[r2_key]] <- .accumulate_bins(r2_bins[[r2_key]], method, bins)
+        }
+      }
+
+      overall_m <- .metrics_from_bins_list(overall_bins, agg_methods) %>%
+        dplyr::mutate(spec_name = spec_nm, resolution = res, annotation_r2 = NA_real_)
+      r2_m <- purrr::map_dfr(as.character(r2_levels), function(r2k) {
+        .metrics_from_bins_list(r2_bins[[r2k]], agg_methods) %>%
+          dplyr::mutate(spec_name = spec_nm, resolution = res,
+                        annotation_r2 = as.numeric(r2k))
+      })
+      dplyr::bind_rows(overall_m, r2_m)
+    })
+  }) %>%
+    dplyr::select(spec_name, annotation_r2, resolution, agg_method, AUPRC, tpr05)
+}

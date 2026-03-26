@@ -407,7 +407,11 @@ make_run_tables <- function(use_case_ids,
           if (k %% as.integer(other_prod) != 0L) {
             stop("Cannot infer refine count: K is not divisible by non-refine axis product.")
           }
-          n_refine <- as.integer(k / as.integer(other_prod))
+          n_refine_raw <- as.integer(k / as.integer(other_prod))
+          # Each non-root refine step costs 2 model fits (perturb + refit).
+          # Halve the inferred count so total model fits match the budget.
+          # Special case: keep 3 as-is (rather than rounding down to 1).
+          n_refine <- if (n_refine_raw == 3L) 3L else max(1L, as.integer(floor(n_refine_raw / 2L)))
         } else {
           stop("refine_settings$n_steps must be set for intersect mode when refine is included.")
         }
@@ -420,8 +424,7 @@ make_run_tables <- function(use_case_ids,
         stop("refine count must be >= 1.")
       }
       return(tibble::tibble(
-        refine_step = seq_len(n_refine),
-        run_type = rep("default", n_refine)
+        refine_step = seq_len(n_refine)
       ))
     }
     stop("Unsupported exploration method: ", method)
@@ -513,10 +516,22 @@ make_run_tables <- function(use_case_ids,
       # Use unnamed inputs so crossing splices columns instead of creating list-cols.
       axis_tbl <- do.call(tidyr::crossing, unname(axis_list))
     }
-    if (nrow(axis_tbl) != K) {
+    # For refine-containing intersect specs each row costs 2 model fits
+    # (perturb + refit), so the expected row count is K/2. The special case
+    # (n_refine = 3, no halving) keeps rows == K unchanged.
+    has_refine_intersect <- "refine" %in% methods_intersect
+    ok <- if (has_refine_intersect) {
+      nrow(axis_tbl) == K || nrow(axis_tbl) * 2L == as.integer(K)
+    } else {
+      nrow(axis_tbl) == K
+    }
+    if (!ok) {
       stop(
-        "Intersect exploration produced ", nrow(axis_tbl),
-        " fits but K = ", K, ". Provide axis sizes whose product equals K."
+        "Intersect exploration produced ", nrow(axis_tbl), " rows",
+        if (has_refine_intersect) paste0(" (~", nrow(axis_tbl) * 2L, " model fits)") else "",
+        " but K = ", K, ". Provide axis sizes whose product",
+        if (has_refine_intersect) " (×2 for refine cost)" else "",
+        " equals K."
       )
     }
     axis_tbl %>%

@@ -67,7 +67,7 @@ refine_2 <- list(n_steps = 2L, cs_source = "filtered", purity_threshold = 0.95)
 # ── Group A: one pure lever + one interaction ──
 spec_A_R <- list(
   name = "A-R",
-  use_case_ids = "susie_vanilla",
+  use_case_ids = "susine_vanilla",
   exploration_methods = "restart",
   exploration_mode = "separate",
   K = 4L,
@@ -76,7 +76,7 @@ spec_A_R <- list(
 
 spec_A_F <- list(
   name = "A-F",
-  use_case_ids = "susie_vanilla",
+  use_case_ids = "susine_vanilla",
   exploration_methods = "refine",
   exploration_mode = "separate",
   K = 2L,
@@ -85,7 +85,7 @@ spec_A_F <- list(
 
 spec_A_S <- list(
   name = "A-S",
-  use_case_ids = "susie_vanilla",
+  use_case_ids = "susine_vanilla",
   exploration_methods = "sigma_0_2_grid",
   exploration_mode = "separate",
   K = 4L,
@@ -94,7 +94,7 @@ spec_A_S <- list(
 
 spec_A_RF <- list(
   name = "A-RF",
-  use_case_ids = "susie_vanilla",
+  use_case_ids = "susine_vanilla",
   exploration_methods = c("restart", "refine"),
   exploration_mode = "intersect",
   K = 4L,
@@ -135,7 +135,7 @@ spec_C_CS <- list(
 # ── Single-fit baselines ──
 spec_baseline <- list(
   name = "baseline-single",
-  use_case_ids = c("susie_vanilla", "susine_eb_clamped_scale_var_nonneg",
+  use_case_ids = c("susine_vanilla", "susine_eb_clamped_scale_var_nonneg",
                    "susine_functional_mu"),
   exploration_methods = "single",
   exploration_mode = "separate",
@@ -183,7 +183,7 @@ cfg <- make_job_config(
   output_root = here("output"),
   grid_mode = "full",
 
-  use_case_ids = c("susie_vanilla",
+  use_case_ids = c("susine_vanilla",
                    "susine_eb_clamped_scale_var_nonneg",
                    "susine_functional_mu"),
 
@@ -341,8 +341,10 @@ cat("Running", n_tasks, "tasks locally...\n")
 for (tid in seq_len(n_tasks)) {
   cat("\n--- Task", tid, "of", n_tasks, "---\n")
   run_task(
-    job_config_path = file.path(arts$temp_dir, "job_config.json"),
+    job_name = cfg$job$name,
     task_id = tid,
+    job_root = here("output"),
+    config_path = arts$job_config,
     quiet = FALSE
   )
 }

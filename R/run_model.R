@@ -35,6 +35,7 @@ run_task <- function(job_name,
       confusion = list(),
       dataset_metrics = list(),
       multimodal = list(),
+      refine_depth = list(),
       validation = list(),
       prior_diagnostics = list()
     )
@@ -691,7 +692,9 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
         fit <- cached$fit
         eval_res <- cached$evaluation
         run_data_bundle <- cached$run_data_bundle
-        meta <- infer_primary_variant_meta(run_row, wall_time_sec = 0)
+        meta <- infer_primary_variant_meta(
+          run_row, wall_time_sec = as.numeric(cached$wall_time_sec %||% 0)
+        )
         meta$model_call_executed <- FALSE
         meta$cache_source_run_id <- as.integer(cached$source_run_id)
         execution_cache_hits <<- execution_cache_hits + 1L
@@ -729,7 +732,8 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
             fit = fit,
             evaluation = eval_res,
             run_data_bundle = run_data_bundle,
-            source_run_id = as.integer(run_row$run_id)
+            source_run_id = as.integer(run_row$run_id),
+            wall_time_sec = as.numeric(meta$wall_time_sec %||% 0)
           ),
           envir = execution_cache
         )
@@ -831,6 +835,7 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
         )
       )
     grouped_idx <- split(seq_len(nrow(uc_runs)), uc_runs$.group_key)
+    refine_depth_by_group <- list()
     for (gk in names(grouped_idx)) {
       group_rows <- uc_runs[grouped_idx[[gk]], , drop = FALSE]
       if (is.null(group_run_map[[gk]])) {
@@ -851,133 +856,159 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
         next
       }
 
-      group_rows <- group_rows %>%
-        dplyr::arrange(dplyr::coalesce(.data$refine_step, .data$run_id), .data$run_id)
+      # Split refine group into independent per-parent BFS trees.
+      # Parent = unique combination of non-refine exploration axes
+      # (restart_id, c_value, sigma_0_2_scalar, tau_value).
+      parent_key_cols <- intersect(
+        c("restart_id", "c_value", "sigma_0_2_scalar", "tau_value"),
+        names(group_rows)
+      )
+      parent_key_strs <- do.call(paste, c(
+        lapply(parent_key_cols, function(col) {
+          paste0(col, "=", dplyr::coalesce(as.character(group_rows[[col]]), "NA"))
+        }),
+        sep = "|"
+      ))
+      parent_split <- split(seq_len(nrow(group_rows)), parent_key_strs)
 
-      # Two-step refinement BFS: perturb (blocked weights) -> refit (restored
-      # weights + init_alpha from perturb). The root node (step 1) is a
-      # baseline fit with no blocking.  Each subsequent node costs 2 model
-      # fits (perturb + refit) but only the refit is stored in ensemble PIPs.
-      # The perturb fit is intermediate.
-
+      # Two-step refinement BFS per parent: perturb (blocked weights) -> refit
+      # (restored weights + init_alpha from perturb). Root node (step 1) is a
+      # baseline fit with no blocking. Each non-root node costs 2 model fits
+      # (perturb + refit); only the refit is stored in ensemble PIPs.
       refine_purity_threshold <- as.numeric(
         job_config$job$compute$refine$purity_threshold %||% 0.95
       )
 
-      queue <- list(list(blocked = integer(0), parent_fit = NULL))
-      seen_block_sets <- new.env(parent = emptyenv())
-      assign(".root", TRUE, envir = seen_block_sets)
-      processed <- 0L
+      refine_depth_records <- list()
 
-      for (ii in seq_len(nrow(group_rows))) {
-        if (!length(queue)) {
-          break
-        }
-        node <- queue[[1]]
-        if (length(queue) == 1L) {
-          queue <- list()
-        } else {
-          queue <- queue[-1]
-        }
-        run_row <- group_rows[ii, , drop = FALSE]
-        step_id <- as.integer(run_row$refine_step %||% ii)
-        is_root <- (step_id <= 1L && length(node$blocked) == 0L)
+      for (pk in names(parent_split)) {
+        parent_rows <- group_rows[parent_split[[pk]], , drop = FALSE] %>%
+          dplyr::arrange(.data$refine_step, .data$run_id)
+        n_requested <- nrow(parent_rows)
 
-        if (is_root) {
-          # Root: baseline fit (no blocking, no warm start) -----
-          out <- run_and_record(
-            run_row = run_row,
-            group_key = gk,
-            blocked_idx = integer(0),
-            meta_override = list(
-              explore_method = "refine",
-              variant_id = step_id,
-              run_type = "default",
-              is_restart = FALSE
+        queue <- list(list(blocked = integer(0), parent_fit = NULL))
+        seen_block_sets <- new.env(parent = emptyenv())
+        assign(".root", TRUE, envir = seen_block_sets)
+        processed <- 0L
+
+        for (ii in seq_len(n_requested)) {
+          if (!length(queue)) {
+            break
+          }
+          node <- queue[[1]]
+          if (length(queue) == 1L) {
+            queue <- list()
+          } else {
+            queue <- queue[-1]
+          }
+          run_row <- parent_rows[ii, , drop = FALSE]
+          step_id <- as.integer(run_row$refine_step %||% ii)
+          is_root <- (step_id <= 1L && length(node$blocked) == 0L)
+
+          if (is_root) {
+            # Root: baseline fit (no blocking, no warm start) -----
+            out <- run_and_record(
+              run_row = run_row,
+              group_key = gk,
+              blocked_idx = integer(0),
+              meta_override = list(
+                explore_method = "refine",
+                variant_id = step_id,
+                run_type = "default",
+                is_restart = FALSE
+              )
             )
-          )
-          processed <- processed + 1L
-          stored_fit <- out$fit
-          stored_eval <- out$eval_res
-        } else {
-          # Non-root: two-step perturb + refit -----
-          # Step 1 (perturb): fit with blocked prior weights.  This is an
-          # intermediate model whose alpha we extract for the warm start.
-          # We call run_use_case directly so the perturb is NOT recorded
-          # in ensemble PIPs or written to outputs.
-          perturb_result <- run_use_case(
-            use_case = use_case,
-            run_row = run_row,
-            data_bundle = data_bundle,
-            job_config = job_config,
-            blocked_idx = node$blocked
-          )
-          perturb_fit <- perturb_result$fits[[1]]
-          perturb_alpha <- perturb_fit$effect_fits$alpha
+            processed <- processed + 1L
+            stored_fit <- out$fit
+            stored_eval <- out$eval_res
+          } else {
+            # Non-root: two-step perturb + refit -----
+            # Step 1 (perturb): fit with blocked prior weights.  This is an
+            # intermediate model whose alpha we extract for the warm start.
+            # We call run_use_case directly so the perturb is NOT recorded
+            # in ensemble PIPs or written to outputs.
+            perturb_result <- run_use_case(
+              use_case = use_case,
+              run_row = run_row,
+              data_bundle = data_bundle,
+              job_config = job_config,
+              blocked_idx = node$blocked
+            )
+            perturb_fit <- perturb_result$fits[[1]]
+            perturb_alpha <- perturb_fit$effect_fits$alpha
 
-          # Step 2 (refit): restore uniform prior weights, warm-start
-          # from perturbed model's alpha.  The init_alpha_override
-          # bypasses normal warm-start logic and injects perturbed
-          # alpha directly.  This is stored as the actual ensemble member.
-          out <- run_and_record(
-            run_row = run_row,
-            group_key = gk,
-            blocked_idx = integer(0),
-            meta_override = list(
-              explore_method = "refine",
-              variant_id = step_id,
-              run_type = "warm",
-              is_restart = FALSE
-            ),
-            init_alpha_override = perturb_alpha
-          )
-          processed <- processed + 1L
-          stored_fit <- out$fit
-          stored_eval <- out$eval_res
-        }
+            # Step 2 (refit): restore uniform prior weights, warm-start
+            # from perturbed model's alpha.  The init_alpha_override
+            # bypasses normal warm-start logic and injects perturbed
+            # alpha directly.  This is stored as the actual ensemble member.
+            out <- run_and_record(
+              run_row = run_row,
+              group_key = gk,
+              blocked_idx = integer(0),
+              meta_override = list(
+                explore_method = "refine",
+                variant_id = step_id,
+                run_type = "warm",
+                is_restart = FALSE
+              ),
+              init_alpha_override = perturb_alpha
+            )
+            processed <- processed + 1L
+            stored_fit <- out$fit
+            stored_eval <- out$eval_res
+          }
 
-        # Extract eligible CSs from the stored (refit/root) model for
-        # branching.  Only CSs with purity above threshold are eligible.
-        cs_sets <- list()
-        eff_filt <- stored_eval$effects_filtered
-        if (!is.null(eff_filt) && !is.null(eff_filt$indices) &&
-            !is.null(eff_filt$purity)) {
-          for (ci in seq_along(eff_filt$indices)) {
-            pur <- as.numeric(eff_filt$purity[[ci]])
-            if (is.finite(pur) && pur >= refine_purity_threshold) {
-              cs_sets[[length(cs_sets) + 1L]] <- as.integer(eff_filt$indices[[ci]])
+          # Extract eligible CSs from the stored (refit/root) model for
+          # branching.  Only CSs with purity above threshold are eligible.
+          cs_sets <- list()
+          eff_filt <- stored_eval$effects_filtered
+          if (!is.null(eff_filt) && !is.null(eff_filt$indices) &&
+              !is.null(eff_filt$purity)) {
+            for (ci in seq_along(eff_filt$indices)) {
+              pur <- as.numeric(eff_filt$purity[[ci]])
+              if (is.finite(pur) && pur >= refine_purity_threshold) {
+                cs_sets[[length(cs_sets) + 1L]] <- as.integer(eff_filt$indices[[ci]])
+              }
+            }
+          }
+          if (!length(cs_sets)) {
+            next
+          }
+          for (cs in cs_sets) {
+            cs <- cs[is.finite(cs)]
+            if (!length(cs)) {
+              next
+            }
+            child_blocked <- sort(unique(c(node$blocked, cs)))
+            if (length(child_blocked) >= ncol(data_bundle$X)) {
+              next
+            }
+            key <- paste(child_blocked, collapse = ",")
+            if (!exists(key, envir = seen_block_sets, inherits = FALSE)) {
+              assign(key, TRUE, envir = seen_block_sets)
+              queue[[length(queue) + 1L]] <- list(
+                blocked = child_blocked,
+                parent_fit = stored_fit
+              )
             }
           }
         }
-        if (!length(cs_sets)) {
-          next
-        }
-        for (cs in cs_sets) {
-          cs <- cs[is.finite(cs)]
-          if (!length(cs)) {
-            next
-          }
-          child_blocked <- sort(unique(c(node$blocked, cs)))
-          if (length(child_blocked) >= ncol(data_bundle$X)) {
-            next
-          }
-          key <- paste(child_blocked, collapse = ",")
-          if (!exists(key, envir = seen_block_sets, inherits = FALSE)) {
-            assign(key, TRUE, envir = seen_block_sets)
-            queue[[length(queue) + 1L]] <- list(
-              blocked = child_blocked,
-              parent_fit = stored_fit
-            )
-          }
+
+        refine_depth_records[[pk]] <- list(
+          parent_key         = pk,
+          n_refine_requested = n_requested,
+          n_refine_processed = processed
+        )
+
+        if (processed < n_requested) {
+          warning(
+            "Refine BFS queue exhausted for parent '", pk, "' in group '", gk,
+            "' (processed ", processed, " of ", n_requested, " steps)."
+          )
         }
       }
 
-      if (processed < nrow(group_rows)) {
-        warning(
-          "Refine BFS queue exhausted before reaching requested K for group '",
-          gk, "' (processed ", processed, " of ", nrow(group_rows), ")."
-        )
-      }
+      refine_depth_by_group[[gk]] <- refine_depth_records
     }
 
     # Aggregation across fits (per use case)
@@ -994,9 +1025,7 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
             elbo_vec = group_elbos,
             methods = agg_methods,
             softmax_temperature = softmax_temperature,
-            jsd_threshold = job_config$job$metrics$jsd_threshold %||% 0.15,
-            cluster_jsd_thresholds = job_config$job$compute$cluster_jsd_thresholds %||% c(0.50, 1.0, 2.0, 3.0, 5.0),
-            cluster_bjsd_thresholds = job_config$job$compute$cluster_bjsd_thresholds %||% c(0.001, 0.002, 0.004, 0.006, 0.008)
+            jsd_threshold = job_config$job$metrics$jsd_threshold %||% 0.15
           )
           for (m in names(agg_results)) {
             agg_pip <- agg_results[[m]]
@@ -1051,6 +1080,26 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
       }
     }
 
+    # Emit per-parent refine depth records for all refine groups.
+    for (group_key in names(refine_depth_by_group)) {
+      rd_records <- refine_depth_by_group[[group_key]]
+      if (!is.null(rd_records) && length(rd_records) > 0L) {
+        rd_tbl <- dplyr::bind_rows(lapply(rd_records, function(r) {
+          tibble::tibble(
+            parent_key         = r$parent_key,
+            n_refine_requested = as.integer(r$n_refine_requested),
+            n_refine_processed = as.integer(r$n_refine_processed)
+          )
+        })) %>%
+          dplyr::mutate(
+            dataset_bundle_id = bundle_row$dataset_bundle_id,
+            use_case_id       = uc_id,
+            group_label       = paste0("model_grid|", group_key)
+          )
+        write_refine_depth(rd_tbl, job_config, buffer_ctx)
+      }
+    }
+
   }
 
   # Overall per-dataset aggregation across all fits/use-cases.
@@ -1064,8 +1113,7 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
       methods = overall_methods,
       softmax_temperature = softmax_temperature,
       jsd_threshold = job_config$job$metrics$jsd_threshold %||% 0.15,
-      cluster_jsd_thresholds = job_config$job$compute$cluster_jsd_thresholds %||% c(0.50, 1.0, 2.0, 3.0, 5.0),
-      cluster_bjsd_thresholds = job_config$job$compute$cluster_bjsd_thresholds %||% c(0.001, 0.002, 0.004, 0.006, 0.008)
+      jsd_threshold = job_config$job$metrics$jsd_threshold %||% 0.15
     )
     global_row <- global_run_template %||% bundle_runs[1, , drop = FALSE]
     global_row$use_case_id <- "global_pool"
@@ -1561,9 +1609,7 @@ aggregate_use_case_pips <- function(pip_list,
                                     elbo_vec,
                                     methods = c("elbo_softmax"),
                                     softmax_temperature = 1,
-                                    jsd_threshold = 0.15,
-                                    cluster_jsd_thresholds = c(0.50, 1.0, 2.0, 3.0, 5.0),
-                                    cluster_bjsd_thresholds = c(0.001, 0.002, 0.004, 0.006, 0.008)) {
+                                    jsd_threshold = 0.15) {
   methods <- unique(as.character(methods))
   methods[methods == "softmax_elbo"] <- "elbo_softmax"
   methods[methods == "mean"] <- "uniform"
@@ -1595,39 +1641,15 @@ aggregate_use_case_pips <- function(pip_list,
     }
     hc_jsd <- stats::hclust(stats::as.dist(jsd_mat), method = "complete")
 
-    # Compute Bernoulli JSD distance matrix -----
-    bjsd_mat <- matrix(0, n, n)
-    for (i in 1:(n - 1)) {
-      for (j in (i + 1):n) {
-        d <- js_distance_bernoulli(pips_mat[i, ], pips_mat[j, ])
-        bjsd_mat[i, j] <- d
-        bjsd_mat[j, i] <- d
-      }
-    }
-    hc_bjsd <- stats::hclust(stats::as.dist(bjsd_mat), method = "complete")
-
-    # Legacy cluster_weight: categorical JSD at jsd_threshold -----
+    # cluster_weight: categorical JSD at jsd_threshold (default 0.15) -----
     res$cluster_weight <- .cluster_weight_from_hc(
       hc_jsd, jsd_threshold, elbo_vec, pips_mat, softmax_temperature
     )
 
-    # Multi-threshold categorical JSD variants -----
-    for (th in cluster_jsd_thresholds) {
-      th_label <- sub("\\.", "", formatC(th, format = "f", digits = 2))
-      name <- paste0("cluster_weight_jsd_", th_label)
-      res[[name]] <- .cluster_weight_from_hc(
-        hc_jsd, th, elbo_vec, pips_mat, softmax_temperature
-      )
-    }
-
-    # Multi-threshold Bernoulli JSD variants -----
-    for (th in cluster_bjsd_thresholds) {
-      th_label <- sub("\\.", "", formatC(th, format = "f", digits = 3))
-      name <- paste0("cluster_weight_bjsd_", th_label)
-      res[[name]] <- .cluster_weight_from_hc(
-        hc_bjsd, th, elbo_vec, pips_mat, softmax_temperature
-      )
-    }
+    # cluster_weight_jsd_050: categorical JSD at 0.50 threshold -----
+    res$cluster_weight_jsd_050 <- .cluster_weight_from_hc(
+      hc_jsd, 0.50, elbo_vec, pips_mat, softmax_temperature
+    )
   }
   res
 }
@@ -1665,49 +1687,29 @@ js_distance <- function(p, q, eps = 1e-12) {
   0.5 * kl(p, m) + 0.5 * kl(q, m)
 }
 
-js_distance_bernoulli <- function(p, q, eps = 1e-12) {
-  p <- pmin(pmax(as.numeric(p), eps), 1 - eps)
-  q <- pmin(pmax(as.numeric(q), eps), 1 - eps)
-  m <- 0.5 * (p + q)
-  kl_comp <- function(a, b) a * log(a / b) + (1 - a) * log((1 - a) / (1 - b))
-  mean(0.5 * kl_comp(p, m) + 0.5 * kl_comp(q, m))
-}
-
-compute_multimodal_metrics <- function(pip_list, jsd_threshold = 0.15, top_k = 10L,
-                                       jsd_thresholds = c(0.15, 0.5, 1.0, 2.0, 3.0, 5.0),
-                                       bjsd_thresholds = c(0.001, 0.002, 0.004, 0.006, 0.008)) {
+compute_multimodal_metrics <- function(pip_list, jsd_threshold = 0.15, top_k = 10L) {
   n <- length(pip_list)
   if (n < 2) {
-    out <- tibble::tibble(
+    return(tibble::tibble(
       mean_jsd = NA_real_,
       median_jsd = NA_real_,
       max_jsd = NA_real_,
-      mean_bjsd = NA_real_,
-      median_bjsd = NA_real_,
-      max_bjsd = NA_real_,
       jaccard_top10 = NA_real_,
       mean_pip_var = NA_real_,
-      n_clusters = NA_integer_
-    )
-    for (th in jsd_thresholds) {
-      col_name <- sprintf("n_clusters_jsd_%s", sub("\\.", "", formatC(th, format = "f", digits = 2)))
-      out[[col_name]] <- NA_integer_
-    }
-    for (th in bjsd_thresholds) {
-      col_name <- sprintf("n_clusters_bjsd_%s", sub("\\.", "", formatC(th, format = "f", digits = 3)))
-      out[[col_name]] <- NA_integer_
-    }
-    return(out)
+      n_clusters = NA_integer_,
+      n_clusters_jsd_050 = NA_integer_
+    ))
   }
   pips_mat <- do.call(rbind, lapply(pip_list, as.numeric))
+
+  # Pairwise categorical JSD
   jsd_vals <- c()
-  bjsd_vals <- c()
   for (i in 1:(n - 1)) {
     for (j in (i + 1):n) {
       jsd_vals <- c(jsd_vals, js_distance(pips_mat[i, ], pips_mat[j, ]))
-      bjsd_vals <- c(bjsd_vals, js_distance_bernoulli(pips_mat[i, ], pips_mat[j, ]))
     }
   }
+
   # Jaccard top-k (mean across pairs)
   k <- as.integer(top_k)
   top_sets <- lapply(seq_len(n), function(i) {
@@ -1722,10 +1724,11 @@ compute_multimodal_metrics <- function(pip_list, jsd_threshold = 0.15, top_k = 1
       pair_jaccard <- c(pair_jaccard, if (union > 0) inter / union else NA_real_)
     }
   }
+
   # PIP variance
   pip_var <- mean(apply(pips_mat, 2, stats::var, na.rm = TRUE))
 
-  # Cluster count: categorical JSD at legacy threshold
+  # Cluster counts via categorical JSD
   jsd_mat <- matrix(0, n, n)
   idx <- 1L
   for (i in 1:(n - 1)) {
@@ -1736,40 +1739,16 @@ compute_multimodal_metrics <- function(pip_list, jsd_threshold = 0.15, top_k = 1
     }
   }
   hc_jsd <- stats::hclust(stats::as.dist(jsd_mat), method = "complete")
-  n_clusters <- length(unique(stats::cutree(hc_jsd, h = jsd_threshold)))
 
-  # Cluster counts: Bernoulli JSD at multiple thresholds
-  bjsd_mat <- matrix(0, n, n)
-  idx <- 1L
-  for (i in 1:(n - 1)) {
-    for (j in (i + 1):n) {
-      bjsd_mat[i, j] <- bjsd_vals[idx]
-      bjsd_mat[j, i] <- bjsd_vals[idx]
-      idx <- idx + 1L
-    }
-  }
-  hc_bjsd <- stats::hclust(stats::as.dist(bjsd_mat), method = "complete")
-
-  out <- tibble::tibble(
+  tibble::tibble(
     mean_jsd = mean(jsd_vals),
     median_jsd = stats::median(jsd_vals),
     max_jsd = max(jsd_vals),
-    mean_bjsd = mean(bjsd_vals),
-    median_bjsd = stats::median(bjsd_vals),
-    max_bjsd = max(bjsd_vals),
     jaccard_top10 = mean(pair_jaccard, na.rm = TRUE),
     mean_pip_var = pip_var,
-    n_clusters = n_clusters
+    n_clusters = length(unique(stats::cutree(hc_jsd, h = jsd_threshold))),
+    n_clusters_jsd_050 = length(unique(stats::cutree(hc_jsd, h = 0.50)))
   )
-  for (th in jsd_thresholds) {
-    col_name <- sprintf("n_clusters_jsd_%s", sub("\\.", "", formatC(th, format = "f", digits = 2)))
-    out[[col_name]] <- length(unique(stats::cutree(hc_jsd, h = th)))
-  }
-  for (th in bjsd_thresholds) {
-    col_name <- sprintf("n_clusters_bjsd_%s", sub("\\.", "", formatC(th, format = "f", digits = 3)))
-    out[[col_name]] <- length(unique(stats::cutree(hc_bjsd, h = th)))
-  }
-  out
 }
 
 write_dataset_metrics <- function(bundle_row, job_config, dataset_metrics, buffer_ctx = NULL) {
@@ -1796,9 +1775,9 @@ write_multimodal_metrics <- function(bundle_row, use_case_id, group_label, explo
   out <- metrics %>%
     dplyr::mutate(
       dataset_bundle_id = bundle_row$dataset_bundle_id,
-      use_case_id = use_case_id,
-      group_label = group_label,
-      explore_method = as.character(explore_method)
+      use_case_id       = use_case_id,
+      group_label       = group_label,
+      explore_method    = as.character(explore_method)
     )
   verbose_output <- isTRUE(job_config$job$verbose_file_output)
   if (verbose_output) {
@@ -1809,6 +1788,21 @@ write_multimodal_metrics <- function(bundle_row, use_case_id, group_label, explo
     readr::write_csv(out, out_path)
   } else {
     buffer_ctx$buffers$multimodal[[length(buffer_ctx$buffers$multimodal) + 1L]] <- out
+  }
+}
+
+write_refine_depth <- function(rd_tbl, job_config, buffer_ctx = NULL) {
+  if (is.null(rd_tbl) || !nrow(rd_tbl)) return(invisible(NULL))
+  verbose_output <- isTRUE(job_config$job$verbose_file_output)
+  if (verbose_output) {
+    base_output <- determine_base_output(job_config)
+    run_dir <- file.path(base_output, "refine_depth")
+    ensure_dir(run_dir)
+    out_path <- file.path(run_dir, sprintf("refine_depth_%s.csv",
+                          paste0(rd_tbl$dataset_bundle_id[[1]], "_", rd_tbl$use_case_id[[1]])))
+    readr::write_csv(rd_tbl, out_path)
+  } else {
+    buffer_ctx$buffers$refine_depth[[length(buffer_ctx$buffers$refine_depth) + 1L]] <- rd_tbl
   }
 }
 
@@ -2114,7 +2108,7 @@ flush_task_buffers <- function(buffer_ctx) {
   if (is.null(buf) ||
       !length(buf$model) && !length(buf$effect) && !length(buf$snps) &&
       !length(buf$confusion) && !length(buf$dataset_metrics) && !length(buf$multimodal) &&
-      !length(buf$validation) && !length(buf$prior_diagnostics) &&
+      !length(buf$refine_depth) && !length(buf$validation) && !length(buf$prior_diagnostics) &&
       !length(buf$tier_cs_metrics)) {
     return(invisible(NULL))
   }
@@ -2137,6 +2131,7 @@ flush_task_buffers <- function(buffer_ctx) {
   confusion_tbl <- if (length(buf$confusion)) dplyr::bind_rows(buf$confusion) else NULL
   dataset_tbl <- if (length(buf$dataset_metrics)) dplyr::bind_rows(buf$dataset_metrics) else NULL
   multimodal_tbl <- if (length(buf$multimodal)) dplyr::bind_rows(buf$multimodal) else NULL
+  refine_depth_tbl <- if (length(buf$refine_depth)) dplyr::bind_rows(buf$refine_depth) else NULL
   prior_diag_tbl  <- if (length(buf$prior_diagnostics)) dplyr::bind_rows(buf$prior_diagnostics) else NULL
   tier_cs_tbl     <- if (length(buf$tier_cs_metrics))   dplyr::bind_rows(buf$tier_cs_metrics)   else NULL
 
@@ -2151,6 +2146,7 @@ flush_task_buffers <- function(buffer_ctx) {
     confusion_bins = confusion_tbl,
     dataset_metrics = dataset_tbl,
     multimodal_metrics = multimodal_tbl,
+    refine_depth = refine_depth_tbl,
     prior_diagnostics = prior_diag_tbl,
     tier_cs_metrics = tier_cs_tbl
   )
@@ -2172,6 +2168,7 @@ flush_task_buffers <- function(buffer_ctx) {
     confusion = list(),
     dataset_metrics = list(),
     multimodal = list(),
+    refine_depth = list(),
     validation = list(),
     prior_diagnostics = list(),
     tier_cs_metrics = list()
@@ -2189,6 +2186,7 @@ write_flush_outputs <- function(staging_dir,
                                 confusion_bins = NULL,
                                 dataset_metrics = NULL,
                                 multimodal_metrics = NULL,
+                                refine_depth = NULL,
                                 prior_diagnostics = NULL,
                                 tier_cs_metrics = NULL) {
   if (!is.null(model_metrics) && nrow(model_metrics)) {
@@ -2218,6 +2216,10 @@ write_flush_outputs <- function(staging_dir,
   if (!is.null(multimodal_metrics) && nrow(multimodal_metrics)) {
     multimodal_metrics <- dplyr::mutate(multimodal_metrics, task_id = task_id, flush_id = flush_label)
     readr::write_csv(multimodal_metrics, file.path(staging_dir, sprintf("%s_multimodal_metrics.csv", flush_label)))
+  }
+  if (!is.null(refine_depth) && nrow(refine_depth)) {
+    refine_depth <- dplyr::mutate(refine_depth, task_id = task_id, flush_id = flush_label)
+    readr::write_csv(refine_depth, file.path(staging_dir, sprintf("%s_refine_depth.csv", flush_label)))
   }
   if (!is.null(prior_diagnostics) && nrow(prior_diagnostics)) {
     prior_diagnostics <- dplyr::mutate(prior_diagnostics, task_id = task_id, flush_id = flush_label)

@@ -138,28 +138,45 @@ compute_cs_power_by_tier <- function(effects_filtered, causal_idx, beta,
                                      n_top_vec = c(3L, 5L, 7L, 9L, 11L, 23L)) {
   if (length(causal_idx) == 0L) {
     return(tibble::tibble(
-      n_top    = as.integer(n_top_vec),
-      cs_power = NA_real_,
-      cs_fdr   = NA_real_
+      n_top           = as.integer(n_top_vec),
+      cs_power        = NA_real_,
+      cs_fdr          = NA_real_,
+      n_causal_covered = NA_integer_,
+      n_causal_total  = NA_integer_,
+      n_false_cs      = NA_integer_,
+      n_cs_total      = NA_integer_
     ))
   }
   causal_order <- causal_idx[order(abs(beta[causal_idx]), decreasing = TRUE)]
   cs_indices   <- effects_filtered$indices   # list-column
   union_cs     <- sort(unique(unlist(cs_indices)))
+  n_cs_total   <- length(cs_indices)
   purrr::map_dfr(n_top_vec, function(n_top) {
-    top_causal <- head(causal_order, n_top)
-    cs_power   <- if (length(union_cs) > 0L)
-      length(intersect(union_cs, top_causal)) / max(length(top_causal), 1L)
-    else 0
-    cs_fdr <- if (length(cs_indices) > 0L) {
+    top_causal       <- head(causal_order, n_top)
+    n_causal_total   <- length(top_causal)
+    n_causal_covered <- if (length(union_cs) > 0L)
+      length(intersect(union_cs, top_causal))
+    else 0L
+    cs_power <- n_causal_covered / max(n_causal_total, 1L)
+    if (n_cs_total > 0L) {
       has_causal <- vapply(cs_indices, function(idx) {
         length(intersect(idx, top_causal)) > 0L
       }, logical(1L))
-      mean(!has_causal)
+      n_false_cs <- sum(!has_causal)
+      cs_fdr     <- n_false_cs / n_cs_total
     } else {
-      NA_real_
+      n_false_cs <- NA_integer_
+      cs_fdr     <- NA_real_
     }
-    tibble::tibble(n_top = as.integer(n_top), cs_power = cs_power, cs_fdr = cs_fdr)
+    tibble::tibble(
+      n_top            = as.integer(n_top),
+      cs_power         = cs_power,
+      cs_fdr           = cs_fdr,
+      n_causal_covered = as.integer(n_causal_covered),
+      n_causal_total   = as.integer(n_causal_total),
+      n_false_cs       = as.integer(n_false_cs),
+      n_cs_total       = as.integer(n_cs_total)
+    )
   })
 }
 
@@ -395,6 +412,48 @@ print_model_summary <- function(res) {
 
   cat("\n#CS kept (filtered):", nrow(res$effects_filtered),
       " | #vars in CS union (filtered):", length(res$cs_union_indices_filtered), "\n")
+}
+
+# ---------- scaling analysis helpers ----------
+
+# Compute confusion bins from a pre-aggregated PIP vector.
+# Matches the schema of flush confusion_bins files:
+#   pip_threshold, n_causal_at_bucket, n_noncausal_at_bucket
+# Used by compute_scaling_curves() and compute_interaction_scaling() in collect_results.R.
+#' @keywords internal
+compute_bins_from_pip_vec <- function(pip_vec, causal_vec, pip_breaks) {
+  bucket_idx <- findInterval(pip_vec, sort(pip_breaks), rightmost.closed = TRUE)
+  tibble::tibble(
+    bucket = bucket_idx,
+    pip    = pip_vec,
+    causal = as.integer(causal_vec)
+  ) %>%
+    dplyr::group_by(.data$bucket) %>%
+    dplyr::summarise(
+      pip_threshold         = min(.data$pip),
+      n_causal_at_bucket    = sum(.data$causal),
+      n_noncausal_at_bucket = dplyr::n() - sum(.data$causal),
+      .groups = "drop"
+    ) %>%
+    dplyr::arrange(dplyr::desc(.data$pip_threshold))
+}
+
+# TPR at a fixed FPR threshold from a pooled confusion-bins tibble.
+# pooled_bins must have columns: pip_threshold, n_causal_at_bucket, n_noncausal_at_bucket.
+# Mirrors the compute_tpr05_from_confusion() logic in the collect workbook.
+#' @keywords internal
+tpr_at_fpr_threshold <- function(pooled_bins, fpr_threshold = 0.05) {
+  b       <- pooled_bins %>% dplyr::arrange(dplyr::desc(.data$pip_threshold))
+  cum_tp  <- cumsum(b$n_causal_at_bucket)
+  cum_fp  <- cumsum(b$n_noncausal_at_bucket)
+  total_p <- sum(b$n_causal_at_bucket)
+  total_n <- sum(b$n_noncausal_at_bucket)
+  if (total_p == 0L || total_n == 0L) return(NA_real_)
+  tpr <- cum_tp / total_p
+  fpr <- cum_fp / total_n
+  idx <- which(fpr <= fpr_threshold)
+  if (length(idx) == 0L) return(NA_real_)
+  max(tpr[idx])
 }
 
 # ---------- example (comment or adapt) ----------
