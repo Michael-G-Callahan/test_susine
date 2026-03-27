@@ -68,6 +68,7 @@ refine_depth       <- merge_flush_csv(task_dirs, "refine_depth\\.csv$")
 effect_metrics    <- merge_flush_csv(task_dirs, "effect_metrics\\.csv$")
 tier_cs_metrics   <- merge_flush_csv(task_dirs, "tier_cs_metrics\\.csv$")
 hg2_by_agg        <- merge_flush_csv(task_dirs, "hg2_by_agg\\.csv$")
+scaling_bins_raw  <- merge_flush_csv(task_dirs, "scaling_bins\\.csv$")
 
 cat("Model metrics:", nrow(model_metrics), "rows\n")
 cat("Confusion bins:", nrow(confusion_bins), "rows\n")
@@ -76,6 +77,7 @@ cat("Multimodal metrics:", nrow(multimodal_metrics), "rows\n")
 cat("Refine depth:", nrow(refine_depth), "rows\n")
 cat("Tier CS metrics:", nrow(tier_cs_metrics), "rows\n")
 cat("hg2 by agg:", nrow(hg2_by_agg), "rows\n")
+cat("Scaling bins:", nrow(scaling_bins_raw), "rows\n")
 ```
 
 # 3. Join Run Table Metadata
@@ -350,18 +352,14 @@ auprc_pooled_individual %>%
 # 6b. Subscaling Analysis
 
 ```{r load-scaling-bins}
-# Scaling confusion bins are computed during the SLURM run (per dataset bundle)
-# when write_scaling_confusion_bins = TRUE in the job config, then merged by
-# aggregate_staging_outputs() into scaling_bins.csv.
-# Skipped automatically if the file is absent.
-scaling_bins_path <- file.path(job_dir, "aggregated", "scaling_bins.csv")
-if (file.exists(scaling_bins_path)) {
-  scaling_bins_raw <- readr::read_csv(scaling_bins_path, show_col_types = FALSE)
+# Scaling confusion bins were merged from flush files in Section 2.
+# Report summary; set to NULL if empty.
+if (nrow(scaling_bins_raw) > 0L) {
   cat("Scaling bins rows:", nrow(scaling_bins_raw), "\n")
   cat("Specs present:", paste(sort(unique(na.omit(scaling_bins_raw$spec_name))), collapse = ", "), "\n")
 } else {
   scaling_bins_raw <- NULL
-  message("scaling_bins.csv not found — subscaling analysis skipped.",
+  message("No scaling_bins flush files found — subscaling analysis skipped.",
           "\nRe-run with write_scaling_confusion_bins = TRUE in the job config.")
 }
 ```
