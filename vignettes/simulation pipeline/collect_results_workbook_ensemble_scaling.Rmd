@@ -31,8 +31,8 @@ library(knitr)
 # 1. Locate Output
 
 ```{r locate}
-job_name      <- "ensemble_scaling_v1"
-parent_job_id <- "50200044"
+job_name      <- "ensemble_scaling_testing"
+parent_job_id <- "50248383"
 output_root   <- here("output")
 
 # Job-level directory (contains task-001/, task-002/, etc.)
@@ -67,6 +67,7 @@ multimodal_metrics <- merge_flush_csv(task_dirs, "multimodal_metrics\\.csv$")
 refine_depth       <- merge_flush_csv(task_dirs, "refine_depth\\.csv$")
 effect_metrics    <- merge_flush_csv(task_dirs, "effect_metrics\\.csv$")
 tier_cs_metrics   <- merge_flush_csv(task_dirs, "tier_cs_metrics\\.csv$")
+hg2_by_agg        <- merge_flush_csv(task_dirs, "hg2_by_agg\\.csv$")
 
 cat("Model metrics:", nrow(model_metrics), "rows\n")
 cat("Confusion bins:", nrow(confusion_bins), "rows\n")
@@ -74,6 +75,7 @@ cat("Dataset metrics:", nrow(dataset_metrics), "rows\n")
 cat("Multimodal metrics:", nrow(multimodal_metrics), "rows\n")
 cat("Refine depth:", nrow(refine_depth), "rows\n")
 cat("Tier CS metrics:", nrow(tier_cs_metrics), "rows\n")
+cat("hg2 by agg:", nrow(hg2_by_agg), "rows\n")
 ```
 
 # 3. Join Run Table Metadata
@@ -103,6 +105,21 @@ tier_cs_metrics <- tier_cs_metrics %>%
 cat("Model metrics with metadata:", nrow(model_metrics), "rows\n")
 cat("Tier CS metrics with metadata:", nrow(tier_cs_metrics), "rows\n")
 cat("Specs present:", paste(unique(na.omit(model_metrics$spec_name)), collapse = ", "), "\n")
+
+# Enrich hg2_by_agg with spec_name via group_label -> group_key mapping
+if (nrow(hg2_by_agg) > 0L) {
+  if (!"spec_name" %in% names(hg2_by_agg) && "group_label" %in% names(hg2_by_agg)) {
+    spec_map <- run_info %>%
+      dplyr::distinct(.data$group_key, .data$spec_name)
+    hg2_by_agg <- hg2_by_agg %>%
+      dplyr::mutate(group_key = sub("^model_grid\\|", "", .data$group_label)) %>%
+      dplyr::left_join(spec_map, by = "group_key") %>%
+      dplyr::select(-group_key)
+  }
+  cat("hg2 by agg with metadata:", nrow(hg2_by_agg), "rows\n")
+  cat("hg2 specs:", paste(unique(na.omit(hg2_by_agg$spec_name)), collapse = ", "), "\n")
+  cat("hg2 agg methods:", paste(unique(na.omit(hg2_by_agg$agg_method)), collapse = ", "), "\n")
+}
 ```
 
 For confusion bins, aggregated rows share a `run_id` with the group's
@@ -402,6 +419,9 @@ if (nrow(refine_depth)) {
 }
 if (nrow(tier_cs_metrics)) {
   readr::write_csv(tier_cs_metrics, file.path(out_dir, "tier_cs_metrics_full.csv"))
+}
+if (nrow(hg2_by_agg)) {
+  readr::write_csv(hg2_by_agg, file.path(out_dir, "hg2_by_agg.csv"))
 }
 
 readr::write_csv(tpr05_pooled_agg, file.path(out_dir, "tpr05_pooled_aggregated.csv"))

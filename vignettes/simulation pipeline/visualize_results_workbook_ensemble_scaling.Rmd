@@ -1599,6 +1599,261 @@ method. Baseline single-fit shown as a black star.
 }
 ```
 
+# 6. Bootstrap AUPRC Stability
+
+Bootstrap analysis to demonstrate that pooled AUPRC estimates are
+stable at the available sample size. For each subsample size $n$, we
+draw $B$ bootstrap resamples (with replacement) from the full set of
+datasets, pool confusion bins within each resample, compute AUPRC,
+and report the bootstrap mean $\pm$ 1.96 SE.
+
+```{r bootstrap-auprc-stability, fig.width=12, fig.height=10}
+{
+  # ── Helper: pooled AUPRC from confusion bins ──
+  pooled_auprc <- function(bins) {
+    b       <- bins %>% dplyr::arrange(dplyr::desc(.data$pip_threshold))
+    cum_tp  <- cumsum(b$n_causal_at_bucket)
+    cum_fp  <- cumsum(b$n_noncausal_at_bucket)
+    total_p <- sum(b$n_causal_at_bucket)
+    total_n <- sum(b$n_noncausal_at_bucket)
+    if (total_p == 0L || total_n == 0L) return(NA_real_)
+    recall    <- cum_tp / total_p
+    precision <- cum_tp / pmax(cum_tp + cum_fp, 1L)
+    auprc_average_precision(recall, precision)
+  }
+
+  # ── Bootstrap stability function ──
+  # bins:        confusion_bins tibble (must have dataset_bundle_id,
+
+  #              pip_threshold, n_causal_at_bucket, n_noncausal_at_bucket)
+  # dataset_ids: character vector of unique dataset IDs to resample from
+  # sizes:       integer vector of subsample sizes
+  # B:           number of bootstrap replicates per size
+  bootstrap_auprc_stability <- function(bins, dataset_ids, sizes, B = 300L) {
+    # Pre-split bins by dataset for fast lookup
+    bins_split <- split(bins, bins$dataset_bundle_id)
+
+    results <- vector("list", length(sizes))
+    for (si in seq_along(sizes)) {
+      n <- sizes[si]
+      auprcs <- numeric(B)
+      for (b in seq_len(B)) {
+        sampled_ids <- sample(dataset_ids, size = n, replace = TRUE)
+        # Frequency table: how many times each dataset was drawn
+        freq <- table(sampled_ids)
+        # Collect and weight bins
+        weighted_bins <- lapply(names(freq), function(did) {
+          d <- bins_split[[did]]
+          if (is.null(d)) return(NULL)
+          w <- as.integer(freq[[did]])
+          d %>% dplyr::mutate(
+            n_causal_at_bucket    = .data$n_causal_at_bucket * w,
+            n_noncausal_at_bucket = .data$n_noncausal_at_bucket * w
+          )
+        })
+        pooled_bins <- dplyr::bind_rows(weighted_bins) %>%
+          dplyr::group_by(.data$pip_threshold) %>%
+          dplyr::summarise(
+            n_causal_at_bucket    = sum(.data$n_causal_at_bucket),
+            n_noncausal_at_bucket = sum(.data$n_noncausal_at_bucket),
+            .groups = "drop"
+          )
+        auprcs[b] <- pooled_auprc(pooled_bins)
+      }
+      results[[si]] <- tibble::tibble(
+        n_datasets = n,
+        auprc_mean = mean(auprcs, na.rm = TRUE),
+        auprc_se   = sd(auprcs, na.rm = TRUE)
+      )
+    }
+    dplyr::bind_rows(results)
+  }
+
+  # ── Run bootstrap for baseline single-fit (susine_vanilla) ──
+  baseline_bins <- confusion_bins %>%
+    dplyr::filter(.data$spec_name == "baseline-single",
+                  is.na(.data$agg_method))
+  baseline_datasets <- sort(unique(baseline_bins$dataset_bundle_id))
+  n_total <- length(baseline_datasets)
+  cat("Bootstrap stability: total datasets =", n_total, "\n")
+
+  if (n_total >= 20L) {
+    # Subsample sizes: steps of ~10% of total, from ~10% up to 100%
+    step <- max(10L, as.integer(round(n_total / 10)))
+    sizes <- sort(unique(c(
+      seq(step, n_total, by = step),
+      n_total
+    )))
+    # Ensure we don't go below a reasonable minimum
+    sizes <- sizes[sizes >= 10L]
+
+    B <- 300L
+    set.seed(42)
+    cat("Running bootstrap: sizes =", paste(sizes, collapse = ", "),
+        ", B =", B, "\n")
+
+    boot_baseline <- bootstrap_auprc_stability(
+      bins        = baseline_bins,
+      dataset_ids = baseline_datasets,
+      sizes       = sizes,
+      B           = B
+    ) %>%
+      dplyr::mutate(
+        ci_lo = .data$auprc_mean - 1.96 * .data$auprc_se,
+        ci_hi = .data$auprc_mean + 1.96 * .data$auprc_se,
+        spec_label = "baseline single-fit (vanilla)"
+      )
+
+    # ── Panel 1: AUPRC stability curve ──
+    p_stab <- ggplot(boot_baseline,
+                     aes(x = n_datasets, y = auprc_mean)) +
+      geom_ribbon(aes(ymin = ci_lo, ymax = ci_hi),
+                  fill = "steelblue", alpha = 0.25) +
+      geom_line(color = "steelblue", linewidth = 0.8) +
+      geom_point(color = "steelblue", size = 2) +
+      labs(
+        x = "Number of datasets in bootstrap resample",
+        y = "Pooled AUPRC (bootstrap mean \u00b1 1.96 SE)",
+        title = "AUPRC estimation stability (baseline single-fit)"
+      ) +
+      theme_bw()
+
+    # ── Panel 2: Bootstrap SE decay ──
+    p_se <- ggplot(boot_baseline,
+                   aes(x = n_datasets, y = auprc_se)) +
+      geom_line(color = "firebrick", linewidth = 0.8) +
+      geom_point(color = "firebrick", size = 2) +
+      # Reference 1/sqrt(n) curve scaled to match the first point
+      stat_function(
+        fun = function(n) boot_baseline$auprc_se[1] *
+          sqrt(boot_baseline$n_datasets[1]) / sqrt(n),
+        linetype = "dashed", color = "grey50"
+      ) +
+      annotate("text",
+               x = max(sizes) * 0.7,
+               y = boot_baseline$auprc_se[1] *
+                 sqrt(boot_baseline$n_datasets[1]) /
+                 sqrt(max(sizes) * 0.7) * 1.15,
+               label = "1/\u221An reference",
+               color = "grey50", size = 3.5) +
+      labs(
+        x = "Number of datasets in bootstrap resample",
+        y = "Bootstrap SE of pooled AUPRC",
+        title = "Bootstrap SE decay"
+      ) +
+      theme_bw()
+
+    # ── Combined figure ──
+    p_combined <- gridExtra::grid.arrange(p_stab, p_se, nrow = 2)
+    ggsave(file.path(fig_root, "ensemble_scaling",
+                     "bootstrap_auprc_stability.png"),
+           p_combined, width = 10, height = 8, dpi = 150)
+
+    # ── Optional: run for a few ensemble specs too ──
+    # Pick the top-performing spec per agg_method to show stability
+    # is not unique to the baseline.
+    agg_bins <- confusion_bins %>%
+      dplyr::filter(!is.na(.data$agg_method),
+                    !is.na(.data$spec_name),
+                    .data$spec_name != "baseline-single")
+    agg_combos <- agg_bins %>%
+      dplyr::distinct(.data$spec_name, .data$agg_method)
+
+    # Select up to 3 representative (spec, agg) combos via highest AUPRC
+    if (nrow(agg_combos) > 0L && exists("auprc_pooled_agg")) {
+      top_combos <- auprc_pooled_agg %>%
+        dplyr::filter(!is.na(.data$spec_name),
+                      .data$spec_name != "baseline-single") %>%
+        dplyr::arrange(dplyr::desc(.data$AUPRC)) %>%
+        dplyr::slice_head(n = 3L)
+
+      boot_ensemble_list <- list()
+      for (ri in seq_len(nrow(top_combos))) {
+        sn <- top_combos$spec_name[ri]
+        am <- top_combos$agg_method[ri]
+        combo_bins <- confusion_bins %>%
+          dplyr::filter(.data$spec_name == sn,
+                        .data$agg_method == am)
+        combo_datasets <- sort(unique(combo_bins$dataset_bundle_id))
+        if (length(combo_datasets) < 20L) next
+
+        boot_ensemble_list[[ri]] <- bootstrap_auprc_stability(
+          bins        = combo_bins,
+          dataset_ids = combo_datasets,
+          sizes       = sizes[sizes <= length(combo_datasets)],
+          B           = B
+        ) %>%
+          dplyr::mutate(
+            ci_lo = .data$auprc_mean - 1.96 * .data$auprc_se,
+            ci_hi = .data$auprc_mean + 1.96 * .data$auprc_se,
+            spec_label = paste0(sn, " (", am, ")")
+          )
+      }
+
+      if (length(boot_ensemble_list) > 0L) {
+        boot_all <- dplyr::bind_rows(
+          boot_baseline,
+          dplyr::bind_rows(boot_ensemble_list)
+        )
+
+        p_stab_multi <- ggplot(boot_all,
+                               aes(x = n_datasets, y = auprc_mean,
+                                   color = spec_label, fill = spec_label)) +
+          geom_ribbon(aes(ymin = ci_lo, ymax = ci_hi),
+                      alpha = 0.15, color = NA) +
+          geom_line(linewidth = 0.7) +
+          geom_point(size = 1.8) +
+          labs(
+            x = "Number of datasets in bootstrap resample",
+            y = "Pooled AUPRC (bootstrap mean \u00b1 1.96 SE)",
+            color = "Method", fill = "Method",
+            title = "AUPRC estimation stability (selected methods)"
+          ) +
+          theme_bw() +
+          theme(legend.position = "bottom")
+
+        p_se_multi <- ggplot(boot_all,
+                             aes(x = n_datasets, y = auprc_se,
+                                 color = spec_label)) +
+          geom_line(linewidth = 0.7) +
+          geom_point(size = 1.8) +
+          labs(
+            x = "Number of datasets in bootstrap resample",
+            y = "Bootstrap SE of pooled AUPRC",
+            color = "Method",
+            title = "Bootstrap SE decay (selected methods)"
+          ) +
+          theme_bw() +
+          theme(legend.position = "bottom")
+
+        p_multi <- gridExtra::grid.arrange(p_stab_multi, p_se_multi,
+                                           nrow = 2)
+        ggsave(file.path(fig_root, "ensemble_scaling",
+                         "bootstrap_auprc_stability_multi.png"),
+               p_multi, width = 12, height = 10, dpi = 150)
+      }
+    }
+
+    # Print summary
+    cat("\nBootstrap stability summary (baseline):\n")
+    print(knitr::kable(
+      boot_baseline %>%
+        dplyr::mutate(
+          auprc_mean = round(auprc_mean, 4),
+          auprc_se   = round(auprc_se, 5),
+          ci_lo      = round(ci_lo, 4),
+          ci_hi      = round(ci_hi, 4)
+        ) %>%
+        dplyr::select(n_datasets, auprc_mean, auprc_se, ci_lo, ci_hi),
+      col.names = c("N datasets", "Mean AUPRC", "SE", "95% CI lo", "95% CI hi")
+    ))
+    cat("Fig bootstrap_auprc_stability saved.\n")
+  } else {
+    cat("Bootstrap stability skipped: fewer than 20 datasets.\n")
+  }
+}
+```
+
 # Summary Table
 
 ```{r summary-table}

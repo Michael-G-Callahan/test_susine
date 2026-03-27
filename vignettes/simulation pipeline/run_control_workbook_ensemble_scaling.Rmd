@@ -87,6 +87,11 @@ write_snps_parquet   <- TRUE
 write_confusion_bins <- TRUE
 write_tier_cs_metrics <- TRUE
 
+# ── Scaling analysis ──
+write_scaling_confusion_bins <- TRUE
+scaling_n_ens_sizes          <- c(4L, 8L, 16L, 32L, 64L)
+scaling_restart_reps         <- 50L
+
 # Variable-resolution PIP breaks:
 #   0.02 steps: 1.00 to 0.10 (46 breaks)
 #   0.01 steps: 0.10 to 0.05 (5 breaks)
@@ -445,6 +450,11 @@ cfg <- make_job_config(
   write_snps_parquet = write_snps_parquet,
   write_confusion_bins = write_confusion_bins,
   write_tier_cs_metrics = write_tier_cs_metrics,
+
+  # Scaling analysis
+  write_scaling_confusion_bins = write_scaling_confusion_bins,
+  scaling_n_ens_sizes = scaling_n_ens_sizes,
+  scaling_restart_reps = scaling_restart_reps,
 
   # Metrics
   metrics_settings = list(
