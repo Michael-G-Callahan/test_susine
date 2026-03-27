@@ -772,6 +772,9 @@ make_job_config <- function(job_name,
                             exploration_specs = NULL,
                             include_overall_pool = TRUE,
                             softmax_temperature = 1,
+                            write_scaling_confusion_bins = FALSE,
+                            scaling_n_ens_sizes = c(4L, 8L, 16L, 32L, 64L),
+                            scaling_restart_reps = 50L,
                             metrics_settings = list(
                               pip_bucket_width = 0.01,
                               z_top_k = 10,
@@ -1049,7 +1052,10 @@ make_job_config <- function(job_name,
     aggregation_methods = aggregation_methods,
     overall_aggregation_methods = overall_aggregation_methods,
     include_overall_pool = isTRUE(include_overall_pool),
-    softmax_temperature = as.numeric(softmax_temperature)
+    softmax_temperature = as.numeric(softmax_temperature),
+    write_scaling_confusion_bins = isTRUE(write_scaling_confusion_bins),
+    scaling_n_ens_sizes = as.integer(scaling_n_ens_sizes),
+    scaling_restart_reps = as.integer(scaling_restart_reps)
   )
 
   list(
