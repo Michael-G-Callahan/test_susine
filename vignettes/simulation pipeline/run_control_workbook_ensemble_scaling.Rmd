@@ -36,6 +36,70 @@ library(readr)
 library(knitr)
 ```
 
+# 0. User Configuration
+
+All run-level knobs in one place. Edit these before knitting.
+
+```{r user-config}
+# ── Job identity ──
+job_name <- "ensemble_scaling_testing"
+email    <- "mgc5166@psu.edu"
+
+# ── HPC resources (per SLURM array task) ──
+slurm_time <- "05:59:59"
+slurm_mem  <- "8G"
+
+# ── Dataset grid ──
+n_matrices_target <- 10L   # M1-stratified genotype matrices
+seeds             <- 1:2   # phenotype seeds per matrix
+
+# ── Simulation design ──
+L_grid            <- 10L
+y_noise_grid      <- NA_real_
+p_star_grid       <- NA_integer_
+architecture_grid <- "susie2_oligogenic"
+
+# ── Annotation quality levels ──
+annotation_r2_levels <- c(0, 0.2, 0.5)
+
+# ── Prior variance default (for non-gridded runs) ──
+sigma_0_2_default <- 0.2
+
+# ── Model fitting ──
+max_iter <- 100L
+
+# ── Task packing ──
+task_unit            <- "dataset"
+bundles_per_task     <- 1L
+task_assignment_seed <- 42L
+
+# ── Aggregation ──
+aggregation_methods  <- c("max_elbo", "uniform", "elbo_softmax",
+                          "cluster_weight")
+include_overall_pool <- FALSE
+softmax_temperature  <- 1
+
+# ── Output / metrics ──
+credible_set_rho     <- 0.95
+purity_threshold     <- 0.50
+verbose_file_output  <- FALSE
+write_snps_parquet   <- TRUE
+write_confusion_bins <- TRUE
+write_tier_cs_metrics <- TRUE
+
+# Variable-resolution PIP breaks:
+#   0.02 steps: 1.00 to 0.10 (46 breaks)
+#   0.01 steps: 0.10 to 0.05 (5 breaks)
+#   0.005 steps: 0.05 to 0.00 (10 breaks)
+pip_breaks <- sort(unique(c(
+  seq(0.00, 0.05, by = 0.005),
+  seq(0.05, 0.10, by = 0.01),
+  seq(0.10, 1.00, by = 0.02)
+)))
+z_top_k       <- 10
+jsd_threshold  <- 0.15
+```
+
 # 1. Grid Value Definitions
 
 ```{r grid-values}
@@ -259,9 +323,7 @@ for (s in all_specs) {
 # 3. Build Job Config
 
 ```{r matrix-selection}
-# Pilot settings: 10 M1-stratified matrices, 2 seeds each = 20 datasets.
-n_matrices_target <- 10L  # number of matrices, M1-stratified
-seeds             <- 1:2  # seeds per matrix
+# n_matrices_target and seeds are set in Section 0 (User Configuration).
 
 data_matrix_catalog_full <- test_susine:::build_data_matrix_catalog(
   requested_scenarios = "scenario_1",
@@ -323,11 +385,11 @@ cat("Seeds:", paste(seeds, collapse = ", "), "\n")
 ```{r build-config}
 
 cfg <- make_job_config(
-  job_name = "ensemble_scaling_v1",
+  job_name = job_name,
   HPC = TRUE,
-  time = "05:59:59",
-  mem = "8G",
-  email = "mgc5166@psu.edu",
+  time = slurm_time,
+  mem = slurm_mem,
+  email = email,
   output_root = here("output"),
   grid_mode = "full",
 
@@ -340,20 +402,20 @@ cfg <- make_job_config(
   exploration_specs = all_specs,
 
   # Dataset grid
-  L_grid = 10L,
-  y_noise_grid = NA_real_,
-  p_star_grid = NA_integer_,
-  architecture_grid = "susie2_oligogenic",
+  L_grid = L_grid,
+  y_noise_grid = y_noise_grid,
+  p_star_grid = p_star_grid,
+  architecture_grid = architecture_grid,
   seeds = seeds,
 
   # Annotation quality
   prior_quality = tibble::tibble(
-    annotation_r2 = c(0, 0.2, 0.5),
-    inflate_match = c(1, 1, 1)
+    annotation_r2 = annotation_r2_levels,
+    inflate_match = rep(1, length(annotation_r2_levels))
   ),
 
   # Prior variance (default for non-gridded runs)
-  sigma_0_2_scalars = 0.2,
+  sigma_0_2_scalars = sigma_0_2_default,
 
   # Data source
   data_scenarios = "scenario_1",
@@ -364,38 +426,31 @@ cfg <- make_job_config(
   ),
 
   # Task packing
-  task_unit = "dataset",
-  bundles_per_task = 1L,
-  task_assignment_seed = 42L,
+  task_unit = task_unit,
+  bundles_per_task = bundles_per_task,
+  task_assignment_seed = task_assignment_seed,
 
   # Model settings
-  max_iter = 100L,
+  max_iter = max_iter,
 
   # Aggregation
-  aggregation_methods = c("max_elbo", "uniform", "elbo_softmax", "cluster_weight"),
-  include_overall_pool = FALSE,
-  softmax_temperature = 1,
+  aggregation_methods = aggregation_methods,
+  include_overall_pool = include_overall_pool,
+  softmax_temperature = softmax_temperature,
 
   # Output flags
-  credible_set_rho = 0.95,
-  purity_threshold = 0.50,
-  verbose_file_output = FALSE,
-  write_snps_parquet = TRUE,
-  write_confusion_bins = TRUE,
-  write_tier_cs_metrics = TRUE,
+  credible_set_rho = credible_set_rho,
+  purity_threshold = purity_threshold,
+  verbose_file_output = verbose_file_output,
+  write_snps_parquet = write_snps_parquet,
+  write_confusion_bins = write_confusion_bins,
+  write_tier_cs_metrics = write_tier_cs_metrics,
 
-  # Metrics: variable-resolution PIP breaks
-  # 0.02 steps: 1.00 to 0.10 (46 breaks)
-  # 0.01 steps: 0.10 to 0.05 (5 breaks)
-  # 0.005 steps: 0.05 to 0.00 (10 breaks)
+  # Metrics
   metrics_settings = list(
-    pip_breaks = sort(unique(c(
-      seq(0.00, 0.05, by = 0.005),
-      seq(0.05, 0.10, by = 0.01),
-      seq(0.10, 1.00, by = 0.02)
-    ))),
-    z_top_k = 10,
-    jsd_threshold = 0.15
+    pip_breaks = pip_breaks,
+    z_top_k = z_top_k,
+    jsd_threshold = jsd_threshold
   )
 )
 ```

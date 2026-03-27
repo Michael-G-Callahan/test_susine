@@ -35,8 +35,8 @@ theme_set(theme_bw(base_size = 12))
 
 ```{r load}
 # Point to job-level consolidated output from collect workbook
-job_name      <- "ensemble_scaling_v1"
-parent_job_id <- "50200044"
+job_name      <- "ensemble_scaling_testing"
+parent_job_id <- "50248383"
 output_root   <- here("output")
 
 job_dir          <- file.path(output_root, "slurm_output", job_name, parent_job_id)
@@ -1434,6 +1434,168 @@ if (!is.null(interaction_scaling) && nrow(interaction_scaling) > 0L) {
   cat("Fig 4d saved.\n")
 } else {
   cat("scaling_bins_pooled.csv not found — fig 4d skipped.\n")
+}
+```
+
+# 5. Compute vs AUPRC
+
+Total ensemble compute time (sum of wall_time_sec across all runs in
+the ensemble, averaged over datasets) on the x-axis, pooled AUPRC on
+the y-axis. Color = ensemble method (spec_name), shape = aggregation
+method. Baseline single-fit shown as a black star.
+
+```{r compute-vs-auprc, fig.width=12, fig.height=7}
+{
+  # Build per-ensemble total compute time: sum wall_time across all
+
+  # individual (non-agg) runs within each (spec_name, dataset_bundle_id),
+  # then average over datasets.
+  wt_available <- "wall_time_sec" %in% names(model_metrics)
+
+  if (wt_available) {
+    # Individual runs only (exclude aggregation pseudo-rows)
+    wt_per_ensemble <- model_metrics %>%
+      dplyr::filter(!is.na(.data$spec_name),
+                    .data$filtering == "purity_filtered",
+                    is.na(.data$agg_method) |
+                      .data$explore_method != "aggregation") %>%
+      dplyr::group_by(.data$spec_name, .data$dataset_bundle_id) %>%
+      dplyr::summarise(
+        total_wall_sec = sum(.data$wall_time_sec, na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      dplyr::group_by(.data$spec_name) %>%
+      dplyr::summarise(
+        mean_total_wall_sec = mean(.data$total_wall_sec, na.rm = TRUE),
+        .groups = "drop"
+      )
+
+    # Join with pooled AUPRC (one row per spec x agg_method)
+    compute_auprc <- auprc_pooled_agg %>%
+      dplyr::filter(!is.na(.data$spec_name),
+                    .data$spec_name != "baseline-single") %>%
+      dplyr::inner_join(wt_per_ensemble, by = "spec_name") %>%
+      dplyr::mutate(
+        compute_min = .data$mean_total_wall_sec / 60
+      )
+
+    # Baseline single-fit: average wall_time across datasets (1 run each)
+    baseline_wt <- model_metrics %>%
+      dplyr::filter(.data$spec_name == "baseline-single",
+                    .data$filtering == "purity_filtered",
+                    is.na(.data$agg_method) |
+                      .data$explore_method != "aggregation",
+                    .data$use_case_id == "susine_vanilla") %>%
+      dplyr::group_by(.data$dataset_bundle_id) %>%
+      dplyr::summarise(
+        total_wall_sec = sum(.data$wall_time_sec, na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      dplyr::summarise(
+        mean_total_wall_sec = mean(.data$total_wall_sec, na.rm = TRUE)
+      ) %>%
+      dplyr::pull(mean_total_wall_sec)
+    baseline_compute_min <- baseline_wt / 60
+
+    if (nrow(compute_auprc) > 0L) {
+      # Aggregation method shapes
+      agg_shapes <- c(
+        "max_elbo"       = 15,  # filled square
+        "uniform"        = 16,  # filled circle
+        "elbo_softmax"   = 17,  # filled triangle
+        "cluster_weight" = 18   # filled diamond
+      )
+
+      p_compute <- ggplot(
+        compute_auprc,
+        aes(x = compute_min, y = AUPRC,
+            color = spec_name, shape = agg_method)
+      ) +
+        geom_point(size = 3, alpha = 0.85) +
+        scale_shape_manual(
+          values = agg_shapes,
+          name = "Aggregation"
+        ) +
+        # Baseline star
+        annotate(
+          "point",
+          x = baseline_compute_min,
+          y = baseline_auprc,
+          shape = 8, size = 4, color = "black", stroke = 1.2
+        ) +
+        annotate(
+          "text",
+          x = baseline_compute_min,
+          y = baseline_auprc,
+          label = "baseline single-fit",
+          hjust = -0.15, vjust = -0.8, size = 3, color = "black"
+        ) +
+        labs(
+          x = "Total compute time (minutes, mean over datasets)",
+          y = "Pooled AUPRC",
+          color = "Ensemble Method",
+          title = "Compute vs. AUPRC (all annotation R\u00b2 pooled)"
+        ) +
+        theme_bw() +
+        theme(legend.position = "bottom",
+              legend.box = "vertical")
+      ggsave(file.path(fig_root, "ensemble_scaling",
+                       "compute_vs_auprc.png"),
+             p_compute, width = 12, height = 7, dpi = 150)
+      cat("Fig compute_vs_auprc saved.\n")
+
+      # Per annotation_r2 variant
+      for (r2 in sort(unique(na.omit(
+        auprc_pooled_agg_by_r2$annotation_r2)))) {
+        compute_auprc_r2 <- auprc_pooled_agg_by_r2 %>%
+          dplyr::filter(!is.na(.data$spec_name),
+                        .data$spec_name != "baseline-single",
+                        is.na(.data$annotation_r2) |
+                          .data$annotation_r2 == r2) %>%
+          dplyr::inner_join(wt_per_ensemble, by = "spec_name") %>%
+          dplyr::mutate(compute_min = .data$mean_total_wall_sec / 60)
+
+        if (nrow(compute_auprc_r2) > 0L) {
+          # Baseline AUPRC at this r2 level
+          bl_auprc_r2 <- auprc_pooled_agg_by_r2 %>%
+            dplyr::filter(.data$spec_name == "baseline-single",
+                          is.na(.data$annotation_r2) |
+                            .data$annotation_r2 == r2) %>%
+            dplyr::pull(AUPRC)
+          bl_auprc_r2 <- if (length(bl_auprc_r2)) bl_auprc_r2[1] else baseline_auprc
+
+          p_r2 <- ggplot(
+            compute_auprc_r2,
+            aes(x = compute_min, y = AUPRC,
+                color = spec_name, shape = agg_method)
+          ) +
+            geom_point(size = 3, alpha = 0.85) +
+            scale_shape_manual(values = agg_shapes, name = "Aggregation") +
+            annotate("point", x = baseline_compute_min, y = bl_auprc_r2,
+                     shape = 8, size = 4, color = "black", stroke = 1.2) +
+            annotate("text", x = baseline_compute_min, y = bl_auprc_r2,
+                     label = "baseline single-fit",
+                     hjust = -0.15, vjust = -0.8, size = 3, color = "black") +
+            labs(
+              x = "Total compute time (minutes, mean over datasets)",
+              y = "Pooled AUPRC",
+              color = "Ensemble Method",
+              title = sprintf(
+                "Compute vs. AUPRC (annotation R\u00b2 = %.1f)", r2)
+            ) +
+            theme_bw() +
+            theme(legend.position = "bottom", legend.box = "vertical")
+          ggsave(file.path(fig_root, "ensemble_scaling",
+                           sprintf("compute_vs_auprc_r2_%.1f.png", r2)),
+                 p_r2, width = 12, height = 7, dpi = 150)
+        }
+      }
+    } else {
+      cat("compute_vs_auprc skipped: no data after joining wall_time.\n")
+    }
+  } else {
+    cat("compute_vs_auprc skipped: wall_time_sec not in model_metrics.\n")
+  }
 }
 ```
 

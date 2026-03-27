@@ -746,6 +746,13 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
         execution_cache_misses <<- execution_cache_misses + 1L
       }
       if (length(meta_override)) {
+        # Add perturb wall time to refit wall time for refine steps so the
+        # recorded wall_time_sec reflects the true cost of the full step.
+        if (!is.null(meta_override$wall_time_perturb_sec)) {
+          meta$wall_time_sec <- as.numeric(meta$wall_time_sec %||% 0) +
+            as.numeric(meta_override$wall_time_perturb_sec)
+          meta_override$wall_time_perturb_sec <- NULL
+        }
         meta[names(meta_override)] <- meta_override
       }
       meta$run_type <- as.character(meta$run_type %||% resolve_run_type(run_row))
@@ -951,6 +958,7 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
             # intermediate model whose alpha we extract for the warm start.
             # We call run_use_case directly so the perturb is NOT recorded
             # in ensemble PIPs or written to outputs.
+            perturb_started <- proc.time()[["elapsed"]]
             perturb_result <- run_use_case(
               use_case = use_case,
               run_row = run_row,
@@ -958,6 +966,7 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
               job_config = job_config,
               blocked_idx = node$blocked
             )
+            perturb_wall_sec <- proc.time()[["elapsed"]] - perturb_started
             perturb_fit <- perturb_result$fits[[1]]
             perturb_alpha <- perturb_fit$effect_fits$alpha
 
@@ -965,6 +974,8 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
             # from perturbed model's alpha.  The init_alpha_override
             # bypasses normal warm-start logic and injects perturbed
             # alpha directly.  This is stored as the actual ensemble member.
+            # wall_time includes both perturb + refit (the true cost of
+            # one refine step).
             out <- run_and_record(
               run_row = run_row,
               group_key = gk,
@@ -973,7 +984,8 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
                 explore_method = "refine",
                 variant_id = step_id,
                 run_type = "warm",
-                is_restart = FALSE
+                is_restart = FALSE,
+                wall_time_perturb_sec = perturb_wall_sec
               ),
               init_alpha_override = perturb_alpha
             )
