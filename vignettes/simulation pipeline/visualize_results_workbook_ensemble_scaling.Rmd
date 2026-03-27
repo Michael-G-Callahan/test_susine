@@ -1637,6 +1637,11 @@ and report the bootstrap mean $\pm$ 1.96 SE.
 ```{r bootstrap-auprc-stability, fig.width=12, fig.height=10}
 {
   # ── Helper: pooled AUPRC from confusion bins ──
+  # Computes average precision directly from binned counts (descending
+
+  # pip_threshold order). AP = (1/P) * sum over positive-containing bins
+  # of [ cum_tp_at_bin * n_causal_in_bin / (cum_tp + cum_fp)_at_bin ].
+  # This is the bin-level analogue of the per-SNP AP formula.
   pooled_auprc <- function(bins) {
     b       <- bins %>% dplyr::arrange(dplyr::desc(.data$pip_threshold))
     cum_tp  <- cumsum(b$n_causal_at_bucket)
@@ -1644,9 +1649,13 @@ and report the bootstrap mean $\pm$ 1.96 SE.
     total_p <- sum(b$n_causal_at_bucket)
     total_n <- sum(b$n_noncausal_at_bucket)
     if (total_p == 0L || total_n == 0L) return(NA_real_)
-    recall    <- cum_tp / total_p
-    precision <- cum_tp / pmax(cum_tp + cum_fp, 1L)
-    auprc_average_precision(recall, precision)
+    # For each bin with causal SNPs, the average precision contribution is:
+    # precision_at_bin * (n_causal_in_bin / total_positives)
+    # This correctly weights by the number of positives discovered at each
+    # threshold, matching the per-SNP AP formula.
+    precision <- cum_tp / (cum_tp + cum_fp)
+    delta_recall <- b$n_causal_at_bucket / total_p
+    sum(precision * delta_recall)
   }
 
   # ── Bootstrap stability function ──
@@ -1696,9 +1705,10 @@ and report the bootstrap mean $\pm$ 1.96 SE.
     dplyr::bind_rows(results)
   }
 
-  # ── Run bootstrap for baseline single-fit (susine_vanilla) ──
+  # ── Run bootstrap for baseline single-fit (susine_vanilla only) ──
   baseline_bins <- confusion_bins %>%
     dplyr::filter(.data$spec_name == "baseline-single",
+                  .data$use_case_id == "susine_vanilla",
                   is.na(.data$agg_method))
   baseline_datasets <- sort(unique(baseline_bins$dataset_bundle_id))
   n_total <- length(baseline_datasets)
