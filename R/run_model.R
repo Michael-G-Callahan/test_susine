@@ -2238,29 +2238,52 @@ compute_scaling_confusion_bins_for_group <- function(pip_list,
 
   expl_raw  <- as.character(group_run_row$exploration_methods[[1]] %||% "")
   method_ids <- unique(trimws(strsplit(expl_raw, "x", fixed = TRUE)[[1]]))
-  is_interaction <- length(method_ids) > 1L && "refine" %in% method_ids
+  is_interaction <- length(method_ids) > 1L
 
   agg_methods <- c("uniform", "max_elbo", "elbo_softmax", "cluster_weight", "cluster_weight_050")
 
   results <- list()
 
   if (is_interaction) {
-    # Interaction specs: compare 4x4 vs 8x8 grid resolutions (deterministic).
-    axis_cols <- c(
-      if ("restart"   %in% method_ids) "restart_id"       else NULL,
-      if ("refine"    %in% method_ids) "refine_step"      else NULL,
-      if ("c_grid"    %in% method_ids) "c_value"          else NULL,
-      if ("sigma_0_2" %in% method_ids) "sigma_0_2_scalar" else NULL
+    # Skip 3+ axis specs — only 2-axis interactions are analyzed for subscaling.
+    if (length(method_ids) > 2L) return(dplyr::bind_rows(results))
+
+    # 2-axis interaction: proportional halving.  Full grid = n1 x n2;
+    # half grid = ceil(n1/2) x ceil(n2/2).  Labels reflect actual dims.
+    axis_info <- list(
+      if ("restart"        %in% method_ids) list(col = "restart_id",       id = "restart")       else NULL,
+      if ("refine"         %in% method_ids) list(col = "refine_step",      id = "refine")        else NULL,
+      if ("c_grid"         %in% method_ids) list(col = "c_value",          id = "c")             else NULL,
+      if ("sigma_0_2_grid" %in% method_ids) list(col = "sigma_0_2_scalar", id = "sigma_0_2")     else NULL
     )
-    for (res in c(4L, 8L)) {
+    axis_info <- Filter(Negate(is.null), axis_info)
+
+    # Compute full axis sizes
+    axis_full_sizes <- vapply(axis_info, function(ax) {
+      length(unique(run_meta[[ax$col]]))
+    }, integer(1L))
+
+    # Two resolution levels: full and half (proportional per axis)
+    resolutions <- list(
+      half = as.integer(pmax(1L, ceiling(axis_full_sizes / 2))),
+      full = axis_full_sizes
+    )
+
+    for (res_name in names(resolutions)) {
+      res_sizes <- resolutions[[res_name]]
       sub_meta <- run_meta
-      for (col in axis_cols) {
+      dim_labels <- character(length(axis_info))
+      for (ai in seq_along(axis_info)) {
+        col <- axis_info[[ai]]$col
         if (!col %in% names(sub_meta)) next
         vals <- sort(unique(sub_meta[[col]]))
-        n_keep <- min(res, length(vals))
-        keep_vals <- vals[round(seq(1, length(vals), length.out = n_keep))]
+        n_keep <- min(res_sizes[ai], length(vals))
+        keep_vals <- vals[unique(round(seq(1, length(vals), length.out = n_keep)))]
         sub_meta <- dplyr::filter(sub_meta, .data[[col]] %in% keep_vals)
+        dim_labels[ai] <- as.character(n_keep)
       }
+      resolution_label <- paste(dim_labels, collapse = "x")
+
       sel_idx <- match(sub_meta$run_id, run_meta$run_id)
       sel_idx <- sel_idx[!is.na(sel_idx)]
       if (!length(sel_idx)) next
@@ -2283,7 +2306,7 @@ compute_scaling_confusion_bins_for_group <- function(pip_list,
             annotation_r2     = r2_val,
             dataset_bundle_id = as.character(dataset_bundle_id),
             n_ensemble        = as.integer(length(sel_idx)),
-            resolution        = paste0(res, "x", res),
+            resolution        = resolution_label,
             agg_method        = am,
             rep               = 1L
           )
@@ -2292,10 +2315,10 @@ compute_scaling_confusion_bins_for_group <- function(pip_list,
     }
   } else {
     # Pure-lever specs: subsample N fits across valid sizes.
-    lever_type <- if ("restart"   %in% method_ids) "restart"   else
-                  if ("refine"    %in% method_ids) "refine"    else
-                  if ("sigma_0_2" %in% method_ids) "sigma_0_2" else
-                  if ("c_grid"    %in% method_ids) "c_grid"    else NA_character_
+    lever_type <- if ("restart"        %in% method_ids) "restart"   else
+                  if ("refine"         %in% method_ids) "refine"    else
+                  if ("sigma_0_2_grid" %in% method_ids) "sigma_0_2" else
+                  if ("c_grid"         %in% method_ids) "c_grid"    else NA_character_
     if (is.na(lever_type)) return(NULL)
 
     n_reps <- if (lever_type == "restart") n_restart_reps else 1L
