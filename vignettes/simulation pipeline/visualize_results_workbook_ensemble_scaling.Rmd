@@ -508,8 +508,35 @@ if (file.exists(hg2_path)) {
   }
 
   if (nrow(hg2_dat) > 0L && "spec_name" %in% names(hg2_dat)) {
-    p_1c <- ggplot(hg2_dat, aes(x = .data$spec_name, y = .data$hg2,
-                                 fill = .data$spec_name)) +
+    # Baseline single-fit hg2 from model_metrics (one per dataset)
+    baseline_hg2 <- model_metrics %>%
+      dplyr::filter(.data$spec_name == "baseline-single",
+                    .data$use_case_id == "susine_vanilla",
+                    .data$filtering == "purity_filtered",
+                    !is.na(.data$hg2)) %>%
+      dplyr::distinct(.data$dataset_bundle_id, .keep_all = TRUE) %>%
+      dplyr::select(dataset_bundle_id, hg2_baseline = hg2)
+
+    # Append baseline as its own "agg_method" so it appears in every facet
+    # via bind_rows: one row per dataset per agg_method
+    agg_methods_present <- sort(unique(na.omit(hg2_dat$agg_method)))
+    if (nrow(baseline_hg2) > 0L && length(agg_methods_present) > 0L) {
+      baseline_rows <- tidyr::crossing(
+        baseline_hg2,
+        tibble::tibble(agg_method = agg_methods_present)
+      ) %>%
+        dplyr::mutate(
+          spec_name = "baseline-single",
+          hg2 = .data$hg2_baseline
+        ) %>%
+        dplyr::select(dplyr::any_of(names(hg2_dat)))
+      hg2_plot_dat <- dplyr::bind_rows(hg2_dat, baseline_rows)
+    } else {
+      hg2_plot_dat <- hg2_dat
+    }
+
+    p_1c <- ggplot(hg2_plot_dat, aes(x = .data$spec_name, y = .data$hg2,
+                                      fill = .data$spec_name)) +
       geom_boxplot(outlier.size = 0.5, alpha = 0.8) +
       facet_wrap(~agg_method, ncol = 3) +
       labs(x = "Ensemble Spec", y = expression(hat(h)[g]^2),
