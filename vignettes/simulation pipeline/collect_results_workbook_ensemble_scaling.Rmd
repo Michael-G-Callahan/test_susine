@@ -32,7 +32,7 @@ library(knitr)
 
 ```{r locate}
 job_name      <- "ensemble_scaling_testing"
-parent_job_id <- "50248383"
+parent_job_id <- "50282709"
 output_root   <- here("output")
 
 # Job-level directory (contains task-001/, task-002/, etc.)
@@ -387,11 +387,7 @@ if (!is.null(scaling_bins_raw) && nrow(scaling_bins_raw) > 0L) {
 # 7. Export Consolidated Outputs
 
 ```{r export-scaling}
-if (!is.null(scaling_bins_pooled) && nrow(scaling_bins_pooled) > 0L) {
-  readr::write_csv(scaling_bins_pooled,
-                   file.path(out_dir, "scaling_bins_pooled.csv"))
-  cat("Wrote scaling_bins_pooled.csv\n")
-}
+# scaling_bins_pooled is written to consolidated in the export chunk below.
 ```
 
 ```{r export}
@@ -420,6 +416,10 @@ if (nrow(tier_cs_metrics)) {
 }
 if (nrow(hg2_by_agg)) {
   readr::write_csv(hg2_by_agg, file.path(out_dir, "hg2_by_agg.csv"))
+}
+if (!is.null(scaling_bins_pooled) && nrow(scaling_bins_pooled) > 0L) {
+  readr::write_csv(scaling_bins_pooled,
+                   file.path(out_dir, "scaling_bins_pooled.csv"))
 }
 
 readr::write_csv(tpr05_pooled_agg, file.path(out_dir, "tpr05_pooled_aggregated.csv"))
