@@ -1744,7 +1744,7 @@ and report the bootstrap mean $\pm$ 1.96 SE.
       theme_bw()
 
     # ── Combined figure ──
-    p_combined <- gridExtra::grid.arrange(p_stab, p_se, nrow = 2)
+    p_combined <- gridExtra::arrangeGrob(p_stab, p_se, nrow = 2)
     ggsave(file.path(fig_root, "ensemble_scaling",
                      "bootstrap_auprc_stability.png"),
            p_combined, width = 10, height = 8, dpi = 150)
@@ -1826,8 +1826,8 @@ and report the bootstrap mean $\pm$ 1.96 SE.
           theme_bw() +
           theme(legend.position = "bottom")
 
-        p_multi <- gridExtra::grid.arrange(p_stab_multi, p_se_multi,
-                                           nrow = 2)
+        p_multi <- gridExtra::arrangeGrob(p_stab_multi, p_se_multi,
+                                          nrow = 2)
         ggsave(file.path(fig_root, "ensemble_scaling",
                          "bootstrap_auprc_stability_multi.png"),
                p_multi, width = 12, height = 10, dpi = 150)
