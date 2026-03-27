@@ -1704,50 +1704,37 @@ and report the bootstrap mean $\pm$ 1.96 SE.
         spec_label = "baseline single-fit (vanilla)"
       )
 
-    # ── Panel 1: AUPRC stability curve ──
-    p_stab <- ggplot(boot_baseline,
-                     aes(x = n_datasets, y = auprc_mean)) +
-      geom_ribbon(aes(ymin = ci_lo, ymax = ci_hi),
+    # ── Combined baseline figure (faceted: AUPRC + SE panels) ──
+    boot_long <- boot_baseline %>%
+      tidyr::pivot_longer(
+        cols = c(auprc_mean, auprc_se),
+        names_to = "metric",
+        values_to = "value"
+      ) %>%
+      dplyr::mutate(
+        ci_lo = dplyr::if_else(.data$metric == "auprc_mean", .data$ci_lo, NA_real_),
+        ci_hi = dplyr::if_else(.data$metric == "auprc_mean", .data$ci_hi, NA_real_),
+        metric_label = dplyr::if_else(
+          .data$metric == "auprc_mean",
+          "Pooled AUPRC (mean \u00b1 1.96 SE)",
+          "Bootstrap SE"
+        )
+      )
+
+    p_boot <- ggplot(boot_long, aes(x = n_datasets, y = value)) +
+      geom_ribbon(data = dplyr::filter(boot_long, .data$metric == "auprc_mean"),
+                  aes(ymin = ci_lo, ymax = ci_hi),
                   fill = "steelblue", alpha = 0.25) +
       geom_line(color = "steelblue", linewidth = 0.8) +
       geom_point(color = "steelblue", size = 2) +
-      labs(
-        x = "Number of datasets in bootstrap resample",
-        y = "Pooled AUPRC (bootstrap mean \u00b1 1.96 SE)",
-        title = "AUPRC estimation stability (baseline single-fit)"
-      ) +
+      facet_wrap(~metric_label, scales = "free_y", ncol = 1) +
+      labs(x = "Number of datasets in bootstrap resample", y = NULL,
+           title = "AUPRC estimation stability (baseline single-fit)") +
       theme_bw()
 
-    # ── Panel 2: Bootstrap SE decay ──
-    p_se <- ggplot(boot_baseline,
-                   aes(x = n_datasets, y = auprc_se)) +
-      geom_line(color = "firebrick", linewidth = 0.8) +
-      geom_point(color = "firebrick", size = 2) +
-      # Reference 1/sqrt(n) curve scaled to match the first point
-      stat_function(
-        fun = function(n) boot_baseline$auprc_se[1] *
-          sqrt(boot_baseline$n_datasets[1]) / sqrt(n),
-        linetype = "dashed", color = "grey50"
-      ) +
-      annotate("text",
-               x = max(sizes) * 0.7,
-               y = boot_baseline$auprc_se[1] *
-                 sqrt(boot_baseline$n_datasets[1]) /
-                 sqrt(max(sizes) * 0.7) * 1.15,
-               label = "1/\u221An reference",
-               color = "grey50", size = 3.5) +
-      labs(
-        x = "Number of datasets in bootstrap resample",
-        y = "Bootstrap SE of pooled AUPRC",
-        title = "Bootstrap SE decay"
-      ) +
-      theme_bw()
-
-    # ── Combined figure ──
-    p_combined <- gridExtra::arrangeGrob(p_stab, p_se, nrow = 2)
     ggsave(file.path(fig_root, "ensemble_scaling",
                      "bootstrap_auprc_stability.png"),
-           p_combined, width = 10, height = 8, dpi = 150)
+           p_boot, width = 10, height = 8, dpi = 150)
 
     # ── Optional: run for a few ensemble specs too ──
     # Pick the top-performing spec per agg_method to show stability
@@ -1796,41 +1783,41 @@ and report the bootstrap mean $\pm$ 1.96 SE.
           dplyr::bind_rows(boot_ensemble_list)
         )
 
-        p_stab_multi <- ggplot(boot_all,
-                               aes(x = n_datasets, y = auprc_mean,
+        boot_all_long <- boot_all %>%
+          tidyr::pivot_longer(
+            cols = c(auprc_mean, auprc_se),
+            names_to = "metric",
+            values_to = "value"
+          ) %>%
+          dplyr::mutate(
+            ci_lo = dplyr::if_else(.data$metric == "auprc_mean", .data$ci_lo, NA_real_),
+            ci_hi = dplyr::if_else(.data$metric == "auprc_mean", .data$ci_hi, NA_real_),
+            metric_label = dplyr::if_else(
+              .data$metric == "auprc_mean",
+              "Pooled AUPRC (mean \u00b1 1.96 SE)",
+              "Bootstrap SE"
+            )
+          )
+
+        p_boot_multi <- ggplot(boot_all_long,
+                               aes(x = n_datasets, y = value,
                                    color = spec_label, fill = spec_label)) +
-          geom_ribbon(aes(ymin = ci_lo, ymax = ci_hi),
-                      alpha = 0.15, color = NA) +
+          geom_ribbon(
+            data = dplyr::filter(boot_all_long, .data$metric == "auprc_mean"),
+            aes(ymin = ci_lo, ymax = ci_hi),
+            alpha = 0.15, color = NA) +
           geom_line(linewidth = 0.7) +
           geom_point(size = 1.8) +
-          labs(
-            x = "Number of datasets in bootstrap resample",
-            y = "Pooled AUPRC (bootstrap mean \u00b1 1.96 SE)",
-            color = "Method", fill = "Method",
-            title = "AUPRC estimation stability (selected methods)"
-          ) +
+          facet_wrap(~metric_label, scales = "free_y", ncol = 1) +
+          labs(x = "Number of datasets in bootstrap resample", y = NULL,
+               color = "Method", fill = "Method",
+               title = "AUPRC estimation stability (selected methods)") +
           theme_bw() +
           theme(legend.position = "bottom")
 
-        p_se_multi <- ggplot(boot_all,
-                             aes(x = n_datasets, y = auprc_se,
-                                 color = spec_label)) +
-          geom_line(linewidth = 0.7) +
-          geom_point(size = 1.8) +
-          labs(
-            x = "Number of datasets in bootstrap resample",
-            y = "Bootstrap SE of pooled AUPRC",
-            color = "Method",
-            title = "Bootstrap SE decay (selected methods)"
-          ) +
-          theme_bw() +
-          theme(legend.position = "bottom")
-
-        p_multi <- gridExtra::arrangeGrob(p_stab_multi, p_se_multi,
-                                          nrow = 2)
         ggsave(file.path(fig_root, "ensemble_scaling",
                          "bootstrap_auprc_stability_multi.png"),
-               p_multi, width = 12, height = 10, dpi = 150)
+               p_boot_multi, width = 12, height = 10, dpi = 150)
       }
     }
 
