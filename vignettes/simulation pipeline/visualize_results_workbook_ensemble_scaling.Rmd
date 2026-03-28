@@ -36,7 +36,7 @@ theme_set(theme_bw(base_size = 12))
 ```{r load}
 # Point to job-level consolidated output from collect workbook
 job_name      <- "ensemble_scaling_testing"
-parent_job_id <- "50282709"
+parent_job_id <- "50293659"
 output_root   <- here("output")
 
 job_dir          <- file.path(output_root, "slurm_output", job_name, parent_job_id)
@@ -1190,6 +1190,7 @@ if (file.exists(scaling_bins_path)) {
   cat("Scaling bins pooled rows:", nrow(scaling_bins_pooled), "\n")
 
   # Helper: compute AUPRC from a pooled confusion-bins tibble.
+  # AP = sum over bins of [precision_at_bin * delta_recall_at_bin].
   auprc_from_bins <- function(bins) {
     b       <- bins %>% dplyr::arrange(dplyr::desc(.data$pip_threshold))
     cum_tp  <- cumsum(b$n_causal_at_bucket)
@@ -1197,9 +1198,9 @@ if (file.exists(scaling_bins_path)) {
     total_p <- sum(b$n_causal_at_bucket)
     total_n <- sum(b$n_noncausal_at_bucket)
     if (total_p == 0L || total_n == 0L) return(NA_real_)
-    recall    <- cum_tp / total_p
-    precision <- cum_tp / pmax(cum_tp + cum_fp, 1L)
-    auprc_average_precision(recall, precision)
+    precision    <- cum_tp / (cum_tp + cum_fp)
+    delta_recall <- b$n_causal_at_bucket / total_p
+    sum(precision * delta_recall)
   }
 
   # Helper: TPR at FPR <= threshold.
