@@ -79,8 +79,12 @@ compute_auprc_from_confusion <- function(confusion_df, group_vars) {
 
 #' Compute AUPRC for a single precision-recall curve
 #'
-#' @param precision Numeric vector of precision values
-#' @param recall Numeric vector of recall values
+#' Uses the step-function average precision (AP) formula:
+#' AP = sum(precision_at_k * delta_recall_at_k), matching sklearn's
+#' average_precision_score. No anchor at (0, 1), no trapezoidal interpolation.
+#'
+#' @param precision Numeric vector of precision values (descending threshold order)
+#' @param recall Numeric vector of recall values (descending threshold order)
 #' @return Single AUPRC value
 #' @keywords internal
 compute_auprc_single <- function(precision, recall) {
@@ -90,17 +94,9 @@ compute_auprc_single <- function(precision, recall) {
 
   if (nrow(df) < 2) return(NA_real_)
 
- # Anchor at recall=0 with precision=1 (standard AUPRC convention)
-  if (min(df$recall) > 0) {
-    df <- dplyr::bind_rows(
-      data.frame(recall = 0, precision = 1),
-      df
-    )
-  }
-
-  # Trapezoidal integration
-  auprc <- sum(diff(df$recall) * (utils::head(df$precision, -1) + utils::tail(df$precision, -1)) / 2)
-  auprc
+  # Step-function AP: sum of precision * delta_recall at each threshold
+  delta_recall <- c(df$recall[1], diff(df$recall))
+  sum(df$precision * delta_recall)
 }
 
 #' Create Power vs FDR plot

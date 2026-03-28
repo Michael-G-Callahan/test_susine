@@ -870,7 +870,13 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
     for (gk in names(grouped_idx)) {
       group_rows <- uc_runs[grouped_idx[[gk]], , drop = FALSE]
       if (is.null(group_run_map[[gk]])) {
-        group_run_map[[gk]] <- group_rows[1, , drop = FALSE]
+        grr <- group_rows[1, , drop = FALSE]
+        # Store planned axis sizes for scaling analysis (before BFS may truncate)
+        grr$.planned_n_restart <- length(unique(group_rows$restart_id))
+        grr$.planned_n_refine  <- length(unique(group_rows$refine_step))
+        grr$.planned_n_c       <- length(unique(group_rows$c_value))
+        grr$.planned_n_sigma   <- length(unique(group_rows$sigma_0_2_scalar))
+        group_run_map[[gk]] <- grr
       }
 
       method_raw <- as.character(group_rows$exploration_methods[[1]] %||% "")
@@ -2249,30 +2255,42 @@ compute_scaling_confusion_bins_for_group <- function(pip_list,
     if (length(method_ids) > 2L) return(dplyr::bind_rows(results))
 
     # 2-axis interaction: proportional halving.  Full grid = n1 x n2;
-    # half grid = ceil(n1/2) x ceil(n2/2).  Labels reflect actual dims.
+    # half grid = ceil(n1/2) x ceil(n2/2).  Labels use PLANNED sizes
+    # (from the run table) so all datasets get identical labels even
+    # when BFS truncates some refine trees early.
     axis_info <- list(
-      if ("restart"        %in% method_ids) list(col = "restart_id",       id = "restart")       else NULL,
-      if ("refine"         %in% method_ids) list(col = "refine_step",      id = "refine")        else NULL,
-      if ("c_grid"         %in% method_ids) list(col = "c_value",          id = "c")             else NULL,
-      if ("sigma_0_2_grid" %in% method_ids) list(col = "sigma_0_2_scalar", id = "sigma_0_2")     else NULL
+      if ("restart"        %in% method_ids) list(col = "restart_id",       planned_col = ".planned_n_restart") else NULL,
+      if ("refine"         %in% method_ids) list(col = "refine_step",      planned_col = ".planned_n_refine")  else NULL,
+      if ("c_grid"         %in% method_ids) list(col = "c_value",          planned_col = ".planned_n_c")       else NULL,
+      if ("sigma_0_2_grid" %in% method_ids) list(col = "sigma_0_2_scalar", planned_col = ".planned_n_sigma")   else NULL
     )
     axis_info <- Filter(Negate(is.null), axis_info)
 
-    # Compute full axis sizes
-    axis_full_sizes <- vapply(axis_info, function(ax) {
-      length(unique(run_meta[[ax$col]]))
+    # Use planned sizes from the run table (falls back to actual if unavailable)
+    axis_planned_sizes <- vapply(axis_info, function(ax) {
+      planned <- as.integer(group_run_row[[ax$planned_col]] %||% NA_integer_)
+      if (is.na(planned) || planned < 1L) {
+        as.integer(length(unique(run_meta[[ax$col]])))
+      } else {
+        planned
+      }
     }, integer(1L))
+
+    # Sort axes by descending planned size so labels are consistent
+    # (larger axis first, e.g. "8x4" not "4x8")
+    sort_order <- order(axis_planned_sizes, decreasing = TRUE)
+    axis_info <- axis_info[sort_order]
+    axis_planned_sizes <- axis_planned_sizes[sort_order]
 
     # Two resolution levels: full and half (proportional per axis)
     resolutions <- list(
-      half = as.integer(pmax(1L, ceiling(axis_full_sizes / 2))),
-      full = axis_full_sizes
+      half = as.integer(pmax(1L, ceiling(axis_planned_sizes / 2))),
+      full = axis_planned_sizes
     )
 
     for (res_name in names(resolutions)) {
       res_sizes <- resolutions[[res_name]]
       sub_meta <- run_meta
-      dim_labels <- character(length(axis_info))
       for (ai in seq_along(axis_info)) {
         col <- axis_info[[ai]]$col
         if (!col %in% names(sub_meta)) next
@@ -2280,9 +2298,9 @@ compute_scaling_confusion_bins_for_group <- function(pip_list,
         n_keep <- min(res_sizes[ai], length(vals))
         keep_vals <- vals[unique(round(seq(1, length(vals), length.out = n_keep)))]
         sub_meta <- dplyr::filter(sub_meta, .data[[col]] %in% keep_vals)
-        dim_labels[ai] <- as.character(n_keep)
       }
-      resolution_label <- paste(dim_labels, collapse = "x")
+      # Label uses planned sizes so all datasets get identical labels
+      resolution_label <- paste(res_sizes, collapse = "x")
 
       sel_idx <- match(sub_meta$run_id, run_meta$run_id)
       sel_idx <- sel_idx[!is.na(sel_idx)]
