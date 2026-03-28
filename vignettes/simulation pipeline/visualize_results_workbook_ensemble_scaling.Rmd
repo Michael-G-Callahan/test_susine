@@ -1234,14 +1234,45 @@ if (file.exists(scaling_bins_path)) {
     scaling_bins_pooled <- dplyr::bind_rows(scaling_bins_pooled, overall_pooled)
   }
 
-  # Compute per-rep AUPRC and TPR@0.05 from pooled bins.
-  scaling_metrics_by_rep <- scaling_bins_pooled %>%
-    dplyr::group_by(spec_name, annotation_r2, n_ensemble, resolution, agg_method, rep) %>%
-    dplyr::summarise(
-      AUPRC = auprc_from_bins(dplyr::pick(dplyr::everything())),
-      tpr05 = tpr05_from_bins(dplyr::pick(dplyr::everything())),
-      .groups = "drop"
-    )
+  # Compute per-rep AUPRC and TPR@0.05 from bins pooled across datasets.
+  # Pure-lever specs: group by n_ensemble (the subsample size).
+  # Interaction specs: group by resolution (the grid label); n_ensemble may
+  #   vary across datasets due to BFS early stopping, so we pool bins at the
+  #   resolution level and let the pooled counts weight datasets naturally.
+
+  scaling_pure <- scaling_bins_pooled %>% dplyr::filter(is.na(.data$resolution))
+  scaling_inter <- scaling_bins_pooled %>% dplyr::filter(!is.na(.data$resolution))
+
+  metrics_pure <- if (nrow(scaling_pure) > 0L) {
+    scaling_pure %>%
+      dplyr::group_by(spec_name, annotation_r2, n_ensemble, agg_method, rep) %>%
+      dplyr::summarise(
+        AUPRC = auprc_from_bins(dplyr::pick(dplyr::everything())),
+        tpr05 = tpr05_from_bins(dplyr::pick(dplyr::everything())),
+        .groups = "drop"
+      ) %>%
+      dplyr::mutate(resolution = NA_character_)
+  } else { tibble::tibble() }
+
+  metrics_inter <- if (nrow(scaling_inter) > 0L) {
+    scaling_inter %>%
+      dplyr::group_by(spec_name, annotation_r2, resolution, agg_method, rep,
+                       pip_threshold) %>%
+      dplyr::summarise(
+        n_causal_at_bucket    = sum(.data$n_causal_at_bucket,    na.rm = TRUE),
+        n_noncausal_at_bucket = sum(.data$n_noncausal_at_bucket, na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      dplyr::group_by(spec_name, annotation_r2, resolution, agg_method, rep) %>%
+      dplyr::summarise(
+        AUPRC = auprc_from_bins(dplyr::pick(dplyr::everything())),
+        tpr05 = tpr05_from_bins(dplyr::pick(dplyr::everything())),
+        .groups = "drop"
+      ) %>%
+      dplyr::mutate(n_ensemble = NA_integer_)
+  } else { tibble::tibble() }
+
+  scaling_metrics_by_rep <- dplyr::bind_rows(metrics_pure, metrics_inter)
 
   # Summarise over reps: mean +/- SE.  SE is NA when only 1 rep (deterministic specs).
   scaling_summary <- scaling_metrics_by_rep %>%
@@ -1404,7 +1435,7 @@ if (!is.null(interaction_scaling) && nrow(interaction_scaling) > 0L) {
     ) +
       ggplot2::geom_line() +
       ggplot2::geom_point(size = 2.5) +
-      ggplot2::facet_wrap(~ spec_name, nrow = 1) +
+      ggplot2::facet_wrap(~ spec_name, nrow = 2) +
       ggplot2::labs(
         x     = "Grid resolution",
         y     = y_label,
@@ -1412,7 +1443,8 @@ if (!is.null(interaction_scaling) && nrow(interaction_scaling) > 0L) {
         title = title
       ) +
       ggplot2::theme_bw() +
-      ggplot2::theme(legend.position = "bottom")
+      ggplot2::theme(legend.position = "bottom",
+                     axis.text.x = element_text(angle = 45, hjust = 1))
   }
 
   p4c_overall <- make_interaction_plot(
