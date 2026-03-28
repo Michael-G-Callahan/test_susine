@@ -31,7 +31,7 @@ library(knitr)
 # 1. Locate Output
 
 ```{r locate}
-job_name      <- "ensemble_scaling_testing"
+job_name      <- "ensemble_scaling_full"
 parent_job_id <- "50308010"
 output_root   <- here("output")
 

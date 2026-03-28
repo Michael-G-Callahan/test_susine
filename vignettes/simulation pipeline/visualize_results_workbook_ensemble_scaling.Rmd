@@ -35,7 +35,7 @@ theme_set(theme_bw(base_size = 12))
 
 ```{r load}
 # Point to job-level consolidated output from collect workbook
-job_name      <- "ensemble_scaling_testing"
+job_name      <- "ensemble_scaling_full"
 parent_job_id <- "50308010"
 output_root   <- here("output")
 
