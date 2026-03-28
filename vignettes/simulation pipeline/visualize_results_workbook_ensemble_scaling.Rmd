@@ -36,7 +36,7 @@ theme_set(theme_bw(base_size = 12))
 ```{r load}
 # Point to job-level consolidated output from collect workbook
 job_name      <- "ensemble_scaling_testing"
-parent_job_id <- "50293659"
+parent_job_id <- "50308010"
 output_root   <- here("output")
 
 job_dir          <- file.path(output_root, "slurm_output", job_name, parent_job_id)
@@ -848,6 +848,69 @@ make_tpr05_barplot(r2_filter = NULL)  # overall (all r2 pooled)
 make_tpr05_barplot(r2_filter = 0)     # annotation r2 = 0 (null annotations)
 make_tpr05_barplot(r2_filter = 0.2)   # annotation r2 = 0.2
 make_tpr05_barplot(r2_filter = 0.5)   # annotation r2 = 0.5
+```
+
+## 2e. C-CS Grid Landscape (AUPRC by c × σ₀², faceted by annotation R²)
+
+Individual-fit AUPRC pooled across datasets for each (c, σ₀²) cell in
+the C-CS grid. Validates that annotation quality shifts the optimal c.
+
+```{r fig-2e, fig.width=14, fig.height=5}
+{
+  cs_bins <- confusion_bins %>%
+    dplyr::filter(.data$spec_name == "C-CS",
+                  is.na(.data$agg_method),
+                  !is.na(.data$c_value),
+                  !is.na(.data$sigma_0_2_scalar))
+
+  if (nrow(cs_bins) > 0L) {
+    # Pool confusion bins across datasets per (c_value, sigma_0_2_scalar, annotation_r2)
+    cs_pooled <- cs_bins %>%
+      dplyr::group_by(.data$c_value, .data$sigma_0_2_scalar,
+                       .data$annotation_r2, .data$pip_threshold) %>%
+      dplyr::summarise(
+        n_causal_at_bucket    = sum(.data$n_causal_at_bucket,    na.rm = TRUE),
+        n_noncausal_at_bucket = sum(.data$n_noncausal_at_bucket, na.rm = TRUE),
+        .groups = "drop"
+      )
+
+    # Compute AUPRC per (c, sigma, r2) cell
+    cs_auprc <- cs_pooled %>%
+      dplyr::group_by(.data$c_value, .data$sigma_0_2_scalar, .data$annotation_r2) %>%
+      dplyr::summarise(
+        AUPRC = auprc_from_bins(dplyr::pick(dplyr::everything())),
+        .groups = "drop"
+      ) %>%
+      dplyr::mutate(
+        sigma_label = factor(
+          .data$sigma_0_2_scalar,
+          levels = sort(unique(.data$sigma_0_2_scalar))
+        ),
+        r2_label = paste0("annotation R\u00b2 = ", .data$annotation_r2)
+      )
+
+    p_cs <- ggplot(cs_auprc,
+                   aes(x = c_value, y = AUPRC,
+                       color = sigma_label, group = sigma_label)) +
+      geom_line(linewidth = 0.7) +
+      geom_point(size = 1.8) +
+      geom_hline(yintercept = baseline_auprc, linetype = "dashed",
+                 color = "red", linewidth = 0.6) +
+      facet_wrap(~r2_label, nrow = 1) +
+      labs(x = "c (annotation scale)",
+           y = "Pooled AUPRC (individual fits)",
+           color = expression(sigma[0]^2),
+           title = "C-CS grid landscape: AUPRC by c and \u03c3\u00b2\u2080, faceted by annotation R\u00b2") +
+      theme_bw() +
+      theme(legend.position = "bottom")
+    ggsave(file.path(fig_root, "ensemble_performance",
+                     "cs_grid_landscape.png"),
+           p_cs, width = 14, height = 5, dpi = 150)
+    cat("Fig 2e saved.\n")
+  } else {
+    cat("Fig 2e skipped: no C-CS individual-fit confusion bins.\n")
+  }
+}
 ```
 
 # 3. Dataset Difficulty Plots (Category 3)
