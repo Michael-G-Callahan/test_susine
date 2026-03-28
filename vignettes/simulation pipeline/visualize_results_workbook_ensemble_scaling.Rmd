@@ -1218,6 +1218,22 @@ if (file.exists(scaling_bins_path)) {
     max(tpr[idx])
   }
 
+  # For specs with non-NA annotation_r2, create overall rows by pooling bins
+  # across annotation_r2 levels (so the "overall" plot includes all specs).
+  has_r2 <- scaling_bins_pooled %>% dplyr::filter(!is.na(.data$annotation_r2))
+  if (nrow(has_r2) > 0L) {
+    overall_pooled <- has_r2 %>%
+      dplyr::group_by(spec_name, n_ensemble, resolution, agg_method, rep,
+                       pip_threshold) %>%
+      dplyr::summarise(
+        n_causal_at_bucket    = sum(.data$n_causal_at_bucket,    na.rm = TRUE),
+        n_noncausal_at_bucket = sum(.data$n_noncausal_at_bucket, na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      dplyr::mutate(annotation_r2 = NA_real_)
+    scaling_bins_pooled <- dplyr::bind_rows(scaling_bins_pooled, overall_pooled)
+  }
+
   # Compute per-rep AUPRC and TPR@0.05 from pooled bins.
   scaling_metrics_by_rep <- scaling_bins_pooled %>%
     dplyr::group_by(spec_name, annotation_r2, n_ensemble, resolution, agg_method, rep) %>%
