@@ -1787,19 +1787,18 @@ and report the bootstrap mean $\pm$ 1.96 SE.
   # pip_threshold order). AP = (1/P) * sum over positive-containing bins
   # of [ cum_tp_at_bin * n_causal_in_bin / (cum_tp + cum_fp)_at_bin ].
   # This is the bin-level analogue of the per-SNP AP formula.
-  pooled_auprc <- function(bins) {
-    b       <- bins %>% dplyr::arrange(dplyr::desc(.data$pip_threshold))
-    cum_tp  <- cumsum(b$n_causal_at_bucket)
-    cum_fp  <- cumsum(b$n_noncausal_at_bucket)
-    total_p <- sum(b$n_causal_at_bucket)
-    total_n <- sum(b$n_noncausal_at_bucket)
+  pooled_auprc_counts <- function(causal_counts, noncausal_counts) {
+    cum_tp  <- cumsum(causal_counts)
+    cum_fp  <- cumsum(noncausal_counts)
+    total_p <- sum(causal_counts)
+    total_n <- sum(noncausal_counts)
     if (total_p == 0L || total_n == 0L) return(NA_real_)
     # For each bin with causal SNPs, the average precision contribution is:
     # precision_at_bin * (n_causal_in_bin / total_positives)
     # This correctly weights by the number of positives discovered at each
     # threshold, matching the per-SNP AP formula.
     precision <- cum_tp / (cum_tp + cum_fp)
-    delta_recall <- b$n_causal_at_bucket / total_p
+    delta_recall <- causal_counts / total_p
     sum(precision * delta_recall)
   }
 
@@ -1810,43 +1809,74 @@ and report the bootstrap mean $\pm$ 1.96 SE.
   # dataset_ids: character vector of unique dataset IDs to resample from
   # sizes:       integer vector of subsample sizes
   # B:           number of bootstrap replicates per size
-  bootstrap_auprc_stability <- function(bins, dataset_ids, sizes, B = 300L) {
-    # Pre-split bins by dataset for fast lookup
-    bins_split <- split(bins, bins$dataset_bundle_id)
+  bootstrap_auprc_stability <- function(bins, dataset_ids, sizes, B = 300L,
+                                        progress_label = "bootstrap") {
+    cat(sprintf("[%s] preparing dataset x threshold matrices\n", progress_label))
+    bins_compact <- bins %>%
+      dplyr::select(
+        .data$dataset_bundle_id,
+        .data$pip_threshold,
+        .data$n_causal_at_bucket,
+        .data$n_noncausal_at_bucket
+      ) %>%
+      dplyr::group_by(.data$dataset_bundle_id, .data$pip_threshold) %>%
+      dplyr::summarise(
+        n_causal_at_bucket = sum(.data$n_causal_at_bucket, na.rm = TRUE),
+        n_noncausal_at_bucket = sum(.data$n_noncausal_at_bucket, na.rm = TRUE),
+        .groups = "drop"
+      )
+
+    pip_levels <- sort(unique(bins_compact$pip_threshold), decreasing = TRUE)
+    bins_compact <- bins_compact %>%
+      dplyr::mutate(
+        dataset_bundle_id = factor(.data$dataset_bundle_id, levels = dataset_ids),
+        pip_threshold = factor(.data$pip_threshold, levels = pip_levels)
+      )
+
+    causal_mat <- stats::xtabs(
+      n_causal_at_bucket ~ dataset_bundle_id + pip_threshold,
+      data = bins_compact
+    )
+    noncausal_mat <- stats::xtabs(
+      n_noncausal_at_bucket ~ dataset_bundle_id + pip_threshold,
+      data = bins_compact
+    )
+
+    n_dataset_ids <- length(dataset_ids)
+    cat(sprintf("[%s] matrix prep complete: %d datasets x %d thresholds\n",
+                progress_label, nrow(causal_mat), ncol(causal_mat)))
 
     results <- vector("list", length(sizes))
     for (si in seq_along(sizes)) {
       n <- sizes[si]
-      auprcs <- numeric(B)
-      for (b in seq_len(B)) {
-        sampled_ids <- sample(dataset_ids, size = n, replace = TRUE)
-        # Frequency table: how many times each dataset was drawn
-        freq <- table(sampled_ids)
-        # Collect and weight bins
-        weighted_bins <- lapply(names(freq), function(did) {
-          d <- bins_split[[did]]
-          if (is.null(d)) return(NULL)
-          w <- as.integer(freq[[did]])
-          d %>% dplyr::mutate(
-            n_causal_at_bucket    = .data$n_causal_at_bucket * w,
-            n_noncausal_at_bucket = .data$n_noncausal_at_bucket * w
+      cat(sprintf("[%s] size %d/%d (n=%d, B=%d)\n",
+                  progress_label, si, length(sizes), n, B))
+
+      weight_mat <- replicate(
+        B,
+        tabulate(sample.int(n_dataset_ids, size = n, replace = TRUE),
+                 nbins = n_dataset_ids)
+      )
+      pooled_causal <- crossprod(causal_mat, weight_mat)
+      pooled_noncausal <- crossprod(noncausal_mat, weight_mat)
+      auprcs <- vapply(
+        seq_len(B),
+        function(b) {
+          pooled_auprc_counts(
+            causal_counts = pooled_causal[, b],
+            noncausal_counts = pooled_noncausal[, b]
           )
-        })
-        pooled_bins <- dplyr::bind_rows(weighted_bins) %>%
-          dplyr::group_by(.data$pip_threshold) %>%
-          dplyr::summarise(
-            n_causal_at_bucket    = sum(.data$n_causal_at_bucket),
-            n_noncausal_at_bucket = sum(.data$n_noncausal_at_bucket),
-            .groups = "drop"
-          )
-        auprcs[b] <- pooled_auprc(pooled_bins)
-      }
+        },
+        numeric(1)
+      )
+
       results[[si]] <- tibble::tibble(
         n_datasets = n,
         auprc_mean = mean(auprcs, na.rm = TRUE),
         auprc_se   = sd(auprcs, na.rm = TRUE)
       )
     }
+    cat(sprintf("[%s] complete\n", progress_label))
     dplyr::bind_rows(results)
   }
 
@@ -1873,12 +1903,14 @@ and report the bootstrap mean $\pm$ 1.96 SE.
     set.seed(42)
     cat("Running bootstrap: sizes =", paste(sizes, collapse = ", "),
         ", B =", B, "\n")
+    cat("[baseline bootstrap] starting\n")
 
     boot_baseline <- bootstrap_auprc_stability(
       bins        = baseline_bins,
       dataset_ids = baseline_datasets,
       sizes       = sizes,
-      B           = B
+      B           = B,
+      progress_label = "baseline bootstrap"
     ) %>%
       dplyr::mutate(
         ci_lo = .data$auprc_mean - 1.96 * .data$auprc_se,
@@ -1940,17 +1972,26 @@ and report the bootstrap mean $\pm$ 1.96 SE.
       for (ri in seq_len(nrow(top_combos))) {
         sn <- top_combos$spec_name[ri]
         am <- top_combos$agg_method[ri]
+        combo_label <- sprintf("ensemble bootstrap %d/%d: %s (%s)",
+                               ri, nrow(top_combos), sn, am)
         combo_bins <- confusion_bins %>%
           dplyr::filter(.data$spec_name == sn,
                         .data$agg_method == am)
         combo_datasets <- sort(unique(combo_bins$dataset_bundle_id))
-        if (length(combo_datasets) < 20L) next
+        if (length(combo_datasets) < 20L) {
+          cat(sprintf("[%s] skipped: only %d datasets available\n",
+                      combo_label, length(combo_datasets)))
+          next
+        }
+
+        cat(sprintf("[%s] starting\n", combo_label))
 
         boot_ensemble_list[[ri]] <- bootstrap_auprc_stability(
           bins        = combo_bins,
           dataset_ids = combo_datasets,
           sizes       = sizes[sizes <= length(combo_datasets)],
-          B           = B
+          B           = B,
+          progress_label = combo_label
         ) %>%
           dplyr::mutate(
             ci_lo = .data$auprc_mean - 1.96 * .data$auprc_se,
