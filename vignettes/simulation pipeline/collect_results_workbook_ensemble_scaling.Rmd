@@ -71,11 +71,18 @@ merge_flush_csv <- function(task_dirs,
   progress_every <- max(1L, as.integer(progress_every))
 
   for (i in seq_along(files)) {
-    read_args <- list(file = files[[i]], show_col_types = FALSE)
     if (!is.null(col_select)) {
-      read_args$col_select <- dplyr::any_of(col_select)
+      out[[i]] <- readr::read_csv(
+        files[[i]],
+        show_col_types = FALSE,
+        col_select = dplyr::any_of(col_select)
+      )
+    } else {
+      out[[i]] <- readr::read_csv(
+        files[[i]],
+        show_col_types = FALSE
+      )
     }
-    out[[i]] <- do.call(readr::read_csv, read_args)
     if (i == 1L || i == length(files) || (i %% progress_every) == 0L) {
       cat(sprintf("  -> %s %d/%d\n", label, i, length(files)))
     }
