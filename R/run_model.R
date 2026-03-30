@@ -2250,6 +2250,17 @@ compute_scaling_confusion_bins_for_group <- function(pip_list,
 
   results <- list()
 
+  select_axis_subset <- function(vals, n_keep, axis_col) {
+    vals <- sort(unique(vals))
+    if (!length(vals)) return(vals)
+    n_keep <- min(as.integer(n_keep), length(vals))
+    if (n_keep >= length(vals)) return(vals)
+    if (axis_col %in% c("restart_id", "refine_step")) {
+      return(vals[seq_len(n_keep)])
+    }
+    vals[unique(round(seq(1, length(vals), length.out = n_keep)))]
+  }
+
   if (is_interaction) {
     # Skip 3+ axis specs — only 2-axis interactions are analyzed for subscaling.
     if (length(method_ids) > 2L) return(dplyr::bind_rows(results))
@@ -2291,13 +2302,13 @@ compute_scaling_confusion_bins_for_group <- function(pip_list,
     for (res_name in names(resolutions)) {
       res_sizes <- resolutions[[res_name]]
       sub_meta <- run_meta
-      for (ai in seq_along(axis_info)) {
-        col <- axis_info[[ai]]$col
-        if (!col %in% names(sub_meta)) next
-        vals <- sort(unique(sub_meta[[col]]))
-        n_keep <- min(res_sizes[ai], length(vals))
-        keep_vals <- vals[unique(round(seq(1, length(vals), length.out = n_keep)))]
-        sub_meta <- dplyr::filter(sub_meta, .data[[col]] %in% keep_vals)
+      if (!identical(res_name, "full")) {
+        for (ai in seq_along(axis_info)) {
+          col <- axis_info[[ai]]$col
+          if (!col %in% names(sub_meta)) next
+          keep_vals <- select_axis_subset(sub_meta[[col]], res_sizes[ai], col)
+          sub_meta <- dplyr::filter(sub_meta, .data[[col]] %in% keep_vals)
+        }
       }
       # Label uses planned sizes so all datasets get identical labels
       resolution_label <- paste(res_sizes, collapse = "x")
@@ -2339,7 +2350,7 @@ compute_scaling_confusion_bins_for_group <- function(pip_list,
                   if ("c_grid"         %in% method_ids) "c_grid"    else NA_character_
     if (is.na(lever_type)) return(NULL)
 
-    n_reps <- if (lever_type == "restart") n_restart_reps else 1L
+    n_reps <- 1L
     valid_sizes <- n_ens_sizes[n_ens_sizes <= N]
 
     for (n_ens in valid_sizes) {
@@ -2711,5 +2722,4 @@ load_sampled_matrix <- function(matrix_row, repo_root) {
   storage.mode(X) <- "numeric"
   X
 }
-
 

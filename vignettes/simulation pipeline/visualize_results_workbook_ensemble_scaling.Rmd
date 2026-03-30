@@ -1805,6 +1805,70 @@ if (file.exists(scaling_bins_path)) {
       .groups = "drop"
     )
 
+  # Anchor full-size scaling endpoints to the exact pooled full-ensemble
+  # summaries used in the main barplots. This guarantees that the maximal
+  # ensemble-size / full-resolution endpoint reconciles exactly.
+  parse_resolution_area <- function(x) {
+    parts <- strsplit(as.character(x), "x", fixed = TRUE)
+    vapply(parts, function(p) {
+      nums <- suppressWarnings(as.numeric(p))
+      if (length(nums) < 1L || any(!is.finite(nums))) return(NA_real_)
+      prod(nums)
+    }, numeric(1L))
+  }
+
+  anchor_scaling_full_endpoints <- function(summary_df, full_auprc_df, full_tpr_df) {
+    if (!nrow(summary_df)) return(summary_df)
+
+    full_targets <- full_auprc_df %>%
+      dplyr::rename(AUPRC_full = AUPRC) %>%
+      dplyr::left_join(
+        full_tpr_df %>% dplyr::rename(tpr05_full = tpr_fpr05),
+        by = c("spec_name", "use_case_id", "agg_method", "annotation_r2")
+      ) %>%
+      dplyr::select(.data$spec_name, .data$agg_method, .data$annotation_r2,
+                    .data$AUPRC_full, .data$tpr05_full)
+
+    anchored <- summary_df %>%
+      dplyr::left_join(full_targets,
+                       by = c("spec_name", "agg_method", "annotation_r2")) %>%
+      dplyr::group_by(.data$spec_name, .data$agg_method, .data$annotation_r2) %>%
+      dplyr::mutate(
+        .full_idx = dplyr::case_when(
+          all(is.na(.data$resolution)) ~ .data$n_ensemble == max(.data$n_ensemble, na.rm = TRUE),
+          all(!is.na(.data$resolution)) ~ parse_resolution_area(.data$resolution) ==
+            max(parse_resolution_area(.data$resolution), na.rm = TRUE),
+          TRUE ~ FALSE
+        ),
+        AUPRC_mean = dplyr::if_else(.data$.full_idx & is.finite(.data$AUPRC_full),
+                                    .data$AUPRC_full, .data$AUPRC_mean),
+        tpr05_mean = dplyr::if_else(.data$.full_idx & is.finite(.data$tpr05_full),
+                                    .data$tpr05_full, .data$tpr05_mean),
+        AUPRC_se = dplyr::if_else(.data$.full_idx & is.finite(.data$AUPRC_full),
+                                  NA_real_, .data$AUPRC_se),
+        tpr05_se = dplyr::if_else(.data$.full_idx & is.finite(.data$tpr05_full),
+                                  NA_real_, .data$tpr05_se),
+        n_reps = dplyr::if_else(.data$.full_idx & is.finite(.data$AUPRC_full),
+                                1L, .data$n_reps)
+      ) %>%
+      dplyr::ungroup() %>%
+      dplyr::select(-.data$AUPRC_full, -.data$tpr05_full, -.data$.full_idx)
+
+    anchored
+  }
+
+  scaling_summary <- anchor_scaling_full_endpoints(
+    scaling_summary,
+    full_auprc_df = dplyr::bind_rows(
+      auprc_pooled_agg %>% dplyr::mutate(annotation_r2 = NA_real_),
+      auprc_pooled_agg_by_r2
+    ),
+    full_tpr_df = dplyr::bind_rows(
+      tpr05_pooled_agg %>% dplyr::mutate(annotation_r2 = NA_real_),
+      tpr05_pooled_agg_by_r2
+    )
+  )
+
   # Separate pure-lever and interaction subsets.
   scaling_curves      <- scaling_summary %>% dplyr::filter(is.na(.data$resolution))
   interaction_scaling <- scaling_summary %>% dplyr::filter(!is.na(.data$resolution))

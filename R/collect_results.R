@@ -512,8 +512,10 @@ select_subsample_run_ids <- function(run_meta, n_ens, lever_type, rep_i = 1L) {
   n_sel <- min(n_ens, nrow(run_meta))
   switch(lever_type,
     restart = {
-      set.seed(rep_i * 7919L)
-      dplyr::slice_sample(run_meta, n = n_sel)$run_id
+      run_meta %>%
+        dplyr::arrange(.data$restart_id, .data$run_id) %>%
+        dplyr::slice_head(n = n_sel) %>%
+        dplyr::pull(run_id)
     },
     refine = {
       run_meta %>%
@@ -906,8 +908,10 @@ select_subsample_run_ids <- function(run_meta, n_ens, lever_type, rep_i = 1L) {
   n_sel <- min(as.integer(n_ens), nrow(run_meta))
   switch(lever_type,
     restart = {
-      set.seed(rep_i * 7919L)
-      dplyr::slice_sample(run_meta, n = n_sel)$run_id
+      run_meta %>%
+        dplyr::arrange(.data$restart_id, .data$run_id) %>%
+        dplyr::slice_head(n = n_sel) %>%
+        dplyr::pull(run_id)
     },
     refine = {
       run_meta %>%
