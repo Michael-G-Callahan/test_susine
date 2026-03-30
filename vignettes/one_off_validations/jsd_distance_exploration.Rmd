@@ -1,0 +1,261 @@
+---
+title: "JSD Distance Exploration — Categorical vs Bernoulli"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.width = 10, fig.height = 6)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+devtools::load_all(here::here("..", "susine"))
+devtools::load_all(here::here())
+```
+
+# Purpose
+
+Build intuition for what categorical and Bernoulli JSD values mean for
+pairs of PIP vectors. We construct synthetic PIP vectors with p=600 and
+controlled differences, then compute both JSD types.
+
+- **Categorical JSD** (`js_distance`): treats PIP vector as an unnormalized
+  categorical distribution (adds epsilon, computes KL). Unbounded above.
+- **Bernoulli JSD** (`js_distance_bernoulli`): treats each PIP as an
+  independent Bernoulli parameter. Bounded in [0, ln(2)] ~ [0, 0.693].
+  Averaged across all p variants.
+
+```{r helpers}
+p <- 600L
+
+# Make a PIP vector: set specified indices to `value`, rest to 0
+make_pips <- function(indices, value = 1.0, p = 600L) {
+  v <- rep(0, p)
+  v[indices] <- value
+  v
+}
+
+# Compute both JSD types for a pair and return a 1-row tibble
+compare_pair <- function(pips_a, pips_b, label = "") {
+  tibble::tibble(
+    label = label,
+    n_diff = sum(pips_a != pips_b),
+    cat_jsd = js_distance(pips_a, pips_b),
+    bern_jsd = js_distance_bernoulli(pips_a, pips_b)
+  )
+}
+```
+
+# Group 1: Binary PIPs (0 or 1), 10 active variants
+
+Each PIP vector has 10 variants at PIP=1, rest at 0 (sums to 10).
+We swap 1, 2, 3, ..., 10 variant assignments between vectors.
+
+```{r group1}
+base_idx <- 1:10
+results <- list()
+
+for (n_swap in 0:10) {
+  pips_a <- make_pips(base_idx, value = 1.0)
+  # Swap: move n_swap indices from base_idx to new positions
+  new_idx <- base_idx
+  if (n_swap > 0) {
+    new_idx[1:n_swap] <- (10 + 1):(10 + n_swap)
+  }
+  pips_b <- make_pips(new_idx, value = 1.0)
+  results[[length(results) + 1]] <- compare_pair(
+    pips_a, pips_b,
+    label = sprintf("binary_10active_%dswap", n_swap)
+  )
+}
+
+group1 <- bind_rows(results)
+group1$group <- "Binary (PIP=1, 10 active)"
+print(group1)
+```
+
+# Group 2: Half-weight PIPs (0 or 0.5), 20 active variants
+
+Each vector has 20 variants at PIP=0.5 (sums to 10).
+Swap 1, 2, 4, 6, 10, 20 variant assignments.
+
+```{r group2}
+base_idx <- 1:20
+results <- list()
+
+for (n_swap in c(0, 1, 2, 4, 6, 10, 20)) {
+  pips_a <- make_pips(base_idx, value = 0.5)
+  new_idx <- base_idx
+  if (n_swap > 0) {
+    new_idx[1:n_swap] <- (20 + 1):(20 + n_swap)
+  }
+  pips_b <- make_pips(new_idx, value = 0.5)
+  results[[length(results) + 1]] <- compare_pair(
+    pips_a, pips_b,
+    label = sprintf("half_20active_%dswap", n_swap)
+  )
+}
+
+group2 <- bind_rows(results)
+group2$group <- "Half-weight (PIP=0.5, 20 active)"
+print(group2)
+```
+
+# Group 3: Diffuse PIPs (0 or 0.1), 100 active variants
+
+Each vector has 100 variants at PIP=0.1 (sums to 10).
+Swap 2, 5, 10, 20, 50, 100 variant assignments.
+
+```{r group3}
+base_idx <- 1:100
+results <- list()
+
+for (n_swap in c(0, 2, 5, 10, 20, 50, 100)) {
+  pips_a <- make_pips(base_idx, value = 0.1)
+  new_idx <- base_idx
+  if (n_swap > 0) {
+    new_idx[1:n_swap] <- (100 + 1):(100 + n_swap)
+  }
+  pips_b <- make_pips(new_idx, value = 0.1)
+  results[[length(results) + 1]] <- compare_pair(
+    pips_a, pips_b,
+    label = sprintf("diffuse_100active_%dswap", n_swap)
+  )
+}
+
+group3 <- bind_rows(results)
+group3$group <- "Diffuse (PIP=0.1, 100 active)"
+print(group3)
+```
+
+# Group 4: Realistic SuSiE-like PIPs
+
+Two CS-like structures: a few high-PIP variants with LD-spread tails.
+
+```{r group4}
+results <- list()
+
+# Baseline: 3 "credible sets" each with 1 lead + 2 proxies
+# CS1: variants 1 (PIP=0.8), 2-3 (PIP=0.05 each)
+# CS2: variants 10 (PIP=0.7), 11-12 (PIP=0.10 each)
+# CS3: variants 20 (PIP=0.9), 21 (PIP=0.05)
+# Total PIP mass ~ 0.8+0.1+0.7+0.2+0.9+0.05 = 2.75
+make_realistic_a <- function() {
+  v <- rep(0, p)
+  v[1] <- 0.8; v[2] <- 0.05; v[3] <- 0.05
+  v[10] <- 0.7; v[11] <- 0.10; v[12] <- 0.10
+  v[20] <- 0.9; v[21] <- 0.05
+  # Add low background noise
+  v[50:55] <- 0.02
+  v
+}
+
+# Variant B1: CS1 lead swaps to a different variant (single CS swap)
+make_realistic_b1 <- function() {
+  v <- make_realistic_a()
+  v[1] <- 0.05  # demote original lead
+  v[4] <- 0.8   # new lead in same CS region
+  v
+}
+
+# Variant B2: CS1 and CS2 both swap leads (two CS swaps)
+make_realistic_b2 <- function() {
+  v <- make_realistic_a()
+  v[1] <- 0.05; v[4] <- 0.8    # CS1 swap
+  v[10] <- 0.10; v[13] <- 0.7  # CS2 swap
+  v
+}
+
+# Variant B3: completely different CS allocation (3 CS swaps)
+make_realistic_b3 <- function() {
+  v <- rep(0, p)
+  v[4] <- 0.8; v[5] <- 0.05; v[6] <- 0.05
+  v[13] <- 0.7; v[14] <- 0.10; v[15] <- 0.10
+  v[25] <- 0.9; v[26] <- 0.05
+  v[50:55] <- 0.02
+  v
+}
+
+pips_a <- make_realistic_a()
+results[[1]] <- compare_pair(pips_a, pips_a, "realistic_identical")
+results[[2]] <- compare_pair(pips_a, make_realistic_b1(), "realistic_1cs_swap")
+results[[3]] <- compare_pair(pips_a, make_realistic_b2(), "realistic_2cs_swap")
+results[[4]] <- compare_pair(pips_a, make_realistic_b3(), "realistic_3cs_swap")
+
+group4 <- bind_rows(results)
+group4$group <- "Realistic (CS-like, mixed PIPs)"
+print(group4)
+```
+
+# Summary table
+
+```{r summary}
+all_results <- bind_rows(group1, group2, group3, group4)
+cat("All pairs:\n")
+print(as.data.frame(all_results), digits = 6)
+```
+
+# Summary plot: Categorical vs Bernoulli JSD
+
+```{r summary-plot, fig.width=10, fig.height=7}
+p_summary <- ggplot(all_results, aes(x = bern_jsd, y = cat_jsd, color = group)) +
+  geom_point(size = 3) +
+  geom_text(aes(label = n_diff), hjust = -0.3, vjust = -0.3, size = 2.5) +
+  scale_x_continuous("Bernoulli JSD (bounded [0, ln(2)])") +
+  scale_y_continuous("Categorical JSD (unbounded)") +
+  labs(
+    title = "Categorical vs Bernoulli JSD across synthetic PIP pairs",
+    subtitle = "Labels = number of differing variants. p = 600.",
+    color = "Group"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+print(p_summary)
+```
+
+# Per-group scaling plots
+
+```{r group-plots, fig.width=12, fig.height=5}
+plot_data <- all_results %>%
+  pivot_longer(cols = c(cat_jsd, bern_jsd),
+               names_to = "jsd_type", values_to = "jsd_value") %>%
+  mutate(jsd_type = ifelse(jsd_type == "cat_jsd", "Categorical", "Bernoulli"))
+
+ggplot(plot_data, aes(x = n_diff, y = jsd_value, color = jsd_type)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 2) +
+  facet_wrap(~group, scales = "free") +
+  labs(
+    x = "Number of differing variants",
+    y = "JSD value",
+    color = "JSD type",
+    title = "JSD scaling with number of PIP differences",
+    subtitle = "Each group uses different PIP magnitudes and sparsity levels"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+# Clustering threshold implications
+
+For each pair, show which Bernoulli JSD threshold bins would merge vs
+separate them.
+
+```{r threshold-table}
+bjsd_cuts <- c(0.001, 0.002, 0.004, 0.006, 0.008, 0.01, 0.02, 0.05)
+cat_cuts <- c(0.15, 0.50, 1.0, 2.0, 3.0, 5.0)
+
+threshold_tbl <- all_results %>%
+  select(label, group, n_diff, cat_jsd, bern_jsd)
+
+for (th in bjsd_cuts) {
+  col <- sprintf("bjsd_h%.3f", th)
+  threshold_tbl[[col]] <- ifelse(all_results$bern_jsd <= th, "merged", "split")
+}
+for (th in cat_cuts) {
+  col <- sprintf("cat_h%.2f", th)
+  threshold_tbl[[col]] <- ifelse(all_results$cat_jsd <= th, "merged", "split")
+}
+
+cat("Threshold classification (merged = same cluster, split = different clusters):\n")
+print(as.data.frame(threshold_tbl), right = FALSE)
+```

@@ -1,0 +1,573 @@
+---
+title: "Investigation: EB vs. Vanilla Prior Variance in SuSiE"
+date: "2026-03-05"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    code_folding: show
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+# Background and Motivation
+
+## The Prior Variance as Effective Temperature
+
+In the SER, the log Bayes factor for SNP $j$ is:
+
+$$
+\log \text{BF}_j = \log \mathcal{N}(\hat\beta_j;\, \mu_{0j},\, \sigma_0^2 + \hat{v}_j) - \log \mathcal{N}(\hat\beta_j;\, 0,\, \hat{v}_j)
+$$
+
+where $\hat\beta_j = X_j^T y / d_j$ and $\hat{v}_j = \sigma^2/d_j$.
+The posterior inclusion probability is $\alpha_j \propto \pi_j \exp(\log
+\text{BF}_j)$.
+
+$\sigma_0^2$ controls the **effective temperature** of this softmax:
+
+-   **Large $\sigma_0^2$**: the prior accommodates extreme effects;
+    high-signal SNPs get sharper alpha concentration
+    (winner-take-all).
+-   **Small $\sigma_0^2$**: the prior penalizes large effects; alpha
+    spreads more evenly across LD-correlated SNPs.
+-   **$\sigma_0^2 = 0$**: log BF = 0 for all SNPs → alpha reverts to
+    prior $\pi$ (automatic sparsity / null effect).
+
+Crucially, $\sigma_0^2$ changes the *contrast* of the BFs without
+changing their *ranking* (approximately, when $\hat{v}_j$ is
+constant). This is why EB for $\sigma_0^2$ is relatively stable.
+
+## What EB Does
+
+The EB update (`estimate_prior_variance = TRUE` in susieR) finds
+$\sigma_0^2$ per effect $\ell$ that maximizes the SER marginal
+log-likelihood. Three regimes:
+
+1.  **Typical EB**: converges to a $\sigma_0^2$ that reflects the
+    signal strength in the partial residuals. Reasonable, data-adaptive.
+2.  **Great EB**: collapses $\sigma_0^2 \to 0$ for null effects
+    (automatic sparsity), inflates for real signals. This is the
+    per-effect shrinkage advantage.
+3.  **Bad EB**: $\sigma_0^2$ estimate is distorted by LD contamination
+    in partial residuals; oscillates between iterations; or collapses
+    a real signal to zero due to numerical instability.
+
+## Prior Belief vs. Observation
+
+**Prior belief**: EB is unstable because it introduces circularity.
+Estimating $\sigma_0^2$ from the data changes alpha, which changes
+residuals, which changes the next $\sigma_0^2$ estimate. Under
+multimodal posteriors (multiple basins), EB can distort ELBO values
+asymmetrically, breaking ensemble aggregation (see `susie_pathology`
+notebook, Scenario 3).
+
+**Observation from pilot_phase_a**: EB (`susie_eb`) outperforms vanilla
+(`susie_vanilla`, fixed $\sigma_0^2 = 0.2 \times \text{var}(y)$).
+This workbook investigates **where** and **why**.
+
+## When is Fixed $\sigma_0^2 = 0.2$ "Right"?
+
+The default scaled prior variance 0.2 assumes each causal SNP explains
+about 20% of the trait variance *per effect*. This is:
+
+-   Too large when p\* is high (many weak effects, each explaining
+    $\ll 20\%$)
+-   Too small when p\* is low and signal is strong (one SNP explaining
+    $> 20\%$)
+-   About right when L=10, p\*=2, h\^2=0.5 → each effect ~5-25% of
+    variance
+
+EB adapts $\sigma_0^2$ per-effect, potentially finding the right
+temperature for each component. This is the fundamental advantage.
+
+```{r setup, message=FALSE, warning=FALSE}
+here::i_am(
+  "vignettes/one_off_validations/eb_vs_vanilla_investigation.Rmd"
+)
+library(here)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(purrr)
+library(readr)
+library(knitr)
+library(stringr)
+
+theme_set(theme_bw(base_size = 12))
+```
+
+# Data Loading
+
+```{r load-data}
+# -------------------------------------------------------------------
+# Point this to your pilot_phase_a aggregated results directory.
+# Expect: model_metrics.csv (or .parquet), dataset_bundles.csv
+# -------------------------------------------------------------------
+results_path <- here(
+  "output", "slurm_output", "pilot_phase_a", "48997267"
+)
+stopifnot(
+  dir.exists(results_path) ||
+    stop("Results directory not found. Update results_path above.")
+)
+```
+
+```{r read-metrics}
+# Try parquet first, fall back to CSV
+read_safe <- function(dir, stem) {
+  pq <- file.path(dir, paste0(stem, ".parquet"))
+  csv <- file.path(dir, paste0(stem, ".csv"))
+  if (file.exists(pq)) {
+    arrow::read_parquet(pq)
+  } else if (file.exists(csv)) {
+    readr::read_csv(csv, show_col_types = FALSE)
+  } else {
+    stop("Cannot find ", stem, " in ", dir)
+  }
+}
+
+model_metrics <- read_safe(results_path, "model_metrics")
+```
+
+```{r peek}
+glimpse(model_metrics)
+```
+
+Depending on the column names in your output, adjust the filtering
+below. The key columns are:
+
+-   `prior_spec_id` or `use_case` (identifies susie_vanilla vs
+    susie_eb)
+-   `p_star`, `y_noise` (simulation regime)
+-   `AUPRC` or `auprc` (primary metric)
+-   Power, CS metrics as available
+
+```{r identify-columns}
+# Auto-detect column naming conventions
+col_names <- names(model_metrics)
+cat("Available columns:\n")
+cat(str_wrap(paste(col_names, collapse = ", "), width = 80), "\n")
+```
+
+# Filter to EB vs. Vanilla
+
+```{r filter}
+# Adjust these filters based on actual column names in your output.
+# This assumes a 'prior_spec_id' or 'use_case_id' column.
+use_case_col <- intersect(
+  c("prior_spec_id", "use_case_id", "use_case", "use_case_label"),
+  col_names
+)[1]
+
+if (is.na(use_case_col)) {
+  stop("Cannot find use case column. Available: ", paste(col_names, collapse = ", "))
+}
+
+cat("Using use case column:", use_case_col, "\n")
+cat("Unique values:\n")
+print(sort(unique(model_metrics[[use_case_col]])))
+```
+
+```{r filter-eb-vanilla}
+# Filter to the two use cases of interest
+# Adjust the string matching as needed based on your catalog
+eb_label <- grep("eb", unique(model_metrics[[use_case_col]]),
+                 value = TRUE, ignore.case = TRUE)
+vanilla_label <- grep("vanilla", unique(model_metrics[[use_case_col]]),
+                      value = TRUE, ignore.case = TRUE)
+
+# Keep only susie-backend (not susine) variants
+eb_label <- grep("susie", eb_label, value = TRUE, ignore.case = TRUE)
+vanilla_label <- grep("susie", vanilla_label, value = TRUE, ignore.case = TRUE)
+
+# Exclude susine variants (had a bug)
+eb_label <- setdiff(eb_label, grep("susine", eb_label, value = TRUE,
+                                    ignore.case = TRUE))
+vanilla_label <- setdiff(vanilla_label, grep("susine", vanilla_label,
+                                              value = TRUE,
+                                              ignore.case = TRUE))
+
+cat("EB labels:", paste(eb_label, collapse = ", "), "\n")
+cat("Vanilla labels:", paste(vanilla_label, collapse = ", "), "\n")
+
+df <- model_metrics %>%
+  filter(.data[[use_case_col]] %in% c(eb_label, vanilla_label)) %>%
+  mutate(
+    method = case_when(
+      .data[[use_case_col]] %in% eb_label ~ "EB",
+      .data[[use_case_col]] %in% vanilla_label ~ "Vanilla",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(method))
+
+cat("Rows after filtering:", nrow(df), "\n")
+cat("By method:\n")
+print(count(df, method))
+```
+
+# Paired Comparison Construction
+
+We need to pair each EB run with its vanilla counterpart on the same
+dataset. The pairing key should include everything that defines a
+dataset + exploration setting *except* the use case.
+
+```{r pair-key}
+# Identify the pairing columns -- adjust as needed
+# Typical: dataset_bundle_id (or dataset_id) + exploration columns
+pair_candidates <- intersect(
+  c("dataset_bundle_id", "dataset_id", "matrix_id", "seed",
+    "p_star", "y_noise", "exploration_method", "exploration_id",
+    "annotation_r2", "inflate_match"),
+  col_names
+)
+cat("Pairing on:", paste(pair_candidates, collapse = ", "), "\n")
+```
+
+```{r build-paired}
+# Identify the metric columns
+metric_cols <- intersect(
+  c("AUPRC", "auprc", "power", "fdr", "FDR",
+    "mean_purity", "mean_size", "mean_coverage", "cs_power",
+    "n_cs", "cross_entropy"),
+  col_names
+)
+cat("Metric columns:", paste(metric_cols, collapse = ", "), "\n")
+
+paired <- df %>%
+  select(all_of(c(pair_candidates, "method", metric_cols))) %>%
+  pivot_wider(
+    id_cols = all_of(pair_candidates),
+    names_from = method,
+    values_from = all_of(metric_cols),
+    names_glue = "{metric_cols}_{method}"
+  )
+
+# Compute deltas (EB - Vanilla) for each metric
+for (m in metric_cols) {
+  eb_col <- paste0(m, "_EB")
+  van_col <- paste0(m, "_Vanilla")
+  delta_col <- paste0("delta_", m)
+  if (eb_col %in% names(paired) && van_col %in% names(paired)) {
+    paired[[delta_col]] <- paired[[eb_col]] - paired[[van_col]]
+  }
+}
+
+cat("Paired dataset rows:", nrow(paired), "\n")
+```
+
+# Where Does EB Win?
+
+## Overall Summary
+
+```{r overall-summary}
+# Identify delta columns
+delta_cols <- grep("^delta_", names(paired), value = TRUE)
+
+summary_tbl <- paired %>%
+  summarize(
+    across(
+      all_of(delta_cols),
+      list(
+        mean = ~mean(.x, na.rm = TRUE),
+        median = ~median(.x, na.rm = TRUE),
+        pct_positive = ~mean(.x > 0, na.rm = TRUE)
+      ),
+      .names = "{.col}__{.fn}"
+    )
+  ) %>%
+  pivot_longer(everything(), names_to = "stat", values_to = "value") %>%
+  separate(stat, into = c("metric", "fn"), sep = "__") %>%
+  pivot_wider(names_from = fn, values_from = value)
+
+kable(summary_tbl, digits = 4, caption = "EB - Vanilla: overall summary")
+```
+
+## AUPRC by Regime
+
+```{r auprc-by-regime, fig.width=10, fig.height=6}
+# Find the AUPRC column name
+auprc_col <- intersect(c("AUPRC", "auprc"), col_names)[1]
+delta_auprc <- paste0("delta_", auprc_col)
+
+if (!is.null(auprc_col) && delta_auprc %in% names(paired)) {
+
+  if ("p_star" %in% names(paired) && "y_noise" %in% names(paired)) {
+    p1 <- paired %>%
+      ggplot(aes(x = factor(p_star), y = .data[[delta_auprc]])) +
+      geom_boxplot(outlier.alpha = 0.3) +
+      geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+      facet_wrap(~y_noise, labeller = label_both) +
+      labs(
+        title = "EB advantage (delta AUPRC) by p* and noise level",
+        x = "p* (causal count)",
+        y = "AUPRC(EB) - AUPRC(Vanilla)"
+      )
+    print(p1)
+  }
+}
+```
+
+## Heatmap: Mean Delta AUPRC
+
+```{r heatmap-delta, fig.width=8, fig.height=5}
+if (!is.null(auprc_col) && delta_auprc %in% names(paired) &&
+    "p_star" %in% names(paired) && "y_noise" %in% names(paired)) {
+
+  heat_df <- paired %>%
+    group_by(p_star, y_noise) %>%
+    summarize(
+      mean_delta = mean(.data[[delta_auprc]], na.rm = TRUE),
+      n = n(),
+      .groups = "drop"
+    )
+
+  p2 <- heat_df %>%
+    ggplot(aes(
+      x = factor(p_star), y = factor(y_noise), fill = mean_delta
+    )) +
+    geom_tile(color = "white", linewidth = 0.5) +
+    geom_text(aes(label = sprintf("%.3f\n(n=%d)", mean_delta, n)),
+              size = 3) +
+    scale_fill_gradient2(
+      midpoint = 0, low = "steelblue", high = "firebrick",
+      name = "Mean delta\nAUPRC"
+    ) +
+    labs(
+      title = "Mean EB advantage over Vanilla",
+      x = "p* (causal count)", y = "y_noise"
+    )
+  print(p2)
+}
+```
+
+## CS Metrics Comparison
+
+```{r cs-metrics, fig.width=10, fig.height=8}
+cs_deltas <- intersect(
+  c("delta_mean_purity", "delta_mean_size",
+    "delta_mean_coverage", "delta_cs_power"),
+  names(paired)
+)
+
+if (length(cs_deltas) > 0 && "p_star" %in% names(paired)) {
+  paired %>%
+    select(all_of(c("p_star", "y_noise", cs_deltas))) %>%
+    pivot_longer(
+      cols = all_of(cs_deltas),
+      names_to = "metric", values_to = "delta"
+    ) %>%
+    mutate(metric = str_remove(metric, "^delta_")) %>%
+    ggplot(aes(x = factor(p_star), y = delta)) +
+    geom_boxplot(outlier.alpha = 0.3) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+    facet_grid(metric ~ y_noise, scales = "free_y",
+               labeller = label_both) +
+    labs(
+      title = "CS metric deltas (EB - Vanilla)",
+      x = "p*", y = "Delta"
+    ) +
+    theme(strip.text.y = element_text(angle = 0))
+}
+```
+
+# Where Does EB Lose?
+
+```{r eb-loses}
+if (!is.null(auprc_col) && delta_auprc %in% names(paired)) {
+
+  losers <- paired %>%
+    filter(.data[[delta_auprc]] < -0.01)
+
+  cat("Datasets where EB loses by > 0.01 AUPRC:", nrow(losers),
+      "out of", nrow(paired), "\n")
+
+  if (nrow(losers) > 0 && "p_star" %in% names(losers)) {
+    cat("\nLosing regime breakdown:\n")
+    losers %>%
+      count(p_star, y_noise) %>%
+      arrange(desc(n)) %>%
+      kable(caption = "Regimes where EB underperforms Vanilla")
+  }
+}
+```
+
+# Scatter Diagnostics
+
+## AUPRC: EB vs. Vanilla
+
+```{r scatter-auprc, fig.width=7, fig.height=7}
+eb_auprc <- paste0(auprc_col, "_EB")
+van_auprc <- paste0(auprc_col, "_Vanilla")
+
+if (eb_auprc %in% names(paired) && van_auprc %in% names(paired)) {
+
+  p3 <- paired %>%
+    ggplot(aes(
+      x = .data[[van_auprc]],
+      y = .data[[eb_auprc]],
+      color = factor(p_star)
+    )) +
+    geom_point(alpha = 0.5, size = 1.5) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+    coord_equal() +
+    labs(
+      title = "AUPRC: EB vs. Vanilla",
+      x = "Vanilla AUPRC", y = "EB AUPRC",
+      color = "p*"
+    )
+  print(p3)
+}
+```
+
+## Delta AUPRC vs. Dataset Difficulty (M1)
+
+If dataset-level M1 metrics are available, join and plot.
+
+```{r delta-vs-m1, fig.width=8, fig.height=5}
+# Try to load dataset metrics for M1
+dataset_metrics_file <- file.path(results_path, "dataset_metrics.csv")
+x_metrics_file <- file.path(results_path, "x_metrics.csv")
+
+m1_available <- FALSE
+
+if (file.exists(dataset_metrics_file)) {
+  dataset_metrics <- read_csv(dataset_metrics_file, show_col_types = FALSE)
+  m1_col <- intersect(c("M1", "m1", "ld_complexity"), names(dataset_metrics))
+  if (length(m1_col) > 0) m1_available <- TRUE
+} else if (file.exists(x_metrics_file)) {
+  dataset_metrics <- read_csv(x_metrics_file, show_col_types = FALSE)
+  m1_col <- intersect(c("M1", "m1", "ld_complexity"), names(dataset_metrics))
+  if (length(m1_col) > 0) m1_available <- TRUE
+}
+
+if (m1_available) {
+  # Join on matrix_id or dataset_bundle_id
+  join_col <- intersect(
+    c("matrix_id", "dataset_bundle_id"),
+    intersect(names(paired), names(dataset_metrics))
+  )[1]
+
+  if (!is.na(join_col)) {
+    paired_m1 <- paired %>%
+      left_join(
+        dataset_metrics %>% select(all_of(c(join_col, m1_col[1]))),
+        by = join_col
+      )
+
+    p4 <- paired_m1 %>%
+      ggplot(aes(
+        x = .data[[m1_col[1]]],
+        y = .data[[delta_auprc]],
+        color = factor(p_star)
+      )) +
+      geom_point(alpha = 0.5) +
+      geom_smooth(method = "loess", se = TRUE, color = "black",
+                  linewidth = 0.8) +
+      geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+      labs(
+        title = "EB advantage vs. LD complexity (M1)",
+        x = "M1 (LD complexity)", y = "delta AUPRC (EB - Vanilla)",
+        color = "p*"
+      )
+    print(p4)
+  }
+} else {
+  cat("M1 metrics not found. Skipping M1 analysis.\n")
+}
+```
+
+# Theoretical Interpretation
+
+## When Fixed 0.2 is Misspecified
+
+The default `scaled_prior_variance = 0.2` means each causal SNP's
+prior effect size has variance $0.2 \times \text{var}(y)$. This is
+the "right" value when each causal SNP explains about 20% of
+variance.
+
+With L=10 effects and varying p\*:
+
+-   **p\*=1, y_noise=0.5 (h2=0.5)**: 1 causal SNP explaining 50% →
+    true per-SNP variance $\approx 0.5 \times \text{var}(y)$.
+    Fixed 0.2 is **too small** → alpha too diffuse → power loss.
+-   **p\*=20, y_noise=0.95 (h2=0.05)**: 20 causal SNPs sharing 5% →
+    per-SNP variance $\approx 0.0025 \times \text{var}(y)$.
+    Fixed 0.2 is **way too large** → model over-fits noise.
+
+EB adapts: sets large V for strong effects, small V for weak ones.
+The advantage should be largest when the fixed value is most wrong.
+
+## Prediction: EB Advantage Increases with p\*
+
+At high p\*, each effect is weak. Fixed 0.2 over-estimates the per-SNP
+variance, making alpha overly concentrated on noise. EB shrinks V
+toward the true (small) value, providing better calibration.
+
+At low p\*, each effect is strong. Fixed 0.2 under-estimates the
+per-SNP variance, making alpha insufficiently concentrated. EB inflates
+V to match the strong signal.
+
+**Net prediction:** EB advantage should be positive across the board,
+but largest at the extremes of p\* (where misspecification is worst)
+and smallest near p\*=2-3 (where 0.2 happens to be approximately
+correct for moderate h2).
+
+## When EB Should Fail
+
+EB should struggle when:
+
+1.  **High M1 (strong LD)**: partial residuals for effect $\ell$ are
+    contaminated by LD with effect $\ell'$, inflating V estimates
+2.  **Competing effects**: multiple effects fight for the same
+    signal, causing V to oscillate
+3.  **Multimodal posteriors**: different basins prefer different V
+    values; EB locks into one basin's V
+
+**Check against data:** Does delta_AUPRC decrease or reverse at
+high M1?
+
+```{r interpretation-check}
+if (m1_available && exists("paired_m1")) {
+  # Tercile analysis
+  paired_m1 <- paired_m1 %>%
+    mutate(
+      m1_tercile = ntile(.data[[m1_col[1]]], 3) %>%
+        factor(labels = c("Low M1", "Med M1", "High M1"))
+    )
+
+  paired_m1 %>%
+    group_by(m1_tercile) %>%
+    summarize(
+      mean_delta = mean(.data[[delta_auprc]], na.rm = TRUE),
+      median_delta = median(.data[[delta_auprc]], na.rm = TRUE),
+      pct_eb_wins = mean(.data[[delta_auprc]] > 0, na.rm = TRUE),
+      n = n(),
+      .groups = "drop"
+    ) %>%
+    kable(digits = 4,
+          caption = "EB advantage by M1 tercile")
+}
+```
+
+# Conclusions
+
+**Fill in after running the workbook on actual data.**
+
+Key questions to answer:
+
+1.  Does EB win across the board, or only in specific regimes?
+2.  Is the advantage largest at extreme p\* (where fixed 0.2 is most
+    misspecified)?
+3.  Does EB fail at high M1 (LD contamination)?
+4.  What are the implications for Phase B ensemble design?
+    -   Should sigma_0^2-grid ensembles use EB as baseline, or fixed?
+    -   If EB is reliable, the ensemble's job is only multimodality
+        resolution (random restarts), not hyperparameter search.
+
+```{r session-info}
+sessionInfo()
+```

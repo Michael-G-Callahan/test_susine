@@ -1,0 +1,284 @@
+---
+title: "EB vs Vanilla (mu=0) Diagnostic Workbook"
+output: html_document
+---
+
+```{r setup, message=FALSE, warning=FALSE}
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(tidyr)
+library(forcats)
+```
+
+## Goal
+
+This workbook isolates the `mu=0` comparison:
+
+- EB prior variance (`susie_eb`, `susine_eb`, `susie_ash_eb`)
+- fixed prior variance counterparts (`susie_vanilla`, `susine_vanilla`, `susie_ash_fixed`)
+
+It provides both:
+
+1. cell-level summaries (`p_star x y_noise`),
+2. dataset-level head-to-head comparisons (EB vs fixed 0.2 and EB vs best fixed in grid).
+
+## Inputs
+
+```{r paths}
+job_id <- "48988192"
+run_name <- "pilot_phase_a"
+
+agg_dir <- file.path("test_susine", "output", "slurm_output", run_name, job_id, "aggregated")
+run_hist_dir <- file.path("test_susine", "output", "run_history", run_name, job_id)
+
+conf_path <- file.path(agg_dir, "confusion_matrix_detailed.csv")
+model_path <- file.path(agg_dir, "model_metrics.csv")
+run_table_path <- file.path(run_hist_dir, "run_table.csv")
+use_cases_path <- file.path(run_hist_dir, "use_cases.csv")
+
+stopifnot(file.exists(conf_path), file.exists(model_path), file.exists(run_table_path), file.exists(use_cases_path))
+
+confusion <- read_csv(conf_path, show_col_types = FALSE)
+model_metrics <- read_csv(model_path, show_col_types = FALSE)
+run_table <- read_csv(run_table_path, show_col_types = FALSE)
+use_cases <- read_csv(use_cases_path, show_col_types = FALSE)
+
+cat("confusion rows:", nrow(confusion), "\n")
+cat("model_metrics rows:", nrow(model_metrics), "\n")
+cat("run_table rows:", nrow(run_table), "\n")
+```
+
+## Helpers
+
+```{r helpers}
+compute_power_fdr_curves <- function(confusion_df, group_vars) {
+  confusion_df %>%
+    dplyr::group_by(dplyr::across(dplyr::all_of(group_vars)), pip_threshold) %>%
+    dplyr::summarise(
+      n_causal_at_bucket = sum(n_causal_at_bucket, na.rm = TRUE),
+      n_noncausal_at_bucket = sum(n_noncausal_at_bucket, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    dplyr::group_by(dplyr::across(dplyr::all_of(group_vars))) %>%
+    dplyr::arrange(dplyr::desc(pip_threshold), .by_group = TRUE) %>%
+    dplyr::mutate(
+      TP = cumsum(n_causal_at_bucket),
+      FP = cumsum(n_noncausal_at_bucket),
+      total_causal = sum(n_causal_at_bucket),
+      precision = dplyr::if_else(TP + FP > 0, TP / (TP + FP), NA_real_),
+      recall = dplyr::if_else(total_causal > 0, TP / total_causal, NA_real_)
+    ) %>%
+    dplyr::ungroup() %>%
+    dplyr::filter(!is.na(precision), !is.na(recall))
+}
+
+compute_auprc_single <- function(precision, recall) {
+  df <- data.frame(precision = precision, recall = recall) %>%
+    dplyr::filter(!is.na(precision), !is.na(recall)) %>%
+    dplyr::arrange(recall)
+  if (nrow(df) < 2) return(NA_real_)
+  if (min(df$recall) > 0) {
+    df <- dplyr::bind_rows(data.frame(recall = 0, precision = 1), df)
+  }
+  sum(diff(df$recall) * (head(df$precision, -1) + tail(df$precision, -1)) / 2)
+}
+
+compute_auprc_from_confusion <- function(confusion_df, group_vars) {
+  curves <- compute_power_fdr_curves(confusion_df, group_vars)
+  curves %>%
+    dplyr::group_by(dplyr::across(dplyr::all_of(group_vars))) %>%
+    dplyr::summarise(AUPRC = compute_auprc_single(precision, recall), .groups = "drop")
+}
+```
+
+## Use Case Definitions
+
+```{r use-cases}
+pairs <- tibble::tribble(
+  ~family,  ~eb_id,          ~fixed_id,
+  "susie",  "susie_eb",      "susie_vanilla",
+  "susine", "susine_eb",     "susine_vanilla",
+  "ash",    "susie_ash_eb",  "susie_ash_fixed"
+)
+
+ids <- unique(c(pairs$eb_id, pairs$fixed_id))
+
+labels <- use_cases %>%
+  dplyr::filter(use_case_id %in% ids) %>%
+  dplyr::select(use_case_id, label)
+
+labels
+```
+
+## 1) Cell-Level AUPRC (p_star x y_noise)
+
+```{r cell-level-auprc}
+confusion_base <- confusion %>%
+  dplyr::filter(is.na(agg_method) | agg_method == "none") %>%
+  dplyr::filter(use_case_id %in% ids)
+
+auprc_cell <- compute_auprc_from_confusion(
+  confusion_base,
+  group_vars = c("use_case_id", "p_star", "y_noise")
+) %>%
+  dplyr::left_join(labels, by = "use_case_id")
+
+auprc_cell %>% dplyr::arrange(y_noise, use_case_id, p_star) %>% head(20)
+```
+
+```{r heatmaps, fig.width=12, fig.height=7}
+ggplot(
+  auprc_cell %>% dplyr::mutate(use_case_id = forcats::fct_reorder(use_case_id, AUPRC, .fun = mean)),
+  aes(x = factor(p_star), y = use_case_id, fill = AUPRC)
+) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = sprintf("%.3f", AUPRC)), size = 2.8, color = "white") +
+  facet_wrap(~paste0("y_noise=", y_noise), ncol = 3) +
+  scale_fill_viridis_c(option = "magma", direction = -1) +
+  labs(title = "Cell-Level AUPRC", x = "p_star", y = NULL, fill = "AUPRC") +
+  theme_minimal(base_size = 11)
+```
+
+## 2) Cell-Level EB Deltas
+
+```{r cell-deltas}
+cell_delta <- pairs %>%
+  dplyr::left_join(
+    auprc_cell %>% dplyr::select(use_case_id, p_star, y_noise, AUPRC) %>%
+      dplyr::rename(eb_id = use_case_id, auprc_eb = AUPRC),
+    by = "eb_id"
+  ) %>%
+  dplyr::left_join(
+    auprc_cell %>% dplyr::select(use_case_id, p_star, y_noise, AUPRC) %>%
+      dplyr::rename(fixed_id = use_case_id, auprc_fixed = AUPRC),
+    by = c("fixed_id", "p_star", "y_noise")
+  ) %>%
+  dplyr::mutate(delta = auprc_eb - auprc_fixed)
+
+cell_delta %>%
+  dplyr::group_by(family) %>%
+  dplyr::summarise(
+    mean_delta = mean(delta, na.rm = TRUE),
+    median_delta = median(delta, na.rm = TRUE),
+    pct_positive = mean(delta > 0, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+```{r cell-delta-plot, fig.width=10, fig.height=4}
+ggplot(cell_delta, aes(x = factor(p_star), y = delta, fill = family)) +
+  geom_hline(yintercept = 0, linetype = 2, color = "gray40") +
+  geom_col(position = "dodge") +
+  facet_wrap(~y_noise, ncol = 3) +
+  labs(title = "EB - Fixed AUPRC (cell-level)", x = "p_star", y = "Delta AUPRC") +
+  theme_minimal(base_size = 11)
+```
+
+## 3) Dataset-Level Head-to-Head
+
+```{r dataset-level}
+# one model-level row per run_id (base, unfiltered)
+run_auprc <- model_metrics %>%
+  dplyr::filter(filtering == "unfiltered", is.na(agg_method) | agg_method == "none") %>%
+  dplyr::select(run_id, dataset_bundle_id, use_case_id, AUPRC) %>%
+  dplyr::left_join(
+    run_table %>% dplyr::select(run_id, dataset_bundle_id, use_case_id, p_star, y_noise, sigma_0_2_scalar),
+    by = c("run_id", "dataset_bundle_id", "use_case_id")
+  )
+
+eb_runs <- run_auprc %>%
+  dplyr::filter(use_case_id %in% pairs$eb_id) %>%
+  dplyr::rename(eb_id = use_case_id, auprc_eb = AUPRC)
+
+fixed_runs <- run_auprc %>%
+  dplyr::filter(use_case_id %in% pairs$fixed_id) %>%
+  dplyr::rename(fixed_id = use_case_id)
+
+dataset_cmp_02 <- pairs %>%
+  dplyr::left_join(eb_runs, by = "eb_id") %>%
+  dplyr::left_join(
+    fixed_runs %>%
+      dplyr::filter(sigma_0_2_scalar == 0.2) %>%
+      dplyr::rename(auprc_fixed_02 = AUPRC),
+    by = c("fixed_id", "dataset_bundle_id", "p_star", "y_noise")
+  ) %>%
+  dplyr::mutate(delta_eb_vs_fixed02 = auprc_eb - auprc_fixed_02)
+
+fixed_best <- fixed_runs %>%
+  dplyr::group_by(fixed_id, dataset_bundle_id, p_star, y_noise) %>%
+  dplyr::summarise(
+    best_fixed = max(AUPRC, na.rm = TRUE),
+    best_sigma = sigma_0_2_scalar[which.max(AUPRC)[1]],
+    .groups = "drop"
+  )
+
+dataset_cmp_best <- pairs %>%
+  dplyr::left_join(eb_runs, by = "eb_id") %>%
+  dplyr::left_join(
+    fixed_best,
+    by = c("fixed_id", "dataset_bundle_id", "p_star", "y_noise")
+  ) %>%
+  dplyr::mutate(delta_eb_vs_best = auprc_eb - best_fixed)
+
+dataset_cmp_02 %>%
+  dplyr::group_by(family) %>%
+  dplyr::summarise(
+    mean_delta = mean(delta_eb_vs_fixed02, na.rm = TRUE),
+    median_delta = median(delta_eb_vs_fixed02, na.rm = TRUE),
+    pct_positive = mean(delta_eb_vs_fixed02 > 0, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+```{r dataset-best-summary}
+dataset_cmp_best %>%
+  dplyr::group_by(family) %>%
+  dplyr::summarise(
+    mean_delta = mean(delta_eb_vs_best, na.rm = TRUE),
+    median_delta = median(delta_eb_vs_best, na.rm = TRUE),
+    pct_positive = mean(delta_eb_vs_best > 0, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+```{r sigma-frequency}
+dataset_cmp_best %>%
+  dplyr::count(family, best_sigma) %>%
+  dplyr::group_by(family) %>%
+  dplyr::mutate(freq = n / sum(n))
+```
+
+## 4) Optional Deeper Probe (Single Matrix CSV)
+
+If this file exists, load the custom probe:
+
+- `test_susine/output/eb_probe_mu0_singlematrix_compare.csv`
+
+```{r optional-probe}
+probe_path <- file.path("test_susine", "output", "eb_probe_mu0_singlematrix_compare.csv")
+if (file.exists(probe_path)) {
+  probe <- read_csv(probe_path, show_col_types = FALSE)
+  print(
+    probe %>%
+      dplyr::group_by(p_star, y_noise) %>%
+      dplyr::summarise(
+        mean_delta_02 = mean(delta_vs_02, na.rm = TRUE),
+        pct_pos_02 = mean(delta_vs_02 > 0, na.rm = TRUE),
+        mean_delta_best = mean(delta_vs_best, na.rm = TRUE),
+        .groups = "drop"
+      )
+  )
+} else {
+  cat("Probe CSV not found:", probe_path, "\n")
+}
+```
+
+## 5) What To Do Next
+
+1. Add convergence and prior-variance traces to model-level exports for EB runs.
+2. In next large simulation, stratify reporting by:
+   `family x p_star x y_noise x architecture`.
+3. Include both comparisons in the paper:
+   - EB vs fixed default (`sigma_0_2 = 0.2`)
+   - EB vs best fixed in grid (oracle upper bound).

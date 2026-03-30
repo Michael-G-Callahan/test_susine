@@ -50,8 +50,8 @@ slurm_time <- "05:59:59"
 slurm_mem  <- "8G"
 
 # ── Dataset grid ──
-n_matrices_target <- 3L    # M1-stratified genotype matrices
-seeds             <- 1:2   # phenotype seeds per matrix
+n_matrices_target <- 150L  # M1-stratified genotype matrices
+seeds             <- 1:4   # phenotype seeds per matrix
 
 # ── Simulation design ──
 L_grid            <- 10L

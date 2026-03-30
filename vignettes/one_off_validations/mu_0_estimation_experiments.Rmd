@@ -1,0 +1,674 @@
+---
+title: "mu_0 Scale Estimation: Experimental Validation"
+date: "2026-03-05"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    code_folding: show
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+# Overview
+
+This workbook tests the theoretical predictions from
+`refs/mu_0_estimation_theory.md` about why EB estimation works for
+$\sigma_0^2$ but not for $c$ (the prior mean scale factor where
+$\mu_{0j} = c \cdot a_j$).
+
+**Key predictions to test:**
+
+1.  `auto_scale_mu_0` works well at high annotation R^2, degrades at
+    low R^2 and high L
+2.  The $(c, \sigma_0^2)$ likelihood surface is unimodal in
+    $\sigma_0^2$ but flat/multimodal in $c$
+3.  Iterative "mean" mode is ineffective (wrong parameterization:
+    uniform shift, not annotation-scaled)
+4.  Iterative "both" mode collapses to
+    $(\mu_0 = 0,\, \sigma_0^2 = \text{large})$
+5.  Oracle $c$ gives best AUPRC; c-grid comes close
+
+```{r setup, message=FALSE, warning=FALSE}
+here::i_am(
+  "vignettes/one_off_validations/mu_0_estimation_experiments.Rmd"
+)
+library(here)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(purrr)
+library(tibble)
+library(knitr)
+
+devtools::load_all(here("../susine"), quiet = TRUE)
+devtools::load_all(here("."), quiet = TRUE)
+
+theme_set(theme_bw(base_size = 12))
+set.seed(20260305)
+```
+
+# Synthetic Data Generation
+
+Small-scale problems runnable locally. We generate multiple scenarios
+varying annotation quality and signal strength.
+
+```{r generate-data}
+# --- Dimensions ---
+n <- 400L
+p <- 200L
+L <- 5L
+
+# --- Design matrix with AR1 LD structure ---
+make_X <- function(n, p, rho = 0.5) {
+  X <- matrix(rnorm(n * p), nrow = n)
+  for (j in 2:p) {
+    X[, j] <- rho * X[, j - 1] + sqrt(1 - rho^2) * X[, j]
+  }
+  # Standardize columns
+  X <- scale(X, center = TRUE, scale = TRUE)
+  X
+}
+
+# --- Generate one scenario ---
+make_scenario <- function(n, p, p_star, c_true, annotation_r2,
+                          noise_fraction = 0.8, rho = 0.5,
+                          seed = NULL) {
+  if (!is.null(seed)) set.seed(seed)
+
+  X <- make_X(n, p, rho)
+  causal_idx <- sort(sample.int(p, p_star))
+
+  beta_true <- rep(0, p)
+  beta_true[causal_idx] <- rnorm(p_star, sd = 1)
+
+  # --- Annotation: a = beta / c_true + noise ---
+  annotation <- rep(0, p)
+  if (c_true != 0) {
+    # Causal SNPs: annotation tracks true effect
+    causal_signal <- beta_true[causal_idx] / c_true
+    if (annotation_r2 > 0 && annotation_r2 < 1) {
+      noise_sd <- sqrt(var(causal_signal) *
+                          (1 - annotation_r2) / annotation_r2)
+    } else if (annotation_r2 >= 1) {
+      noise_sd <- 0
+    } else {
+      noise_sd <- sd(causal_signal) * 10
+    }
+    annotation[causal_idx] <- causal_signal + rnorm(p_star, sd = noise_sd)
+  }
+  # Noncausal: small background noise
+  noncausal_idx <- setdiff(seq_len(p), causal_idx)
+  annotation[noncausal_idx] <- rnorm(
+    length(noncausal_idx),
+    sd = sd(annotation[causal_idx]) * 0.3
+  )
+
+  # --- Phenotype ---
+  signal <- drop(X %*% beta_true)
+  sigma2 <- var(signal) * noise_fraction / (1 - noise_fraction)
+  y <- signal + rnorm(n, sd = sqrt(sigma2))
+
+  list(
+    X = X, y = y, beta_true = beta_true,
+    annotation = annotation,
+    causal_idx = causal_idx,
+    c_true = c_true,
+    annotation_r2 = annotation_r2,
+    noise_fraction = noise_fraction,
+    sigma2 = sigma2,
+    p_star = p_star
+  )
+}
+```
+
+```{r scenario-grid}
+# Build a grid of scenarios
+scenario_grid <- expand_grid(
+  c_true = c(0.3, 0.7, 1.5),
+  annotation_r2 = c(0.1, 0.4, 0.8),
+  p_star = c(3, 5, 10),
+  rep = 1:3
+) %>%
+  mutate(
+    scenario_id = row_number(),
+    seed = 20260305 + scenario_id
+  )
+
+cat("Total scenarios:", nrow(scenario_grid), "\n")
+```
+
+```{r generate-all}
+# Generate all scenarios (this takes ~10-30 seconds)
+scenarios <- scenario_grid %>%
+  pmap(function(c_true, annotation_r2, p_star, rep, scenario_id, seed) {
+    make_scenario(
+      n = n, p = p, p_star = p_star,
+      c_true = c_true, annotation_r2 = annotation_r2,
+      noise_fraction = 0.8, seed = seed
+    )
+  })
+
+cat("Generated", length(scenarios), "scenarios.\n")
+```
+
+# Experiment 1: auto_scale_mu_0 Validation
+
+Test the one-shot `estimate_mu_0_scale_factor()` on known-$c$ data.
+
+**Theory predicts:** works well when annotation R^2 is high; degrades
+when annotation is noisy or L effects share LD.
+
+```{r exp1-autoscale}
+exp1_results <- scenario_grid %>%
+  mutate(
+    c_hat = map_dbl(scenarios, function(sc) {
+      X_init <- susine:::initialize_X(sc$X)
+      d <- attr(X_init, "d")
+      xty <- susine:::compute_Xty(X_init, sc$y)
+      beta_hat <- as.vector(xty / d)
+      shat2 <- as.vector(sc$sigma2 / d)
+
+      est <- susine::estimate_mu_0_scale_factor(
+        beta_hat = beta_hat,
+        shat2 = shat2,
+        mu_0_unscaled = sc$annotation
+      )
+      est$c
+    }),
+    c_true = map_dbl(scenarios, ~.x$c_true)
+  ) %>%
+  mutate(
+    c_error = c_hat - c_true,
+    c_ratio = c_hat / c_true
+  )
+```
+
+```{r exp1-scatter, fig.width=8, fig.height=6}
+exp1_results %>%
+  ggplot(aes(x = c_true, y = c_hat, color = factor(annotation_r2))) +
+  geom_point(size = 2, alpha = 0.7) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  facet_wrap(~p_star, labeller = label_both) +
+  labs(
+    title = "Experiment 1: auto_scale_mu_0 recovery of c",
+    x = "True c", y = "Estimated c",
+    color = "Annotation R²"
+  )
+```
+
+```{r exp1-summary}
+exp1_results %>%
+  group_by(annotation_r2, p_star) %>%
+  summarize(
+    mean_bias = mean(c_error),
+    rmse = sqrt(mean(c_error^2)),
+    mean_ratio = mean(c_ratio),
+    .groups = "drop"
+  ) %>%
+  kable(digits = 3,
+        caption = "auto_scale_mu_0: bias and RMSE by annotation R² and p*")
+```
+
+# Experiment 2: Profile the $(c, \sigma_0^2)$ Likelihood Surface
+
+Evaluate the SER negative log-likelihood on a fine 2D grid.
+
+**Theory predicts:** unimodal in $\sigma_0^2$ at fixed $c$;
+potentially flat or multimodal in $c$ at fixed $\sigma_0^2$.
+
+```{r exp2-setup}
+# Pick a representative scenario: medium annotation R2, moderate signal
+exp2_idx <- which(
+  scenario_grid$annotation_r2 == 0.4 &
+    scenario_grid$c_true == 0.7 &
+    scenario_grid$p_star == 5 &
+    scenario_grid$rep == 1
+)[1]
+
+sc2 <- scenarios[[exp2_idx]]
+cat("Experiment 2 scenario:", exp2_idx, "\n")
+cat("  c_true =", sc2$c_true, ", annotation_r2 =", sc2$annotation_r2,
+    ", p_star =", sc2$p_star, "\n")
+```
+
+```{r exp2-profile}
+# Prepare X for susine internals
+X2 <- susine:::initialize_X(sc2$X)
+y2 <- sc2$y - mean(sc2$y)
+sigma2_est <- sc2$sigma2
+
+# Define the grid
+c_grid <- seq(-1, 3, length.out = 50)
+log_s0_grid <- seq(-4, 2, length.out = 50)
+
+profile_2d <- expand_grid(
+  c_val = c_grid,
+  log_s0 = log_s0_grid
+) %>%
+  mutate(
+    nll = pmap_dbl(list(c_val, log_s0), function(cv, ls) {
+      mu_0_vec <- cv * sc2$annotation
+      s0_val <- exp(ls)
+      pi_vec <- rep(1 / p, p)
+
+      priors <- data.frame(
+        mu_0 = I(list(mu_0_vec)),
+        sigma_0_2 = I(list(rep(s0_val, p))),
+        prior_inclusion_weights = I(list(pi_vec))
+      )
+
+      tryCatch(
+        susine:::neg_log_lik(priors, X2, y2, sigma2_est),
+        error = function(e) NA_real_
+      )
+    })
+  )
+```
+
+```{r exp2-contour, fig.width=9, fig.height=7}
+profile_2d %>%
+  filter(!is.na(nll)) %>%
+  ggplot(aes(x = c_val, y = log_s0, z = nll, fill = nll)) +
+  geom_tile() +
+  geom_contour(color = "white", linewidth = 0.3, bins = 20) +
+  geom_vline(xintercept = sc2$c_true, linetype = "dashed",
+             color = "red", linewidth = 0.8) +
+  scale_fill_viridis_c(option = "inferno", direction = -1,
+                       name = "Neg log-lik") +
+  labs(
+    title = "SER Negative Log-Likelihood Surface",
+    subtitle = sprintf("c_true = %.1f, ann_r2 = %.1f, p* = %d",
+                       sc2$c_true, sc2$annotation_r2, sc2$p_star),
+    x = "c (prior mean scale)", y = "log(sigma_0^2)"
+  )
+```
+
+```{r exp2-slices, fig.width=10, fig.height=4}
+# Slice at the optimal log_s0 to show c-direction profile
+best_log_s0 <- profile_2d %>%
+  filter(!is.na(nll)) %>%
+  slice_min(nll, n = 1) %>%
+  pull(log_s0)
+
+p_cslice <- profile_2d %>%
+  filter(abs(log_s0 - best_log_s0) < 0.1) %>%
+  ggplot(aes(x = c_val, y = nll)) +
+  geom_line() +
+  geom_vline(xintercept = sc2$c_true, linetype = "dashed", color = "red") +
+  labs(
+    title = sprintf("NLL slice at log(s0^2) = %.1f", best_log_s0),
+    x = "c", y = "Neg log-lik"
+  )
+
+# Slice at c_true to show sigma_0^2-direction profile
+p_sslice <- profile_2d %>%
+  filter(abs(c_val - sc2$c_true) < diff(c_grid)[1]) %>%
+  ggplot(aes(x = log_s0, y = nll)) +
+  geom_line() +
+  labs(
+    title = sprintf("NLL slice at c = %.1f (true)", sc2$c_true),
+    x = "log(sigma_0^2)", y = "Neg log-lik"
+  )
+
+gridExtra::grid.arrange(p_cslice, p_sslice, ncol = 2)
+```
+
+```{r exp2-curvature}
+# Compare curvature (second derivative) at the optimum
+# in c-direction vs sigma_0_2-direction
+opt_point <- profile_2d %>%
+  filter(!is.na(nll)) %>%
+  slice_min(nll, n = 1)
+
+cat("Optimal point: c =", opt_point$c_val,
+    ", log(s0^2) =", opt_point$log_s0,
+    ", NLL =", opt_point$nll, "\n")
+cat("True c =", sc2$c_true, "\n")
+```
+
+# Experiment 3: Iterative EB "mean" Mode vs. c-Grid
+
+Test whether iterative EB with `prior_update_method = "mean"` converges
+to a useful value.
+
+**Theory predicts:** "mean" mode estimates a UNIFORM shift
+(not annotation-scaled $c$), so it should converge near 0.
+
+```{r exp3-setup}
+# Pick a few representative scenarios
+exp3_indices <- which(
+  scenario_grid$annotation_r2 %in% c(0.4, 0.8) &
+    scenario_grid$c_true == 0.7 &
+    scenario_grid$p_star == 5 &
+    scenario_grid$rep == 1
+)
+```
+
+```{r exp3-iterative-eb}
+exp3_results <- map_dfr(exp3_indices, function(idx) {
+  sc <- scenarios[[idx]]
+  mu_0_scaled <- sc$c_true * sc$annotation
+
+  # Run susine with prior_update_method = "mean"
+  fit_eb <- tryCatch(
+    susine::susine(
+      L = L, X = sc$X, y = sc$y,
+      mu_0 = mu_0_scaled,
+      sigma_0_2 = 0.2,
+      prior_update_method = "mean",
+      max_iter = 50L,
+      tol = 1e-4
+    ),
+    error = function(e) {
+      message("susine() failed for scenario ", idx, ": ", e$message)
+      NULL
+    }
+  )
+
+  # Run susine with fixed c (oracle)
+  fit_oracle <- tryCatch(
+    susine::susine(
+      L = L, X = sc$X, y = sc$y,
+      mu_0 = mu_0_scaled,
+      sigma_0_2 = 0.2,
+      prior_update_method = "none",
+      max_iter = 50L,
+      tol = 1e-4
+    ),
+    error = function(e) {
+      message("susine() oracle failed for scenario ", idx, ": ", e$message)
+      NULL
+    }
+  )
+
+  # Run susine at c=0 (vanilla)
+  fit_vanilla <- tryCatch(
+    susine::susine(
+      L = L, X = sc$X, y = sc$y,
+      mu_0 = 0,
+      sigma_0_2 = 0.2,
+      prior_update_method = "none",
+      max_iter = 50L,
+      tol = 1e-4
+    ),
+    error = function(e) {
+      message("susine() vanilla failed for scenario ", idx, ": ", e$message)
+      NULL
+    }
+  )
+
+  # Extract PIPs and compare
+  extract_auprc <- function(fit, sc) {
+    if (is.null(fit)) return(NA_real_)
+    pips <- fit$model_fit$PIPs
+    truth <- rep(0L, p)
+    truth[sc$causal_idx] <- 1L
+    # Simple AUPRC via trapezoidal rule
+    ord <- order(pips, decreasing = TRUE)
+    tp <- cumsum(truth[ord])
+    fp <- cumsum(1L - truth[ord])
+    precision <- tp / (tp + fp)
+    recall <- tp / sum(truth)
+    # Trapezoidal AUPRC
+    sum(diff(recall) * (precision[-1] + precision[-length(precision)]) / 2)
+  }
+
+  tibble(
+    scenario_id = idx,
+    annotation_r2 = sc$annotation_r2,
+    c_true = sc$c_true,
+    auprc_eb_mean = extract_auprc(fit_eb, sc),
+    auprc_oracle = extract_auprc(fit_oracle, sc),
+    auprc_vanilla = extract_auprc(fit_vanilla, sc),
+    # Check what mu_0 converged to under "mean" mode
+    final_mu_0_eb = if (!is.null(fit_eb))
+      mean(fit_eb$priors$mu_0[[1]]) else NA_real_,
+    elbo_eb = if (!is.null(fit_eb))
+      fit_eb$model_fit$elbo else NA_real_,
+    elbo_oracle = if (!is.null(fit_oracle))
+      fit_oracle$model_fit$elbo else NA_real_,
+    elbo_vanilla = if (!is.null(fit_vanilla))
+      fit_vanilla$model_fit$elbo else NA_real_
+  )
+})
+
+kable(exp3_results, digits = 4,
+      caption = "Experiment 3: Iterative EB 'mean' mode vs oracle vs vanilla")
+```
+
+# Experiment 4: Joint "both" Mode Pathology
+
+Test `prior_update_method = "both"` from multiple initializations.
+
+**Theory predicts:** convergence to $(mu_0 \approx 0, \sigma_0^2 = \text{large})$
+or pathological values, because the 2D landscape has a flat c-direction.
+
+```{r exp4-both-mode}
+exp4_idx <- exp3_indices[1]  # Single scenario for detailed analysis
+sc4 <- scenarios[[exp4_idx]]
+
+# Multiple initializations via different mu_0 starting points
+init_c_values <- c(0, 0.3, 0.7, 1.0, 1.5, 2.0)
+
+exp4_results <- map_dfr(init_c_values, function(c_init) {
+  mu_0_init <- c_init * sc4$annotation
+
+  fit <- tryCatch(
+    susine::susine(
+      L = L, X = sc4$X, y = sc4$y,
+      mu_0 = mu_0_init,
+      sigma_0_2 = 0.2,
+      prior_update_method = "both",
+      max_iter = 50L,
+      tol = 1e-4
+    ),
+    error = function(e) {
+      message("both mode failed at c_init = ", c_init, ": ", e$message)
+      NULL
+    }
+  )
+
+  # Extract final priors
+  if (!is.null(fit)) {
+    # Average mu_0 and sigma_0_2 across effects to summarize
+    final_mu0_vals <- map_dbl(seq_len(L), function(l) {
+      mean(fit$priors$mu_0[[l]])
+    })
+    final_s02_vals <- map_dbl(seq_len(L), function(l) {
+      mean(fit$priors$sigma_0_2[[l]])
+    })
+
+    tibble(
+      c_init = c_init,
+      final_mu0_mean = mean(final_mu0_vals),
+      final_mu0_sd = sd(final_mu0_vals),
+      final_s02_mean = mean(final_s02_vals),
+      final_s02_sd = sd(final_s02_vals),
+      elbo = fit$model_fit$elbo,
+      converged = fit$model_fit$converged
+    )
+  } else {
+    tibble(
+      c_init = c_init,
+      final_mu0_mean = NA_real_,
+      final_mu0_sd = NA_real_,
+      final_s02_mean = NA_real_,
+      final_s02_sd = NA_real_,
+      elbo = NA_real_,
+      converged = NA
+    )
+  }
+})
+
+kable(exp4_results, digits = 4,
+      caption = sprintf(
+        "Experiment 4: 'both' mode from multiple inits (c_true = %.1f)",
+        sc4$c_true
+      ))
+```
+
+```{r exp4-analysis}
+cat("True c =", sc4$c_true, "\n\n")
+cat("Did 'both' mode find the right c from any initialization?\n")
+cat("Did it collapse to mu_0 ~ 0?\n")
+cat("Is ELBO sensitive to initialization?\n")
+```
+
+# Experiment 5: Oracle Comparison and c-Grid
+
+Run a full c-grid at fine resolution and compare to oracle, auto_scale,
+and vanilla.
+
+```{r exp5-cgrid}
+exp5_idx <- exp3_indices[1]
+sc5 <- scenarios[[exp5_idx]]
+
+c_grid_fine <- seq(0, 2, by = 0.1)
+
+exp5_grid <- map_dfr(c_grid_fine, function(c_val) {
+  mu_0_val <- c_val * sc5$annotation
+
+  fit <- tryCatch(
+    susine::susine(
+      L = L, X = sc5$X, y = sc5$y,
+      mu_0 = mu_0_val,
+      sigma_0_2 = 0.2,
+      prior_update_method = "none",
+      max_iter = 50L,
+      tol = 1e-4
+    ),
+    error = function(e) NULL
+  )
+
+  if (!is.null(fit)) {
+    pips <- fit$model_fit$PIPs
+    truth <- rep(0L, p)
+    truth[sc5$causal_idx] <- 1L
+    ord <- order(pips, decreasing = TRUE)
+    tp <- cumsum(truth[ord])
+    fp <- cumsum(1L - truth[ord])
+    precision <- tp / (tp + fp)
+    recall <- tp / sum(truth)
+    auprc <- sum(diff(recall) *
+                   (precision[-1] + precision[-length(precision)]) / 2)
+
+    tibble(c_val = c_val, elbo = fit$model_fit$elbo, auprc = auprc)
+  } else {
+    tibble(c_val = c_val, elbo = NA_real_, auprc = NA_real_)
+  }
+})
+```
+
+```{r exp5-elbo-profile, fig.width=8, fig.height=4}
+p5a <- exp5_grid %>%
+  filter(!is.na(elbo)) %>%
+  ggplot(aes(x = c_val, y = elbo)) +
+  geom_line() +
+  geom_point(size = 1.5) +
+  geom_vline(xintercept = sc5$c_true, linetype = "dashed",
+             color = "red") +
+  annotate("text", x = sc5$c_true + 0.05, y = min(exp5_grid$elbo, na.rm = TRUE),
+           label = "c_true", hjust = 0, color = "red") +
+  labs(title = "ELBO across c-grid", x = "c", y = "ELBO")
+
+p5b <- exp5_grid %>%
+  filter(!is.na(auprc)) %>%
+  ggplot(aes(x = c_val, y = auprc)) +
+  geom_line() +
+  geom_point(size = 1.5) +
+  geom_vline(xintercept = sc5$c_true, linetype = "dashed",
+             color = "red") +
+  labs(title = "AUPRC across c-grid", x = "c", y = "AUPRC")
+
+gridExtra::grid.arrange(p5a, p5b, ncol = 2)
+```
+
+```{r exp5-comparison}
+# auto_scale estimate
+X5 <- susine:::initialize_X(sc5$X)
+d5 <- attr(X5, "d")
+xty5 <- susine:::compute_Xty(X5, sc5$y)
+beta_hat5 <- as.vector(xty5 / d5)
+shat2_5 <- as.vector(sc5$sigma2 / d5)
+
+auto_est <- susine::estimate_mu_0_scale_factor(
+  beta_hat = beta_hat5,
+  shat2 = shat2_5,
+  mu_0_unscaled = sc5$annotation
+)
+
+# Best c from grid (max ELBO)
+best_grid <- exp5_grid %>%
+  filter(!is.na(elbo)) %>%
+  slice_max(elbo, n = 1)
+
+# Compile comparison
+comparison <- tribble(
+  ~method, ~c_used,
+  "Oracle", sc5$c_true,
+  "auto_scale", auto_est$c,
+  "Best grid (max ELBO)", best_grid$c_val,
+  "Vanilla (c=0)", 0
+) %>%
+  left_join(
+    exp5_grid %>% rename(c_used = c_val),
+    by = "c_used"
+  )
+
+kable(comparison, digits = 4,
+      caption = "Experiment 5: Method comparison")
+```
+
+# Adversarial Synthesis
+
+## Does the theory hold?
+
+```{r synthesis}
+cat("=== SYNTHESIS ===\n\n")
+
+cat("Prediction 1: auto_scale works well at high ann R2.\n")
+cat("  → Check exp1 summary table above. RMSE by annotation_r2.\n\n")
+
+cat("Prediction 2: Likelihood surface unimodal in s0^2, flat in c.\n")
+cat("  → Check exp2 contour and slice plots above.\n")
+cat("  → Is the c-direction slice broader than the s0^2-direction?\n\n")
+
+cat("Prediction 3: 'mean' mode converges to mu_0 ~ 0 (uniform shift).\n")
+cat("  → Check exp3 final_mu_0_eb values.\n\n")
+
+cat("Prediction 4: 'both' mode collapses or is initialization-dependent.\n")
+cat("  → Check exp4 table for ELBO sensitivity to c_init.\n\n")
+
+cat("Prediction 5: Oracle c gives best AUPRC; grid comes close.\n")
+cat("  → Check exp5 comparison table.\n")
+```
+
+## Surprises and Open Questions
+
+Fill in after running the workbook:
+
+1.  Did `auto_scale_mu_0` over- or under-estimate c? By how much?
+2.  Was the c-direction really flat, or did it have clear curvature?
+3.  Did the "mean" mode do anything useful, or was it as predicted?
+4.  Is the c-grid ensemble really close to oracle, or is there a big
+    gap?
+5.  **If auto_scale works well:** could we use it as a warm-start for
+    the c-grid (narrowing the grid around c_hat)?
+6.  **If auto_scale fails:** does it fail gracefully (c_hat near 0) or
+    catastrophically (c_hat wildly wrong)?
+
+## Implications for the Paper
+
+-   If c-grid ELBO-softmax recovers near-oracle performance, the
+    ensemble story is strong.
+-   If `auto_scale_mu_0` is reliable, it could reduce the c-grid
+    size needed (adaptive grid centered on c_hat).
+-   If iterative EB for c is truly hopeless, the paper can cite this
+    analysis as justification for the grid approach.
+
+```{r session-info}
+sessionInfo()
+```
