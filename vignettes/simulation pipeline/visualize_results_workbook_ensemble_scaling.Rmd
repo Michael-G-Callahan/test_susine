@@ -80,6 +80,37 @@ cat("AUPRC individual rows:", nrow(auprc_individual), "\n")
 cat("Figure root:", fig_root, "\n")
 ```
 
+```{r helpers}
+# Helper: compute AUPRC from a pooled confusion-bins tibble.
+# AP = sum over bins of [precision_at_bin * delta_recall_at_bin].
+auprc_from_bins <- function(bins) {
+  b       <- bins %>% dplyr::arrange(dplyr::desc(.data$pip_threshold))
+  cum_tp  <- cumsum(b$n_causal_at_bucket)
+  cum_fp  <- cumsum(b$n_noncausal_at_bucket)
+  total_p <- sum(b$n_causal_at_bucket)
+  total_n <- sum(b$n_noncausal_at_bucket)
+  if (total_p == 0L || total_n == 0L) return(NA_real_)
+  precision    <- cum_tp / (cum_tp + cum_fp)
+  delta_recall <- b$n_causal_at_bucket / total_p
+  sum(precision * delta_recall)
+}
+
+# Helper: TPR at FPR <= threshold.
+tpr05_from_bins <- function(bins, fpr_threshold = 0.05) {
+  b       <- bins %>% dplyr::arrange(dplyr::desc(.data$pip_threshold))
+  cum_tp  <- cumsum(b$n_causal_at_bucket)
+  cum_fp  <- cumsum(b$n_noncausal_at_bucket)
+  total_p <- sum(b$n_causal_at_bucket)
+  total_n <- sum(b$n_noncausal_at_bucket)
+  if (total_p == 0L || total_n == 0L) return(NA_real_)
+  tpr <- cum_tp / total_p
+  fpr <- cum_fp / total_n
+  idx <- which(fpr <= fpr_threshold)
+  if (!length(idx)) return(NA_real_)
+  max(tpr[idx])
+}
+```
+
 ```{r baselines}
 # Load all pooled AUPRC tables
 auprc_pooled_agg <- readr::read_csv(
@@ -1251,35 +1282,6 @@ scaling_bins_path <- file.path(consolidated_dir, "scaling_bins_pooled.csv")
 if (file.exists(scaling_bins_path)) {
   scaling_bins_pooled <- readr::read_csv(scaling_bins_path, show_col_types = FALSE)
   cat("Scaling bins pooled rows:", nrow(scaling_bins_pooled), "\n")
-
-  # Helper: compute AUPRC from a pooled confusion-bins tibble.
-  # AP = sum over bins of [precision_at_bin * delta_recall_at_bin].
-  auprc_from_bins <- function(bins) {
-    b       <- bins %>% dplyr::arrange(dplyr::desc(.data$pip_threshold))
-    cum_tp  <- cumsum(b$n_causal_at_bucket)
-    cum_fp  <- cumsum(b$n_noncausal_at_bucket)
-    total_p <- sum(b$n_causal_at_bucket)
-    total_n <- sum(b$n_noncausal_at_bucket)
-    if (total_p == 0L || total_n == 0L) return(NA_real_)
-    precision    <- cum_tp / (cum_tp + cum_fp)
-    delta_recall <- b$n_causal_at_bucket / total_p
-    sum(precision * delta_recall)
-  }
-
-  # Helper: TPR at FPR <= threshold.
-  tpr05_from_bins <- function(bins, fpr_threshold = 0.05) {
-    b       <- bins %>% dplyr::arrange(dplyr::desc(.data$pip_threshold))
-    cum_tp  <- cumsum(b$n_causal_at_bucket)
-    cum_fp  <- cumsum(b$n_noncausal_at_bucket)
-    total_p <- sum(b$n_causal_at_bucket)
-    total_n <- sum(b$n_noncausal_at_bucket)
-    if (total_p == 0L || total_n == 0L) return(NA_real_)
-    tpr <- cum_tp / total_p
-    fpr <- cum_fp / total_n
-    idx <- which(fpr <= fpr_threshold)
-    if (!length(idx)) return(NA_real_)
-    max(tpr[idx])
-  }
 
   # For specs with non-NA annotation_r2, create overall rows by pooling bins
   # across annotation_r2 levels (so the "overall" plot includes all specs).
