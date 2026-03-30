@@ -56,25 +56,202 @@ confusion_df %>%
 
 #' Compute AUPRC from pre-aggregated confusion matrix
 #'
-#' Integrates the precision-recall curve using trapezoidal rule,
-#' anchored at (recall=0, precision=1).
+#' Computes average precision directly from grouped bucket counts, avoiding
+#' full precision-recall curve materialization.
 #'
 #' @param confusion_df Data frame with per-bucket counts
 #' @param group_vars Character vector of columns to group by for AUPRC calculation
+#' @param progress Logical; when TRUE, emit periodic progress messages
+#' @param progress_every Integer; emit a progress message every N groups
+#' @param progress_label Optional label included in progress messages
 #' @return Data frame with group_vars and AUPRC column
 #' @export
-compute_auprc_from_confusion <- function(confusion_df, group_vars) {
+compute_auprc_from_confusion <- function(confusion_df,
+                                         group_vars,
+                                         progress = FALSE,
+                                         progress_every = 1000L,
+                                         progress_label = NULL) {
 
-  # First get power/fdr curves
-  curves <- compute_power_fdr_curves(confusion_df, group_vars)
+  pooled_bins <- pool_confusion_bins(confusion_df, group_vars)
+  compute_auprc_from_pooled_confusion(
+    pooled_bins,
+    group_vars = group_vars,
+    progress = progress,
+    progress_every = progress_every,
+    progress_label = progress_label
+  )
+}
 
-  # Compute AUPRC per group
-  curves %>%
-    dplyr::group_by(dplyr::across(dplyr::all_of(group_vars))) %>%
+#' Pool confusion-bin counts by grouping variables and PIP threshold
+#' @keywords internal
+pool_confusion_bins <- function(confusion_df, group_vars) {
+  if (!length(group_vars)) {
+    stop("group_vars must contain at least one column.")
+  }
+  required_cols <- c(group_vars, "pip_threshold",
+                     "n_causal_at_bucket", "n_noncausal_at_bucket")
+  missing_cols <- setdiff(required_cols, names(confusion_df))
+  if (length(missing_cols)) {
+    stop("confusion_df is missing required columns: ",
+         paste(missing_cols, collapse = ", "))
+  }
+
+  confusion_df %>%
+    dplyr::group_by(dplyr::across(dplyr::all_of(group_vars)), .data$pip_threshold) %>%
     dplyr::summarise(
-      AUPRC = compute_auprc_single(precision, recall),
+      n_causal_at_bucket = sum(.data$n_causal_at_bucket, na.rm = TRUE),
+      n_noncausal_at_bucket = sum(.data$n_noncausal_at_bucket, na.rm = TRUE),
       .groups = "drop"
     )
+}
+
+#' Compute AUPRC from pooled confusion-bin counts
+#' @keywords internal
+compute_auprc_from_pooled_confusion <- function(pooled_bins,
+                                                group_vars,
+                                                progress = FALSE,
+                                                progress_every = 1000L,
+                                                progress_label = NULL) {
+  if (!length(group_vars)) {
+    stop("group_vars must contain at least one column.")
+  }
+  if (!nrow(pooled_bins)) {
+    out <- pooled_bins[, group_vars, drop = FALSE]
+    out$AUPRC <- numeric(0)
+    return(out)
+  }
+
+  group_info <- split_pooled_confusion_groups(pooled_bins, group_vars)
+  pooled_bins <- group_info$pooled_bins
+  group_rows <- group_info$group_rows
+  group_keys <- group_info$group_keys
+  n_groups <- length(group_rows)
+  progress_every <- max(1L, as.integer(progress_every %||% 1000L))
+  label <- progress_label %||% "AUPRC"
+
+  if (isTRUE(progress)) {
+    message(sprintf("%s: computing %d grouped AUPRC value(s)...", label, n_groups))
+  }
+
+  auprc_vals <- rep(NA_real_, n_groups)
+  keep_group <- rep(FALSE, n_groups)
+  for (i in seq_along(group_rows)) {
+    idx <- group_rows[[i]]
+    bins_i <- pooled_bins[idx, c("n_causal_at_bucket", "n_noncausal_at_bucket"),
+                          drop = FALSE]
+    total_p <- sum(bins_i$n_causal_at_bucket, na.rm = TRUE)
+    if (!is.finite(total_p) || total_p <= 0) {
+      val <- NA_real_
+      keep_group[[i]] <- FALSE
+    } else {
+      cum_tp <- cumsum(bins_i$n_causal_at_bucket)
+      cum_fp <- cumsum(bins_i$n_noncausal_at_bucket)
+      denom <- cum_tp + cum_fp
+      precision <- ifelse(denom > 0, cum_tp / denom, NA_real_)
+      recall <- cum_tp / total_p
+      valid <- !is.na(precision) & !is.na(recall)
+      if (!any(valid)) {
+        val <- NA_real_
+        keep_group[[i]] <- FALSE
+      } else if (sum(valid) < 2L) {
+        val <- NA_real_
+        keep_group[[i]] <- TRUE
+      } else {
+        val <- compute_auprc_single(precision[valid], recall[valid])
+        keep_group[[i]] <- TRUE
+      }
+    }
+
+    if (isTRUE(progress) &&
+        (i == 1L || i == n_groups || (i %% progress_every) == 0L)) {
+      message(sprintf("%s: processed %d/%d groups", label, i, n_groups))
+    }
+    auprc_vals[[i]] <- val
+  }
+
+  dplyr::mutate(group_keys[keep_group, , drop = FALSE], AUPRC = auprc_vals[keep_group])
+}
+
+#' Split pooled confusion bins into contiguous groups after sorting
+#' @keywords internal
+split_pooled_confusion_groups <- function(pooled_bins, group_vars) {
+  pooled_bins <- pooled_bins %>%
+    dplyr::arrange(dplyr::across(dplyr::all_of(group_vars)),
+                   dplyr::desc(.data$pip_threshold)) %>%
+    dplyr::mutate(.group_id = dplyr::consecutive_id(!!!rlang::syms(group_vars)))
+
+  group_start <- !duplicated(pooled_bins$.group_id)
+
+  list(
+    pooled_bins = dplyr::select(pooled_bins, -.data$.group_id),
+    group_rows = split(seq_len(nrow(pooled_bins)), pooled_bins$.group_id),
+    group_keys = pooled_bins[group_start, group_vars, drop = FALSE]
+  )
+}
+
+#' Compute TPR at a fixed FPR target from pooled confusion-bin counts
+#' @keywords internal
+compute_tpr05_from_pooled_confusion <- function(pooled_bins,
+                                                group_vars,
+                                                fpr_target = 0.05,
+                                                progress = FALSE,
+                                                progress_every = 1000L,
+                                                progress_label = NULL) {
+  if (!length(group_vars)) {
+    stop("group_vars must contain at least one column.")
+  }
+  if (!nrow(pooled_bins)) {
+    out <- pooled_bins[, group_vars, drop = FALSE]
+    out$tpr_fpr05 <- numeric(0)
+    return(out)
+  }
+
+  group_info <- split_pooled_confusion_groups(pooled_bins, group_vars)
+  pooled_bins <- group_info$pooled_bins
+  group_rows <- group_info$group_rows
+  group_keys <- group_info$group_keys
+  n_groups <- length(group_rows)
+  progress_every <- max(1L, as.integer(progress_every %||% 1000L))
+  label <- progress_label %||% "TPR@FPR"
+
+  if (isTRUE(progress)) {
+    message(sprintf("%s: computing %d grouped TPR values...", label, n_groups))
+  }
+
+  tpr_vals <- rep(NA_real_, n_groups)
+  keep_group <- rep(FALSE, n_groups)
+  for (i in seq_along(group_rows)) {
+    idx <- group_rows[[i]]
+    bins_i <- pooled_bins[idx, c("n_causal_at_bucket", "n_noncausal_at_bucket"),
+                          drop = FALSE]
+    total_p <- sum(bins_i$n_causal_at_bucket, na.rm = TRUE)
+    total_n <- sum(bins_i$n_noncausal_at_bucket, na.rm = TRUE)
+    if (!is.finite(total_p) || !is.finite(total_n) || total_p <= 0 || total_n <= 0) {
+      val <- NA_real_
+      keep_group[[i]] <- FALSE
+    } else {
+      cum_tp <- cumsum(bins_i$n_causal_at_bucket)
+      cum_fp <- cumsum(bins_i$n_noncausal_at_bucket)
+      fpr <- cum_fp / total_n
+      tpr <- cum_tp / total_p
+      keep <- which(fpr <= fpr_target)
+      if (length(keep)) {
+        val <- max(tpr[keep], na.rm = TRUE)
+        keep_group[[i]] <- TRUE
+      } else {
+        val <- NA_real_
+        keep_group[[i]] <- FALSE
+      }
+    }
+
+    if (isTRUE(progress) &&
+        (i == 1L || i == n_groups || (i %% progress_every) == 0L)) {
+      message(sprintf("%s: processed %d/%d groups", label, i, n_groups))
+    }
+    tpr_vals[[i]] <- val
+  }
+
+  dplyr::mutate(group_keys[keep_group, , drop = FALSE], tpr_fpr05 = tpr_vals[keep_group])
 }
 
 #' Compute AUPRC for a single precision-recall curve

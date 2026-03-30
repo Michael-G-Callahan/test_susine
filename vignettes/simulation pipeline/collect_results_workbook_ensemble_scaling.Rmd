@@ -53,22 +53,57 @@ cat(" ", paste(basename(task_dirs), collapse = ", "), "\n")
 # 2. Merge Flush Files
 
 ```{r merge-flush}
-merge_flush_csv <- function(task_dirs, pattern) {
-  files <- unlist(lapply(task_dirs, list.files, pattern = pattern,
-                          full.names = TRUE))
-  if (!length(files)) return(tibble::tibble())
-  purrr::map_dfr(files, readr::read_csv, show_col_types = FALSE)
+log_stage <- function(msg) {
+  cat(sprintf("[%s] %s\n", format(Sys.time(), "%Y-%m-%d %H:%M:%S"), msg))
 }
 
-model_metrics <- merge_flush_csv(task_dirs, "model_metrics\\.csv$")
-confusion_bins <- merge_flush_csv(task_dirs, "confusion_bins\\.csv$")
-dataset_metrics <- merge_flush_csv(task_dirs, "dataset_metrics\\.csv$")
-multimodal_metrics <- merge_flush_csv(task_dirs, "multimodal_metrics\\.csv$")
-refine_depth       <- merge_flush_csv(task_dirs, "refine_depth\\.csv$")
-effect_metrics    <- merge_flush_csv(task_dirs, "effect_metrics\\.csv$")
-tier_cs_metrics   <- merge_flush_csv(task_dirs, "tier_cs_metrics\\.csv$")
-hg2_by_agg        <- merge_flush_csv(task_dirs, "hg2_by_agg\\.csv$")
-scaling_bins_raw  <- merge_flush_csv(task_dirs, "scaling_bins\\.csv$")
+merge_flush_csv <- function(task_dirs,
+                            pattern,
+                            label,
+                            col_select = NULL,
+                            progress_every = 25L) {
+  files <- sort(unlist(lapply(task_dirs, list.files, pattern = pattern,
+                              full.names = TRUE)))
+  if (!length(files)) return(tibble::tibble())
+
+  log_stage(sprintf("%s: reading %d file(s)", label, length(files)))
+  out <- vector("list", length(files))
+  progress_every <- max(1L, as.integer(progress_every))
+
+  for (i in seq_along(files)) {
+    read_args <- list(file = files[[i]], show_col_types = FALSE)
+    if (!is.null(col_select)) {
+      read_args$col_select <- dplyr::any_of(col_select)
+    }
+    out[[i]] <- do.call(readr::read_csv, read_args)
+    if (i == 1L || i == length(files) || (i %% progress_every) == 0L) {
+      cat(sprintf("  -> %s %d/%d\n", label, i, length(files)))
+    }
+  }
+
+  dplyr::bind_rows(out)
+}
+
+confusion_flush_cols <- c(
+  "run_id", "explore_method", "variant_id", "agg_method",
+  "pip_threshold", "n_causal_at_bucket", "n_noncausal_at_bucket"
+)
+
+model_metrics <- merge_flush_csv(task_dirs, "model_metrics\\.csv$", "model_metrics")
+confusion_bins <- merge_flush_csv(
+  task_dirs,
+  "confusion_bins\\.csv$",
+  "confusion_bins",
+  col_select = confusion_flush_cols
+) %>%
+  dplyr::select(dplyr::all_of(confusion_flush_cols))
+dataset_metrics <- merge_flush_csv(task_dirs, "dataset_metrics\\.csv$", "dataset_metrics")
+multimodal_metrics <- merge_flush_csv(task_dirs, "multimodal_metrics\\.csv$", "multimodal_metrics")
+refine_depth <- merge_flush_csv(task_dirs, "refine_depth\\.csv$", "refine_depth")
+effect_metrics <- merge_flush_csv(task_dirs, "effect_metrics\\.csv$", "effect_metrics")
+tier_cs_metrics <- merge_flush_csv(task_dirs, "tier_cs_metrics\\.csv$", "tier_cs_metrics")
+hg2_by_agg <- merge_flush_csv(task_dirs, "hg2_by_agg\\.csv$", "hg2_by_agg")
+scaling_bins_raw <- merge_flush_csv(task_dirs, "scaling_bins\\.csv$", "scaling_bins")
 
 cat("Model metrics:", nrow(model_metrics), "rows\n")
 cat("Confusion bins:", nrow(confusion_bins), "rows\n")
@@ -82,9 +117,8 @@ cat("Scaling bins:", nrow(scaling_bins_raw), "rows\n")
 
 # 3. Join Run Table Metadata
 
-The flush outputs only have `run_id`. Join with the run table for
-`spec_name`, `use_case_id`, `dataset_bundle_id`, `sigma_0_2_scalar`,
-`warm_method`, etc.
+The flush outputs only have `run_id`. Join with the run table for the
+metadata the downstream summaries and plots actually use.
 
 ```{r join-metadata}
 run_info <- cfg$tables$runs %>%
@@ -92,6 +126,12 @@ run_info <- cfg$tables$runs %>%
     run_id, dataset_bundle_id, spec_name, use_case_id, prior_spec_id,
     exploration_methods, sigma_0_2_scalar, warm_method, c_value,
     refine_step, restart_id, annotation_r2, inflate_match, group_key
+  )
+
+confusion_run_info <- run_info %>%
+  dplyr::select(
+    run_id, dataset_bundle_id, spec_name, use_case_id,
+    annotation_r2, group_key, c_value, sigma_0_2_scalar
   )
 
 model_metrics <- model_metrics %>%
@@ -125,43 +165,99 @@ if (nrow(hg2_by_agg) > 0L) {
 ```
 
 For confusion bins, aggregated rows share a `run_id` with the group's
-representative run. Join to get dataset/spec context.
+representative run. Join only the fields the collect and visualize
+workbooks use.
 
 ```{r join-confusion}
+confusion_output_cols <- c(
+  "run_id", "explore_method", "variant_id", "agg_method",
+  "pip_threshold", "n_causal_at_bucket", "n_noncausal_at_bucket",
+  "dataset_bundle_id", "spec_name", "use_case_id", "annotation_r2",
+  "group_key", "c_value", "sigma_0_2_scalar"
+)
+
 # Individual fit rows (agg_method = NA) join directly
-cb_individual <- confusion_bins %>%
+confusion_individual <- confusion_bins %>%
   dplyr::filter(is.na(agg_method)) %>%
-  dplyr::left_join(run_info, by = "run_id")
+  dplyr::left_join(confusion_run_info, by = "run_id") %>%
+  dplyr::select(dplyr::all_of(confusion_output_cols))
 
 # Aggregated rows: run_id is the group representative
-cb_agg <- confusion_bins %>%
+confusion_agg <- confusion_bins %>%
   dplyr::filter(!is.na(agg_method)) %>%
-  dplyr::left_join(
-    run_info %>% dplyr::select(run_id, dataset_bundle_id, spec_name,
-                                use_case_id, annotation_r2, group_key),
-    by = "run_id"
-  )
+  dplyr::left_join(confusion_run_info, by = "run_id") %>%
+  dplyr::select(dplyr::all_of(confusion_output_cols))
 
-confusion_bins_full <- dplyr::bind_rows(cb_individual, cb_agg)
-cat("Confusion bins with metadata:", nrow(confusion_bins_full), "rows\n")
+cat("Confusion bins with metadata:", nrow(confusion_individual) + nrow(confusion_agg), "rows\n")
+cat("  Individual:", nrow(confusion_individual), "\n")
+cat("  Aggregated:", nrow(confusion_agg), "\n")
+rm(confusion_bins)
+invisible(gc())
 ```
 
 # 4. Compute AUPRC from Confusion Bins
 
-Uses `test_susine::compute_auprc_from_confusion()` which pools bins by
-`group_vars` then integrates the precision-recall curve (trapezoidal,
-anchored at recall=0/precision=1).
+Uses pooled confusion-bin summaries plus the direct AP implementation in
+`test_susine::compute_auprc_from_confusion()`.
 
 ```{r compute-auprc}
-# Per-dataset AUPRC (needed for oracle selection per dataset)
-auprc_per_dataset <- compute_auprc_from_confusion(
-  confusion_bins_full,
-  group_vars = c("dataset_bundle_id", "run_id", "spec_name",
-                  "use_case_id", "annotation_r2", "group_key",
-                  "explore_method", "agg_method", "variant_id")
+pool_confusion_summary <- function(bins, group_vars, label) {
+  log_stage(sprintf("%s: pooling bins", label))
+  pooled <- test_susine:::pool_confusion_bins(bins, group_vars)
+  cat(label, "pooled rows:", nrow(pooled), "\n")
+  pooled
+}
+
+compute_auprc_from_pooled <- function(pooled_bins,
+                                      group_vars,
+                                      label,
+                                      progress = FALSE,
+                                      progress_every = 1000L) {
+  test_susine:::compute_auprc_from_pooled_confusion(
+    pooled_bins,
+    group_vars = group_vars,
+    progress = progress,
+    progress_every = progress_every,
+    progress_label = label
+  )
+}
+
+per_dataset_group_vars <- c(
+  "dataset_bundle_id", "run_id", "spec_name", "use_case_id",
+  "annotation_r2", "group_key", "explore_method", "agg_method", "variant_id"
 )
-auprc_individual <- auprc_per_dataset %>% dplyr::filter(is.na(agg_method))
-auprc_agg_per_ds <- auprc_per_dataset %>% dplyr::filter(!is.na(agg_method))
+pooled_agg_overall_vars <- c("spec_name", "use_case_id", "agg_method")
+pooled_agg_by_r2_vars <- c("spec_name", "use_case_id", "agg_method", "annotation_r2")
+pooled_individual_overall_vars <- c("spec_name", "use_case_id")
+pooled_individual_by_r2_vars <- c("spec_name", "use_case_id", "annotation_r2")
+pooled_curve_agg_vars <- c("spec_name", "agg_method")
+
+# Per-dataset AUPRC (needed for oracle selection per dataset)
+per_dataset_individual_bins <- pool_confusion_summary(
+  confusion_individual,
+  per_dataset_group_vars,
+  "Per-dataset individual"
+)
+per_dataset_agg_bins <- pool_confusion_summary(
+  confusion_agg,
+  per_dataset_group_vars,
+  "Per-dataset aggregated"
+)
+auprc_individual <- compute_auprc_from_pooled(
+  per_dataset_individual_bins,
+  group_vars = per_dataset_group_vars,
+  label = "Per-dataset individual AUPRC",
+  progress = TRUE,
+  progress_every = 500L
+)
+auprc_agg_per_ds <- compute_auprc_from_pooled(
+  per_dataset_agg_bins,
+  group_vars = per_dataset_group_vars,
+  label = "Per-dataset aggregated AUPRC",
+  progress = TRUE,
+  progress_every = 500L
+)
+auprc_per_dataset <- dplyr::bind_rows(auprc_individual, auprc_agg_per_ds)
 
 cat("Per-dataset AUPRC:", nrow(auprc_per_dataset), "rows\n")
 cat("  Individual fits:", nrow(auprc_individual), "\n")
@@ -169,28 +265,52 @@ cat("  Aggregated:", nrow(auprc_agg_per_ds), "\n")
 
 # Pooled AUPRC: combine confusion bins across ALL datasets, then
 # compute one AUPRC per (spec, agg_method). Used for overall barplot.
-auprc_pooled_agg <- compute_auprc_from_confusion(
-  confusion_bins_full %>% dplyr::filter(!is.na(agg_method)),
-  group_vars = c("spec_name", "use_case_id", "agg_method")
+pooled_agg_bins_overall <- pool_confusion_summary(
+  confusion_agg,
+  pooled_agg_overall_vars,
+  "Pooled aggregated overall"
+)
+auprc_pooled_agg <- compute_auprc_from_pooled(
+  pooled_agg_bins_overall,
+  group_vars = pooled_agg_overall_vars,
+  label = "Pooled aggregated overall AUPRC"
 )
 
 # By-annotation-r2 pooled agg: one AUPRC per (spec, agg_method, annotation_r2).
 # Used for per-r2 barplots; annotation-independent specs have annotation_r2=NA.
-auprc_pooled_agg_by_r2 <- compute_auprc_from_confusion(
-  confusion_bins_full %>% dplyr::filter(!is.na(agg_method)),
-  group_vars = c("spec_name", "use_case_id", "agg_method", "annotation_r2")
+pooled_agg_bins_by_r2 <- pool_confusion_summary(
+  confusion_agg,
+  pooled_agg_by_r2_vars,
+  "Pooled aggregated by r2"
+)
+auprc_pooled_agg_by_r2 <- compute_auprc_from_pooled(
+  pooled_agg_bins_by_r2,
+  group_vars = pooled_agg_by_r2_vars,
+  label = "Pooled aggregated by-r2 AUPRC"
 )
 
 # Overall pooled individual (pooled across all r2 — for overall barplot truth-warm lines)
-auprc_pooled_individual_overall <- compute_auprc_from_confusion(
-  confusion_bins_full %>% dplyr::filter(is.na(agg_method)),
-  group_vars = c("spec_name", "use_case_id")
+pooled_individual_bins_overall <- pool_confusion_summary(
+  confusion_individual,
+  pooled_individual_overall_vars,
+  "Pooled individual overall"
+)
+auprc_pooled_individual_overall <- compute_auprc_from_pooled(
+  pooled_individual_bins_overall,
+  group_vars = pooled_individual_overall_vars,
+  label = "Pooled individual overall AUPRC"
 )
 
 # By-r2 pooled individual (for per-r2 barplot truth-warm lines)
-auprc_pooled_individual <- compute_auprc_from_confusion(
-  confusion_bins_full %>% dplyr::filter(is.na(agg_method)),
-  group_vars = c("spec_name", "use_case_id", "annotation_r2")
+pooled_individual_bins_by_r2 <- pool_confusion_summary(
+  confusion_individual,
+  pooled_individual_by_r2_vars,
+  "Pooled individual by r2"
+)
+auprc_pooled_individual <- compute_auprc_from_pooled(
+  pooled_individual_bins_by_r2,
+  group_vars = pooled_individual_by_r2_vars,
+  label = "Pooled individual by-r2 AUPRC"
 )
 
 cat("Pooled aggregated (overall):", nrow(auprc_pooled_agg), "combos\n")
@@ -199,10 +319,16 @@ cat("Pooled individual (overall):", nrow(auprc_pooled_individual_overall), "comb
 cat("Pooled individual (by r2):", nrow(auprc_pooled_individual), "combos\n")
 
 # Pooled TPR/FPR curves (for ROC-style plots)
-curves_pooled_agg <- compute_power_fdr_curves(
-  confusion_bins_full %>% dplyr::filter(!is.na(agg_method)),
-  group_vars = c("spec_name", "agg_method")
+pooled_curve_agg_bins <- pool_confusion_summary(
+  confusion_agg,
+  pooled_curve_agg_vars,
+  "Pooled ROC aggregated"
 )
+curves_pooled_agg <- compute_power_fdr_curves(
+  pooled_curve_agg_bins,
+  group_vars = pooled_curve_agg_vars
+)
+invisible(gc())
 ```
 
 # 4b. TPR @ FPR=0.05 from Confusion Bins
@@ -212,42 +338,44 @@ then scan thresholds to find TPR at the FPR = 0.05 crossing. No per-dataset
 averaging.
 
 ```{r compute-tpr05}
-compute_tpr05_from_confusion <- function(bins, group_vars, fpr_target = 0.05) {
-  bins %>%
-    dplyr::group_by(dplyr::across(dplyr::all_of(group_vars))) %>%
-    dplyr::arrange(dplyr::desc(pip_threshold), .by_group = TRUE) %>%
-    dplyr::mutate(
-      cum_tp  = cumsum(n_causal_at_bucket),
-      cum_fp  = cumsum(n_noncausal_at_bucket),
-      total_p = sum(n_causal_at_bucket),
-      total_n = sum(n_noncausal_at_bucket)
-    ) %>%
-    dplyr::filter(total_p > 0, total_n > 0) %>%
-    dplyr::mutate(tpr = cum_tp / total_p, fpr = cum_fp / total_n) %>%
-    dplyr::filter(fpr <= fpr_target) %>%
-    dplyr::slice_tail(n = 1) %>%
-    dplyr::ungroup() %>%
-    dplyr::select(dplyr::all_of(group_vars), tpr_fpr05 = tpr)
+compute_tpr05_from_pooled <- function(pooled_bins,
+                                      group_vars,
+                                      label,
+                                      fpr_target = 0.05,
+                                      progress = FALSE,
+                                      progress_every = 1000L) {
+  test_susine:::compute_tpr05_from_pooled_confusion(
+    pooled_bins,
+    group_vars = group_vars,
+    fpr_target = fpr_target,
+    progress = progress,
+    progress_every = progress_every,
+    progress_label = label
+  )
 }
 
-tpr05_pooled_agg <- compute_tpr05_from_confusion(
-  confusion_bins_full %>% dplyr::filter(!is.na(agg_method)),
-  group_vars = c("spec_name", "use_case_id", "agg_method")
+tpr05_pooled_agg <- compute_tpr05_from_pooled(
+  pooled_agg_bins_overall,
+  group_vars = pooled_agg_overall_vars,
+  label = "Pooled aggregated overall TPR@0.05"
 )
 
-tpr05_pooled_agg_by_r2 <- compute_tpr05_from_confusion(
-  confusion_bins_full %>% dplyr::filter(!is.na(agg_method)),
-  group_vars = c("spec_name", "use_case_id", "agg_method", "annotation_r2")
+tpr05_pooled_agg_by_r2 <- compute_tpr05_from_pooled(
+  pooled_agg_bins_by_r2,
+  group_vars = pooled_agg_by_r2_vars,
+  label = "Pooled aggregated by-r2 TPR@0.05"
 )
 
-tpr05_pooled_individual_overall <- compute_tpr05_from_confusion(
-  confusion_bins_full %>% dplyr::filter(is.na(agg_method)),
-  group_vars = c("spec_name", "use_case_id")
+tpr05_pooled_individual_overall <- compute_tpr05_from_pooled(
+  pooled_individual_bins_overall,
+  group_vars = pooled_individual_overall_vars,
+  label = "Pooled individual overall TPR@0.05"
 )
 
-tpr05_pooled_individual <- compute_tpr05_from_confusion(
-  confusion_bins_full %>% dplyr::filter(is.na(agg_method)),
-  group_vars = c("spec_name", "use_case_id", "annotation_r2")
+tpr05_pooled_individual <- compute_tpr05_from_pooled(
+  pooled_individual_bins_by_r2,
+  group_vars = pooled_individual_by_r2_vars,
+  label = "Pooled individual by-r2 TPR@0.05"
 )
 
 cat("TPR@0.05 pooled aggregated (overall):", nrow(tpr05_pooled_agg), "combos\n")
@@ -283,19 +411,31 @@ auprc_combined <- dplyr::bind_rows(auprc_agg_per_ds, oracle_per_ds)
 
 # Pooled oracle AUPRC: pull confusion bins for the oracle-selected runs,
 # pool across all datasets, then compute one AUPRC per spec.
-oracle_confusion <- confusion_bins_full %>%
-  dplyr::filter(is.na(agg_method)) %>%
+oracle_confusion <- confusion_individual %>%
   dplyr::semi_join(oracle_run_ids, by = c("run_id", "spec_name", "use_case_id"))
 
-auprc_pooled_oracle <- compute_auprc_from_confusion(
+pooled_oracle_bins_overall <- pool_confusion_summary(
   oracle_confusion,
-  group_vars = c("spec_name", "use_case_id")
+  pooled_individual_overall_vars,
+  "Pooled oracle overall"
+)
+pooled_oracle_bins_by_r2 <- pool_confusion_summary(
+  oracle_confusion,
+  pooled_individual_by_r2_vars,
+  "Pooled oracle by r2"
+)
+
+auprc_pooled_oracle <- compute_auprc_from_pooled(
+  pooled_oracle_bins_overall,
+  group_vars = pooled_individual_overall_vars,
+  label = "Pooled oracle overall AUPRC"
 ) %>%
   dplyr::mutate(agg_method = "oracle")
 
-auprc_pooled_oracle_by_r2 <- compute_auprc_from_confusion(
-  oracle_confusion,
-  group_vars = c("spec_name", "use_case_id", "annotation_r2")
+auprc_pooled_oracle_by_r2 <- compute_auprc_from_pooled(
+  pooled_oracle_bins_by_r2,
+  group_vars = pooled_individual_by_r2_vars,
+  label = "Pooled oracle by-r2 AUPRC"
 ) %>%
   dplyr::mutate(agg_method = "oracle")
 
@@ -307,15 +447,17 @@ auprc_pooled_agg <- dplyr::bind_rows(auprc_pooled_agg, auprc_pooled_oracle)
 auprc_pooled_agg_by_r2 <- dplyr::bind_rows(auprc_pooled_agg_by_r2, auprc_pooled_oracle_by_r2)
 
 # Oracle TPR@0.05 (uses same oracle_confusion bins)
-tpr05_pooled_oracle <- compute_tpr05_from_confusion(
-  oracle_confusion,
-  group_vars = c("spec_name", "use_case_id")
+tpr05_pooled_oracle <- compute_tpr05_from_pooled(
+  pooled_oracle_bins_overall,
+  group_vars = pooled_individual_overall_vars,
+  label = "Pooled oracle overall TPR@0.05"
 ) %>%
   dplyr::mutate(agg_method = "oracle")
 
-tpr05_pooled_oracle_by_r2 <- compute_tpr05_from_confusion(
-  oracle_confusion,
-  group_vars = c("spec_name", "use_case_id", "annotation_r2")
+tpr05_pooled_oracle_by_r2 <- compute_tpr05_from_pooled(
+  pooled_oracle_bins_by_r2,
+  group_vars = pooled_individual_by_r2_vars,
+  label = "Pooled oracle by-r2 TPR@0.05"
 ) %>%
   dplyr::mutate(agg_method = "oracle")
 
@@ -401,6 +543,8 @@ readr::write_csv(auprc_pooled_agg_by_r2, file.path(out_dir, "auprc_pooled_agg_by
 readr::write_csv(auprc_pooled_individual_overall, file.path(out_dir, "auprc_pooled_individual_overall.csv"))
 readr::write_csv(auprc_pooled_individual, file.path(out_dir, "auprc_pooled_individual.csv"))
 readr::write_csv(model_metrics, file.path(out_dir, "model_metrics_full.csv"))
+confusion_bins_full <- dplyr::bind_rows(confusion_individual, confusion_agg) %>%
+  dplyr::select(dplyr::all_of(confusion_output_cols))
 readr::write_csv(confusion_bins_full, file.path(out_dir, "confusion_bins_full.csv"))
 if (nrow(dataset_metrics)) {
   readr::write_csv(dataset_metrics, file.path(out_dir, "dataset_metrics.csv"))
@@ -426,6 +570,8 @@ readr::write_csv(tpr05_pooled_agg, file.path(out_dir, "tpr05_pooled_aggregated.c
 readr::write_csv(tpr05_pooled_agg_by_r2, file.path(out_dir, "tpr05_pooled_agg_by_r2.csv"))
 readr::write_csv(tpr05_pooled_individual_overall, file.path(out_dir, "tpr05_pooled_individual_overall.csv"))
 readr::write_csv(tpr05_pooled_individual, file.path(out_dir, "tpr05_pooled_individual.csv"))
+rm(confusion_bins_full)
+invisible(gc())
 
 cat("Consolidated outputs written to:", out_dir, "\n")
 cat("Files:", paste(list.files(out_dir), collapse = ", "), "\n")

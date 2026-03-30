@@ -4,17 +4,29 @@
 \alias{compute_auprc_from_confusion}
 \title{Compute AUPRC from pre-aggregated confusion matrix}
 \usage{
-compute_auprc_from_confusion(confusion_df, group_vars)
+compute_auprc_from_confusion(
+  confusion_df,
+  group_vars,
+  progress = FALSE,
+  progress_every = 1000L,
+  progress_label = NULL
+)
 }
 \arguments{
 \item{confusion_df}{Data frame with per-bucket counts}
 
 \item{group_vars}{Character vector of columns to group by for AUPRC calculation}
+
+\item{progress}{Logical; when TRUE, emit periodic progress messages}
+
+\item{progress_every}{Integer; emit a progress message every N groups}
+
+\item{progress_label}{Optional label included in progress messages}
 }
 \value{
 Data frame with group_vars and AUPRC column
 }
 \description{
-Integrates the precision-recall curve using trapezoidal rule,
-anchored at (recall=0, precision=1).
+Computes average precision directly from grouped bucket counts, avoiding
+full precision-recall curve materialization.
 }
