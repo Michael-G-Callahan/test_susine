@@ -17,6 +17,7 @@ Imports:
     susine,
     arrow,
     filelock,
+    data.table,
     dplyr,
     magrittr,
     tidyr,

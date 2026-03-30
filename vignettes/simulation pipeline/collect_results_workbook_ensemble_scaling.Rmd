@@ -208,6 +208,12 @@ Uses pooled confusion-bin summaries plus the direct AP implementation in
 `test_susine::compute_auprc_from_confusion()`.
 
 ```{r compute-auprc}
+cat(
+  "Confusion pooling backend:",
+  if (requireNamespace("data.table", quietly = TRUE)) "data.table" else "dplyr fallback",
+  "\n"
+)
+
 pool_confusion_summary <- function(bins,
                                    group_vars,
                                    label,
@@ -215,8 +221,17 @@ pool_confusion_summary <- function(bins,
                                    chunk_size = 25L) {
   log_stage(sprintf("%s: pooling bins", label))
 
-  if (is.null(chunk_var) && "dataset_bundle_id" %in% names(bins)) {
-    chunk_var <- "dataset_bundle_id"
+  if (is.null(chunk_var)) {
+    preferred_chunk_vars <- c(
+      "dataset_bundle_id", "spec_name", "use_case_id",
+      "agg_method", "annotation_r2", "run_id"
+    )
+    available <- intersect(preferred_chunk_vars, intersect(group_vars, names(bins)))
+    if (length(available)) {
+      chunk_var <- available[[1]]
+    } else if ("dataset_bundle_id" %in% names(bins)) {
+      chunk_var <- "dataset_bundle_id"
+    }
   }
   chunk_size <- max(1L, as.integer(chunk_size))
 
@@ -233,8 +248,7 @@ pool_confusion_summary <- function(bins,
 
   for (i in seq_along(chunk_groups)) {
     ids <- chunk_groups[[i]]
-    chunk_bins <- bins %>%
-      dplyr::filter(.data[[chunk_var]] %in% ids)
+    chunk_bins <- bins[bins[[chunk_var]] %in% ids, , drop = FALSE]
     partials[[i]] <- test_susine:::pool_confusion_bins(chunk_bins, group_vars)
     cat(sprintf("  -> %s chunk %d/%d (%d %s values)\n",
                 label, i, length(chunk_groups), length(ids), chunk_var))
@@ -242,10 +256,19 @@ pool_confusion_summary <- function(bins,
     invisible(gc())
   }
 
-  pooled <- test_susine:::pool_confusion_bins(
-    dplyr::bind_rows(partials),
-    group_vars
-  )
+  combined_partials <- dplyr::bind_rows(partials)
+  if (chunk_var %in% group_vars) {
+    cat(sprintf("  -> %s chunk outputs are disjoint by %s; skipping final re-pool\n",
+                label, chunk_var))
+    pooled <- combined_partials
+  } else {
+    cat(sprintf("  -> %s binding partials complete; starting final re-pool\n", label))
+    pooled <- test_susine:::pool_confusion_bins(
+      combined_partials,
+      group_vars
+    )
+    cat(sprintf("  -> %s final re-pool complete\n", label))
+  }
   cat(label, "pooled rows:", nrow(pooled), "\n")
   pooled
 }
@@ -290,14 +313,14 @@ auprc_individual <- compute_auprc_from_pooled(
   group_vars = per_dataset_group_vars,
   label = "Per-dataset individual AUPRC",
   progress = TRUE,
-  progress_every = 500L
+  progress_every = 5000L
 )
 auprc_agg_per_ds <- compute_auprc_from_pooled(
   per_dataset_agg_bins,
   group_vars = per_dataset_group_vars,
   label = "Per-dataset aggregated AUPRC",
   progress = TRUE,
-  progress_every = 500L
+  progress_every = 5000L
 )
 auprc_per_dataset <- dplyr::bind_rows(auprc_individual, auprc_agg_per_ds)
 
