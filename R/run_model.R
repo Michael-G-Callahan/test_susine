@@ -1057,20 +1057,60 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
     agg_methods <- job_config$job$compute$aggregation_methods %||% character(0)
     softmax_temperature <- as.numeric(job_config$job$compute$softmax_temperature %||% 1)
     group_keys <- names(primary_pips_by_group)
+    need_scaling_bins <- !is.null(buffer_ctx) &&
+      isTRUE(job_config$job$compute$write_scaling_confusion_bins)
+    full_group_cache <- list()
     if (length(group_keys) > 0 && length(agg_methods)) {
       for (group_key in group_keys) {
         group_pips <- primary_pips_by_group[[group_key]]
         group_elbos <- primary_elbos_by_group[[group_key]]
         if (length(group_pips) > 1) {
+          group_cache <- prepare_pip_similarity_cache(
+            do.call(rbind, lapply(group_pips, as.numeric))
+          )
+          pip_mat_cols <- t(group_cache$pips_mat)
+          agg_methods_full <- unique(c(
+            agg_methods,
+            if (need_scaling_bins) "cluster_weight_050" else character(0)
+          ))
           agg_results <- aggregate_use_case_pips(
             pip_list = group_pips,
             elbo_vec = group_elbos,
-            methods = agg_methods,
+            methods = agg_methods_full,
             softmax_temperature = softmax_temperature,
-            jsd_threshold = job_config$job$metrics$jsd_threshold %||% 0.15
+            jsd_threshold = job_config$job$metrics$jsd_threshold %||% 0.15,
+            pip_cache = group_cache
           )
+          full_group_bins <- list()
+          if (need_scaling_bins) {
+            scaling_methods <- c("uniform", "max_elbo", "elbo_softmax",
+                                 "cluster_weight", "cluster_weight_050")
+            for (sm in scaling_methods) {
+              agg_pip_scaling <- aggregate_pip_matrix(
+                pip_mat_cols,
+                group_elbos,
+                sm,
+                hc = group_cache$hc %||% NULL
+              )
+              full_group_bins[[sm]] <- compute_confusion_bins(
+                agg_pip_scaling,
+                as.integer(seq_along(data_bundle$beta) %in% data_bundle$causal_idx),
+                pip_bucket_width = job_config$job$metrics$pip_bucket_width %||% 0.01,
+                pip_breaks = job_config$job$metrics$pip_breaks,
+                causal_mask = top8_causal_mask
+              )
+            }
+          }
           for (m in names(agg_results)) {
             agg_pip <- agg_results[[m]]
+            conf_bins <- compute_confusion_bins(
+              agg_pip,
+              as.integer(seq_along(data_bundle$beta) %in% data_bundle$causal_idx),
+              pip_bucket_width = job_config$job$metrics$pip_bucket_width %||% 0.01,
+              pip_breaks = job_config$job$metrics$pip_breaks,
+              causal_mask = top8_causal_mask
+            )
+            if (!m %in% agg_methods) next
             agg_meta <- list(
               explore_method = "aggregation",
               variant_id = m,
@@ -1078,13 +1118,6 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
               agg_ess = as.numeric(attr(agg_pip, "ess") %||% NA_real_),
               is_restart = FALSE,
               is_agg = TRUE
-            )
-            conf_bins <- compute_confusion_bins(
-              agg_pip,
-              as.integer(seq_along(data_bundle$beta) %in% data_bundle$causal_idx),
-              pip_bucket_width = job_config$job$metrics$pip_bucket_width %||% 0.01,
-              pip_breaks = job_config$job$metrics$pip_breaks,
-              causal_mask = top8_causal_mask
             )
             agg_run_row <- group_run_map[[group_key]] %||% uc_runs[1, , drop = FALSE]
             agg_run_row$restart_id <- NA_integer_
@@ -1100,12 +1133,17 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
               variant_meta = agg_meta
             )
           }
+          full_group_cache[[group_key]] <- list(
+            pip_cache = group_cache,
+            agg_results = agg_results,
+            bins = full_group_bins
+          )
         }
       }
     }
 
     # Scaling confusion bins (subsample-N ensemble analysis stored as bins).
-    if (!is.null(buffer_ctx) && isTRUE(job_config$job$compute$write_scaling_confusion_bins)) {
+    if (need_scaling_bins) {
       sc_n_sizes     <- as.integer(job_config$job$compute$scaling_n_ens_sizes %||% c(4L, 8L, 16L, 32L, 64L))
       sc_restart_reps <- as.integer(job_config$job$compute$scaling_restart_reps %||% 50L)
       sc_pip_breaks  <- job_config$job$metrics$pip_breaks
@@ -1127,7 +1165,8 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
           n_restart_reps   = sc_restart_reps,
           pip_breaks       = sc_pip_breaks,
           pip_bw           = sc_pip_bw,
-          dataset_bundle_id = bundle_id
+          dataset_bundle_id = bundle_id,
+          full_agg_cache    = full_group_cache[[group_key]]
         )
         if (!is.null(sc_bins) && nrow(sc_bins)) {
           buffer_ctx$buffers$scaling_bins[[
@@ -1151,7 +1190,8 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
             elbo_vec          = elbo_vec,
             y                 = data_bundle$y,
             group_run_row     = grr,
-            dataset_bundle_id = bundle_id
+            dataset_bundle_id = bundle_id,
+            pip_cache         = full_group_cache[[group_key]]$pip_cache %||% NULL
           )
           if (!is.null(hg2_tbl) && nrow(hg2_tbl) > 0L) {
             buffer_ctx$buffers$hg2_by_agg[[
@@ -1165,7 +1205,11 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
     for (group_key in names(primary_pips_by_group)) {
       group_pips <- primary_pips_by_group[[group_key]]
       if (length(group_pips) > 1) {
-        mm <- compute_multimodal_metrics(group_pips, jsd_threshold = job_config$job$metrics$jsd_threshold %||% 0.15)
+        mm <- compute_multimodal_metrics(
+          group_pips,
+          jsd_threshold = job_config$job$metrics$jsd_threshold %||% 0.15,
+          pip_cache = full_group_cache[[group_key]]$pip_cache %||% NULL
+        )
         # Extract explore method from group_key (e.g., "L=10|...|explore=separate:restart" -> "restart")
         gk_explore <- sub(".*explore=[^:]*:", "", group_key)
         write_multimodal_metrics(
@@ -1705,17 +1749,50 @@ softmax_weights <- function(x, temperature = 1) {
   w / sum(w)
 }
 
+prepare_pip_similarity_cache <- function(pips_mat) {
+  n <- nrow(pips_mat)
+  if (n < 2L) {
+    return(list(
+      pips_mat = pips_mat,
+      jsd_vals = numeric(0),
+      jsd_mat = matrix(0, n, n),
+      hc = NULL
+    ))
+  }
+
+  jsd_vals <- numeric(n * (n - 1L) / 2L)
+  jsd_mat <- matrix(0, n, n)
+  idx <- 1L
+  for (i in seq_len(n - 1L)) {
+    for (j in seq.int(i + 1L, n)) {
+      d <- js_distance(pips_mat[i, ], pips_mat[j, ])
+      jsd_vals[[idx]] <- d
+      jsd_mat[i, j] <- d
+      jsd_mat[j, i] <- d
+      idx <- idx + 1L
+    }
+  }
+
+  list(
+    pips_mat = pips_mat,
+    jsd_vals = jsd_vals,
+    jsd_mat = jsd_mat,
+    hc = stats::hclust(stats::as.dist(jsd_mat), method = "complete")
+  )
+}
+
 aggregate_use_case_pips <- function(pip_list,
                                     elbo_vec,
                                     methods = c("elbo_softmax"),
                                     softmax_temperature = 1,
-                                    jsd_threshold = 0.15) {
+                                    jsd_threshold = 0.15,
+                                    pip_cache = NULL) {
   methods <- unique(as.character(methods))
   methods[methods == "softmax_elbo"] <- "elbo_softmax"
   methods[methods == "mean"] <- "uniform"
   res <- list()
   if (!length(pip_list)) return(res)
-  pips_mat <- do.call(rbind, lapply(pip_list, as.numeric))
+  pips_mat <- pip_cache$pips_mat %||% do.call(rbind, lapply(pip_list, as.numeric))
   if ("uniform" %in% methods) {
     res$uniform <- colMeans(pips_mat)
   }
@@ -1727,29 +1804,47 @@ aggregate_use_case_pips <- function(pip_list,
     w <- softmax_weights(elbo_vec, temperature = softmax_temperature)
     res$elbo_softmax <- as.numeric(crossprod(w, pips_mat))
   }
-  if ("cluster_weight" %in% methods && length(elbo_vec) > 1 && nrow(pips_mat) > 1) {
-    n <- nrow(pips_mat)
+  if (any(methods %in% c("cluster_weight", "cluster_weight_050")) &&
+      length(elbo_vec) > 1 && nrow(pips_mat) > 1) {
+    hc_jsd <- pip_cache$hc %||% prepare_pip_similarity_cache(pips_mat)$hc
 
-    # Compute categorical JSD distance matrix -----
-    jsd_mat <- matrix(0, n, n)
-    for (i in 1:(n - 1)) {
-      for (j in (i + 1):n) {
-        d <- js_distance(pips_mat[i, ], pips_mat[j, ])
-        jsd_mat[i, j] <- d
-        jsd_mat[j, i] <- d
-      }
+    if ("cluster_weight" %in% methods) {
+      # cluster_weight: categorical JSD at jsd_threshold (default 0.15) -----
+      res$cluster_weight <- .cluster_weight_from_hc(
+        hc_jsd, jsd_threshold, elbo_vec, pips_mat, softmax_temperature
+      )
     }
-    hc_jsd <- stats::hclust(stats::as.dist(jsd_mat), method = "complete")
 
-    # cluster_weight: categorical JSD at jsd_threshold (default 0.15) -----
-    res$cluster_weight <- .cluster_weight_from_hc(
-      hc_jsd, jsd_threshold, elbo_vec, pips_mat, softmax_temperature
-    )
+    if ("cluster_weight_050" %in% methods) {
+      # cluster_weight_050: categorical JSD at 0.50 threshold -----
+      res$cluster_weight_050 <- .cluster_weight_from_hc(
+        hc_jsd, 0.50, elbo_vec, pips_mat, softmax_temperature
+      )
+    }
 
-    # cluster_weight_jsd_050: categorical JSD at 0.50 threshold -----
+    if ("cluster_weight_jsd_050" %in% methods) {
+      # Backward-compatible alias.
+      res$cluster_weight_jsd_050 <- .cluster_weight_from_hc(
+        hc_jsd, 0.50, elbo_vec, pips_mat, softmax_temperature
+      )
+    }
+  }
+  if ("cluster_weight_jsd_050" %in% methods &&
+      !("cluster_weight_jsd_050" %in% names(res)) &&
+      length(elbo_vec) > 1 && nrow(pips_mat) > 1) {
+    hc_jsd <- pip_cache$hc %||% prepare_pip_similarity_cache(pips_mat)$hc
     res$cluster_weight_jsd_050 <- .cluster_weight_from_hc(
       hc_jsd, 0.50, elbo_vec, pips_mat, softmax_temperature
     )
+  }
+  if ("cluster_weight" %in% methods && !(length(elbo_vec) > 1 && nrow(pips_mat) > 1)) {
+    res$cluster_weight <- as.numeric(crossprod(softmax_weights(elbo_vec, temperature = softmax_temperature), pips_mat))
+  }
+  if ("cluster_weight_050" %in% methods && !(length(elbo_vec) > 1 && nrow(pips_mat) > 1)) {
+    res$cluster_weight_050 <- as.numeric(crossprod(softmax_weights(elbo_vec, temperature = softmax_temperature), pips_mat))
+  }
+  if ("cluster_weight_jsd_050" %in% methods && !(length(elbo_vec) > 1 && nrow(pips_mat) > 1)) {
+    res$cluster_weight_jsd_050 <- as.numeric(crossprod(softmax_weights(elbo_vec, temperature = softmax_temperature), pips_mat))
   }
   res
 }
@@ -1802,7 +1897,10 @@ js_distance <- function(p, q, eps = 1e-12) {
   0.5 * kl(p, m) + 0.5 * kl(q, m)
 }
 
-compute_multimodal_metrics <- function(pip_list, jsd_threshold = 0.15, top_k = 10L) {
+compute_multimodal_metrics <- function(pip_list,
+                                       jsd_threshold = 0.15,
+                                       top_k = 10L,
+                                       pip_cache = NULL) {
   n <- length(pip_list)
   if (n < 2) {
     return(tibble::tibble(
@@ -1815,15 +1913,9 @@ compute_multimodal_metrics <- function(pip_list, jsd_threshold = 0.15, top_k = 1
       n_clusters_jsd_050 = NA_integer_
     ))
   }
-  pips_mat <- do.call(rbind, lapply(pip_list, as.numeric))
-
-  # Pairwise categorical JSD
-  jsd_vals <- c()
-  for (i in 1:(n - 1)) {
-    for (j in (i + 1):n) {
-      jsd_vals <- c(jsd_vals, js_distance(pips_mat[i, ], pips_mat[j, ]))
-    }
-  }
+  pips_mat <- pip_cache$pips_mat %||% do.call(rbind, lapply(pip_list, as.numeric))
+  pip_cache <- pip_cache %||% prepare_pip_similarity_cache(pips_mat)
+  jsd_vals <- pip_cache$jsd_vals
 
   # Jaccard top-k (mean across pairs)
   k <- as.integer(top_k)
@@ -1842,18 +1934,7 @@ compute_multimodal_metrics <- function(pip_list, jsd_threshold = 0.15, top_k = 1
 
   # PIP variance
   pip_var <- mean(apply(pips_mat, 2, stats::var, na.rm = TRUE))
-
-  # Cluster counts via categorical JSD
-  jsd_mat <- matrix(0, n, n)
-  idx <- 1L
-  for (i in 1:(n - 1)) {
-    for (j in (i + 1):n) {
-      jsd_mat[i, j] <- jsd_vals[idx]
-      jsd_mat[j, i] <- jsd_vals[idx]
-      idx <- idx + 1L
-    }
-  }
-  hc_jsd <- stats::hclust(stats::as.dist(jsd_mat), method = "complete")
+  hc_jsd <- pip_cache$hc
 
   tibble::tibble(
     mean_jsd = mean(jsd_vals),
@@ -2233,7 +2314,8 @@ compute_scaling_confusion_bins_for_group <- function(pip_list,
                                                       n_restart_reps = 50L,
                                                       pip_breaks = NULL,
                                                       pip_bw = 0.01,
-                                                      dataset_bundle_id = NA_character_) {
+                                                      dataset_bundle_id = NA_character_,
+                                                      full_agg_cache = NULL) {
   N <- length(pip_list)
   pip_mat <- do.call(cbind, pip_list)  # p x N
 
@@ -2259,6 +2341,31 @@ compute_scaling_confusion_bins_for_group <- function(pip_list,
       return(vals[seq_len(n_keep)])
     }
     vals[unique(round(seq(1, length(vals), length.out = n_keep)))]
+  }
+
+  compute_bins_for_subset <- function(sel_idx, agg_method) {
+    is_full_subset <- length(sel_idx) == N && identical(sort(sel_idx), seq_len(N))
+    if (is_full_subset && !is.null(full_agg_cache$bins[[agg_method]])) {
+      return(full_agg_cache$bins[[agg_method]])
+    }
+
+    sub_pip_mat <- pip_mat[, sel_idx, drop = FALSE]
+    sub_elbos   <- elbo_vec[sel_idx]
+    subset_cache <- NULL
+    if (agg_method %in% c("cluster_weight", "cluster_weight_050")) {
+      subset_cache <- prepare_pip_similarity_cache(t(sub_pip_mat))
+    }
+    agg_pip <- tryCatch(
+      aggregate_pip_matrix(sub_pip_mat, sub_elbos, agg_method,
+                           hc = subset_cache$hc %||% NULL),
+      error = function(e) NULL
+    )
+    if (is.null(agg_pip)) return(NULL)
+    compute_confusion_bins(
+      agg_pip, causal_vec,
+      pip_bucket_width = pip_bw, pip_breaks = pip_breaks,
+      causal_mask = causal_mask
+    )
   }
 
   if (is_interaction) {
@@ -2316,19 +2423,8 @@ compute_scaling_confusion_bins_for_group <- function(pip_list,
       sel_idx <- match(sub_meta$run_id, run_meta$run_id)
       sel_idx <- sel_idx[!is.na(sel_idx)]
       if (!length(sel_idx)) next
-      sub_pip_mat <- pip_mat[, sel_idx, drop = FALSE]
-      sub_elbos   <- elbo_vec[sel_idx]
       for (am in agg_methods) {
-        agg_pip <- tryCatch(
-          aggregate_pip_matrix(sub_pip_mat, sub_elbos, am),
-          error = function(e) NULL
-        )
-        if (is.null(agg_pip)) next
-        bins <- compute_confusion_bins(
-          agg_pip, causal_vec,
-          pip_bucket_width = pip_bw, pip_breaks = pip_breaks,
-          causal_mask = causal_mask
-        )
+        bins <- compute_bins_for_subset(sel_idx, am)
         if (!is.null(bins) && nrow(bins)) {
           results[[length(results) + 1L]] <- dplyr::mutate(bins,
             spec_name         = spec_nm,
@@ -2359,19 +2455,8 @@ compute_scaling_confusion_bins_for_group <- function(pip_list,
         sel_idx <- match(sel_ids, run_meta$run_id)
         sel_idx <- sel_idx[!is.na(sel_idx)]
         if (!length(sel_idx)) next
-        sub_pip_mat <- pip_mat[, sel_idx, drop = FALSE]
-        sub_elbos   <- elbo_vec[sel_idx]
         for (am in agg_methods) {
-          agg_pip <- tryCatch(
-            aggregate_pip_matrix(sub_pip_mat, sub_elbos, am),
-            error = function(e) NULL
-          )
-          if (is.null(agg_pip)) next
-          bins <- compute_confusion_bins(
-            agg_pip, causal_vec,
-            pip_bucket_width = pip_bw, pip_breaks = pip_breaks,
-            causal_mask = causal_mask
-          )
+          bins <- compute_bins_for_subset(sel_idx, am)
           if (!is.null(bins) && nrow(bins)) {
             results[[length(results) + 1L]] <- dplyr::mutate(bins,
               spec_name         = spec_nm,
@@ -2404,7 +2489,8 @@ compute_hg2_by_agg <- function(pip_list,
                                 elbo_vec,
                                 y,
                                 group_run_row,
-                                dataset_bundle_id = NA_character_) {
+                                dataset_bundle_id = NA_character_,
+                                pip_cache = NULL) {
   valid <- !vapply(fitted_y_list, is.null, logical(1L))
   pip_list      <- pip_list[valid]
   fitted_y_list <- fitted_y_list[valid]
@@ -2416,24 +2502,11 @@ compute_hg2_by_agg <- function(pip_list,
 
   # K x n matrix of fitted values; K x p matrix of PIPs (for JSD clustering)
   fy_mat  <- do.call(rbind, lapply(fitted_y_list, as.numeric))  # K x n
-  pip_mat <- do.call(rbind, lapply(pip_list, as.numeric))       # K x p
+  pip_mat <- pip_cache$pips_mat %||% do.call(rbind, lapply(pip_list, as.numeric))       # K x p
 
   # JSD-based hierarchical clustering on PIP vectors (same as confusion bins)
-  hc <- NULL
-  if (K > 1L) {
-    hc <- tryCatch({
-      n_pip <- nrow(pip_mat)
-      jsd_mat <- matrix(0, n_pip, n_pip)
-      for (i in seq_len(n_pip - 1L)) {
-        for (j in seq(i + 1L, n_pip)) {
-          d <- js_distance(pip_mat[i, ], pip_mat[j, ])
-          jsd_mat[i, j] <- d
-          jsd_mat[j, i] <- d
-        }
-      }
-      stats::hclust(stats::as.dist(jsd_mat), method = "complete")
-    }, error = function(e) NULL)
-  }
+  pip_cache <- pip_cache %||% if (K > 1L) prepare_pip_similarity_cache(pip_mat) else NULL
+  hc <- pip_cache$hc %||% NULL
 
   agg_methods <- c("uniform", "max_elbo", "elbo_softmax",
                    "cluster_weight", "cluster_weight_050")
@@ -2722,4 +2795,3 @@ load_sampled_matrix <- function(matrix_row, repo_root) {
   storage.mode(X) <- "numeric"
   X
 }
-

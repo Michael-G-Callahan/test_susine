@@ -463,7 +463,7 @@ compute_model_rank <- function(model_metrics_tbl) {
 #'   "cluster_weight", "cluster_weight_050".
 #' @param jsd_threshold JSD cutoff for cluster_weight (default 0.15).
 #' @keywords internal
-aggregate_pip_matrix <- function(pip_mat, elbos, method, jsd_threshold = 0.15) {
+aggregate_pip_matrix <- function(pip_mat, elbos, method, jsd_threshold = 0.15, hc = NULL) {
   N <- ncol(pip_mat)
   if (N == 1L) return(as.vector(pip_mat))
   switch(method,
@@ -473,23 +473,26 @@ aggregate_pip_matrix <- function(pip_mat, elbos, method, jsd_threshold = 0.15) {
       w <- exp(elbos - max(elbos)); w <- w / sum(w)
       as.vector(pip_mat %*% w)
     },
-    cluster_weight     = .aggregate_cluster_weight(pip_mat, elbos, jsd_threshold),
-    cluster_weight_050 = .aggregate_cluster_weight(pip_mat, elbos, 0.50),
+    cluster_weight     = .aggregate_cluster_weight(pip_mat, elbos, jsd_threshold, hc = hc),
+    cluster_weight_050 = .aggregate_cluster_weight(pip_mat, elbos, 0.50, hc = hc),
     stop("Unknown aggregation method: ", method)
   )
 }
 
-.aggregate_cluster_weight <- function(pip_mat, elbos, jsd_threshold) {
+.aggregate_cluster_weight <- function(pip_mat, elbos, jsd_threshold, hc = NULL) {
   N <- ncol(pip_mat); eps <- 1e-10
-  H <- apply(pip_mat + eps, 2L, function(pv) -sum(pv * log(pv)))
-  jsd <- matrix(0, N, N)
-  for (i in seq_len(N - 1L)) {
-    for (j in seq(i + 1L, N)) {
-      mix        <- 0.5 * (pip_mat[, i] + pip_mat[, j]) + eps
-      jsd[i, j]  <- jsd[j, i] <- max(-sum(mix * log(mix)) - 0.5 * (H[i] + H[j]), 0)
+  if (is.null(hc)) {
+    H <- apply(pip_mat + eps, 2L, function(pv) -sum(pv * log(pv)))
+    jsd <- matrix(0, N, N)
+    for (i in seq_len(N - 1L)) {
+      for (j in seq(i + 1L, N)) {
+        mix        <- 0.5 * (pip_mat[, i] + pip_mat[, j]) + eps
+        jsd[i, j]  <- jsd[j, i] <- max(-sum(mix * log(mix)) - 0.5 * (H[i] + H[j]), 0)
+      }
     }
+    hc <- hclust(as.dist(jsd), method = "complete")
   }
-  clusters <- cutree(hclust(as.dist(jsd), method = "complete"), h = jsd_threshold)
+  clusters <- cutree(hc, h = jsd_threshold)
   K <- max(clusters)
   w <- numeric(N)
   for (k in seq_len(K)) {
@@ -854,7 +857,7 @@ auprc_from_pooled_bins <- function(bins) {
 # method:  "max_elbo", "uniform", "elbo_softmax",
 #          "cluster_weight" (JSD threshold 0.15), or "cluster_weight_050" (0.50)
 #' @keywords internal
-aggregate_pip_matrix <- function(pip_mat, elbos, method, jsd_threshold = 0.15) {
+aggregate_pip_matrix <- function(pip_mat, elbos, method, jsd_threshold = 0.15, hc = NULL) {
   N <- ncol(pip_mat)
   if (N == 1L) return(as.vector(pip_mat))
   switch(method,
@@ -868,26 +871,29 @@ aggregate_pip_matrix <- function(pip_mat, elbos, method, jsd_threshold = 0.15) {
       w <- exp(e - max(e)); w <- w / sum(w)
       as.vector(pip_mat %*% w)
     },
-    cluster_weight     = .aggregate_cluster_weight(pip_mat, elbos, jsd_threshold),
-    cluster_weight_050 = .aggregate_cluster_weight(pip_mat, elbos, 0.50),
+    cluster_weight     = .aggregate_cluster_weight(pip_mat, elbos, jsd_threshold, hc = hc),
+    cluster_weight_050 = .aggregate_cluster_weight(pip_mat, elbos, 0.50, hc = hc),
     stop("Unknown aggregation method: ", method)
   )
 }
 
 # Internal JSD-based cluster-then-ELBO-softmax aggregation.
 #' @keywords internal
-.aggregate_cluster_weight <- function(pip_mat, elbos, jsd_threshold) {
+.aggregate_cluster_weight <- function(pip_mat, elbos, jsd_threshold, hc = NULL) {
   N   <- ncol(pip_mat)
   eps <- 1e-10
-  H   <- apply(pip_mat + eps, 2L, function(pv) -sum(pv * log(pv)))
-  jsd <- matrix(0, N, N)
-  for (i in seq_len(N - 1L)) {
-    for (j in seq(i + 1L, N)) {
-      mix        <- 0.5 * (pip_mat[, i] + pip_mat[, j]) + eps
-      jsd[i, j]  <- jsd[j, i] <- max(-sum(mix * log(mix)) - 0.5 * (H[i] + H[j]), 0)
+  if (is.null(hc)) {
+    H   <- apply(pip_mat + eps, 2L, function(pv) -sum(pv * log(pv)))
+    jsd <- matrix(0, N, N)
+    for (i in seq_len(N - 1L)) {
+      for (j in seq(i + 1L, N)) {
+        mix        <- 0.5 * (pip_mat[, i] + pip_mat[, j]) + eps
+        jsd[i, j]  <- jsd[j, i] <- max(-sum(mix * log(mix)) - 0.5 * (H[i] + H[j]), 0)
+      }
     }
+    hc <- hclust(as.dist(jsd), method = "complete")
   }
-  clusters <- cutree(hclust(as.dist(jsd), method = "complete"), h = jsd_threshold)
+  clusters <- cutree(hc, h = jsd_threshold)
   K        <- max(clusters)
   w        <- numeric(N)
   e        <- ifelse(is.na(elbos), -Inf, elbos)
