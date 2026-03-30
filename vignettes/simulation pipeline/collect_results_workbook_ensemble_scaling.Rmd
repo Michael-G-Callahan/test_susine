@@ -32,7 +32,7 @@ library(knitr)
 
 ```{r locate}
 job_name      <- "ensemble_scaling_full"
-parent_job_id <- "50308010"
+parent_job_id <- "50339226"
 output_root   <- here("output")
 
 # Job-level directory (contains task-001/, task-002/, etc.)
