@@ -1301,8 +1301,13 @@ if (exists("dataset_metrics") && is.data.frame(dataset_metrics)) {
 
     best_idx <- which(baseline_model_search$status %in% c("ok", "ok_singular"))[1]
     if (length(best_idx) && !is.na(best_idx)) {
-      baseline_best_fit <- baseline_fits[[best_idx]]
       best_row <- baseline_model_search[best_idx, , drop = FALSE]
+      baseline_best_fit <- fit_difficulty_model(
+        difficulty_model_data,
+        "auprc_baseline",
+        best_row$metric1[[1]],
+        best_row$metric2[[1]]
+      )
       difficulty_model_data <- difficulty_model_data %>%
         dplyr::left_join(
           baseline_best_fit$predictions %>%
