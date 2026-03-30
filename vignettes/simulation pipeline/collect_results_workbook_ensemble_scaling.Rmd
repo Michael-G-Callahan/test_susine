@@ -208,9 +208,44 @@ Uses pooled confusion-bin summaries plus the direct AP implementation in
 `test_susine::compute_auprc_from_confusion()`.
 
 ```{r compute-auprc}
-pool_confusion_summary <- function(bins, group_vars, label) {
+pool_confusion_summary <- function(bins,
+                                   group_vars,
+                                   label,
+                                   chunk_var = NULL,
+                                   chunk_size = 25L) {
   log_stage(sprintf("%s: pooling bins", label))
-  pooled <- test_susine:::pool_confusion_bins(bins, group_vars)
+
+  if (is.null(chunk_var) && "dataset_bundle_id" %in% names(bins)) {
+    chunk_var <- "dataset_bundle_id"
+  }
+  chunk_size <- max(1L, as.integer(chunk_size))
+
+  if (is.null(chunk_var) || !chunk_var %in% names(bins) || !nrow(bins)) {
+    pooled <- test_susine:::pool_confusion_bins(bins, group_vars)
+    cat(label, "pooled rows:", nrow(pooled), "\n")
+    return(pooled)
+  }
+
+  chunk_ids <- unique(bins[[chunk_var]])
+  chunk_ids <- chunk_ids[order(is.na(chunk_ids), chunk_ids)]
+  chunk_groups <- split(chunk_ids, ceiling(seq_along(chunk_ids) / chunk_size))
+  partials <- vector("list", length(chunk_groups))
+
+  for (i in seq_along(chunk_groups)) {
+    ids <- chunk_groups[[i]]
+    chunk_bins <- bins %>%
+      dplyr::filter(.data[[chunk_var]] %in% ids)
+    partials[[i]] <- test_susine:::pool_confusion_bins(chunk_bins, group_vars)
+    cat(sprintf("  -> %s chunk %d/%d (%d %s values)\n",
+                label, i, length(chunk_groups), length(ids), chunk_var))
+    rm(chunk_bins)
+    invisible(gc())
+  }
+
+  pooled <- test_susine:::pool_confusion_bins(
+    dplyr::bind_rows(partials),
+    group_vars
+  )
   cat(label, "pooled rows:", nrow(pooled), "\n")
   pooled
 }
