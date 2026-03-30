@@ -288,11 +288,17 @@ simulate_phenotype_h2 <- function(X, beta,
 #' Construct mu_0 and sigma_0_2 priors from effect sizes using annotation knobs.
 #'
 #' @param beta Numeric vector of true effects.
-#' @param annotation_r2 Target fraction of causal effect variance captured by the annotation.
-#' @param inflate_match Scalar controlling non-causal annotation variance relative to the
-#'   theoretical causal annotation variance. inflate_match = 0 -> no non-causal annotations;
-#'   inflate_match = 1 -> non-causal variance equals theoretical causal variance;
-#'   inflate_match = 2 -> non-causal variance is 2x the theoretical causal variance.
+#' @param annotation_r2 Target squared correlation between the causal annotation
+#'   values and the true causal effects. The construction preserves the causal
+#'   annotation scale, so `annotation_r2 = 1` yields an exact match to the true
+#'   causal effects and `annotation_r2 = 0` yields centered noise at the same
+#'   scale.
+#' @param inflate_match Scalar controlling the centered second moment of
+#'   non-causal annotation values relative to the causal annotation scale.
+#'   `inflate_match = 0` -> no non-causal annotations; `inflate_match = 1` ->
+#'   non-causal annotations have the same centered scale as causal annotations;
+#'   `inflate_match = 2` -> non-causal annotations have sqrt(2)x the causal
+#'   scale.
 #' @param gamma_shrink Deprecated. Ignored when provided.
 #' @param base_sigma2 Optional baseline prior variance.
 #' @param effect_sd Nominal standard deviation used for causal effects (fallback when beta variance is zero).
@@ -300,6 +306,53 @@ simulate_phenotype_h2 <- function(X, beta,
 #'
 #' @return List with `mu_0`, `sigma_0_2`, and `observed_r2`.
 #' @keywords internal
+center_and_scale <- function(x, target_scale = 1, orthogonal_to = NULL) {
+  x <- as.numeric(x)
+  n <- length(x)
+  if (!n) {
+    return(numeric(0))
+  }
+
+  x <- x - mean(x)
+  if (!is.null(orthogonal_to)) {
+    ref <- as.numeric(orthogonal_to)
+    if (length(ref) == n) {
+      denom <- sum(ref^2)
+      if (is.finite(denom) && denom > 0) {
+        x <- x - sum(x * ref) / denom * ref
+      }
+    }
+  }
+
+  rms_x <- sqrt(mean(x^2))
+  if (!is.finite(rms_x) || rms_x <= 0) {
+    return(rep(0, n))
+  }
+  x / rms_x * target_scale
+}
+
+draw_centered_noise <- function(n, target_scale = 1, orthogonal_to = NULL) {
+  if (n <= 0) {
+    return(numeric(0))
+  }
+  if (n == 1L) {
+    return(0)
+  }
+
+  for (attempt in seq_len(8L)) {
+    noise <- center_and_scale(
+      stats::rnorm(n),
+      target_scale = target_scale,
+      orthogonal_to = orthogonal_to
+    )
+    if (sqrt(mean(noise^2)) > 0) {
+      return(noise)
+    }
+  }
+
+  stop("Unable to generate non-degenerate centered annotation noise.")
+}
+
 simulate_priors <- function(beta,
                             annotation_r2,
                             inflate_match,
@@ -331,35 +384,45 @@ simulate_priors <- function(beta,
     causal_var <- effect_sd^2
   }
 
-  if (annotation_r2 <= 0) {
-    noise_var <- causal_var
-  } else if (annotation_r2 >= 1) {
-    noise_var <- 0
-  } else {
-    noise_var <- causal_var * (1 - annotation_r2) / annotation_r2
-  }
-
-  # Compute theoretical causal annotation variance (independent of sample size)
-  # Var(mu_0[causal]) = causal_var + noise_var = causal_var / annotation_r2
-  theoretical_causal_mu0_var <- if (annotation_r2 <= 0) {
-    causal_var
-  } else if (annotation_r2 >= 1) {
-    causal_var
-  } else {
-    causal_var / annotation_r2
-  }
-
   mu_0 <- numeric(p)
   if (length(causal_idx)) {
-    mu_0[causal_idx] <- beta[causal_idx] + stats::rnorm(length(causal_idx), sd = sqrt(noise_var))
+    causal_beta <- as.numeric(beta[causal_idx])
+    causal_mean <- mean(causal_beta)
+    causal_centered <- causal_beta - causal_mean
+    causal_scale <- sqrt(mean(causal_centered^2))
+    if (!is.finite(causal_scale) || causal_scale <= 0) {
+      causal_scale <- sqrt(causal_var)
+    }
+
+    if (length(causal_idx) == 1L || !is.finite(causal_scale) || causal_scale <= 0) {
+      mu_0[causal_idx] <- causal_beta
+    } else {
+      signal_unit <- causal_centered / causal_scale
+      noise_unit <- draw_centered_noise(
+        length(causal_idx),
+        target_scale = 1,
+        orthogonal_to = signal_unit
+      )
+      causal_annotation_centered <- causal_scale * (
+        sqrt(annotation_r2) * signal_unit +
+          sqrt(1 - annotation_r2) * noise_unit
+      )
+      mu_0[causal_idx] <- causal_mean + causal_annotation_centered
+    }
   }
+
+  theoretical_causal_mu0_var <- if (length(causal_idx) > 1L) {
+    mean((mu_0[causal_idx] - mean(mu_0[causal_idx]))^2)
+  } else {
+    causal_var
+  }
+
   if (length(noncausal_idx)) {
-    # Non-causal variance scales with inflate_match relative to theoretical causal variance
-    # inflate_match = 0: variance = 0 (no annotation signal)
-    # inflate_match = 1: variance = theoretical_causal_mu0_var (same as causal)
-    # inflate_match = 2: variance = 2 * theoretical_causal_mu0_var (twice causal)
-    noncausal_var <- inflate_match * theoretical_causal_mu0_var
-    mu_0[noncausal_idx] <- stats::rnorm(length(noncausal_idx), sd = sqrt(noncausal_var))
+    noncausal_scale <- sqrt(inflate_match) * sqrt(theoretical_causal_mu0_var)
+    mu_0[noncausal_idx] <- draw_centered_noise(
+      length(noncausal_idx),
+      target_scale = noncausal_scale
+    )
   }
 
   observed_r2 <- NA_real_

@@ -17,12 +17,18 @@ simulate_priors(
 \arguments{
 \item{beta}{Numeric vector of true effects.}
 
-\item{annotation_r2}{Target fraction of causal effect variance captured by the annotation.}
+\item{annotation_r2}{Target squared correlation between the causal annotation
+values and the true causal effects. The construction preserves the causal
+annotation scale, so \code{annotation_r2 = 1} yields an exact match to the true
+causal effects and \code{annotation_r2 = 0} yields centered noise at the same
+scale.}
 
-\item{inflate_match}{Scalar controlling non-causal annotation variance relative to the
-theoretical causal annotation variance. inflate_match = 0 -> no non-causal annotations;
-inflate_match = 1 -> non-causal variance equals theoretical causal variance;
-inflate_match = 2 -> non-causal variance is 2x the theoretical causal variance.}
+\item{inflate_match}{Scalar controlling the centered second moment of
+non-causal annotation values relative to the causal annotation scale.
+\code{inflate_match = 0} means no non-causal annotations; \code{inflate_match = 1}
+means non-causal annotations have the same centered scale as causal annotations;
+\code{inflate_match = 2} means non-causal annotations have \code{sqrt(2)} times
+the causal scale.}
 
 \item{gamma_shrink}{Deprecated. Ignored when provided.}
 
