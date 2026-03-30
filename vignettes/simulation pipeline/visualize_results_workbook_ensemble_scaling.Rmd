@@ -1019,16 +1019,461 @@ if (exists("dataset_metrics") && "M1" %in% names(dataset_metrics)) {
         labs(x = "Dataset metric", y = "Baseline AUPRC",
              title = "Baseline AUPRC vs all dataset difficulty metrics")
       ggsave(file.path(fig_root, "dataset_difficulty",
-                       "auprc_vs_all_metrics_scatter.png"),
+                       "baseline_auprc_vs_all_metrics_scatter.png"),
              p_multi, width = 14, height = 8)
     }
   }
 }
 ```
 
-## 3d. Multimodality Metrics vs M1
+## 3c. Difficulty Model Search
 
-```{r fig-3d, fig.width=14, fig.height=8}
+```{r fig-3c-difficulty-model-search}
+html_escape <- function(x) {
+  x <- as.character(x)
+  x <- gsub("&", "&amp;", x, fixed = TRUE)
+  x <- gsub("<", "&lt;", x, fixed = TRUE)
+  x <- gsub(">", "&gt;", x, fixed = TRUE)
+  x
+}
+
+format_html_table <- function(df, digits = 4L) {
+  if (is.null(df) || !nrow(df)) {
+    return("<p>No rows to display.</p>")
+  }
+
+  tbl <- df
+  for (nm in names(tbl)) {
+    if (is.numeric(tbl[[nm]])) {
+      tbl[[nm]] <- ifelse(
+        is.na(tbl[[nm]]),
+        "",
+        formatC(tbl[[nm]], digits = digits, format = "f")
+      )
+    } else {
+      tbl[[nm]] <- ifelse(is.na(tbl[[nm]]), "", as.character(tbl[[nm]]))
+    }
+  }
+
+  header <- paste0(
+    "<tr>",
+    paste(sprintf("<th>%s</th>", html_escape(names(tbl))), collapse = ""),
+    "</tr>"
+  )
+  rows <- apply(tbl, 1, function(row) {
+    paste0(
+      "<tr>",
+      paste(sprintf("<td>%s</td>", html_escape(row)), collapse = ""),
+      "</tr>"
+    )
+  })
+
+  paste0(
+    "<table class='report-table'>",
+    "<thead>", header, "</thead>",
+    "<tbody>", paste(rows, collapse = ""), "</tbody>",
+    "</table>"
+  )
+}
+
+write_html_report <- function(path, title, sections) {
+  html_sections <- vapply(sections, function(section) {
+    header_html <- if (!is.null(section$header) && nzchar(section$header)) {
+      sprintf("<h2>%s</h2>", html_escape(section$header))
+    } else {
+      ""
+    }
+    text_html <- if (!is.null(section$text) && length(section$text)) {
+      paste(sprintf("<p>%s</p>", html_escape(section$text)), collapse = "")
+    } else {
+      ""
+    }
+    table_html <- if (!is.null(section$table)) {
+      format_html_table(section$table, digits = section$digits %||% 4L)
+    } else {
+      ""
+    }
+    paste0(header_html, text_html, table_html)
+  }, character(1))
+
+  html <- paste0(
+    "<!DOCTYPE html><html><head><meta charset='utf-8'>",
+    "<title>", html_escape(title), "</title>",
+    "<style>",
+    "body{font-family:Arial,sans-serif;margin:24px;line-height:1.4;}",
+    "h1,h2{margin-bottom:0.4em;}",
+    ".report-table{border-collapse:collapse;width:100%;margin:12px 0 24px 0;}",
+    ".report-table th,.report-table td{border:1px solid #cccccc;padding:6px 8px;text-align:left;}",
+    ".report-table th{background:#f3f3f3;}",
+    "code{background:#f5f5f5;padding:2px 4px;}",
+    "</style></head><body>",
+    "<h1>", html_escape(title), "</h1>",
+    paste(html_sections, collapse = ""),
+    "</body></html>"
+  )
+  writeLines(html, con = path, useBytes = TRUE)
+}
+
+extract_per_dataset_outcome <- function(data,
+                                        outcome_name,
+                                        spec_name,
+                                        use_case_id = NULL,
+                                        agg_method = NULL,
+                                        annotation_r2 = NULL) {
+  out <- data %>%
+    dplyr::filter(.data$spec_name == !!spec_name)
+  if (!is.null(use_case_id)) {
+    out <- out %>% dplyr::filter(.data$use_case_id == !!use_case_id)
+  }
+  if (is.null(agg_method)) {
+    if ("agg_method" %in% names(out)) {
+      out <- out %>% dplyr::filter(is.na(.data$agg_method))
+    }
+  } else {
+    out <- out %>% dplyr::filter(.data$agg_method == !!agg_method)
+  }
+  if (!is.null(annotation_r2)) {
+    out <- out %>% dplyr::filter(.data$annotation_r2 == !!annotation_r2)
+  }
+  out %>%
+    dplyr::group_by(.data$dataset_bundle_id) %>%
+    dplyr::summarise(!!outcome_name := dplyr::first(.data$AUPRC), .groups = "drop")
+}
+
+enumerate_metric_pairs <- function(metrics) {
+  if (length(metrics) < 2L) {
+    return(tibble::tibble(metric1 = character(0), metric2 = character(0)))
+  }
+  pairs <- utils::combn(metrics, 2, simplify = FALSE)
+  tibble::tibble(
+    metric1 = vapply(pairs, `[`, character(1), 1),
+    metric2 = vapply(pairs, `[`, character(1), 2)
+  )
+}
+
+fit_difficulty_model <- function(data, outcome_col, metric1, metric2) {
+  vars <- c(outcome_col, "M1", metric1, metric2)
+  model_df <- data %>%
+    dplyr::select(dplyr::all_of(c("dataset_bundle_id", vars))) %>%
+    dplyr::filter(dplyr::if_all(dplyr::all_of(vars), ~ is.finite(.x)))
+
+  formula_txt <- sprintf("%s ~ (M1 + %s + %s)^2", outcome_col, metric1, metric2)
+  n_used <- nrow(model_df)
+
+  if (n_used < 8L) {
+    return(list(
+      summary = tibble::tibble(
+        outcome = outcome_col,
+        metric1 = metric1,
+        metric2 = metric2,
+        formula = formula_txt,
+        n_used = n_used,
+        r_squared = NA_real_,
+        adj_r_squared = NA_real_,
+        rmse = NA_real_,
+        status = "insufficient_rows",
+        singular = NA
+      ),
+      coef = tibble::tibble(),
+      predictions = model_df
+    ))
+  }
+
+  fit <- tryCatch(
+    stats::lm(stats::as.formula(formula_txt), data = model_df),
+    error = function(e) e
+  )
+  if (inherits(fit, "error")) {
+    return(list(
+      summary = tibble::tibble(
+        outcome = outcome_col,
+        metric1 = metric1,
+        metric2 = metric2,
+        formula = formula_txt,
+        n_used = n_used,
+        r_squared = NA_real_,
+        adj_r_squared = NA_real_,
+        rmse = NA_real_,
+        status = paste0("fit_error: ", fit$message),
+        singular = NA
+      ),
+      coef = tibble::tibble(),
+      predictions = model_df
+    ))
+  }
+
+  fit_summary <- summary(fit)
+  pred <- stats::predict(fit, newdata = model_df)
+  resid <- model_df[[outcome_col]] - pred
+  coef_mat <- fit_summary$coefficients
+  coef_tbl <- tibble::as_tibble(coef_mat, rownames = "term") %>%
+    dplyr::rename(
+      estimate = "Estimate",
+      std_error = "Std. Error",
+      statistic = "t value",
+      p_value = "Pr(>|t|)"
+    )
+  singular <- any(is.na(stats::coef(fit)))
+
+  list(
+    summary = tibble::tibble(
+      outcome = outcome_col,
+      metric1 = metric1,
+      metric2 = metric2,
+      formula = formula_txt,
+      n_used = n_used,
+      r_squared = unname(fit_summary$r.squared),
+      adj_r_squared = unname(fit_summary$adj.r.squared),
+      rmse = sqrt(mean(resid^2)),
+      status = if (singular) "ok_singular" else "ok",
+      singular = singular
+    ),
+    coef = coef_tbl,
+    predictions = model_df %>%
+      dplyr::mutate(predicted = pred, residual = resid)
+  )
+}
+
+candidate_metric_pool <- c(
+  "M1", "high_ld_count_095", "high_ld_count_095_per_snp", "high_ld_frac_095",
+  "z_topk_ratio", "z_max_abs", "z_count_abs_gt_3", "z_eff_signals"
+)
+
+difficulty_model_data <- NULL
+baseline_model_search <- NULL
+baseline_best_fit <- NULL
+difficulty_refits <- NULL
+
+if (exists("dataset_metrics") && is.data.frame(dataset_metrics)) {
+  baseline_per_dataset <- extract_per_dataset_outcome(
+    auprc_individual,
+    outcome_name = "auprc_baseline",
+    spec_name = "baseline-single",
+    use_case_id = "susine_vanilla",
+    agg_method = NULL
+  )
+  oracle_per_dataset <- extract_per_dataset_outcome(
+    auprc_agg,
+    outcome_name = "auprc_ccs_oracle",
+    spec_name = "C-CS",
+    agg_method = "oracle",
+    annotation_r2 = 0.5
+  )
+  cluster_weight_per_dataset <- extract_per_dataset_outcome(
+    auprc_agg,
+    outcome_name = "auprc_ccs_cluster_weight",
+    spec_name = "C-CS",
+    agg_method = "cluster_weight",
+    annotation_r2 = 0.5
+  )
+
+  difficulty_model_data <- dataset_metrics %>%
+    dplyr::distinct(.data$dataset_bundle_id, .keep_all = TRUE) %>%
+    dplyr::left_join(baseline_per_dataset, by = "dataset_bundle_id") %>%
+    dplyr::left_join(oracle_per_dataset, by = "dataset_bundle_id") %>%
+    dplyr::left_join(cluster_weight_per_dataset, by = "dataset_bundle_id") %>%
+    dplyr::mutate(
+      gain_oracle_vs_baseline = .data$auprc_ccs_oracle - .data$auprc_baseline,
+      gain_cluster_weight_vs_baseline = .data$auprc_ccs_cluster_weight - .data$auprc_baseline
+    )
+
+  candidate_metrics <- intersect(candidate_metric_pool, names(difficulty_model_data))
+  candidate_metrics <- candidate_metrics[vapply(candidate_metrics, function(metric) {
+    vals <- difficulty_model_data[[metric]]
+    vals <- vals[is.finite(vals)]
+    length(vals) > 1L && stats::var(vals) > 0
+  }, logical(1))]
+
+  extra_metrics <- setdiff(candidate_metrics, "M1")
+  metric_pairs <- enumerate_metric_pairs(extra_metrics)
+
+  if ("M1" %in% candidate_metrics &&
+      nrow(metric_pairs) > 0L &&
+      "auprc_baseline" %in% names(difficulty_model_data)) {
+    baseline_fits <- purrr::pmap(metric_pairs, function(metric1, metric2) {
+      fit_difficulty_model(difficulty_model_data, "auprc_baseline", metric1, metric2)
+    })
+    baseline_model_search <- dplyr::bind_rows(lapply(baseline_fits, `[[`, "summary")) %>%
+      dplyr::arrange(dplyr::desc(.data$adj_r_squared),
+                     dplyr::desc(.data$r_squared),
+                     .data$metric1,
+                     .data$metric2)
+
+    best_idx <- which(baseline_model_search$status %in% c("ok", "ok_singular"))[1]
+    if (length(best_idx) && !is.na(best_idx)) {
+      baseline_best_fit <- baseline_fits[[best_idx]]
+      best_row <- baseline_model_search[best_idx, , drop = FALSE]
+      difficulty_model_data <- difficulty_model_data %>%
+        dplyr::left_join(
+          baseline_best_fit$predictions %>%
+            dplyr::select(
+              dataset_bundle_id,
+              baseline_predicted_auprc = predicted,
+              baseline_residual = residual
+            ),
+          by = "dataset_bundle_id"
+        ) %>%
+        dplyr::mutate(
+          oracle_residual_vs_baseline_prediction =
+            .data$auprc_ccs_oracle - .data$baseline_predicted_auprc,
+          cluster_weight_residual_vs_baseline_prediction =
+            .data$auprc_ccs_cluster_weight - .data$baseline_predicted_auprc
+        )
+
+      refit_specs <- tibble::tribble(
+        ~outcome, ~method_label, ~html_name,
+        "auprc_baseline", "baseline", "difficulty_model_refit_baseline.html",
+        "auprc_ccs_oracle", "C-CS oracle", "difficulty_model_refit_ccs_oracle_r2_0p5.html",
+        "auprc_ccs_cluster_weight", "C-CS cluster_weight", "difficulty_model_refit_ccs_cluster_weight_r2_0p5.html"
+      )
+
+      difficulty_refits <- purrr::pmap_dfr(refit_specs, function(outcome, method_label, html_name) {
+        refit <- fit_difficulty_model(
+          difficulty_model_data,
+          outcome,
+          best_row$metric1[[1]],
+          best_row$metric2[[1]]
+        )
+        coef_tbl <- refit$coef
+        if (nrow(coef_tbl)) {
+          coef_tbl <- coef_tbl %>% dplyr::mutate(method = method_label, outcome = outcome)
+        }
+        html_path <- file.path(fig_root, "dataset_difficulty", html_name)
+        write_html_report(
+          html_path,
+          title = paste0("Difficulty model refit: ", method_label),
+          sections = list(
+            list(
+              header = "Model Summary",
+              text = c(
+                paste0("Locked metric pair from baseline search: ",
+                       best_row$metric1[[1]], " and ", best_row$metric2[[1]]),
+                paste0("Formula: ", refit$summary$formula[[1]])
+              ),
+              table = refit$summary
+            ),
+            list(
+              header = "Coefficients",
+              table = coef_tbl
+            )
+          )
+        )
+        refit$summary %>% dplyr::mutate(method = method_label, html_file = basename(html_path))
+      })
+
+      write_html_report(
+        file.path(fig_root, "dataset_difficulty", "difficulty_model_search_baseline.html"),
+        title = "Baseline difficulty model search",
+        sections = list(
+          list(
+            header = "Search Summary",
+            text = c(
+              paste0("Candidate metrics considered: ",
+                     paste(candidate_metrics, collapse = ", ")),
+              paste0("Unordered metric pairs searched: ", nrow(metric_pairs)),
+              paste0("Selected pair: ", best_row$metric1[[1]], " and ", best_row$metric2[[1]]),
+              paste0("Selected formula: ", best_row$formula[[1]])
+            ),
+            table = best_row
+          ),
+          list(
+            header = "Selected Model Coefficients",
+            table = baseline_best_fit$coef
+          ),
+          list(
+            header = "All Candidate Models",
+            table = baseline_model_search
+          )
+        )
+      )
+
+      readr::write_csv(
+        baseline_model_search,
+        file.path(fig_root, "dataset_difficulty", "difficulty_model_search_baseline.csv")
+      )
+      readr::write_csv(
+        difficulty_refits,
+        file.path(fig_root, "dataset_difficulty", "difficulty_model_refits.csv")
+      )
+      readr::write_csv(
+        difficulty_model_data,
+        file.path(fig_root, "dataset_difficulty", "difficulty_model_data.csv")
+      )
+
+      cat("Difficulty model search files saved.\n")
+    } else {
+      cat("Difficulty model search skipped: no successful baseline fits.\n")
+    }
+  } else {
+    cat("Difficulty model search skipped: required metrics or baseline outcome unavailable.\n")
+  }
+}
+```
+
+## 3d. Difficulty Model Comparison
+
+```{r fig-3d-difficulty-model-comparison, fig.width=10, fig.height=6}
+if (!is.null(difficulty_model_data) &&
+    "baseline_predicted_auprc" %in% names(difficulty_model_data)) {
+  comparison_long <- difficulty_model_data %>%
+    dplyr::select(dplyr::all_of(c(
+      "dataset_bundle_id",
+      "baseline_predicted_auprc",
+      "auprc_baseline",
+      "auprc_ccs_oracle",
+      "auprc_ccs_cluster_weight"
+    ))) %>%
+    tidyr::pivot_longer(
+      cols = dplyr::all_of(c(
+        "auprc_baseline",
+        "auprc_ccs_oracle",
+        "auprc_ccs_cluster_weight"
+      )),
+      names_to = "method",
+      values_to = "observed_auprc"
+    ) %>%
+    dplyr::filter(is.finite(.data$baseline_predicted_auprc),
+                  is.finite(.data$observed_auprc)) %>%
+    dplyr::mutate(
+      method = dplyr::recode(
+        .data$method,
+        auprc_baseline = "baseline",
+        auprc_ccs_oracle = "C-CS oracle",
+        auprc_ccs_cluster_weight = "C-CS cluster_weight"
+      )
+    )
+
+  if (nrow(comparison_long) > 0L) {
+    p_difficulty_compare <- ggplot(
+      comparison_long,
+      aes(x = baseline_predicted_auprc, y = observed_auprc, color = method)
+    ) +
+      geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "gray50") +
+      geom_point(alpha = 0.7, size = 2) +
+      geom_smooth(method = "lm", se = FALSE, linewidth = 0.8) +
+      labs(
+        x = "Predicted baseline AUPRC (difficulty model)",
+        y = "Observed AUPRC",
+        color = "Method",
+        title = "Observed AUPRC vs baseline-predicted difficulty"
+      ) +
+      theme_bw()
+    ggsave(
+      file.path(fig_root, "dataset_difficulty", "difficulty_model_predictions_comparison.png"),
+      p_difficulty_compare, width = 10, height = 6
+    )
+    cat("Difficulty model comparison plot saved.\n")
+  } else {
+    cat("Difficulty model comparison skipped: no complete rows.\n")
+  }
+} else {
+  cat("Difficulty model comparison skipped: baseline predictions unavailable.\n")
+}
+```
+
+## 3e. Optional Diagnostics: Multimodality Metrics vs M1
+
+```{r fig-3e-legacy-mm, fig.width=14, fig.height=8, eval=FALSE}
 {
   mm_local <- if (exists("mm") && is.data.frame(mm)) mm else {
     mm_p <- file.path(consolidated_dir, "multimodal_metrics.csv")
@@ -1089,9 +1534,9 @@ if (exists("dataset_metrics") && "M1" %in% names(dataset_metrics)) {
 }
 ```
 
-## 3e. Compute-Confound Diversity Comparison (A-R vs C-C)
+## 3f. Optional Diagnostics: Compute-Confound Diversity Comparison (A-R vs C-C)
 
-```{r fig-3e, fig.width=12, fig.height=6}
+```{r fig-3f-legacy-diversity, fig.width=12, fig.height=6, eval=FALSE}
 {
   mm_local_e <- if (exists("mm_local") && is.data.frame(mm_local)) mm_local else {
     mm_p <- file.path(consolidated_dir, "multimodal_metrics.csv")
@@ -1142,7 +1587,7 @@ if (exists("dataset_metrics") && "M1" %in% names(dataset_metrics)) {
 
 ## 3f. Failure Map (M1 × Z_primary, colored by baseline AUPRC)
 
-```{r fig-3f, fig.width=10, fig.height=6}
+```{r fig-3g-legacy-failure-map, fig.width=10, fig.height=6, eval=FALSE}
 {
   z_candidates <- c("z_topk_ratio", "z_max_abs", "z_count_abs_gt_3", "z_eff_signals")
   if (exists("dm_scatter") && is.data.frame(dm_scatter) && nrow(dm_scatter) >= 4L &&
@@ -1179,9 +1624,9 @@ if (exists("dataset_metrics") && "M1" %in% names(dataset_metrics)) {
 }
 ```
 
-## 3c. Refine Depth Diagnostics
+## 3h. Refine Depth Diagnostics
 
-```{r fig-3c-refine-depth, fig.width=14, fig.height=6}
+```{r fig-3h-refine-depth, fig.width=14, fig.height=6}
 # Per-parent refine depth: n_refine_processed vs n_refine_requested.
 # One row per (dataset × ensemble group × parent combination).
 # Loaded from refine_depth.csv written by the collect workbook.
