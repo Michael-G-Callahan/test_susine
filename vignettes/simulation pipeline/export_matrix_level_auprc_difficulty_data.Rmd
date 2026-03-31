@@ -1,0 +1,298 @@
+---
+title: "Export Matrix-Level AUPRC Difficulty Data"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+Build a matrix-level modeling table for difficulty analysis.
+
+This workbook:
+
+1. Reads the consolidated ensemble-scaling outputs.
+2. Re-attaches `matrix_id` from the job config if needed.
+3. Pools confusion bins across all `dataset_bundle_id` values sharing the
+   same `matrix_id`.
+4. Computes matrix-level pooled AUPRC for four methods:
+   - oracle warm-start vanilla (`truth-warm` + `susine_vanilla`)
+   - baseline vanilla (`baseline-single` + `susine_vanilla`)
+   - `C-CS` cluster-weight aggregation
+   - `C-CS` oracle aggregation
+5. Aggregates the non-LD dataset metrics to the matrix level.
+6. Writes a single CSV for downstream modeling.
+
+```{r setup, message=FALSE}
+here::i_am("vignettes/simulation pipeline/export_matrix_level_auprc_difficulty_data.Rmd")
+library(here)
+library(devtools)
+devtools::load_all(".")
+library(dplyr)
+library(tidyr)
+library(readr)
+library(knitr)
+```
+
+## 1. Job Inputs
+
+```{r inputs}
+job_name <- "ensemble_scaling_full"
+parent_job_id <- "50339226"
+
+# For C-CS summaries, pick the annotation R2 slice to export.
+target_annotation_r2 <- 0.5
+
+output_root <- here("output")
+job_dir <- file.path(output_root, "slurm_output", job_name, parent_job_id)
+consolidated_dir <- file.path(job_dir, "consolidated")
+cfg_path <- file.path(output_root, "run_history", job_name, parent_job_id, "job_config.json")
+
+out_csv <- file.path(
+  consolidated_dir,
+  sprintf("matrix_level_auprc_difficulty_data_r2_%s.csv",
+          gsub("\\.", "p", as.character(target_annotation_r2)))
+)
+
+cat("Job dir:", job_dir, "\n")
+cat("Consolidated dir:", consolidated_dir, "\n")
+cat("Config path:", cfg_path, "\n")
+cat("Output CSV:", out_csv, "\n")
+```
+
+## 2. Load Data
+
+```{r load}
+stopifnot(dir.exists(consolidated_dir))
+stopifnot(file.exists(cfg_path))
+
+cfg <- test_susine:::load_job_config(cfg_path)
+
+bundle_lookup <- tibble::as_tibble(cfg$tables$dataset_bundles) %>%
+  dplyr::mutate(dataset_bundle_id = as.integer(.data$dataset_bundle_id)) %>%
+  dplyr::distinct(.data$dataset_bundle_id, .keep_all = TRUE)
+
+confusion_bins <- readr::read_csv(
+  file.path(consolidated_dir, "confusion_bins_full.csv"),
+  show_col_types = FALSE
+) %>%
+  dplyr::mutate(dataset_bundle_id = as.integer(.data$dataset_bundle_id))
+
+dataset_metrics <- readr::read_csv(
+  file.path(consolidated_dir, "dataset_metrics.csv"),
+  show_col_types = FALSE
+) %>%
+  dplyr::mutate(dataset_bundle_id = as.integer(.data$dataset_bundle_id))
+
+cat("Bundle lookup rows:", nrow(bundle_lookup), "\n")
+cat("Confusion rows:", nrow(confusion_bins), "\n")
+cat("Dataset metric rows:", nrow(dataset_metrics), "\n")
+```
+
+## 3. Helpers
+
+```{r helpers}
+add_bundle_cols <- function(df, cols) {
+  if (!"dataset_bundle_id" %in% names(df)) {
+    stop("Expected dataset_bundle_id in input data.")
+  }
+  cols <- intersect(cols, names(bundle_lookup))
+  if (!length(cols)) {
+    return(df)
+  }
+  available <- setdiff(cols, names(df))
+  if (!length(available)) {
+    return(df)
+  }
+  df %>%
+    dplyr::left_join(
+      bundle_lookup %>% dplyr::select(.data$dataset_bundle_id, dplyr::all_of(available)),
+      by = "dataset_bundle_id"
+    )
+}
+
+mean_or_na <- function(x) {
+  if (all(is.na(x))) {
+    return(NA_real_)
+  }
+  mean(x, na.rm = TRUE)
+}
+
+extract_method_bins <- function(data,
+                                method_label,
+                                spec_name,
+                                use_case_id,
+                                agg_method = NULL,
+                                annotation_r2 = NULL) {
+  out <- data %>%
+    dplyr::filter(
+      .data$spec_name == !!spec_name,
+      .data$use_case_id == !!use_case_id
+    )
+
+  if (is.null(agg_method)) {
+    if ("agg_method" %in% names(out)) {
+      out <- out %>% dplyr::filter(is.na(.data$agg_method))
+    }
+  } else {
+    out <- out %>% dplyr::filter(.data$agg_method == !!agg_method)
+  }
+
+  if (!is.null(annotation_r2)) {
+    out <- out %>% dplyr::filter(.data$annotation_r2 == !!annotation_r2)
+  }
+
+  out %>%
+    dplyr::mutate(method_label = method_label)
+}
+```
+
+## 4. Join Matrix Metadata
+
+```{r join-metadata}
+bundle_cols <- c("matrix_id", "data_scenario", "y_noise", "p_star", "phenotype_seed")
+
+confusion_bins <- confusion_bins %>%
+  add_bundle_cols(bundle_cols)
+
+dataset_metrics <- dataset_metrics %>%
+  add_bundle_cols(bundle_cols) %>%
+  dplyr::distinct(.data$dataset_bundle_id, .keep_all = TRUE)
+
+if (!"matrix_id" %in% names(confusion_bins) || all(is.na(confusion_bins$matrix_id))) {
+  stop("matrix_id could not be attached to confusion_bins. Check dataset_bundles in the job config.")
+}
+
+if (!"matrix_id" %in% names(dataset_metrics) || all(is.na(dataset_metrics$matrix_id))) {
+  stop("matrix_id could not be attached to dataset_metrics. Check dataset_bundles in the job config.")
+}
+
+cat("Unique matrix IDs in confusion bins:", dplyr::n_distinct(confusion_bins$matrix_id), "\n")
+cat("Unique matrix IDs in dataset metrics:", dplyr::n_distinct(dataset_metrics$matrix_id), "\n")
+```
+
+## 5. Compute Matrix-Level AUPRC
+
+```{r matrix-auprc}
+method_bins <- dplyr::bind_rows(
+  extract_method_bins(
+    confusion_bins,
+    method_label = "auprc_oracle_warm_start_baseline",
+    spec_name = "truth-warm",
+    use_case_id = "susine_vanilla"
+  ),
+  extract_method_bins(
+    confusion_bins,
+    method_label = "auprc_baseline",
+    spec_name = "baseline-single",
+    use_case_id = "susine_vanilla"
+  ),
+  extract_method_bins(
+    confusion_bins,
+    method_label = "auprc_ccs_cluster_weight",
+    spec_name = "C-CS",
+    use_case_id = "susine_functional_mu",
+    agg_method = "cluster_weight",
+    annotation_r2 = target_annotation_r2
+  ),
+  extract_method_bins(
+    confusion_bins,
+    method_label = "auprc_ccs_oracle",
+    spec_name = "C-CS",
+    use_case_id = "susine_functional_mu",
+    agg_method = "oracle",
+    annotation_r2 = target_annotation_r2
+  )
+)
+
+expected_methods <- c(
+  "auprc_oracle_warm_start_baseline",
+  "auprc_baseline",
+  "auprc_ccs_cluster_weight",
+  "auprc_ccs_oracle"
+)
+
+missing_methods <- setdiff(expected_methods, unique(method_bins$method_label))
+if (length(missing_methods)) {
+  stop(
+    "Missing confusion-bin rows for method(s): ",
+    paste(missing_methods, collapse = ", "),
+    ". Check spec filters and target_annotation_r2."
+  )
+}
+
+cat("Rows retained for target methods:", nrow(method_bins), "\n")
+cat("Methods present:", paste(sort(unique(method_bins$method_label)), collapse = ", "), "\n")
+
+matrix_auprc_long <- test_susine::compute_auprc_from_confusion(
+  method_bins,
+  group_vars = c("matrix_id", "method_label")
+)
+
+matrix_auprc_wide <- matrix_auprc_long %>%
+  tidyr::pivot_wider(
+    id_cols = "matrix_id",
+    names_from = "method_label",
+    values_from = "AUPRC"
+  )
+
+kable(matrix_auprc_wide %>% dplyr::arrange(.data$matrix_id))
+```
+
+## 6. Aggregate Dataset Metrics to Matrix Level
+
+```{r matrix-metrics}
+metric_cols <- c(
+  "M1",
+  "z_topk_ratio",
+  "z_max_abs",
+  "z_count_abs_gt_3",
+  "z_eff_signals"
+)
+
+missing_metric_cols <- setdiff(metric_cols, names(dataset_metrics))
+if (length(missing_metric_cols)) {
+  stop(
+    "dataset_metrics is missing required columns: ",
+    paste(missing_metric_cols, collapse = ", ")
+  )
+}
+
+matrix_metrics <- dataset_metrics %>%
+  dplyr::group_by(.data$matrix_id) %>%
+  dplyr::summarise(
+    data_scenario = dplyr::first(.data$data_scenario),
+    n_dataset_bundles = dplyr::n_distinct(.data$dataset_bundle_id),
+    dplyr::across(dplyr::all_of(metric_cols), mean_or_na),
+    .groups = "drop"
+  )
+
+kable(matrix_metrics %>% dplyr::arrange(.data$matrix_id))
+```
+
+## 7. Build Final Export Table
+
+```{r export}
+matrix_level_df <- matrix_metrics %>%
+  dplyr::left_join(matrix_auprc_wide, by = "matrix_id") %>%
+  dplyr::mutate(
+    warm_start_gain_vs_baseline =
+      .data$auprc_oracle_warm_start_baseline - .data$auprc_baseline,
+    ccs_oracle_gain_vs_baseline =
+      .data$auprc_ccs_oracle - .data$auprc_baseline,
+    ccs_cluster_weight_gain_vs_baseline =
+      .data$auprc_ccs_cluster_weight - .data$auprc_baseline
+  ) %>%
+  dplyr::arrange(.data$matrix_id)
+
+readr::write_csv(matrix_level_df, out_csv)
+
+cat("Wrote:", out_csv, "\n")
+cat("Rows:", nrow(matrix_level_df), "\n")
+cat("Columns:", ncol(matrix_level_df), "\n")
+
+kable(matrix_level_df)
+```
