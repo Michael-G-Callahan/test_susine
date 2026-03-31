@@ -1,0 +1,441 @@
+---
+title: "Analyze Warm-Start Gain Difficulty"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+Run a difficulty-model search for warm-start gain over baseline, using
+the bundle-level export table.
+
+The analysis mirrors the baseline difficulty-model search in the main
+visualization workbook, but changes the target outcome to
+`warm_start_gain_vs_baseline`.
+
+```{r setup, message=FALSE}
+here::i_am("vignettes/simulation pipeline/analyze_warm_start_gain_difficulty.Rmd")
+library(here)
+library(devtools)
+devtools::load_all(".")
+library(dplyr)
+library(tidyr)
+library(readr)
+library(ggplot2)
+library(knitr)
+library(purrr)
+
+theme_set(theme_bw(base_size = 12))
+```
+
+## 1. Job Inputs
+
+```{r inputs}
+job_name <- "ensemble_scaling_full"
+parent_job_id <- "50339226"
+target_annotation_r2 <- 0.5
+
+output_root <- here("output")
+job_dir <- file.path(output_root, "slurm_output", job_name, parent_job_id)
+consolidated_dir <- file.path(job_dir, "consolidated")
+fig_dir <- file.path(job_dir, "figures", "dataset_difficulty")
+dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
+
+input_csv <- file.path(
+  consolidated_dir,
+  sprintf("bundle_level_auprc_difficulty_data_r2_%s.csv",
+          gsub("\\.", "p", as.character(target_annotation_r2)))
+)
+
+cat("Job dir:", job_dir, "\n")
+cat("Input CSV:", input_csv, "\n")
+cat("Figure dir:", fig_dir, "\n")
+```
+
+## 2. Load Data
+
+```{r load}
+stopifnot(file.exists(input_csv))
+
+difficulty_model_data <- readr::read_csv(
+  input_csv,
+  show_col_types = FALSE
+)
+
+required_cols <- c(
+  "dataset_bundle_id",
+  "matrix_id",
+  "M1",
+  "z_topk_ratio",
+  "z_max_abs",
+  "z_count_abs_gt_3",
+  "z_eff_signals",
+  "warm_start_gain_vs_baseline"
+)
+
+missing_required <- setdiff(required_cols, names(difficulty_model_data))
+if (length(missing_required)) {
+  stop(
+    "Input CSV is missing required columns: ",
+    paste(missing_required, collapse = ", ")
+  )
+}
+
+cat("Rows:", nrow(difficulty_model_data), "\n")
+cat("Columns:", ncol(difficulty_model_data), "\n")
+```
+
+## 3. Helpers
+
+```{r helpers}
+html_escape <- function(x) {
+  x <- gsub("&", "&amp;", x, fixed = TRUE)
+  x <- gsub("<", "&lt;", x, fixed = TRUE)
+  x <- gsub(">", "&gt;", x, fixed = TRUE)
+  x
+}
+
+format_html_table <- function(df, digits = 4L) {
+  if (is.null(df) || !nrow(df)) {
+    return("<p><em>No rows.</em></p>")
+  }
+  df_fmt <- df
+  is_num <- vapply(df_fmt, is.numeric, logical(1))
+  df_fmt[is_num] <- lapply(df_fmt[is_num], function(col) round(col, digits))
+  header <- paste0(
+    "<tr>",
+    paste(sprintf("<th>%s</th>", html_escape(names(df_fmt))), collapse = ""),
+    "</tr>"
+  )
+  rows <- apply(as.data.frame(df_fmt, stringsAsFactors = FALSE), 1, function(row) {
+    paste0(
+      "<tr>",
+      paste(sprintf("<td>%s</td>", html_escape(as.character(row))), collapse = ""),
+      "</tr>"
+    )
+  })
+  paste0(
+    "<table class='report-table'>",
+    "<thead>", header, "</thead>",
+    "<tbody>", paste(rows, collapse = ""), "</tbody>",
+    "</table>"
+  )
+}
+
+write_html_report <- function(path, title, sections) {
+  html_sections <- vapply(sections, function(section) {
+    header_html <- if (!is.null(section$header) && nzchar(section$header)) {
+      sprintf("<h2>%s</h2>", html_escape(section$header))
+    } else {
+      ""
+    }
+    text_html <- if (!is.null(section$text) && length(section$text)) {
+      paste(sprintf("<p>%s</p>", html_escape(section$text)), collapse = "")
+    } else {
+      ""
+    }
+    digits <- if (!is.null(section$digits)) section$digits else 4L
+    table_html <- if (!is.null(section$table)) {
+      format_html_table(section$table, digits = digits)
+    } else {
+      ""
+    }
+    paste0(header_html, text_html, table_html)
+  }, character(1))
+
+  html <- paste0(
+    "<!DOCTYPE html><html><head><meta charset='utf-8'>",
+    "<title>", html_escape(title), "</title>",
+    "<style>",
+    "body{font-family:Arial,sans-serif;margin:24px;line-height:1.4;}",
+    "h1,h2{margin-bottom:0.4em;}",
+    ".report-table{border-collapse:collapse;width:100%;margin:12px 0 24px 0;}",
+    ".report-table th,.report-table td{border:1px solid #cccccc;padding:6px 8px;text-align:left;}",
+    ".report-table th{background:#f3f3f3;}",
+    "code{background:#f5f5f5;padding:2px 4px;}",
+    "</style></head><body>",
+    "<h1>", html_escape(title), "</h1>",
+    paste(html_sections, collapse = ""),
+    "</body></html>"
+  )
+
+  writeLines(html, con = path, useBytes = TRUE)
+}
+
+enumerate_metric_pairs <- function(metrics) {
+  if (length(metrics) < 2L) {
+    return(tibble::tibble(metric1 = character(0), metric2 = character(0)))
+  }
+  pairs <- utils::combn(metrics, 2, simplify = FALSE)
+  tibble::tibble(
+    metric1 = vapply(pairs, `[`, character(1), 1),
+    metric2 = vapply(pairs, `[`, character(1), 2)
+  )
+}
+
+fit_difficulty_model <- function(data, outcome_col, metric1, metric2) {
+  vars <- c(outcome_col, "M1", metric1, metric2)
+  model_df <- data %>%
+    dplyr::select(dplyr::all_of(c("dataset_bundle_id", "matrix_id", vars))) %>%
+    dplyr::filter(dplyr::if_all(dplyr::all_of(vars), ~ is.finite(.x)))
+
+  formula_txt <- sprintf("%s ~ (M1 + %s + %s)^2", outcome_col, metric1, metric2)
+  n_used <- nrow(model_df)
+
+  if (n_used < 8L) {
+    return(list(
+      summary = tibble::tibble(
+        outcome = outcome_col,
+        metric1 = metric1,
+        metric2 = metric2,
+        formula = formula_txt,
+        n_used = n_used,
+        r_squared = NA_real_,
+        adj_r_squared = NA_real_,
+        rmse = NA_real_,
+        status = "insufficient_rows",
+        singular = NA
+      ),
+      coef = tibble::tibble(),
+      predictions = model_df
+    ))
+  }
+
+  fit <- tryCatch(
+    stats::lm(stats::as.formula(formula_txt), data = model_df),
+    error = function(e) e
+  )
+
+  if (inherits(fit, "error")) {
+    return(list(
+      summary = tibble::tibble(
+        outcome = outcome_col,
+        metric1 = metric1,
+        metric2 = metric2,
+        formula = formula_txt,
+        n_used = n_used,
+        r_squared = NA_real_,
+        adj_r_squared = NA_real_,
+        rmse = NA_real_,
+        status = paste0("fit_error: ", fit$message),
+        singular = NA
+      ),
+      coef = tibble::tibble(),
+      predictions = model_df
+    ))
+  }
+
+  fit_summary <- summary(fit)
+  pred <- stats::predict(fit, newdata = model_df)
+  resid <- model_df[[outcome_col]] - pred
+  coef_mat <- fit_summary$coefficients
+  coef_tbl <- tibble::as_tibble(coef_mat, rownames = "term") %>%
+    dplyr::rename(
+      estimate = "Estimate",
+      std_error = "Std. Error",
+      statistic = "t value",
+      p_value = "Pr(>|t|)"
+    )
+  singular <- any(is.na(stats::coef(fit)))
+
+  list(
+    summary = tibble::tibble(
+      outcome = outcome_col,
+      metric1 = metric1,
+      metric2 = metric2,
+      formula = formula_txt,
+      n_used = n_used,
+      r_squared = unname(fit_summary$r.squared),
+      adj_r_squared = unname(fit_summary$adj.r.squared),
+      rmse = sqrt(mean(resid^2)),
+      status = if (singular) "ok_singular" else "ok",
+      singular = singular
+    ),
+    coef = coef_tbl,
+    predictions = model_df %>%
+      dplyr::mutate(predicted = pred, residual = resid)
+  )
+}
+```
+
+## 4. Model Search
+
+```{r model-search}
+candidate_metric_pool <- c(
+  "M1",
+  "z_topk_ratio",
+  "z_max_abs",
+  "z_count_abs_gt_3",
+  "z_eff_signals"
+)
+
+candidate_metrics <- intersect(candidate_metric_pool, names(difficulty_model_data))
+candidate_metrics <- candidate_metrics[vapply(candidate_metrics, function(metric) {
+  vals <- difficulty_model_data[[metric]]
+  vals <- vals[is.finite(vals)]
+  length(vals) > 1L && stats::var(vals) > 0
+}, logical(1))]
+
+extra_metrics <- setdiff(candidate_metrics, "M1")
+metric_pairs <- enumerate_metric_pairs(extra_metrics)
+
+if (!("M1" %in% candidate_metrics) || nrow(metric_pairs) == 0L) {
+  stop("Need M1 plus at least two varying non-M1 metrics for model search.")
+}
+
+gain_fits <- purrr::pmap(metric_pairs, function(metric1, metric2) {
+  fit_difficulty_model(
+    difficulty_model_data,
+    "warm_start_gain_vs_baseline",
+    metric1,
+    metric2
+  )
+})
+
+gain_model_search <- dplyr::bind_rows(lapply(gain_fits, `[[`, "summary")) %>%
+  dplyr::arrange(
+    dplyr::desc(.data$adj_r_squared),
+    dplyr::desc(.data$r_squared),
+    .data$metric1,
+    .data$metric2
+  )
+
+best_idx <- which(gain_model_search$status %in% c("ok", "ok_singular"))[1]
+if (!length(best_idx) || is.na(best_idx)) {
+  stop("No successful warm-start gain model fits.")
+}
+
+best_row <- gain_model_search[best_idx, , drop = FALSE]
+gain_best_fit <- fit_difficulty_model(
+  difficulty_model_data,
+  "warm_start_gain_vs_baseline",
+  best_row$metric1[[1]],
+  best_row$metric2[[1]]
+)
+
+predictions_tbl <- gain_best_fit$predictions %>%
+  dplyr::rename(
+    predicted_warm_start_gain_vs_baseline = .data$predicted,
+    residual_warm_start_gain_vs_baseline = .data$residual
+  )
+
+difficulty_model_data <- difficulty_model_data %>%
+  dplyr::left_join(
+    predictions_tbl %>%
+      dplyr::select(
+        .data$dataset_bundle_id,
+        .data$predicted_warm_start_gain_vs_baseline,
+        .data$residual_warm_start_gain_vs_baseline
+      ),
+    by = "dataset_bundle_id"
+  )
+
+kable(gain_model_search)
+```
+
+## 5. Save Reports
+
+```{r reports}
+search_html <- file.path(fig_dir, "difficulty_model_search_warm_start_gain.html")
+best_fit_html <- file.path(fig_dir, "difficulty_model_refit_warm_start_gain.html")
+search_csv <- file.path(fig_dir, "difficulty_model_search_warm_start_gain.csv")
+coef_csv <- file.path(fig_dir, "difficulty_model_best_fit_warm_start_gain_coef.csv")
+data_csv <- file.path(fig_dir, "difficulty_model_data_warm_start_gain.csv")
+
+write_html_report(
+  search_html,
+  title = "Warm-start gain difficulty model search",
+  sections = list(
+    list(
+      header = "Search Summary",
+      text = c(
+        paste0("Outcome: warm_start_gain_vs_baseline"),
+        paste0("Candidate metrics considered: ", paste(candidate_metrics, collapse = ", ")),
+        paste0("Unordered metric pairs searched: ", nrow(metric_pairs)),
+        paste0("Selected pair: ", best_row$metric1[[1]], " and ", best_row$metric2[[1]]),
+        paste0("Selected formula: ", best_row$formula[[1]])
+      ),
+      table = best_row
+    ),
+    list(
+      header = "Selected Model Coefficients",
+      table = gain_best_fit$coef
+    ),
+    list(
+      header = "All Candidate Models",
+      table = gain_model_search
+    )
+  )
+)
+
+write_html_report(
+  best_fit_html,
+  title = "Warm-start gain difficulty model refit",
+  sections = list(
+    list(
+      header = "Model Summary",
+      text = c(
+        paste0("Locked metric pair: ", best_row$metric1[[1]], " and ", best_row$metric2[[1]]),
+        paste0("Formula: ", best_row$formula[[1]])
+      ),
+      table = gain_best_fit$summary
+    ),
+    list(
+      header = "Coefficients",
+      table = gain_best_fit$coef
+    )
+  )
+)
+
+readr::write_csv(gain_model_search, search_csv)
+readr::write_csv(gain_best_fit$coef, coef_csv)
+readr::write_csv(difficulty_model_data, data_csv)
+
+cat("Saved search HTML:", search_html, "\n")
+cat("Saved refit HTML:", best_fit_html, "\n")
+cat("Saved search CSV:", search_csv, "\n")
+cat("Saved coef CSV:", coef_csv, "\n")
+cat("Saved data CSV:", data_csv, "\n")
+```
+
+## 6. Prediction Plot
+
+```{r prediction-plot, fig.width=9, fig.height=6}
+plot_df <- difficulty_model_data %>%
+  dplyr::filter(
+    is.finite(.data$predicted_warm_start_gain_vs_baseline),
+    is.finite(.data$warm_start_gain_vs_baseline)
+  )
+
+if (!nrow(plot_df)) {
+  stop("No rows available for prediction plot.")
+}
+
+p <- ggplot(
+  plot_df,
+  aes(
+    x = .data$predicted_warm_start_gain_vs_baseline,
+    y = .data$warm_start_gain_vs_baseline
+  )
+) +
+  geom_vline(xintercept = 0, linetype = "dotted", color = "gray60") +
+  geom_hline(yintercept = 0, linetype = "dotted", color = "gray60") +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "gray40") +
+  geom_point(alpha = 0.75, size = 2, color = "steelblue4") +
+  geom_smooth(method = "lm", se = FALSE, linewidth = 0.8, color = "firebrick") +
+  labs(
+    x = "Predicted warm-start gain vs baseline",
+    y = "Observed warm-start gain vs baseline",
+    title = "Observed vs predicted warm-start gain"
+  )
+
+plot_path <- file.path(fig_dir, "difficulty_model_predictions_warm_start_gain.png")
+ggsave(plot_path, p, width = 9, height = 6)
+
+cat("Saved plot:", plot_path, "\n")
+p
+```
