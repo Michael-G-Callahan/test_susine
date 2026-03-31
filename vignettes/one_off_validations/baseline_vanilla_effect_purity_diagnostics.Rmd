@@ -1,0 +1,237 @@
+---
+title: "Baseline Vanilla Effect Purity Diagnostics"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+One-off validation workbook for baseline `susine_vanilla` effect rows.
+
+This workbook:
+
+1. Loads the raw `run_table.csv` from run history.
+2. Identifies baseline vanilla runs.
+3. Reads raw `_effect_metrics.csv` and `_model_metrics.csv` flush files from
+   the task output tree.
+4. Keeps `explore_method == "base"` and the selected baseline run IDs.
+5. Joins run-level power from `model_metrics`.
+6. Saves diagnostic plots and the filtered analysis table.
+
+```{r setup, message=FALSE}
+here::i_am("vignettes/one_off_validations/baseline_vanilla_effect_purity_diagnostics.Rmd")
+library(here)
+library(devtools)
+devtools::load_all(".")
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(knitr)
+
+theme_set(theme_bw(base_size = 12))
+```
+
+## 1. Inputs
+
+```{r inputs}
+job_name <- "ensemble_scaling_full"
+job_id <- "50339226"
+
+output_root <- here("output")
+run_history_dir <- file.path(output_root, "run_history", job_name, job_id)
+job_dir <- file.path(output_root, "slurm_output", job_name, job_id)
+fig_dir <- file.path(job_dir, "figures", "one_off_validations")
+dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
+
+run_table_path <- file.path(run_history_dir, "run_table.csv")
+
+effect_out_csv <- file.path(fig_dir, "baseline_vanilla_effect_metrics_joined.csv")
+plot_power_purity <- file.path(fig_dir, "baseline_vanilla_power_vs_purity.png")
+plot_size_purity <- file.path(fig_dir, "baseline_vanilla_size_vs_purity.png")
+plot_size_power <- file.path(fig_dir, "baseline_vanilla_size_vs_power_colored_by_purity.png")
+
+cat("Run history dir:", run_history_dir, "\n")
+cat("Job dir:", job_dir, "\n")
+cat("Figure dir:", fig_dir, "\n")
+cat("Job name:", job_name, "\n")
+cat("Job id:", job_id, "\n")
+cat("Run table:", run_table_path, "\n")
+```
+
+## 2. Run Selection
+
+```{r run-selection}
+stopifnot(dir.exists(job_dir))
+stopifnot(file.exists(run_table_path))
+
+run_table <- readr::read_csv(run_table_path, show_col_types = FALSE)
+
+baseline_run_ids <- run_table %>%
+  dplyr::filter(
+    .data$spec_name == "baseline-single",
+    .data$use_case_id == "susine_vanilla"
+  ) %>%
+  dplyr::distinct(.data$run_id) %>%
+  dplyr::pull(.data$run_id)
+
+cat("Selected baseline vanilla runs:", length(baseline_run_ids), "\n")
+```
+
+## 3. Load Flush Files
+
+```{r load-flush}
+effect_files <- list.files(
+  job_dir,
+  pattern = "_effect_metrics\\.csv$",
+  recursive = TRUE,
+  full.names = TRUE
+)
+
+model_files <- list.files(
+  job_dir,
+  pattern = "_model_metrics\\.csv$",
+  recursive = TRUE,
+  full.names = TRUE
+)
+
+cat("Effect flush files found:", length(effect_files), "\n")
+cat("Model flush files found:", length(model_files), "\n")
+
+if (!length(effect_files)) {
+  stop("No effect_metrics flush files found under: ", job_dir)
+}
+if (!length(model_files)) {
+  stop("No model_metrics flush files found under: ", job_dir)
+}
+
+read_flush_csvs <- function(paths, col_select = NULL) {
+  tbls <- lapply(paths, function(path) {
+    readr::read_csv(path, show_col_types = FALSE, col_select = dplyr::any_of(col_select))
+  })
+  dplyr::bind_rows(tbls)
+}
+
+effect_metrics <- read_flush_csvs(
+  effect_files,
+  col_select = c(
+    "effect", "size", "purity", "coverage", "run_id",
+    "explore_method", "variant_id", "agg_method"
+  )
+)
+
+model_metrics <- read_flush_csvs(
+  model_files,
+  col_select = c(
+    "run_id", "power", "filtering", "explore_method",
+    "variant_id", "agg_method"
+  )
+)
+
+cat("Effect rows loaded:", nrow(effect_metrics), "\n")
+cat("Model rows loaded:", nrow(model_metrics), "\n")
+```
+
+## 4. Build Analysis Table
+
+```{r analysis-table}
+baseline_effects <- effect_metrics %>%
+  dplyr::filter(
+    .data$explore_method == "base",
+    .data$run_id %in% baseline_run_ids
+  ) %>%
+  dplyr::mutate(
+    effect = as.integer(.data$effect),
+    size = as.numeric(.data$size),
+    purity = as.numeric(.data$purity),
+    coverage = as.numeric(.data$coverage)
+  )
+
+baseline_power <- model_metrics %>%
+  dplyr::filter(
+    .data$explore_method == "base",
+    .data$filtering == "purity_filtered",
+    .data$run_id %in% baseline_run_ids
+  ) %>%
+  dplyr::mutate(power = as.numeric(.data$power)) %>%
+  dplyr::distinct(.data$run_id, .keep_all = TRUE) %>%
+  dplyr::select(.data$run_id, .data$power)
+
+analysis_df <- baseline_effects %>%
+  dplyr::left_join(baseline_power, by = "run_id") %>%
+  dplyr::arrange(.data$run_id, .data$effect)
+
+readr::write_csv(analysis_df, effect_out_csv)
+
+cat("Analysis rows:", nrow(analysis_df), "\n")
+cat("Unique runs represented:", dplyr::n_distinct(analysis_df$run_id), "\n")
+cat("Saved analysis CSV:", effect_out_csv, "\n")
+
+kable(head(analysis_df, 20))
+```
+
+## 5. Save Diagnostic Plots
+
+```{r plots}
+plot_df <- analysis_df %>%
+  dplyr::filter(
+    is.finite(.data$size),
+    is.finite(.data$purity),
+    is.finite(.data$power)
+  )
+
+if (!nrow(plot_df)) {
+  stop("No complete rows available for plotting.")
+}
+
+p_power_purity <- ggplot(
+  plot_df,
+  aes(x = .data$purity, y = .data$power)
+) +
+  geom_point(alpha = 0.6, size = 1.8, color = "steelblue4",
+             position = position_jitter(width = 0.005, height = 0.01)) +
+  geom_smooth(method = "lm", se = FALSE, color = "firebrick", linewidth = 0.8) +
+  labs(
+    x = "Effect purity",
+    y = "Run-level power",
+    title = "Baseline vanilla: power vs purity"
+  )
+
+p_size_purity <- ggplot(
+  plot_df,
+  aes(x = .data$purity, y = .data$size)
+) +
+  geom_point(alpha = 0.65, size = 1.8, color = "darkgreen") +
+  geom_smooth(method = "lm", se = FALSE, color = "black", linewidth = 0.8) +
+  labs(
+    x = "Effect purity",
+    y = "Effect size",
+    title = "Baseline vanilla: size vs purity"
+  )
+
+p_size_power <- ggplot(
+  plot_df,
+  aes(x = .data$power, y = .data$size, color = .data$purity)
+) +
+  geom_point(alpha = 0.7, size = 2,
+             position = position_jitter(width = 0.01, height = 0)) +
+  scale_color_viridis_c(option = "C") +
+  labs(
+    x = "Run-level power",
+    y = "Effect size",
+    color = "Purity",
+    title = "Baseline vanilla: size vs power, colored by purity"
+  )
+
+ggsave(plot_power_purity, p_power_purity, width = 8, height = 6)
+ggsave(plot_size_purity, p_size_purity, width = 8, height = 6)
+ggsave(plot_size_power, p_size_power, width = 8, height = 6)
+
+cat("Saved plot:", plot_power_purity, "\n")
+cat("Saved plot:", plot_size_purity, "\n")
+cat("Saved plot:", plot_size_power, "\n")
+invisible(NULL)
+```
