@@ -19,8 +19,7 @@ This workbook:
 3. Reads raw `_effect_metrics.csv` and `_model_metrics.csv` flush files from
    the task output tree.
 4. Keeps `explore_method == "base"` and the selected baseline run IDs.
-5. Joins run-level power from `model_metrics`.
-6. Saves diagnostic plots and the filtered analysis table.
+5. Saves diagnostic plots and the filtered analysis table.
 
 ```{r setup, message=FALSE}
 here::i_am("vignettes/one_off_validations/baseline_vanilla_effect_purity_diagnostics.Rmd")
@@ -50,9 +49,10 @@ dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
 run_table_path <- file.path(run_history_dir, "run_table.csv")
 
 effect_out_csv <- file.path(fig_dir, "baseline_vanilla_effect_metrics_joined.csv")
-plot_power_purity <- file.path(fig_dir, "baseline_vanilla_power_vs_purity.png")
+plot_coverage_purity <- file.path(fig_dir, "baseline_vanilla_coverage_vs_purity.png")
 plot_size_purity <- file.path(fig_dir, "baseline_vanilla_size_vs_purity.png")
-plot_size_power <- file.path(fig_dir, "baseline_vanilla_size_vs_power_colored_by_purity.png")
+plot_size_coverage <- file.path(fig_dir, "baseline_vanilla_size_vs_coverage_colored_by_purity.png")
+plot_size_purity_by_coverage <- file.path(fig_dir, "baseline_vanilla_size_vs_purity_by_coverage.png")
 
 cat("Run history dir:", run_history_dir, "\n")
 cat("Job dir:", job_dir, "\n")
@@ -150,18 +150,7 @@ baseline_effects <- effect_metrics %>%
     coverage = as.numeric(.data$coverage)
   )
 
-baseline_power <- model_metrics %>%
-  dplyr::filter(
-    .data$explore_method == "base",
-    .data$filtering == "purity_filtered",
-    .data$run_id %in% baseline_run_ids
-  ) %>%
-  dplyr::mutate(power = as.numeric(.data$power)) %>%
-  dplyr::distinct(.data$run_id, .keep_all = TRUE) %>%
-  dplyr::select(.data$run_id, .data$power)
-
 analysis_df <- baseline_effects %>%
-  dplyr::left_join(baseline_power, by = "run_id") %>%
   dplyr::arrange(.data$run_id, .data$effect)
 
 readr::write_csv(analysis_df, effect_out_csv)
@@ -180,24 +169,30 @@ plot_df <- analysis_df %>%
   dplyr::filter(
     is.finite(.data$size),
     is.finite(.data$purity),
-    is.finite(.data$power)
+    is.finite(.data$coverage)
   )
 
 if (!nrow(plot_df)) {
   stop("No complete rows available for plotting.")
 }
 
-p_power_purity <- ggplot(
+p_coverage_purity <- ggplot(
   plot_df,
-  aes(x = .data$purity, y = .data$power)
+  aes(x = .data$purity, y = .data$coverage)
 ) +
   geom_point(alpha = 0.6, size = 1.8, color = "steelblue4",
              position = position_jitter(width = 0.005, height = 0.01)) +
-  geom_smooth(method = "lm", se = FALSE, color = "firebrick", linewidth = 0.8) +
+  geom_smooth(
+    method = "glm",
+    method.args = list(family = binomial()),
+    se = FALSE,
+    color = "firebrick",
+    linewidth = 0.8
+  ) +
   labs(
     x = "Effect purity",
-    y = "Run-level power",
-    title = "Baseline vanilla: power vs purity"
+    y = "Effect coverage",
+    title = "Baseline vanilla: coverage vs purity"
   )
 
 p_size_purity <- ggplot(
@@ -212,26 +207,41 @@ p_size_purity <- ggplot(
     title = "Baseline vanilla: size vs purity"
   )
 
-p_size_power <- ggplot(
+p_size_coverage <- ggplot(
   plot_df,
-  aes(x = .data$power, y = .data$size, color = .data$purity)
+  aes(x = .data$coverage, y = .data$size, color = .data$purity)
 ) +
   geom_point(alpha = 0.7, size = 2,
              position = position_jitter(width = 0.01, height = 0)) +
   scale_color_viridis_c(option = "C") +
   labs(
-    x = "Run-level power",
+    x = "Effect coverage",
     y = "Effect size",
     color = "Purity",
-    title = "Baseline vanilla: size vs power, colored by purity"
+    title = "Baseline vanilla: size vs coverage, colored by purity"
   )
 
-ggsave(plot_power_purity, p_power_purity, width = 8, height = 6)
-ggsave(plot_size_purity, p_size_purity, width = 8, height = 6)
-ggsave(plot_size_power, p_size_power, width = 8, height = 6)
+p_size_purity_by_coverage <- ggplot(
+  plot_df %>% dplyr::mutate(coverage_f = factor(.data$coverage)),
+  aes(x = .data$size, y = .data$purity, color = .data$coverage_f)
+) +
+  geom_point(alpha = 0.65, size = 1.8) +
+  geom_smooth(method = "loess", se = FALSE, linewidth = 0.9) +
+  labs(
+    x = "Effect size",
+    y = "Effect purity",
+    color = "Coverage",
+    title = "Baseline vanilla: purity vs size, split by coverage"
+  )
 
-cat("Saved plot:", plot_power_purity, "\n")
+ggsave(plot_coverage_purity, p_coverage_purity, width = 8, height = 6)
+ggsave(plot_size_purity, p_size_purity, width = 8, height = 6)
+ggsave(plot_size_coverage, p_size_coverage, width = 8, height = 6)
+ggsave(plot_size_purity_by_coverage, p_size_purity_by_coverage, width = 8, height = 6)
+
+cat("Saved plot:", plot_coverage_purity, "\n")
 cat("Saved plot:", plot_size_purity, "\n")
-cat("Saved plot:", plot_size_power, "\n")
+cat("Saved plot:", plot_size_coverage, "\n")
+cat("Saved plot:", plot_size_purity_by_coverage, "\n")
 invisible(NULL)
 ```
