@@ -79,7 +79,19 @@ confusion_bins <- readr::read_csv(
   file.path(consolidated_dir, "confusion_bins_full.csv"),
   show_col_types = FALSE
 ) %>%
-  dplyr::mutate(dataset_bundle_id = as.integer(.data$dataset_bundle_id))
+  dplyr::mutate(
+    run_id = as.integer(.data$run_id),
+    dataset_bundle_id = as.integer(.data$dataset_bundle_id)
+  )
+
+auprc_individual <- readr::read_csv(
+  file.path(consolidated_dir, "auprc_individual.csv"),
+  show_col_types = FALSE
+) %>%
+  dplyr::mutate(
+    run_id = as.integer(.data$run_id),
+    dataset_bundle_id = as.integer(.data$dataset_bundle_id)
+  )
 
 dataset_metrics <- readr::read_csv(
   file.path(consolidated_dir, "dataset_metrics.csv"),
@@ -89,6 +101,7 @@ dataset_metrics <- readr::read_csv(
 
 cat("Bundle lookup rows:", nrow(bundle_lookup), "\n")
 cat("Confusion rows:", nrow(confusion_bins), "\n")
+cat("AUPRC individual rows:", nrow(auprc_individual), "\n")
 cat("Dataset metric rows:", nrow(dataset_metrics), "\n")
 ```
 
@@ -158,6 +171,9 @@ bundle_cols <- c("matrix_id", "data_scenario", "y_noise", "p_star", "phenotype_s
 confusion_bins <- confusion_bins %>%
   add_bundle_cols(bundle_cols)
 
+auprc_individual <- auprc_individual %>%
+  add_bundle_cols(bundle_cols)
+
 dataset_metrics <- dataset_metrics %>%
   add_bundle_cols(bundle_cols) %>%
   dplyr::distinct(.data$dataset_bundle_id, .keep_all = TRUE)
@@ -197,16 +213,32 @@ method_bins <- dplyr::bind_rows(
     use_case_id = "susine_functional_mu",
     agg_method = "cluster_weight",
     annotation_r2 = target_annotation_r2
-  ),
-  extract_method_bins(
-    confusion_bins,
-    method_label = "auprc_ccs_oracle",
-    spec_name = "C-CS",
-    use_case_id = "susine_functional_mu",
-    agg_method = "oracle",
-    annotation_r2 = target_annotation_r2
   )
 )
+
+ccs_oracle_run_ids <- auprc_individual %>%
+  dplyr::filter(
+    .data$spec_name == "C-CS",
+    .data$use_case_id == "susine_functional_mu",
+    is.na(.data$agg_method),
+    .data$annotation_r2 == target_annotation_r2
+  ) %>%
+  dplyr::group_by(.data$dataset_bundle_id) %>%
+  dplyr::slice_max(.data$AUPRC, n = 1L, with_ties = FALSE) %>%
+  dplyr::ungroup() %>%
+  dplyr::pull(.data$run_id)
+
+ccs_oracle_bins <- confusion_bins %>%
+  dplyr::filter(
+    .data$spec_name == "C-CS",
+    .data$use_case_id == "susine_functional_mu",
+    is.na(.data$agg_method),
+    .data$annotation_r2 == target_annotation_r2,
+    .data$run_id %in% ccs_oracle_run_ids
+  ) %>%
+  dplyr::mutate(method_label = "auprc_ccs_oracle")
+
+method_bins <- dplyr::bind_rows(method_bins, ccs_oracle_bins)
 
 expected_methods <- c(
   "auprc_oracle_warm_start_baseline",
