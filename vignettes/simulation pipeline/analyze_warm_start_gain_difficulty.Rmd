@@ -402,7 +402,7 @@ cat("Saved coef CSV:", coef_csv, "\n")
 cat("Saved data CSV:", data_csv, "\n")
 ```
 
-## 6. Prediction Plot
+## 6. Prediction Plot Save-Only
 
 ```{r prediction-plot, fig.width=9, fig.height=6}
 plot_df <- difficulty_model_data %>%
@@ -437,5 +437,5 @@ plot_path <- file.path(fig_dir, "difficulty_model_predictions_warm_start_gain.pn
 ggsave(plot_path, p, width = 9, height = 6)
 
 cat("Saved plot:", plot_path, "\n")
-p
+invisible(NULL)
 ```
