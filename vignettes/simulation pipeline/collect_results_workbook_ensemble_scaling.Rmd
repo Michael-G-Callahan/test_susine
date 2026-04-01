@@ -744,6 +744,21 @@ build_metric_coverage_report <- function(metric_df, label) {
     "spec_name", "use_case_id", "dataset_bundle_id",
     "annotation_r2", "group_key", "agg_method"
   )
+  expected_groups <- run_info %>%
+    dplyr::filter(
+      !is.na(.data$spec_name),
+      !.data$spec_name %in% c("baseline-single", "truth-warm"),
+      !is.na(.data$use_case_id),
+      !is.na(.data$dataset_bundle_id),
+      !is.na(.data$group_key)
+    ) %>%
+    dplyr::distinct(
+      .data$spec_name,
+      .data$use_case_id,
+      .data$dataset_bundle_id,
+      .data$annotation_r2,
+      .data$group_key
+    )
   metric_keys <- metric_df %>%
     dplyr::filter(!is.na(.data$spec_name), !is.na(.data$agg_method)) %>%
     dplyr::distinct(dplyr::across(dplyr::all_of(key_cols)))
@@ -755,15 +770,16 @@ build_metric_coverage_report <- function(metric_df, label) {
   expected_methods <- metric_keys %>%
     dplyr::distinct(.data$spec_name, .data$use_case_id, .data$agg_method)
 
-  expected_grid <- metric_keys %>%
-    dplyr::distinct(
-      .data$spec_name,
-      .data$use_case_id,
-      .data$dataset_bundle_id,
-      .data$annotation_r2,
-      .data$group_key
+  expected_grid <- expected_groups %>%
+    dplyr::semi_join(
+      expected_methods %>% dplyr::distinct(.data$spec_name, .data$use_case_id),
+      by = c("spec_name", "use_case_id")
     ) %>%
-    dplyr::left_join(expected_methods, by = c("spec_name", "use_case_id"))
+    dplyr::left_join(
+      expected_methods,
+      by = c("spec_name", "use_case_id"),
+      relationship = "many-to-many"
+    )
 
   missing_rows <- expected_grid %>%
     dplyr::anti_join(metric_keys, by = key_cols) %>%
