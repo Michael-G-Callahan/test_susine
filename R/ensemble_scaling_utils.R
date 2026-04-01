@@ -437,6 +437,179 @@ backfill_terminal_scaling_agg_confusion <- function(scaling_bins_raw,
 }
 
 #' @keywords internal
+backfill_missing_agg_confusion_from_snps <- function(snp_files,
+                                                     confusion_individual,
+                                                     confusion_agg,
+                                                     run_info,
+                                                     model_metrics,
+                                                     agg_methods,
+                                                     pip_breaks) {
+  agg_methods <- unique(normalize_agg_method_id(agg_methods))
+  confusion_agg <- normalize_agg_method_df(confusion_agg)
+
+  empty_result <- list(
+    confusion_agg = confusion_agg,
+    repaired_groups = tibble::tibble(),
+    repair_summary = tibble::tibble()
+  )
+
+  if (is.null(snp_files) || !length(snp_files) ||
+      is.null(confusion_individual) || !nrow(confusion_individual) ||
+      is.null(run_info) || !nrow(run_info) ||
+      is.null(model_metrics) || !nrow(model_metrics) ||
+      !length(agg_methods) || is.null(pip_breaks) || !length(pip_breaks)) {
+    return(empty_result)
+  }
+
+  group_cols <- c("spec_name", "use_case_id", "dataset_bundle_id", "annotation_r2", "group_key")
+
+  existing_agg <- confusion_agg %>%
+    dplyr::distinct(dplyr::across(dplyr::all_of(c(group_cols, "agg_method"))))
+
+  individual_runs <- confusion_individual %>%
+    dplyr::distinct(dplyr::across(dplyr::all_of(group_cols)), .data$run_id) %>%
+    dplyr::group_by(dplyr::across(dplyr::all_of(group_cols))) %>%
+    dplyr::summarise(
+      run_ids = list(sort(unique(.data$run_id))),
+      n_individual_fits = dplyr::n_distinct(.data$run_id),
+      .groups = "drop"
+    ) %>%
+    dplyr::filter(.data$n_individual_fits > 1L)
+
+  missing_groups <- individual_runs %>%
+    tidyr::crossing(agg_method = agg_methods) %>%
+    dplyr::anti_join(existing_agg, by = c(group_cols, "agg_method"))
+
+  if (!nrow(missing_groups)) {
+    return(empty_result)
+  }
+
+  group_meta <- run_info %>%
+    dplyr::filter(
+      !is.na(.data$spec_name),
+      !.data$spec_name %in% c("baseline-single", "truth-warm"),
+      !is.na(.data$use_case_id),
+      !is.na(.data$dataset_bundle_id),
+      !is.na(.data$group_key)
+    ) %>%
+    dplyr::group_by(dplyr::across(dplyr::all_of(group_cols))) %>%
+    dplyr::summarise(
+      run_id = min(.data$run_id, na.rm = TRUE),
+      task_id = dplyr::first(.data$task_id),
+      c_value = dplyr::first(.data$c_value),
+      sigma_0_2_scalar = dplyr::first(.data$sigma_0_2_scalar),
+      .groups = "drop"
+    )
+
+  missing_groups <- missing_groups %>%
+    dplyr::left_join(group_meta, by = group_cols)
+
+  target_run_rows <- missing_groups %>%
+    dplyr::select(dplyr::all_of(group_cols), .data$agg_method, .data$run_ids) %>%
+    tidyr::unnest_longer(.data$run_ids, values_to = "run_id") %>%
+    dplyr::mutate(run_id = as.integer(.data$run_id))
+
+  target_run_ids <- sort(unique(target_run_rows$run_id))
+  if (!length(target_run_ids)) {
+    return(empty_result)
+  }
+
+  snps_needed <- arrow::open_dataset(snp_files, format = "parquet") %>%
+    dplyr::filter(.data$run_id %in% target_run_ids) %>%
+    dplyr::select(.data$run_id, .data$snp_index, .data$pip, .data$causal) %>%
+    dplyr::collect()
+
+  if (!nrow(snps_needed)) {
+    return(empty_result)
+  }
+
+  elbo_info <- model_metrics %>%
+    dplyr::filter(!is.na(.data$run_id), is.na(.data$agg_method)) %>%
+    dplyr::distinct(.data$run_id, .data$elbo_final)
+
+  target_snps <- target_run_rows %>%
+    dplyr::left_join(snps_needed, by = "run_id") %>%
+    dplyr::left_join(elbo_info, by = "run_id")
+
+  if (!nrow(target_snps)) {
+    return(empty_result)
+  }
+
+  repaired_list <- vector("list", nrow(missing_groups))
+  repaired_group_rows <- vector("list", nrow(missing_groups))
+
+  for (i in seq_len(nrow(missing_groups))) {
+    group_row <- missing_groups[i, , drop = FALSE]
+    ds_snps <- target_snps %>%
+      dplyr::filter(
+        .data$spec_name == group_row$spec_name[[1]],
+        .data$use_case_id == group_row$use_case_id[[1]],
+        .data$dataset_bundle_id == group_row$dataset_bundle_id[[1]],
+        ((is.na(.data$annotation_r2) & is.na(group_row$annotation_r2[[1]])) |
+           .data$annotation_r2 == group_row$annotation_r2[[1]]),
+        .data$group_key == group_row$group_key[[1]],
+        .data$agg_method == group_row$agg_method[[1]]
+      )
+
+    if (!nrow(ds_snps)) next
+
+    sel_ids <- sort(unique(ds_snps$run_id))
+    pm <- .build_pip_mat(ds_snps, sel_ids, ds_snps %>% dplyr::distinct(.data$run_id, .data$elbo_final))
+    agg_pip <- aggregate_pip_matrix(pm$pip_mat, pm$elbos, group_row$agg_method[[1]])
+    bins <- compute_bins_from_pip_vec(agg_pip, pm$causal_vec, pip_breaks)
+
+    repaired_list[[i]] <- bins %>%
+      dplyr::mutate(
+        run_id = group_row$run_id[[1]],
+        explore_method = "aggregation",
+        variant_id = group_row$agg_method[[1]],
+        agg_method = group_row$agg_method[[1]],
+        dataset_bundle_id = group_row$dataset_bundle_id[[1]],
+        spec_name = group_row$spec_name[[1]],
+        use_case_id = group_row$use_case_id[[1]],
+        annotation_r2 = group_row$annotation_r2[[1]],
+        group_key = group_row$group_key[[1]],
+        c_value = group_row$c_value[[1]],
+        sigma_0_2_scalar = group_row$sigma_0_2_scalar[[1]]
+      ) %>%
+      dplyr::select(dplyr::all_of(c(
+        "run_id", "explore_method", "variant_id", "agg_method",
+        "pip_threshold", "n_causal_at_bucket", "n_noncausal_at_bucket",
+        "dataset_bundle_id", "spec_name", "use_case_id", "annotation_r2",
+        "group_key", "c_value", "sigma_0_2_scalar"
+      )))
+
+    repaired_group_rows[[i]] <- group_row %>%
+      dplyr::select(.data$task_id, dplyr::all_of(group_cols), .data$agg_method, .data$n_individual_fits)
+  }
+
+  repaired_confusion <- dplyr::bind_rows(repaired_list)
+  repaired_groups <- dplyr::bind_rows(repaired_group_rows) %>%
+    dplyr::arrange(.data$task_id, .data$spec_name, .data$dataset_bundle_id, .data$agg_method)
+
+  if (!nrow(repaired_confusion)) {
+    return(empty_result)
+  }
+
+  if ("variant_id" %in% names(confusion_agg)) {
+    confusion_agg$variant_id <- as.character(confusion_agg$variant_id)
+    repaired_confusion$variant_id <- as.character(repaired_confusion$variant_id)
+  }
+
+  repair_summary <- repaired_groups %>%
+    dplyr::count(
+      .data$task_id, .data$spec_name, .data$use_case_id, .data$agg_method,
+      name = "n_backfilled_groups", sort = TRUE
+    )
+
+  list(
+    confusion_agg = dplyr::bind_rows(confusion_agg, repaired_confusion),
+    repaired_groups = repaired_groups,
+    repair_summary = repair_summary
+  )
+}
+
+#' @keywords internal
 parse_resolution_area <- function(x) {
   parts <- strsplit(as.character(x), "x", fixed = TRUE)
   vapply(parts, function(p) {

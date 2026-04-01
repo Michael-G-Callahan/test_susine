@@ -106,18 +106,22 @@ validate_staging_outputs <- function(file_index) {
   purrr::pmap_dfr(file_index, function(task_id, flush_id, type, path) {
     reader <- switch(
       type,
-      model_metrics = function(p) readr::read_csv(p, show_col_types = FALSE),
-      effect_metrics = function(p) readr::read_csv(p, show_col_types = FALSE),
-      validation = function(p) readr::read_csv(p, show_col_types = FALSE),
-      confusion_bins = function(p) readr::read_csv(p, show_col_types = FALSE),
-      dataset_metrics = function(p) readr::read_csv(p, show_col_types = FALSE),
-      multimodal_metrics = function(p) readr::read_csv(p, show_col_types = FALSE),
-      refine_depth = function(p) readr::read_csv(p, show_col_types = FALSE),
-      prior_diagnostics = function(p) readr::read_csv(p, show_col_types = FALSE),
-      tier_cs_metrics = function(p) readr::read_csv(p, show_col_types = FALSE),
-      scaling_bins = function(p) readr::read_csv(p, show_col_types = FALSE),
-      hg2_by_agg = function(p) readr::read_csv(p, show_col_types = FALSE),
-      snps = function(p) arrow::read_parquet(p),
+      model_metrics = function(p) readr::read_csv(p, show_col_types = FALSE, n_max = 1L, progress = FALSE),
+      effect_metrics = function(p) readr::read_csv(p, show_col_types = FALSE, n_max = 1L, progress = FALSE),
+      validation = function(p) readr::read_csv(p, show_col_types = FALSE, n_max = 1L, progress = FALSE),
+      confusion_bins = function(p) readr::read_csv(p, show_col_types = FALSE, n_max = 1L, progress = FALSE),
+      dataset_metrics = function(p) readr::read_csv(p, show_col_types = FALSE, n_max = 1L, progress = FALSE),
+      multimodal_metrics = function(p) readr::read_csv(p, show_col_types = FALSE, n_max = 1L, progress = FALSE),
+      refine_depth = function(p) readr::read_csv(p, show_col_types = FALSE, n_max = 1L, progress = FALSE),
+      prior_diagnostics = function(p) readr::read_csv(p, show_col_types = FALSE, n_max = 1L, progress = FALSE),
+      tier_cs_metrics = function(p) readr::read_csv(p, show_col_types = FALSE, n_max = 1L, progress = FALSE),
+      scaling_bins = function(p) readr::read_csv(p, show_col_types = FALSE, n_max = 1L, progress = FALSE),
+      hg2_by_agg = function(p) readr::read_csv(p, show_col_types = FALSE, n_max = 1L, progress = FALSE),
+      snps = function(p) {
+        arrow::open_dataset(p, format = "parquet") %>%
+          dplyr::slice_head(n = 1L) %>%
+          dplyr::collect()
+      },
       function(p) stop("Unknown type: ", type)
     )
     res <- tryCatch({

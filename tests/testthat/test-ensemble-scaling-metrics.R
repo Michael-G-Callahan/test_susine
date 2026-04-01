@@ -183,6 +183,83 @@ test_that("collect backfills missing aggregated confusion from terminal scaling 
   expect_true(all(out$confusion_agg$explore_method == "aggregation"))
 })
 
+test_that("collect backfills missing cluster_weight_jsd_050 from staged SNPs", {
+  skip_if_not_installed("arrow")
+
+  snp_tbl <- tibble::tibble(
+    run_id = c(301L, 301L, 301L, 302L, 302L, 302L),
+    snp_index = c(1L, 2L, 3L, 1L, 2L, 3L),
+    pip = c(0.9, 0.2, 0.1, 0.8, 0.3, 0.05),
+    causal = c(1L, 0L, 0L, 1L, 0L, 0L)
+  )
+  pq_path <- file.path(tempdir(), "test-jsd050-snps.parquet")
+  arrow::write_parquet(snp_tbl, pq_path)
+
+  confusion_individual <- tibble::tibble(
+    run_id = c(301L, 301L, 302L, 302L),
+    explore_method = c("refine", "refine", "refine", "refine"),
+    variant_id = c("0", "0", "1", "1"),
+    agg_method = NA_character_,
+    pip_threshold = c(0.9, 0.2, 0.8, 0.3),
+    n_causal_at_bucket = c(1L, 0L, 1L, 0L),
+    n_noncausal_at_bucket = c(0L, 2L, 0L, 2L),
+    dataset_bundle_id = c(17L, 17L, 17L, 17L),
+    spec_name = c("A-F", "A-F", "A-F", "A-F"),
+    use_case_id = c("susine_vanilla", "susine_vanilla", "susine_vanilla", "susine_vanilla"),
+    annotation_r2 = c(NA_real_, NA_real_, NA_real_, NA_real_),
+    group_key = c(
+      "L=10|r2=NA|inflate=NA|explore=separate:refine",
+      "L=10|r2=NA|inflate=NA|explore=separate:refine",
+      "L=10|r2=NA|inflate=NA|explore=separate:refine",
+      "L=10|r2=NA|inflate=NA|explore=separate:refine"
+    ),
+    c_value = c(NA_real_, NA_real_, NA_real_, NA_real_),
+    sigma_0_2_scalar = c(NA_character_, NA_character_, NA_character_, NA_character_)
+  )
+
+  run_info <- tibble::tibble(
+    run_id = c(301L, 302L),
+    task_id = c(21L, 21L),
+    dataset_bundle_id = c(17L, 17L),
+    spec_name = c("A-F", "A-F"),
+    use_case_id = c("susine_vanilla", "susine_vanilla"),
+    prior_spec_id = c("susine_vanilla", "susine_vanilla"),
+    exploration_methods = c("refine", "refine"),
+    sigma_0_2_scalar = c(NA_character_, NA_character_),
+    warm_method = c(NA_character_, NA_character_),
+    c_value = c(NA_real_, NA_real_),
+    refine_step = c(0L, 1L),
+    restart_id = c(NA_integer_, NA_integer_),
+    annotation_r2 = c(NA_real_, NA_real_),
+    inflate_match = c(NA_real_, NA_real_),
+    group_key = c(
+      "L=10|r2=NA|inflate=NA|explore=separate:refine",
+      "L=10|r2=NA|inflate=NA|explore=separate:refine"
+    )
+  )
+
+  model_metrics <- tibble::tibble(
+    run_id = c(301L, 302L),
+    agg_method = c(NA_character_, NA_character_),
+    elbo_final = c(10, 8)
+  )
+
+  out <- test_susine:::backfill_missing_agg_confusion_from_snps(
+    snp_files = pq_path,
+    confusion_individual = confusion_individual,
+    confusion_agg = confusion_individual[0, ],
+    run_info = run_info,
+    model_metrics = model_metrics,
+    agg_methods = "cluster_weight_jsd_050",
+    pip_breaks = c(0, 0.05, 0.1, 0.2, 0.3, 0.8, 0.9, 1)
+  )
+
+  expect_equal(nrow(out$repaired_groups), 1L)
+  expect_equal(out$repaired_groups$agg_method[[1]], "cluster_weight_jsd_050")
+  expect_true(all(out$confusion_agg$agg_method == "cluster_weight_jsd_050"))
+  expect_true(all(out$confusion_agg$explore_method == "aggregation"))
+})
+
 test_that("shared plot table preserves the global vanilla baseline row", {
   auprc_tbl <- test_susine:::build_shared_plot_metric_table(
     agg_overall = tibble::tibble(

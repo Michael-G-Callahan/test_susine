@@ -101,7 +101,7 @@ read_indexed_csvs <- function(index_tbl) {
   if (is.null(index_tbl) || !nrow(index_tbl)) {
     return(tibble::tibble())
   }
-  dplyr::bind_rows(lapply(index_tbl$path, readr::read_csv, show_col_types = FALSE))
+  dplyr::bind_rows(lapply(index_tbl$path, readr::read_csv, show_col_types = FALSE, progress = FALSE))
 }
 
 expected_tasks <- cfg$tables$tasks %>%
@@ -415,6 +415,35 @@ if (nrow(terminal_scaling_backfill_summary) > 0L) {
   cat("  Aggregated rows after scaling backfill:", nrow(confusion_agg), "\n")
 } else {
   cat("No terminal-scaling aggregation backfill needed.\n")
+}
+
+snp_agg_backfill <- test_susine:::backfill_missing_agg_confusion_from_snps(
+  snp_files = staging_index %>%
+    dplyr::filter(.data$type == "snps") %>%
+    dplyr::pull(.data$path),
+  confusion_individual = confusion_individual,
+  confusion_agg = confusion_agg,
+  run_info = run_info,
+  model_metrics = model_metrics,
+  agg_methods = "cluster_weight_jsd_050",
+  pip_breaks = cfg$job$metrics$pip_breaks
+)
+confusion_agg <- snp_agg_backfill$confusion_agg
+snp_agg_backfill_groups <- snp_agg_backfill$repaired_groups
+snp_agg_backfill_summary <- snp_agg_backfill$repair_summary
+write_diagnostic_csv(snp_agg_backfill_groups, "snp_agg_backfill_groups.csv")
+write_diagnostic_csv(snp_agg_backfill_summary, "snp_agg_backfill_summary.csv")
+
+if (nrow(snp_agg_backfill_summary) > 0L) {
+  cat("Applied SNP-based aggregation backfill.\n")
+  print_diagnostic_table(
+    "SNP-Based Aggregation Backfill Summary",
+    snp_agg_backfill_summary,
+    n = 100L
+  )
+  cat("  Aggregated rows after SNP backfill:", nrow(confusion_agg), "\n")
+} else {
+  cat("No SNP-based aggregation backfill needed.\n")
 }
 
 rm(confusion_bins)
@@ -825,27 +854,65 @@ build_metric_coverage_report <- function(metric_df, label) {
   expected_methods <- metric_keys %>%
     dplyr::distinct(.data$spec_name, .data$use_case_id, .data$agg_method)
 
-  expected_grid <- expected_groups %>%
-    dplyr::semi_join(
-      expected_methods %>% dplyr::distinct(.data$spec_name, .data$use_case_id),
-      by = c("spec_name", "use_case_id")
-    ) %>%
-    dplyr::left_join(
-      expected_methods,
-      by = c("spec_name", "use_case_id"),
-      relationship = "many-to-many"
-    )
+  expected_method_counts <- expected_methods %>%
+    dplyr::count(.data$spec_name, .data$use_case_id, name = "n_expected_methods")
 
-  missing_rows <- expected_grid %>%
-    dplyr::anti_join(metric_keys, by = key_cols) %>%
-    dplyr::arrange(
+  present_group_counts <- metric_keys %>%
+    dplyr::count(
       .data$spec_name,
       .data$use_case_id,
-      .data$agg_method,
       .data$dataset_bundle_id,
       .data$annotation_r2,
-      .data$group_key
+      .data$group_key,
+      name = "n_present_methods"
     )
+
+  inconsistent_group_counts <- expected_groups %>%
+    dplyr::semi_join(expected_method_counts, by = c("spec_name", "use_case_id")) %>%
+    dplyr::left_join(expected_method_counts, by = c("spec_name", "use_case_id")) %>%
+    dplyr::left_join(
+      present_group_counts,
+      by = c("spec_name", "use_case_id", "dataset_bundle_id", "annotation_r2", "group_key")
+    ) %>%
+    dplyr::mutate(n_present_methods = tidyr::replace_na(.data$n_present_methods, 0L)) %>%
+    dplyr::filter(.data$n_present_methods != .data$n_expected_methods)
+
+  if (nrow(inconsistent_group_counts) > 0L) {
+    expected_grid <- inconsistent_group_counts %>%
+      dplyr::select(
+        .data$spec_name,
+        .data$use_case_id,
+        .data$dataset_bundle_id,
+        .data$annotation_r2,
+        .data$group_key
+      ) %>%
+      dplyr::distinct() %>%
+      dplyr::left_join(
+        expected_methods,
+        by = c("spec_name", "use_case_id"),
+        relationship = "many-to-many"
+      )
+
+    missing_rows <- expected_grid %>%
+      dplyr::anti_join(metric_keys, by = key_cols) %>%
+      dplyr::arrange(
+        .data$spec_name,
+        .data$use_case_id,
+        .data$agg_method,
+        .data$dataset_bundle_id,
+        .data$annotation_r2,
+        .data$group_key
+      )
+  } else {
+    missing_rows <- tibble::tibble(
+      spec_name = character(),
+      use_case_id = character(),
+      dataset_bundle_id = integer(),
+      annotation_r2 = numeric(),
+      group_key = character(),
+      agg_method = character()
+    )
+  }
 
   missing_summary <- missing_rows %>%
     dplyr::count(.data$spec_name, .data$use_case_id, .data$agg_method,
