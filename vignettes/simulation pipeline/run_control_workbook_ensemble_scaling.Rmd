@@ -42,7 +42,7 @@ All run-level knobs in one place. Edit these before knitting.
 
 ```{r user-config}
 # ── Job identity ──
-job_name <- "ensemble_scaling_testing_v2"
+job_name <- "ensemble_scaling_full"
 email    <- "mgc5166@psu.edu"
 
 # ── HPC resources (per SLURM array task) ──
@@ -70,7 +70,7 @@ max_iter <- 100L
 
 # ── Task packing ──
 task_unit            <- "dataset"
-bundles_per_task     <- 1L
+bundles_per_task     <- 4L
 task_assignment_seed <- 42L
 
 # ── Aggregation ──
