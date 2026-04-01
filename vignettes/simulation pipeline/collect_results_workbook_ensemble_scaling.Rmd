@@ -50,7 +50,168 @@ cat("Task directories:", length(task_dirs), "\n")
 cat(" ", paste(basename(task_dirs), collapse = ", "), "\n")
 ```
 
-# 2. Merge Flush Files
+# 2. Validate Staging Outputs
+
+```{r validate-staging}
+diagnostic_out_dir <- file.path(job_dir, "collect_diagnostics")
+dir.create(diagnostic_out_dir, recursive = TRUE, showWarnings = FALSE)
+
+write_diagnostic_csv <- function(df, filename) {
+  if (is.null(df)) {
+    return(invisible(NULL))
+  }
+  if (!ncol(df)) {
+    return(invisible(NULL))
+  }
+  readr::write_csv(tibble::as_tibble(df), file.path(diagnostic_out_dir, filename))
+}
+
+print_diagnostic_table <- function(title, df, n = 20L) {
+  cat("\n", title, "\n", sep = "")
+  if (is.null(df) || !nrow(df)) {
+    cat("  None.\n")
+    return(invisible(NULL))
+  }
+  print(df, n = min(nrow(df), n))
+  if (nrow(df) > n) {
+    cat("  ...", nrow(df) - n, "more row(s) written to", diagnostic_out_dir, "\n")
+  }
+}
+
+stop_collect_validation <- function(summary_lines, tables = list()) {
+  cat("\n=== Collect Validation Failure ===\n")
+  for (line in summary_lines) {
+    cat("* ", line, "\n", sep = "")
+  }
+  for (tbl in tables) {
+    print_diagnostic_table(
+      tbl$title,
+      tbl$data,
+      n = if (!is.null(tbl$n)) tbl$n else 20L
+    )
+  }
+  stop(
+    "Collect workbook halted due to validation diagnostics. See ",
+    diagnostic_out_dir,
+    call. = FALSE
+  )
+}
+
+read_indexed_csvs <- function(index_tbl) {
+  if (is.null(index_tbl) || !nrow(index_tbl)) {
+    return(tibble::tibble())
+  }
+  dplyr::bind_rows(lapply(index_tbl$path, readr::read_csv, show_col_types = FALSE))
+}
+
+expected_tasks <- cfg$tables$tasks %>%
+  dplyr::distinct(task_id) %>%
+  dplyr::arrange(task_id)
+
+task_dir_index <- tibble::tibble(
+  task_id = suppressWarnings(as.integer(sub("^task-", "", basename(task_dirs))))
+) %>%
+  dplyr::filter(!is.na(.data$task_id))
+
+staging_index <- test_susine::index_staging_outputs(
+  job_name = job_name,
+  parent_job_id = parent_job_id,
+  output_root = output_root
+)
+staging_counts_by_type <- staging_index %>%
+  dplyr::count(type, name = "n_files", sort = TRUE)
+staging_counts_by_task_type <- staging_index %>%
+  dplyr::count(task_id, type, name = "n_files") %>%
+  dplyr::arrange(task_id, type)
+
+missing_task_dirs <- expected_tasks %>%
+  dplyr::anti_join(task_dir_index, by = "task_id") %>%
+  dplyr::mutate(issue = "Missing task directory")
+
+missing_staged_output_tasks <- expected_tasks %>%
+  dplyr::anti_join(staging_index %>% dplyr::distinct(task_id), by = "task_id") %>%
+  dplyr::mutate(issue = "No recognized staged output files found")
+
+required_stage_types <- c("model_metrics", "confusion_bins", "dataset_metrics", "validation")
+missing_required_stage_types <- tidyr::expand_grid(
+  task_id = expected_tasks$task_id,
+  type = required_stage_types
+) %>%
+  dplyr::left_join(staging_counts_by_task_type, by = c("task_id", "type")) %>%
+  dplyr::mutate(n_files = tidyr::replace_na(.data$n_files, 0L)) %>%
+  dplyr::filter(.data$n_files == 0L) %>%
+  dplyr::mutate(issue = paste("Missing required", .data$type, "flush file(s)"))
+
+staging_validation <- test_susine::validate_staging_outputs(staging_index)
+unreadable_staged_files <- staging_validation %>%
+  dplyr::filter(!.data$ok) %>%
+  dplyr::arrange(task_id, flush_id, type)
+
+validation_flush_index <- staging_index %>%
+  dplyr::filter(.data$type == "validation") %>%
+  dplyr::arrange(task_id, flush_id)
+validation_flushes <- read_indexed_csvs(validation_flush_index)
+validation_issue_rows <- if (
+  nrow(validation_flushes) &&
+  all(c("has_issues", "issues") %in% names(validation_flushes))
+) {
+  validation_flushes %>%
+    dplyr::filter(!is.na(.data$has_issues) & .data$has_issues)
+} else {
+  tibble::tibble()
+}
+validation_issue_summary <- if (nrow(validation_issue_rows)) {
+  validation_issue_rows %>%
+    dplyr::count(task_id, issues, name = "n_rows", sort = TRUE)
+} else {
+  tibble::tibble()
+}
+
+write_diagnostic_csv(staging_index, "staging_index.csv")
+write_diagnostic_csv(staging_counts_by_type, "staging_counts_by_type.csv")
+write_diagnostic_csv(staging_counts_by_task_type, "staging_counts_by_task_type.csv")
+write_diagnostic_csv(staging_validation, "staging_read_validation.csv")
+write_diagnostic_csv(validation_flushes, "validation_rows.csv")
+write_diagnostic_csv(validation_issue_summary, "validation_issue_summary.csv")
+write_diagnostic_csv(missing_task_dirs, "missing_task_dirs.csv")
+write_diagnostic_csv(missing_staged_output_tasks, "missing_staged_output_tasks.csv")
+write_diagnostic_csv(missing_required_stage_types, "missing_required_stage_types.csv")
+
+staging_issue_count <- nrow(missing_task_dirs) +
+  nrow(missing_staged_output_tasks) +
+  nrow(missing_required_stage_types) +
+  nrow(unreadable_staged_files) +
+  nrow(validation_issue_summary)
+
+if (staging_issue_count > 0L) {
+  stop_collect_validation(
+    c(
+      sprintf("Expected tasks in job config: %d", nrow(expected_tasks)),
+      sprintf("Task directories found on disk: %d", nrow(task_dir_index)),
+      sprintf("Recognized staged flush files indexed: %d", nrow(staging_index)),
+      sprintf("Unreadable staged files: %d", nrow(unreadable_staged_files)),
+      sprintf("Tasks missing required flush file types: %d", dplyr::n_distinct(missing_required_stage_types$task_id)),
+      sprintf("Validation rows with has_issues = TRUE: %d", nrow(validation_issue_rows)),
+      "Collect stopped before merging flush files because the staged outputs are incomplete or invalid.",
+      "This usually means the SLURM array did not finish cleanly or some task flushes were never written."
+    ),
+    tables = list(
+      list(title = "Staging Counts by Type", data = staging_counts_by_type, n = 50L),
+      list(title = "Missing Task Directories", data = missing_task_dirs, n = 50L),
+      list(title = "Tasks Missing Any Staged Output", data = missing_staged_output_tasks, n = 50L),
+      list(title = "Missing Required Flush Types", data = missing_required_stage_types, n = 100L),
+      list(title = "Unreadable Staged Files", data = unreadable_staged_files, n = 50L),
+      list(title = "Validation Issue Summary", data = validation_issue_summary, n = 50L)
+    )
+  )
+}
+
+cat("Staging validation passed.\n")
+cat("Diagnostic CSVs written to:", diagnostic_out_dir, "\n")
+print_diagnostic_table("Staging Counts by Type", staging_counts_by_type, n = 50L)
+```
+
+# 3. Merge Flush Files
 
 ```{r merge-flush}
 log_stage <- function(msg) {
@@ -575,7 +736,104 @@ cat("TPR@0.05 pooled oracle rows (overall):", nrow(tpr05_pooled_oracle), "\n")
 cat("TPR@0.05 pooled oracle rows (by r2):", nrow(tpr05_pooled_oracle_by_r2), "\n")
 ```
 
-# 6. Summary Tables
+# 6. Metric Coverage Validation
+
+```{r validate-metric-coverage}
+build_metric_coverage_report <- function(metric_df, label) {
+  key_cols <- c(
+    "spec_name", "use_case_id", "dataset_bundle_id",
+    "annotation_r2", "group_key", "agg_method"
+  )
+  metric_keys <- metric_df %>%
+    dplyr::filter(!is.na(.data$spec_name), !is.na(.data$agg_method)) %>%
+    dplyr::distinct(dplyr::across(dplyr::all_of(key_cols)))
+
+  method_counts <- metric_keys %>%
+    dplyr::count(.data$spec_name, .data$use_case_id, .data$agg_method, name = "n_rows") %>%
+    dplyr::arrange(.data$spec_name, .data$use_case_id, .data$agg_method)
+
+  expected_methods <- metric_keys %>%
+    dplyr::distinct(.data$spec_name, .data$use_case_id, .data$agg_method)
+
+  expected_grid <- metric_keys %>%
+    dplyr::distinct(
+      .data$spec_name,
+      .data$use_case_id,
+      .data$dataset_bundle_id,
+      .data$annotation_r2,
+      .data$group_key
+    ) %>%
+    dplyr::left_join(expected_methods, by = c("spec_name", "use_case_id"))
+
+  missing_rows <- expected_grid %>%
+    dplyr::anti_join(metric_keys, by = key_cols) %>%
+    dplyr::arrange(
+      .data$spec_name,
+      .data$use_case_id,
+      .data$agg_method,
+      .data$dataset_bundle_id,
+      .data$annotation_r2,
+      .data$group_key
+    )
+
+  missing_summary <- missing_rows %>%
+    dplyr::count(.data$spec_name, .data$use_case_id, .data$agg_method,
+                 name = "n_missing_rows", sort = TRUE)
+
+  inconsistent_specs <- method_counts %>%
+    dplyr::group_by(.data$spec_name, .data$use_case_id) %>%
+    dplyr::summarise(
+      min_n = min(.data$n_rows),
+      max_n = max(.data$n_rows),
+      agg_methods = paste(sort(.data$agg_method), collapse = ", "),
+      .groups = "drop"
+    ) %>%
+    dplyr::filter(.data$min_n != .data$max_n)
+
+  write_diagnostic_csv(method_counts, paste0(label, "_method_counts.csv"))
+  write_diagnostic_csv(missing_summary, paste0(label, "_missing_summary.csv"))
+  write_diagnostic_csv(missing_rows, paste0(label, "_missing_rows.csv"))
+  write_diagnostic_csv(inconsistent_specs, paste0(label, "_inconsistent_specs.csv"))
+
+  list(
+    method_counts = method_counts,
+    missing_summary = missing_summary,
+    missing_rows = missing_rows,
+    inconsistent_specs = inconsistent_specs
+  )
+}
+
+auprc_coverage <- build_metric_coverage_report(auprc_agg_per_ds, "auprc_agg_per_ds")
+tpr05_coverage <- build_metric_coverage_report(tpr05_agg_per_ds, "tpr05_agg_per_ds")
+
+metric_issue_count <- nrow(auprc_coverage$missing_summary) + nrow(tpr05_coverage$missing_summary)
+
+if (metric_issue_count > 0L) {
+  stop_collect_validation(
+    c(
+      "Per-dataset aggregated metric coverage is inconsistent across aggregation methods.",
+      "Collect stopped before export because mean barplots would compare different dataset subsets.",
+      "This is the same failure mode that can make one aggregation method look better simply because other methods are missing rows.",
+      sprintf("AUPRC missing aggregation rows: %d", nrow(auprc_coverage$missing_rows)),
+      sprintf("TPR@FPR=0.05 missing aggregation rows: %d", nrow(tpr05_coverage$missing_rows))
+    ),
+    tables = list(
+      list(title = "AUPRC Aggregation Method Counts", data = auprc_coverage$method_counts, n = 100L),
+      list(title = "AUPRC Missing Summary", data = auprc_coverage$missing_summary, n = 100L),
+      list(title = "AUPRC Missing Rows (first 50)", data = auprc_coverage$missing_rows, n = 50L),
+      list(title = "TPR@0.05 Aggregation Method Counts", data = tpr05_coverage$method_counts, n = 100L),
+      list(title = "TPR@0.05 Missing Summary", data = tpr05_coverage$missing_summary, n = 100L),
+      list(title = "TPR@0.05 Missing Rows (first 50)", data = tpr05_coverage$missing_rows, n = 50L)
+    )
+  )
+}
+
+cat("Per-dataset aggregated metric coverage passed.\n")
+print_diagnostic_table("AUPRC Aggregation Method Counts", auprc_coverage$method_counts, n = 100L)
+print_diagnostic_table("TPR@0.05 Aggregation Method Counts", tpr05_coverage$method_counts, n = 100L)
+```
+
+# 7. Summary Tables
 
 ```{r summary-by-spec}
 cat("=== AUPRC by spec x aggregation method ===\n")
@@ -598,7 +856,7 @@ auprc_pooled_individual %>%
   knitr::kable(digits = 4, caption = "Baseline and truth-warm pooled AUPRC")
 ```
 
-# 6b. Subscaling Analysis
+# 7b. Subscaling Analysis
 
 ```{r load-scaling-bins}
 # Scaling confusion bins were merged from flush files in Section 2.
@@ -726,7 +984,7 @@ if (!is.null(scaling_bins_pooled) && nrow(scaling_bins_pooled) > 0L) {
 }
 ```
 
-# 7. Export Consolidated Outputs
+# 8. Export Consolidated Outputs
 
 ```{r export-scaling}
 # scaling_bins_pooled is written to consolidated in the export chunk below.
@@ -779,7 +1037,7 @@ cat("Consolidated outputs written to:", out_dir, "\n")
 cat("Files:", paste(list.files(out_dir), collapse = ", "), "\n")
 ```
 
-# 8. Runtime Summary
+# 9. Runtime Summary
 
 ```{r runtime}
 model_metrics %>%

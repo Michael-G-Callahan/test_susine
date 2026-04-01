@@ -59,6 +59,7 @@ index_staging_outputs <- function(job_name,
     if (grepl("_confusion_bins\\.csv$", fname)) return("confusion_bins")
     if (grepl("_dataset_metrics\\.csv$", fname)) return("dataset_metrics")
     if (grepl("_multimodal_metrics\\.csv$", fname)) return("multimodal_metrics")
+    if (grepl("_refine_depth\\.csv$", fname)) return("refine_depth")
     if (grepl("_prior_diagnostics\\.csv$", fname)) return("prior_diagnostics")
     if (grepl("_tier_cs_metrics\\.csv$", fname)) return("tier_cs_metrics")
     if (grepl("_scaling_bins\\.csv$", fname)) return("scaling_bins")
@@ -111,8 +112,11 @@ validate_staging_outputs <- function(file_index) {
       confusion_bins = function(p) readr::read_csv(p, show_col_types = FALSE),
       dataset_metrics = function(p) readr::read_csv(p, show_col_types = FALSE),
       multimodal_metrics = function(p) readr::read_csv(p, show_col_types = FALSE),
+      refine_depth = function(p) readr::read_csv(p, show_col_types = FALSE),
       prior_diagnostics = function(p) readr::read_csv(p, show_col_types = FALSE),
       tier_cs_metrics = function(p) readr::read_csv(p, show_col_types = FALSE),
+      scaling_bins = function(p) readr::read_csv(p, show_col_types = FALSE),
+      hg2_by_agg = function(p) readr::read_csv(p, show_col_types = FALSE),
       snps = function(p) arrow::read_parquet(p),
       function(p) stop("Unknown type: ", type)
     )
@@ -275,6 +279,7 @@ aggregate_staging_outputs <- function(job_name,
   confusion_files <- dplyr::filter(idx, .data$type == "confusion_bins")$path
   dataset_files <- dplyr::filter(idx, .data$type == "dataset_metrics")$path
   multimodal_files <- dplyr::filter(idx, .data$type == "multimodal_metrics")$path
+  refine_depth_files <- dplyr::filter(idx, .data$type == "refine_depth")$path
   prior_diag_files   <- dplyr::filter(idx, .data$type == "prior_diagnostics")$path
   tier_cs_files      <- dplyr::filter(idx, .data$type == "tier_cs_metrics")$path
   scaling_bin_files <- dplyr::filter(idx, .data$type == "scaling_bins")$path
@@ -337,6 +342,13 @@ aggregate_staging_outputs <- function(job_name,
     readr::write_csv(multimodal_tbl, file.path(output_dir, "multimodal_metrics.csv"))
     log_progress("Wrote multimodal_metrics.csv")
     rm(multimodal_tbl, multimodal_files)
+    gc()
+  }
+  if (length(refine_depth_files)) {
+    refine_depth_tbl <- read_csv_safe(refine_depth_files, idx)
+    readr::write_csv(refine_depth_tbl, file.path(output_dir, "refine_depth.csv"))
+    log_progress("Wrote refine_depth.csv")
+    rm(refine_depth_tbl, refine_depth_files)
     gc()
   }
   if (length(prior_diag_files)) {
