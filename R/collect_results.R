@@ -453,97 +453,7 @@ compute_model_rank <- function(model_metrics_tbl) {
     dplyr::select("run_id", "auprc_rank", "n_competitors")
 }
 
-# ---- Scaling analysis helpers -----
-
-#' Aggregate a p x N PIP matrix to a single length-p PIP vector.
-#'
 #' @param pip_mat Numeric matrix (p rows × N columns).
-#' @param elbos Length-N ELBO vector.
-#' @param method One of "uniform", "max_elbo", "elbo_softmax",
-#'   "cluster_weight", "cluster_weight_050".
-#' @param jsd_threshold JSD cutoff for cluster_weight (default 0.15).
-#' @keywords internal
-aggregate_pip_matrix <- function(pip_mat, elbos, method, jsd_threshold = 0.15, hc = NULL) {
-  N <- ncol(pip_mat)
-  if (N == 1L) return(as.vector(pip_mat))
-  switch(method,
-    uniform = rowMeans(pip_mat),
-    max_elbo = as.vector(pip_mat[, which.max(elbos), drop = TRUE]),
-    elbo_softmax = {
-      w <- exp(elbos - max(elbos)); w <- w / sum(w)
-      as.vector(pip_mat %*% w)
-    },
-    cluster_weight     = .aggregate_cluster_weight(pip_mat, elbos, jsd_threshold, hc = hc),
-    cluster_weight_050 = .aggregate_cluster_weight(pip_mat, elbos, 0.50, hc = hc),
-    stop("Unknown aggregation method: ", method)
-  )
-}
-
-.aggregate_cluster_weight <- function(pip_mat, elbos, jsd_threshold, hc = NULL) {
-  N <- ncol(pip_mat); eps <- 1e-10
-  if (is.null(hc)) {
-    H <- apply(pip_mat + eps, 2L, function(pv) -sum(pv * log(pv)))
-    jsd <- matrix(0, N, N)
-    for (i in seq_len(N - 1L)) {
-      for (j in seq(i + 1L, N)) {
-        mix        <- 0.5 * (pip_mat[, i] + pip_mat[, j]) + eps
-        jsd[i, j]  <- jsd[j, i] <- max(-sum(mix * log(mix)) - 0.5 * (H[i] + H[j]), 0)
-      }
-    }
-    hc <- hclust(as.dist(jsd), method = "complete")
-  }
-  clusters <- cutree(hc, h = jsd_threshold)
-  K <- max(clusters)
-  w <- numeric(N)
-  for (k in seq_len(K)) {
-    idx    <- which(clusters == k)
-    ew     <- exp(elbos[idx] - max(elbos[idx]))
-    w[idx] <- ew / sum(ew) / K
-  }
-  as.vector(pip_mat %*% w)
-}
-
-#' Select run_ids for a subsample of size n_ens from run_meta.
-#'
-#' @param run_meta Tibble with columns run_id and lever columns
-#'   (restart_id, refine_step, c_value, sigma_0_2_scalar).
-#' @param n_ens Number of fits to select.
-#' @param lever_type One of "restart", "refine", "sigma_0_2", "c_grid".
-#' @param rep_i Random-seed index (used for restart lever; default 1L).
-#' @keywords internal
-select_subsample_run_ids <- function(run_meta, n_ens, lever_type, rep_i = 1L) {
-  n_sel <- min(n_ens, nrow(run_meta))
-  switch(lever_type,
-    restart = {
-      run_meta %>%
-        dplyr::arrange(.data$restart_id, .data$run_id) %>%
-        dplyr::slice_head(n = n_sel) %>%
-        dplyr::pull(run_id)
-    },
-    refine = {
-      run_meta %>%
-        dplyr::arrange(.data$refine_step) %>%
-        dplyr::slice_head(n = n_sel) %>%
-        dplyr::pull(run_id)
-    },
-    sigma_0_2 = {
-      vals <- sort(unique(run_meta$sigma_0_2_scalar))
-      keep <- vals[round(seq(1, length(vals), length.out = n_sel))]
-      run_meta %>%
-        dplyr::filter(.data$sigma_0_2_scalar %in% keep) %>%
-        dplyr::pull(run_id)
-    },
-    c_grid = {
-      vals <- sort(unique(run_meta$c_value))
-      keep <- vals[round(seq(1, length(vals), length.out = n_sel))]
-      run_meta %>%
-        dplyr::filter(.data$c_value %in% keep) %>%
-        dplyr::pull(run_id)
-    },
-    stop("Unknown lever_type: ", lever_type)
-  )
-}
-
 #' Build pre-aggregated confusion matrix from SNPs dataset.
 #'
 #' Creates a compact summary table with per-bucket causal/non-causal counts
@@ -833,7 +743,7 @@ build_confusion_matrix <- function(snps_dataset_path,
 
 # Ensemble scaling analysis helpers ----------------------------------------
 
-# Compute AUPRC from a pooled confusion-bins tibble via trapezoidal PR-curve.
+# Compute AUPRC from a pooled confusion-bins tibble via step-function average precision.
 # bins: tibble with pip_threshold, n_causal_at_bucket, n_noncausal_at_bucket
 # Returns a scalar or NA_real_.
 #' @keywords internal
@@ -844,20 +754,22 @@ auprc_from_pooled_bins <- function(bins) {
   cum_fp  <- cumsum(b$n_noncausal_at_bucket)
   total_p <- sum(b$n_causal_at_bucket)
   if (total_p == 0L) return(NA_real_)
-  keep      <- (cum_tp + cum_fp) > 0L
-  precision <- (cum_tp / (cum_tp + cum_fp))[keep]
-  recall    <- (cum_tp / total_p)[keep]
-  if (length(recall) < 2L) return(NA_real_)
-  sum(diff(recall) * 0.5 * (precision[-length(precision)] + precision[-1L]))
+  denom <- cum_tp + cum_fp
+  precision <- ifelse(denom > 0, cum_tp / denom, NA_real_)
+  recall <- cum_tp / total_p
+  valid <- !is.na(precision) & !is.na(recall)
+  if (sum(valid) < 2L) return(NA_real_)
+  compute_auprc_single(precision[valid], recall[valid])
 }
 
 # Aggregate a p x N PIP matrix to a length-p vector using the specified method.
 # pip_mat: numeric matrix, p rows (SNPs), N columns (fits)
 # elbos:   length-N numeric (NAs treated as -Inf for max_elbo / softmax)
 # method:  "max_elbo", "uniform", "elbo_softmax",
-#          "cluster_weight" (JSD threshold 0.15), or "cluster_weight_050" (0.50)
+#          "cluster_weight" (JSD threshold 0.15), or "cluster_weight_jsd_050" (0.50)
 #' @keywords internal
 aggregate_pip_matrix <- function(pip_mat, elbos, method, jsd_threshold = 0.15, hc = NULL) {
+  method <- normalize_agg_method_id(method)
   N <- ncol(pip_mat)
   if (N == 1L) return(as.vector(pip_mat))
   switch(method,
@@ -871,8 +783,8 @@ aggregate_pip_matrix <- function(pip_mat, elbos, method, jsd_threshold = 0.15, h
       w <- exp(e - max(e)); w <- w / sum(w)
       as.vector(pip_mat %*% w)
     },
-    cluster_weight     = .aggregate_cluster_weight(pip_mat, elbos, jsd_threshold, hc = hc),
-    cluster_weight_050 = .aggregate_cluster_weight(pip_mat, elbos, 0.50, hc = hc),
+    cluster_weight = .aggregate_cluster_weight(pip_mat, elbos, jsd_threshold, hc = hc),
+    cluster_weight_jsd_050 = .aggregate_cluster_weight(pip_mat, elbos, 0.50, hc = hc),
     stop("Unknown aggregation method: ", method)
   )
 }
@@ -1028,7 +940,7 @@ compute_scaling_curves <- function(snps_indiv, elbo_info, spec_catalog,
                                    pip_breaks,
                                    n_subsample_sizes = c(4L, 8L, 16L, 32L, 64L)) {
   agg_methods <- c("max_elbo", "uniform", "elbo_softmax",
-                   "cluster_weight", "cluster_weight_050")
+                   "cluster_weight", "cluster_weight_jsd_050")
 
   purrr::map_dfr(seq_len(nrow(spec_catalog)), function(si) {
     spec_nm    <- spec_catalog$spec_name[si]
@@ -1133,7 +1045,7 @@ compute_scaling_curves <- function(snps_indiv, elbo_info, spec_catalog,
 compute_interaction_scaling <- function(snps_indiv, elbo_info,
                                         interaction_spec_names, pip_breaks) {
   agg_methods <- c("max_elbo", "uniform", "elbo_softmax",
-                   "cluster_weight", "cluster_weight_050")
+                   "cluster_weight", "cluster_weight_jsd_050")
   resolutions <- c("4x4", "8x8")
 
   purrr::map_dfr(interaction_spec_names, function(spec_nm) {

@@ -84,7 +84,7 @@ aggregation_catalog <- function() {
     "max_elbo",          "Max ELBO",
     "uniform",           "Uniform average",
     "elbo_softmax",      "ELBO softmax",
-    "cluster_weight",    "Cluster-then-ELBO-softmax (JSD 0.15)",
+    "cluster_weight",        "Cluster-then-ELBO-softmax (JSD 0.15)",
     "cluster_weight_jsd_050","Cluster-then-ELBO-softmax (JSD 0.50)"
   )
 }
@@ -177,4 +177,3 @@ resolve_use_cases <- function(ids = NULL) {
   }
   dplyr::filter(catalog, .data$prior_spec_id %in% ids | .data$use_case_id %in% ids)
 }
-

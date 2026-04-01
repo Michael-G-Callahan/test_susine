@@ -75,7 +75,7 @@ task_assignment_seed <- 42L
 
 # ── Aggregation ──
 aggregation_methods  <- c("max_elbo", "uniform", "elbo_softmax",
-                          "cluster_weight")
+                          "cluster_weight", "cluster_weight_jsd_050")
 include_overall_pool <- FALSE
 softmax_temperature  <- 1
 

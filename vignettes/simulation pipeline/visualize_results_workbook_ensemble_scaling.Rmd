@@ -58,6 +58,8 @@ confusion_bins <- readr::read_csv(
   file.path(consolidated_dir, "confusion_bins_full.csv"),
   show_col_types = FALSE
 )
+model_metrics <- test_susine:::normalize_agg_method_df(model_metrics)
+confusion_bins <- test_susine:::normalize_agg_method_df(confusion_bins)
 
 tier_cs_path <- file.path(consolidated_dir, "tier_cs_metrics_full.csv")
 tier_cs_metrics_full <- if (file.exists(tier_cs_path)) {
@@ -81,33 +83,14 @@ cat("Figure root:", fig_root, "\n")
 ```
 
 ```{r helpers}
-# Helper: compute AUPRC from a pooled confusion-bins tibble.
-# AP = sum over bins of [precision_at_bin * delta_recall_at_bin].
+# Use the package-standardized metric helpers so the workbook does not
+# maintain a second AUPRC/TPR implementation.
 auprc_from_bins <- function(bins) {
-  b       <- bins %>% dplyr::arrange(dplyr::desc(.data$pip_threshold))
-  cum_tp  <- cumsum(b$n_causal_at_bucket)
-  cum_fp  <- cumsum(b$n_noncausal_at_bucket)
-  total_p <- sum(b$n_causal_at_bucket)
-  total_n <- sum(b$n_noncausal_at_bucket)
-  if (total_p == 0L || total_n == 0L) return(NA_real_)
-  precision    <- cum_tp / (cum_tp + cum_fp)
-  delta_recall <- b$n_causal_at_bucket / total_p
-  sum(precision * delta_recall)
+  test_susine:::auprc_from_pooled_bins(bins)
 }
 
-# Helper: TPR at FPR <= threshold.
 tpr05_from_bins <- function(bins, fpr_threshold = 0.05) {
-  b       <- bins %>% dplyr::arrange(dplyr::desc(.data$pip_threshold))
-  cum_tp  <- cumsum(b$n_causal_at_bucket)
-  cum_fp  <- cumsum(b$n_noncausal_at_bucket)
-  total_p <- sum(b$n_causal_at_bucket)
-  total_n <- sum(b$n_noncausal_at_bucket)
-  if (total_p == 0L || total_n == 0L) return(NA_real_)
-  tpr <- cum_tp / total_p
-  fpr <- cum_fp / total_n
-  idx <- which(fpr <= fpr_threshold)
-  if (!length(idx)) return(NA_real_)
-  max(tpr[idx])
+  test_susine:::tpr_at_fpr_threshold(bins, fpr_threshold = fpr_threshold)
 }
 ```
 
@@ -129,46 +112,8 @@ auprc_pooled_individual <- readr::read_csv(
   file.path(consolidated_dir, "auprc_pooled_individual.csv"),
   show_col_types = FALSE
 )
-
-# Baseline reference: single-fit susine_vanilla, pooled across all r2
-baseline_auprc <- auprc_pooled_individual_overall %>%
-  dplyr::filter(spec_name == "baseline-single",
-                use_case_id == "susine_vanilla") %>%
-  dplyr::pull(AUPRC)
-
-cat("Baseline pooled AUPRC:", round(baseline_auprc, 4), "\n")
-
-# Truth-warm for OVERALL plot: pooled across all r2, no r2 in label
-truth_warm_overall <- auprc_pooled_individual_overall %>%
-  dplyr::filter(spec_name == "truth-warm") %>%
-  dplyr::select(use_case_id, AUPRC) %>%
-  dplyr::mutate(
-    label = dplyr::case_when(
-      use_case_id == "susine_vanilla" ~ "truth-warm vanilla",
-      use_case_id == "susine_eb_clamped_scale_var_nonneg" ~ "truth-warm EB",
-      use_case_id == "susine_functional_mu" ~ "truth-warm grid (c=0.5)",
-      TRUE ~ use_case_id
-    ),
-    annotation_r2 = NA_real_
-  )
-
-# Truth-warm for PER-R2 plots: one row per use_case x annotation_r2, r2 in label
-truth_warm_by_r2 <- auprc_pooled_individual %>%
-  dplyr::filter(spec_name == "truth-warm") %>%
-  dplyr::select(use_case_id, annotation_r2, AUPRC) %>%
-  dplyr::mutate(
-    label = dplyr::case_when(
-      use_case_id == "susine_vanilla" ~ "truth-warm vanilla",
-      use_case_id == "susine_eb_clamped_scale_var_nonneg" ~
-        paste0("truth-warm EB (r\u00b2=", annotation_r2, ")"),
-      use_case_id == "susine_functional_mu" ~
-        paste0("truth-warm grid (c=0.5, r\u00b2=", annotation_r2, ")"),
-      TRUE ~ use_case_id
-    )
-  )
-
-cat("Truth-warm overall:\n"); print(truth_warm_overall)
-cat("Truth-warm by r2:\n"); print(truth_warm_by_r2)
+auprc_pooled_agg <- test_susine:::normalize_agg_method_df(auprc_pooled_agg)
+auprc_pooled_agg_by_r2 <- test_susine:::normalize_agg_method_df(auprc_pooled_agg_by_r2)
 
 # Load TPR@0.05 pooled tables
 tpr05_pooled_agg <- readr::read_csv(
@@ -187,112 +132,105 @@ tpr05_pooled_individual <- readr::read_csv(
   file.path(consolidated_dir, "tpr05_pooled_individual.csv"),
   show_col_types = FALSE
 )
+tpr05_pooled_agg <- test_susine:::normalize_agg_method_df(tpr05_pooled_agg)
+tpr05_pooled_agg_by_r2 <- test_susine:::normalize_agg_method_df(tpr05_pooled_agg_by_r2)
 
-# Baseline TPR@0.05 (single-fit susine_vanilla, pooled across all r2)
-baseline_tpr05 <- tpr05_pooled_individual_overall %>%
-  dplyr::filter(spec_name == "baseline-single",
-                use_case_id == "susine_vanilla") %>%
-  dplyr::pull(tpr_fpr05)
-cat("Baseline pooled TPR@0.05:", round(baseline_tpr05, 4), "\n")
-
-# Truth-warm TPR@0.05 for OVERALL plot
-truth_warm_tpr05_overall <- tpr05_pooled_individual_overall %>%
-  dplyr::filter(spec_name == "truth-warm") %>%
-  dplyr::select(use_case_id, tpr_fpr05) %>%
-  dplyr::mutate(
-    label = dplyr::case_when(
-      use_case_id == "susine_vanilla" ~ "truth-warm vanilla",
-      use_case_id == "susine_eb_clamped_scale_var_nonneg" ~ "truth-warm EB",
-      use_case_id == "susine_functional_mu" ~ "truth-warm grid (c=0.5)",
-      TRUE ~ use_case_id
-    ),
-    annotation_r2 = NA_real_
-  )
-
-# Truth-warm TPR@0.05 for PER-R2 plots
-truth_warm_tpr05_by_r2 <- tpr05_pooled_individual %>%
-  dplyr::filter(spec_name == "truth-warm") %>%
-  dplyr::select(use_case_id, annotation_r2, tpr_fpr05) %>%
-  dplyr::mutate(
-    label = dplyr::case_when(
-      use_case_id == "susine_vanilla" ~ "truth-warm vanilla",
-      use_case_id == "susine_eb_clamped_scale_var_nonneg" ~
-        paste0("truth-warm EB (r\u00b2=", annotation_r2, ")"),
-      use_case_id == "susine_functional_mu" ~
-        paste0("truth-warm grid (c=0.5, r\u00b2=", annotation_r2, ")"),
-      TRUE ~ use_case_id
-    )
-  )
-
-collapse_plot_metric_table <- function(df, metric_col, label) {
-  if (is.null(df) || !nrow(df)) return(tibble::tibble())
-
-  group_vars <- c("spec_name", "agg_method")
-  if ("annotation_r2" %in% names(df)) {
-    group_vars <- c(group_vars, "annotation_r2")
-  }
-
-  raw <- df %>%
-    dplyr::filter(!is.na(.data$spec_name))
-
-  metric_sym <- rlang::sym(metric_col)
-  dup_summary <- raw %>%
-    dplyr::group_by(dplyr::across(dplyr::all_of(group_vars))) %>%
-    dplyr::summarise(
-      n_rows = dplyr::n(),
-      n_metric = sum(is.finite(!!metric_sym)),
-      metric_min = suppressWarnings(min(!!metric_sym, na.rm = TRUE)),
-      metric_max = suppressWarnings(max(!!metric_sym, na.rm = TRUE)),
-      .groups = "drop"
-    ) %>%
-    dplyr::mutate(
-      metric_span = dplyr::if_else(
-        .data$n_metric > 0L,
-        .data$metric_max - .data$metric_min,
-        0
-      )
-    )
-
-  conflicting <- dup_summary %>%
-    dplyr::filter(.data$n_rows > 1L, is.finite(.data$metric_span), .data$metric_span > 1e-12)
-
-  if (nrow(conflicting) > 0L) {
-    message(
-      sprintf(
-        "%s had %d duplicate plot-key rows with non-identical %s values; collapsing by mean.",
-        label, nrow(conflicting), metric_col
-      )
-    )
-  }
-
-  raw %>%
-    dplyr::group_by(dplyr::across(dplyr::all_of(group_vars))) %>%
-    dplyr::summarise(
-      !!metric_col := mean(!!metric_sym, na.rm = TRUE),
-      .groups = "drop"
-    )
-}
-
-auprc_plot_overall <- collapse_plot_metric_table(
-  auprc_pooled_agg %>% dplyr::mutate(annotation_r2 = NA_real_),
-  metric_col = "AUPRC",
-  label = "auprc_pooled_agg"
-)
-auprc_plot_by_r2 <- collapse_plot_metric_table(
+auprc_plot_table <- test_susine:::build_shared_plot_metric_table(
+  auprc_pooled_agg,
   auprc_pooled_agg_by_r2,
+  auprc_pooled_individual_overall,
+  auprc_pooled_individual,
   metric_col = "AUPRC",
-  label = "auprc_pooled_agg_by_r2"
+  label = "AUPRC plot table"
 )
-tpr05_plot_overall <- collapse_plot_metric_table(
-  tpr05_pooled_agg %>% dplyr::mutate(annotation_r2 = NA_real_),
-  metric_col = "tpr_fpr05",
-  label = "tpr05_pooled_agg"
-)
-tpr05_plot_by_r2 <- collapse_plot_metric_table(
+tpr05_plot_table <- test_susine:::build_shared_plot_metric_table(
+  tpr05_pooled_agg,
   tpr05_pooled_agg_by_r2,
+  tpr05_pooled_individual_overall,
+  tpr05_pooled_individual,
   metric_col = "tpr_fpr05",
-  label = "tpr05_pooled_agg_by_r2"
+  label = "TPR plot table"
 )
+
+auprc_plot_overall <- auprc_plot_table %>%
+  dplyr::filter(.data$series_type == "aggregated", is.na(.data$annotation_r2))
+auprc_plot_by_r2 <- auprc_plot_table %>%
+  dplyr::filter(.data$series_type == "aggregated")
+tpr05_plot_overall <- tpr05_plot_table %>%
+  dplyr::filter(.data$series_type == "aggregated", is.na(.data$annotation_r2))
+tpr05_plot_by_r2 <- tpr05_plot_table %>%
+  dplyr::filter(.data$series_type == "aggregated")
+
+baseline_auprc <- auprc_plot_table %>%
+  dplyr::filter(
+    .data$series_type == "baseline_single",
+    .data$spec_name == "baseline-single",
+    .data$use_case_id == "susine_vanilla",
+    is.na(.data$annotation_r2)
+  ) %>%
+  dplyr::pull(AUPRC)
+baseline_tpr05 <- tpr05_plot_table %>%
+  dplyr::filter(
+    .data$series_type == "baseline_single",
+    .data$spec_name == "baseline-single",
+    .data$use_case_id == "susine_vanilla",
+    is.na(.data$annotation_r2)
+  ) %>%
+  dplyr::pull(tpr_fpr05)
+
+truth_warm_overall <- auprc_plot_table %>%
+  dplyr::filter(.data$series_type == "truth_warm", is.na(.data$annotation_r2)) %>%
+  dplyr::select(.data$use_case_id, .data$annotation_r2, .data$AUPRC) %>%
+  dplyr::mutate(
+    label = dplyr::case_when(
+      .data$use_case_id == "susine_vanilla" ~ "truth-warm vanilla",
+      .data$use_case_id == "susine_eb_clamped_scale_var_nonneg" ~ "truth-warm EB",
+      .data$use_case_id == "susine_functional_mu" ~ "truth-warm grid (c=0.5)",
+      TRUE ~ .data$use_case_id
+    )
+  )
+truth_warm_by_r2 <- auprc_plot_table %>%
+  dplyr::filter(.data$series_type == "truth_warm", !is.na(.data$annotation_r2)) %>%
+  dplyr::select(.data$use_case_id, .data$annotation_r2, .data$AUPRC) %>%
+  dplyr::mutate(
+    label = dplyr::case_when(
+      .data$use_case_id == "susine_vanilla" ~ "truth-warm vanilla",
+      .data$use_case_id == "susine_eb_clamped_scale_var_nonneg" ~
+        paste0("truth-warm EB (r\u00b2=", .data$annotation_r2, ")"),
+      .data$use_case_id == "susine_functional_mu" ~
+        paste0("truth-warm grid (c=0.5, r\u00b2=", .data$annotation_r2, ")"),
+      TRUE ~ .data$use_case_id
+    )
+  )
+truth_warm_tpr05_overall <- tpr05_plot_table %>%
+  dplyr::filter(.data$series_type == "truth_warm", is.na(.data$annotation_r2)) %>%
+  dplyr::select(.data$use_case_id, .data$annotation_r2, .data$tpr_fpr05) %>%
+  dplyr::mutate(
+    label = dplyr::case_when(
+      .data$use_case_id == "susine_vanilla" ~ "truth-warm vanilla",
+      .data$use_case_id == "susine_eb_clamped_scale_var_nonneg" ~ "truth-warm EB",
+      .data$use_case_id == "susine_functional_mu" ~ "truth-warm grid (c=0.5)",
+      TRUE ~ .data$use_case_id
+    )
+  )
+truth_warm_tpr05_by_r2 <- tpr05_plot_table %>%
+  dplyr::filter(.data$series_type == "truth_warm", !is.na(.data$annotation_r2)) %>%
+  dplyr::select(.data$use_case_id, .data$annotation_r2, .data$tpr_fpr05) %>%
+  dplyr::mutate(
+    label = dplyr::case_when(
+      .data$use_case_id == "susine_vanilla" ~ "truth-warm vanilla",
+      .data$use_case_id == "susine_eb_clamped_scale_var_nonneg" ~
+        paste0("truth-warm EB (r\u00b2=", .data$annotation_r2, ")"),
+      .data$use_case_id == "susine_functional_mu" ~
+        paste0("truth-warm grid (c=0.5, r\u00b2=", .data$annotation_r2, ")"),
+      TRUE ~ .data$use_case_id
+    )
+  )
+
+cat("Baseline pooled AUPRC:", round(baseline_auprc, 4), "\n")
+cat("Baseline pooled TPR@0.05:", round(baseline_tpr05, 4), "\n")
+cat("Truth-warm overall:\n"); print(truth_warm_overall)
+cat("Truth-warm by r2:\n"); print(truth_warm_by_r2)
 ```
 
 # 1. SuSiE2-Style Plots (Category 1)
@@ -1800,24 +1738,9 @@ collect workbook; loaded here from `scaling_bins_pooled.csv`.
 scaling_bins_path <- file.path(consolidated_dir, "scaling_bins_pooled.csv")
 
 if (file.exists(scaling_bins_path)) {
-  scaling_bins_pooled <- readr::read_csv(scaling_bins_path, show_col_types = FALSE)
+  scaling_bins_pooled <- readr::read_csv(scaling_bins_path, show_col_types = FALSE) %>%
+    test_susine:::append_overall_scaling_bins()
   cat("Scaling bins pooled rows:", nrow(scaling_bins_pooled), "\n")
-
-  # For specs with non-NA annotation_r2, create overall rows by pooling bins
-  # across annotation_r2 levels (so the "overall" plot includes all specs).
-  has_r2 <- scaling_bins_pooled %>% dplyr::filter(!is.na(.data$annotation_r2))
-  if (nrow(has_r2) > 0L) {
-    overall_pooled <- has_r2 %>%
-      dplyr::group_by(spec_name, n_ensemble, resolution, agg_method, rep,
-                       pip_threshold) %>%
-      dplyr::summarise(
-        n_causal_at_bucket    = sum(.data$n_causal_at_bucket,    na.rm = TRUE),
-        n_noncausal_at_bucket = sum(.data$n_noncausal_at_bucket, na.rm = TRUE),
-        .groups = "drop"
-      ) %>%
-      dplyr::mutate(annotation_r2 = NA_real_)
-    scaling_bins_pooled <- dplyr::bind_rows(scaling_bins_pooled, overall_pooled)
-  }
 
   # Compute per-rep AUPRC and TPR@0.05 from bins pooled across datasets.
   # Pure-lever specs: group by n_ensemble (the subsample size).
@@ -1875,60 +1798,17 @@ if (file.exists(scaling_bins_path)) {
       .groups = "drop"
     )
 
-  # Anchor full-size scaling endpoints to the exact pooled full-ensemble
-  # summaries used in the main barplots. This guarantees that the maximal
-  # ensemble-size / full-resolution endpoint reconciles exactly.
-  parse_resolution_area <- function(x) {
-    parts <- strsplit(as.character(x), "x", fixed = TRUE)
-    vapply(parts, function(p) {
-      nums <- suppressWarnings(as.numeric(p))
-      if (length(nums) < 1L || any(!is.finite(nums))) return(NA_real_)
-      prod(nums)
-    }, numeric(1L))
-  }
-
-  anchor_scaling_full_endpoints <- function(summary_df, full_auprc_df, full_tpr_df) {
-    if (!nrow(summary_df)) return(summary_df)
-
-    full_targets <- full_auprc_df %>%
-      dplyr::rename(AUPRC_full = AUPRC) %>%
-      dplyr::left_join(
-        full_tpr_df %>% dplyr::rename(tpr05_full = tpr_fpr05),
-        by = c("spec_name", "agg_method", "annotation_r2")
-      )
-
-    anchored <- summary_df %>%
-      dplyr::left_join(full_targets,
-                       by = c("spec_name", "agg_method", "annotation_r2")) %>%
-      dplyr::group_by(.data$spec_name, .data$agg_method, .data$annotation_r2) %>%
-      dplyr::mutate(
-        .full_idx = dplyr::case_when(
-          all(is.na(.data$resolution)) ~ .data$n_ensemble == max(.data$n_ensemble, na.rm = TRUE),
-          all(!is.na(.data$resolution)) ~ parse_resolution_area(.data$resolution) ==
-            max(parse_resolution_area(.data$resolution), na.rm = TRUE),
-          TRUE ~ FALSE
-        ),
-        AUPRC_mean = dplyr::if_else(.data$.full_idx & is.finite(.data$AUPRC_full),
-                                    .data$AUPRC_full, .data$AUPRC_mean),
-        tpr05_mean = dplyr::if_else(.data$.full_idx & is.finite(.data$tpr05_full),
-                                    .data$tpr05_full, .data$tpr05_mean),
-        AUPRC_se = dplyr::if_else(.data$.full_idx & is.finite(.data$AUPRC_full),
-                                  NA_real_, .data$AUPRC_se),
-        tpr05_se = dplyr::if_else(.data$.full_idx & is.finite(.data$tpr05_full),
-                                  NA_real_, .data$tpr05_se),
-        n_reps = dplyr::if_else(.data$.full_idx & is.finite(.data$AUPRC_full),
-                                1L, .data$n_reps)
-      ) %>%
-      dplyr::ungroup() %>%
-      dplyr::select(-.data$AUPRC_full, -.data$tpr05_full, -.data$.full_idx)
-
-    anchored
-  }
-
-  scaling_summary <- anchor_scaling_full_endpoints(
+  scaling_summary <- test_susine:::overwrite_scaling_terminal_metrics(
     scaling_summary,
-    full_auprc_df = dplyr::bind_rows(auprc_plot_overall, auprc_plot_by_r2),
-    full_tpr_df = dplyr::bind_rows(tpr05_plot_overall, tpr05_plot_by_r2)
+    full_targets_df = auprc_plot_table %>%
+      dplyr::filter(.data$series_type == "aggregated") %>%
+      dplyr::select(.data$spec_name, .data$annotation_r2, .data$agg_method, .data$AUPRC) %>%
+      dplyr::left_join(
+        tpr05_plot_table %>%
+          dplyr::filter(.data$series_type == "aggregated") %>%
+          dplyr::select(.data$spec_name, .data$annotation_r2, .data$agg_method, .data$tpr_fpr05),
+        by = c("spec_name", "annotation_r2", "agg_method")
+      )
   )
 
   # Separate pure-lever and interaction subsets.
@@ -2247,10 +2127,12 @@ method. Baseline single-fit shown as a black star.
     if (nrow(compute_auprc) > 0L) {
       # Aggregation method shapes
       agg_shapes <- c(
-        "max_elbo"       = 15,  # filled square
-        "uniform"        = 16,  # filled circle
-        "elbo_softmax"   = 17,  # filled triangle
-        "cluster_weight" = 18   # filled diamond
+        "max_elbo"               = 15,  # filled square
+        "uniform"                = 16,  # filled circle
+        "elbo_softmax"           = 17,  # filled triangle
+        "cluster_weight"         = 18,  # filled diamond
+        "cluster_weight_jsd_050" = 8,   # star
+        "oracle"                 = 4    # cross
       )
 
       p_compute <- ggplot(
@@ -2303,8 +2185,10 @@ method. Baseline single-fit shown as a black star.
 
         if (nrow(compute_auprc_r2) > 0L) {
           # Baseline AUPRC at this r2 level
-          bl_auprc_r2 <- auprc_plot_by_r2 %>%
-            dplyr::filter(.data$spec_name == "baseline-single",
+          bl_auprc_r2 <- auprc_plot_table %>%
+            dplyr::filter(.data$series_type == "baseline_single",
+                          .data$spec_name == "baseline-single",
+                          .data$use_case_id == "susine_vanilla",
                           is.na(.data$annotation_r2) |
                             .data$annotation_r2 == r2) %>%
             dplyr::pull(AUPRC)
@@ -2665,6 +2549,24 @@ if (exists("auprc_plot_overall") && nrow(auprc_plot_overall) > 0L) {
 } else {
   cat("Summary table skipped: auprc_plot_overall not available.\n")
 }
+```
+
+```{r metric-inventory}
+metric_inventory <- tibble::tribble(
+  ~figure_name, ~metric, ~source_table, ~grouping_keys, ~helper_used, ~agg_normalization, ~value_mode,
+  "auprc_barplot_by_method_overall.png", "AUPRC", "auprc_plot_table", "spec_name,use_case_id,annotation_r2,agg_method,series_type", "test_susine:::build_shared_plot_metric_table", "normalize_agg_method_id", "pooled aggregated rows",
+  "auprc_barplot_by_method_r2_*.png", "AUPRC", "auprc_plot_table", "spec_name,use_case_id,annotation_r2,agg_method,series_type", "test_susine:::build_shared_plot_metric_table", "normalize_agg_method_id", "pooled aggregated rows",
+  "tpr05_barplot_by_method_overall.png", "TPR@FPR=0.05", "tpr05_plot_table", "spec_name,use_case_id,annotation_r2,agg_method,series_type", "test_susine:::build_shared_plot_metric_table", "normalize_agg_method_id", "pooled aggregated rows",
+  "tpr05_barplot_by_method_r2_*.png", "TPR@FPR=0.05", "tpr05_plot_table", "spec_name,use_case_id,annotation_r2,agg_method,series_type", "test_susine:::build_shared_plot_metric_table", "normalize_agg_method_id", "pooled aggregated rows",
+  "auprc_scaling_curves_overall.png", "AUPRC", "scaling_bins_pooled + auprc_plot_table", "spec_name,annotation_r2,n_ensemble,resolution,agg_method,rep", "test_susine:::auprc_from_pooled_bins + test_susine:::overwrite_scaling_terminal_metrics", "normalize_agg_method_id", "subsampled except exact terminal overwrite",
+  "auprc_scaling_curves_r2_*.png", "AUPRC", "scaling_bins_pooled + auprc_plot_table", "spec_name,annotation_r2,n_ensemble,resolution,agg_method,rep", "test_susine:::auprc_from_pooled_bins + test_susine:::overwrite_scaling_terminal_metrics", "normalize_agg_method_id", "subsampled except exact terminal overwrite",
+  "tpr05_scaling_curves_overall.png", "TPR@FPR=0.05", "scaling_bins_pooled + tpr05_plot_table", "spec_name,annotation_r2,n_ensemble,resolution,agg_method,rep", "test_susine:::tpr_at_fpr_threshold + test_susine:::overwrite_scaling_terminal_metrics", "normalize_agg_method_id", "subsampled except exact terminal overwrite",
+  "tpr05_scaling_curves_r2_*.png", "TPR@FPR=0.05", "scaling_bins_pooled + tpr05_plot_table", "spec_name,annotation_r2,n_ensemble,resolution,agg_method,rep", "test_susine:::tpr_at_fpr_threshold + test_susine:::overwrite_scaling_terminal_metrics", "normalize_agg_method_id", "subsampled except exact terminal overwrite",
+  "baseline_dashed_lines", "AUPRC + TPR@FPR=0.05", "shared plot tables", "spec_name,use_case_id,annotation_r2,series_type", "test_susine:::build_shared_plot_metric_table", "none", "single global baseline-single / susine_vanilla row",
+  "truth_warm_reference_lines", "AUPRC + TPR@FPR=0.05", "shared plot tables", "spec_name,use_case_id,annotation_r2,series_type", "test_susine:::build_shared_plot_metric_table", "none", "truth-warm pooled individual rows"
+)
+readr::write_csv(metric_inventory, file.path(consolidated_dir, "metric_inventory.csv"))
+cat("Metric inventory written.\n")
 ```
 
 # Session Info

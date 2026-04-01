@@ -218,7 +218,7 @@ cfg <- make_job_config(
   # Fast convergence for smoke test
   max_iter = 50L,
 
-  aggregation_methods = c("max_elbo", "uniform", "elbo_softmax", "cluster_weight"),
+  aggregation_methods = c("max_elbo", "uniform", "elbo_softmax", "cluster_weight", "cluster_weight_jsd_050"),
   include_overall_pool = FALSE,
   softmax_temperature = 1,
 
