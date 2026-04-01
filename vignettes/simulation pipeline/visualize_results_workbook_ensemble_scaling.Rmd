@@ -223,6 +223,76 @@ truth_warm_tpr05_by_r2 <- tpr05_pooled_individual %>%
       TRUE ~ use_case_id
     )
   )
+
+collapse_plot_metric_table <- function(df, metric_col, label) {
+  if (is.null(df) || !nrow(df)) return(tibble::tibble())
+
+  group_vars <- c("spec_name", "agg_method")
+  if ("annotation_r2" %in% names(df)) {
+    group_vars <- c(group_vars, "annotation_r2")
+  }
+
+  raw <- df %>%
+    dplyr::filter(!is.na(.data$spec_name))
+
+  metric_sym <- rlang::sym(metric_col)
+  dup_summary <- raw %>%
+    dplyr::group_by(dplyr::across(dplyr::all_of(group_vars))) %>%
+    dplyr::summarise(
+      n_rows = dplyr::n(),
+      n_metric = sum(is.finite(!!metric_sym)),
+      metric_min = suppressWarnings(min(!!metric_sym, na.rm = TRUE)),
+      metric_max = suppressWarnings(max(!!metric_sym, na.rm = TRUE)),
+      .groups = "drop"
+    ) %>%
+    dplyr::mutate(
+      metric_span = dplyr::if_else(
+        .data$n_metric > 0L,
+        .data$metric_max - .data$metric_min,
+        0
+      )
+    )
+
+  conflicting <- dup_summary %>%
+    dplyr::filter(.data$n_rows > 1L, is.finite(.data$metric_span), .data$metric_span > 1e-12)
+
+  if (nrow(conflicting) > 0L) {
+    message(
+      sprintf(
+        "%s had %d duplicate plot-key rows with non-identical %s values; collapsing by mean.",
+        label, nrow(conflicting), metric_col
+      )
+    )
+  }
+
+  raw %>%
+    dplyr::group_by(dplyr::across(dplyr::all_of(group_vars))) %>%
+    dplyr::summarise(
+      !!metric_col := mean(!!metric_sym, na.rm = TRUE),
+      .groups = "drop"
+    )
+}
+
+auprc_plot_overall <- collapse_plot_metric_table(
+  auprc_pooled_agg %>% dplyr::mutate(annotation_r2 = NA_real_),
+  metric_col = "AUPRC",
+  label = "auprc_pooled_agg"
+)
+auprc_plot_by_r2 <- collapse_plot_metric_table(
+  auprc_pooled_agg_by_r2,
+  metric_col = "AUPRC",
+  label = "auprc_pooled_agg_by_r2"
+)
+tpr05_plot_overall <- collapse_plot_metric_table(
+  tpr05_pooled_agg %>% dplyr::mutate(annotation_r2 = NA_real_),
+  metric_col = "tpr_fpr05",
+  label = "tpr05_pooled_agg"
+)
+tpr05_plot_by_r2 <- collapse_plot_metric_table(
+  tpr05_pooled_agg_by_r2,
+  metric_col = "tpr_fpr05",
+  label = "tpr05_pooled_agg_by_r2"
+)
 ```
 
 # 1. SuSiE2-Style Plots (Category 1)
@@ -763,15 +833,15 @@ tw_colors <- c("susine_vanilla" = "blue",
 
 make_auprc_barplot <- function(r2_filter = NULL) {
   if (is.null(r2_filter)) {
-    plot_data <- auprc_pooled_agg %>% dplyr::filter(!is.na(spec_name))
+    plot_data <- auprc_plot_overall
     tw_data   <- truth_warm_overall
     title_str <- "AUPRC by Ensemble Method and Aggregation (all annotation R\u00b2 pooled)"
     fname     <- "auprc_barplot_by_method_overall.png"
   } else {
     # Annotation-independent specs have annotation_r2 = NA — always include.
     # Annotation-dependent specs: filter to the target r2 level.
-    plot_data <- auprc_pooled_agg_by_r2 %>%
-      dplyr::filter(!is.na(spec_name),
+    plot_data <- auprc_plot_by_r2 %>%
+      dplyr::filter(
                     is.na(annotation_r2) | annotation_r2 == r2_filter)
     # Truth-warm: vanilla (NA r2) always; EB/grid at matching r2 only.
     tw_data <- truth_warm_by_r2 %>%
@@ -826,14 +896,14 @@ Four plots: overall + one per annotation R² level.
 ```{r fig-2d-helper}
 make_tpr05_barplot <- function(r2_filter = NULL) {
   if (is.null(r2_filter)) {
-    plot_data <- tpr05_pooled_agg %>% dplyr::filter(!is.na(spec_name))
+    plot_data <- tpr05_plot_overall
     tw_data   <- truth_warm_tpr05_overall
     title_str <- "TPR @ FPR=0.05 by Ensemble Method and Aggregation (all annotation R\u00b2 pooled)"
     fname     <- "tpr05_barplot_by_method_overall.png"
     base_val  <- baseline_tpr05
   } else {
-    plot_data <- tpr05_pooled_agg_by_r2 %>%
-      dplyr::filter(!is.na(spec_name),
+    plot_data <- tpr05_plot_by_r2 %>%
+      dplyr::filter(
                     is.na(annotation_r2) | annotation_r2 == r2_filter)
     tw_data <- truth_warm_tpr05_by_r2 %>%
       dplyr::filter(is.na(annotation_r2) | annotation_r2 == r2_filter)
@@ -1824,10 +1894,8 @@ if (file.exists(scaling_bins_path)) {
       dplyr::rename(AUPRC_full = AUPRC) %>%
       dplyr::left_join(
         full_tpr_df %>% dplyr::rename(tpr05_full = tpr_fpr05),
-        by = c("spec_name", "use_case_id", "agg_method", "annotation_r2")
-      ) %>%
-      dplyr::select(.data$spec_name, .data$agg_method, .data$annotation_r2,
-                    .data$AUPRC_full, .data$tpr05_full)
+        by = c("spec_name", "agg_method", "annotation_r2")
+      )
 
     anchored <- summary_df %>%
       dplyr::left_join(full_targets,
@@ -1859,14 +1927,8 @@ if (file.exists(scaling_bins_path)) {
 
   scaling_summary <- anchor_scaling_full_endpoints(
     scaling_summary,
-    full_auprc_df = dplyr::bind_rows(
-      auprc_pooled_agg %>% dplyr::mutate(annotation_r2 = NA_real_),
-      auprc_pooled_agg_by_r2
-    ),
-    full_tpr_df = dplyr::bind_rows(
-      tpr05_pooled_agg %>% dplyr::mutate(annotation_r2 = NA_real_),
-      tpr05_pooled_agg_by_r2
-    )
+    full_auprc_df = dplyr::bind_rows(auprc_plot_overall, auprc_plot_by_r2),
+    full_tpr_df = dplyr::bind_rows(tpr05_plot_overall, tpr05_plot_by_r2)
   )
 
   # Separate pure-lever and interaction subsets.
@@ -2157,9 +2219,8 @@ method. Baseline single-fit shown as a black star.
       )
 
     # Join with pooled AUPRC (one row per spec x agg_method)
-    compute_auprc <- auprc_pooled_agg %>%
-      dplyr::filter(!is.na(.data$spec_name),
-                    .data$spec_name != "baseline-single") %>%
+    compute_auprc <- auprc_plot_overall %>%
+      dplyr::filter(.data$spec_name != "baseline-single") %>%
       dplyr::inner_join(wt_per_ensemble, by = "spec_name") %>%
       dplyr::mutate(
         compute_min = .data$mean_total_wall_sec / 60
@@ -2232,10 +2293,9 @@ method. Baseline single-fit shown as a black star.
 
       # Per annotation_r2 variant
       for (r2 in sort(unique(na.omit(
-        auprc_pooled_agg_by_r2$annotation_r2)))) {
-        compute_auprc_r2 <- auprc_pooled_agg_by_r2 %>%
-          dplyr::filter(!is.na(.data$spec_name),
-                        .data$spec_name != "baseline-single",
+        auprc_plot_by_r2$annotation_r2)))) {
+        compute_auprc_r2 <- auprc_plot_by_r2 %>%
+          dplyr::filter(.data$spec_name != "baseline-single",
                         is.na(.data$annotation_r2) |
                           .data$annotation_r2 == r2) %>%
           dplyr::inner_join(wt_per_ensemble, by = "spec_name") %>%
@@ -2243,7 +2303,7 @@ method. Baseline single-fit shown as a black star.
 
         if (nrow(compute_auprc_r2) > 0L) {
           # Baseline AUPRC at this r2 level
-          bl_auprc_r2 <- auprc_pooled_agg_by_r2 %>%
+          bl_auprc_r2 <- auprc_plot_by_r2 %>%
             dplyr::filter(.data$spec_name == "baseline-single",
                           is.na(.data$annotation_r2) |
                             .data$annotation_r2 == r2) %>%
@@ -2475,10 +2535,9 @@ and report the bootstrap mean $\pm$ 1.96 SE.
       dplyr::distinct(.data$spec_name, .data$agg_method)
 
     # Select up to 3 representative (spec, agg) combos via highest AUPRC
-    if (nrow(agg_combos) > 0L && exists("auprc_pooled_agg")) {
-      top_combos <- auprc_pooled_agg %>%
-        dplyr::filter(!is.na(.data$spec_name),
-                      .data$spec_name != "baseline-single") %>%
+    if (nrow(agg_combos) > 0L && exists("auprc_plot_overall")) {
+      top_combos <- auprc_plot_overall %>%
+        dplyr::filter(.data$spec_name != "baseline-single") %>%
         dplyr::arrange(dplyr::desc(.data$AUPRC)) %>%
         dplyr::slice_head(n = 3L)
 
@@ -2581,13 +2640,11 @@ and report the bootstrap mean $\pm$ 1.96 SE.
 # Summary Table
 
 ```{r summary-table}
-if (exists("auprc_pooled_agg") && nrow(auprc_pooled_agg) > 0L) {
-  summary_tbl <- auprc_pooled_agg %>%
-    dplyr::filter(!is.na(.data$spec_name)) %>%
+if (exists("auprc_plot_overall") && nrow(auprc_plot_overall) > 0L) {
+  summary_tbl <- auprc_plot_overall %>%
     dplyr::select(spec_name, agg_method, AUPRC) %>%
     dplyr::left_join(
-      tpr05_pooled_agg %>%
-        dplyr::filter(!is.na(.data$spec_name)) %>%
+      tpr05_plot_overall %>%
         dplyr::select(spec_name, agg_method, tpr_fpr05),
       by = c("spec_name", "agg_method")
     ) %>%
@@ -2606,7 +2663,7 @@ if (exists("auprc_pooled_agg") && nrow(auprc_pooled_agg) > 0L) {
                    file.path(consolidated_dir, "summary_table.csv"))
   cat("Summary table written.\n")
 } else {
-  cat("Summary table skipped: auprc_pooled_agg not available.\n")
+  cat("Summary table skipped: auprc_plot_overall not available.\n")
 }
 ```
 
