@@ -422,6 +422,22 @@ compute_tpr05_from_pooled <- function(pooled_bins,
   )
 }
 
+tpr05_individual <- compute_tpr05_from_pooled(
+  per_dataset_individual_bins,
+  group_vars = per_dataset_group_vars,
+  label = "Per-dataset individual TPR@0.05",
+  progress = TRUE,
+  progress_every = 5000L
+)
+tpr05_agg_per_ds <- compute_tpr05_from_pooled(
+  per_dataset_agg_bins,
+  group_vars = per_dataset_group_vars,
+  label = "Per-dataset aggregated TPR@0.05",
+  progress = TRUE,
+  progress_every = 5000L
+)
+tpr05_per_dataset <- dplyr::bind_rows(tpr05_individual, tpr05_agg_per_ds)
+
 tpr05_pooled_agg <- compute_tpr05_from_pooled(
   pooled_agg_bins_overall,
   group_vars = pooled_agg_overall_vars,
@@ -450,6 +466,9 @@ cat("TPR@0.05 pooled aggregated (overall):", nrow(tpr05_pooled_agg), "combos\n")
 cat("TPR@0.05 pooled aggregated (by r2):", nrow(tpr05_pooled_agg_by_r2), "combos\n")
 cat("TPR@0.05 pooled individual (overall):", nrow(tpr05_pooled_individual_overall), "combos\n")
 cat("TPR@0.05 pooled individual (by r2):", nrow(tpr05_pooled_individual), "combos\n")
+cat("TPR@0.05 per-dataset:", nrow(tpr05_per_dataset), "rows\n")
+cat("  Individual fits:", nrow(tpr05_individual), "\n")
+cat("  Aggregated:", nrow(tpr05_agg_per_ds), "\n")
 ```
 
 # 5. Oracle Aggregation
@@ -465,7 +484,7 @@ oracle_run_ids <- auprc_individual %>%
                    annotation_r2, group_key) %>%
   dplyr::slice_max(order_by = AUPRC, n = 1, with_ties = FALSE) %>%
   dplyr::ungroup() %>%
-  dplyr::select(run_id, dataset_bundle_id, spec_name, use_case_id,
+  dplyr::select(run_id, variant_id, dataset_bundle_id, spec_name, use_case_id,
                 annotation_r2, group_key, AUPRC)
 
 cat("Oracle rows (per-dataset):", nrow(oracle_run_ids), "\n")
@@ -480,7 +499,27 @@ auprc_combined <- dplyr::bind_rows(auprc_agg_per_ds, oracle_per_ds)
 # Pooled oracle AUPRC: pull confusion bins for the oracle-selected runs,
 # pool across all datasets, then compute one AUPRC per spec.
 oracle_confusion <- confusion_individual %>%
-  dplyr::semi_join(oracle_run_ids, by = c("run_id", "spec_name", "use_case_id"))
+  dplyr::semi_join(
+    oracle_run_ids,
+    by = c("run_id", "variant_id", "spec_name", "use_case_id")
+  )
+
+per_dataset_oracle_bins <- pool_confusion_summary(
+  oracle_confusion,
+  per_dataset_group_vars,
+  "Per-dataset oracle"
+)
+
+tpr05_oracle_per_ds <- compute_tpr05_from_pooled(
+  per_dataset_oracle_bins,
+  group_vars = per_dataset_group_vars,
+  label = "Per-dataset oracle TPR@0.05",
+  progress = TRUE,
+  progress_every = 5000L
+) %>%
+  dplyr::mutate(agg_method = "oracle", explore_method = "aggregation")
+
+tpr05_combined <- dplyr::bind_rows(tpr05_agg_per_ds, tpr05_oracle_per_ds)
 
 pooled_oracle_bins_overall <- pool_confusion_summary(
   oracle_confusion,
@@ -699,6 +738,8 @@ dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 
 readr::write_csv(auprc_combined, file.path(out_dir, "auprc_aggregated.csv"))
 readr::write_csv(auprc_individual, file.path(out_dir, "auprc_individual.csv"))
+readr::write_csv(tpr05_combined, file.path(out_dir, "tpr05_aggregated.csv"))
+readr::write_csv(tpr05_individual, file.path(out_dir, "tpr05_individual.csv"))
 readr::write_csv(auprc_pooled_agg, file.path(out_dir, "auprc_pooled_aggregated.csv"))
 readr::write_csv(auprc_pooled_agg_by_r2, file.path(out_dir, "auprc_pooled_agg_by_r2.csv"))
 readr::write_csv(auprc_pooled_individual_overall, file.path(out_dir, "auprc_pooled_individual_overall.csv"))

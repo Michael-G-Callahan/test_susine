@@ -50,6 +50,14 @@ auprc_individual <- readr::read_csv(
   file.path(consolidated_dir, "auprc_individual.csv"),
   show_col_types = FALSE
 )
+tpr05_agg <- readr::read_csv(
+  file.path(consolidated_dir, "tpr05_aggregated.csv"),
+  show_col_types = FALSE
+)
+tpr05_individual <- readr::read_csv(
+  file.path(consolidated_dir, "tpr05_individual.csv"),
+  show_col_types = FALSE
+)
 model_metrics <- readr::read_csv(
   file.path(consolidated_dir, "model_metrics_full.csv"),
   show_col_types = FALSE
@@ -58,6 +66,8 @@ confusion_bins <- readr::read_csv(
   file.path(consolidated_dir, "confusion_bins_full.csv"),
   show_col_types = FALSE
 )
+auprc_agg <- test_susine:::normalize_agg_method_df(auprc_agg)
+tpr05_agg <- test_susine:::normalize_agg_method_df(tpr05_agg)
 model_metrics <- test_susine:::normalize_agg_method_df(model_metrics)
 confusion_bins <- test_susine:::normalize_agg_method_df(confusion_bins)
 
@@ -79,6 +89,8 @@ for (d in fig_dirs) {
 
 cat("AUPRC aggregated rows:", nrow(auprc_agg), "\n")
 cat("AUPRC individual rows:", nrow(auprc_individual), "\n")
+cat("TPR@0.05 aggregated rows:", nrow(tpr05_agg), "\n")
+cat("TPR@0.05 individual rows:", nrow(tpr05_individual), "\n")
 cat("Figure root:", fig_root, "\n")
 ```
 
@@ -135,6 +147,38 @@ tpr05_pooled_individual <- readr::read_csv(
 tpr05_pooled_agg <- test_susine:::normalize_agg_method_df(tpr05_pooled_agg)
 tpr05_pooled_agg_by_r2 <- test_susine:::normalize_agg_method_df(tpr05_pooled_agg_by_r2)
 
+extract_baseline_metric <- function(plot_table, metric_col) {
+  plot_table %>%
+    dplyr::filter(
+      .data$series_type == "baseline_single",
+      .data$spec_name == "baseline-single",
+      .data$use_case_id == "susine_vanilla",
+      is.na(.data$annotation_r2)
+    ) %>%
+    dplyr::pull(!!rlang::sym(metric_col))
+}
+
+extract_truth_warm_refs <- function(plot_table, metric_col, overall = TRUE) {
+  plot_table %>%
+    dplyr::filter(
+      .data$series_type == "truth_warm",
+      if (overall) is.na(.data$annotation_r2) else !is.na(.data$annotation_r2)
+    ) %>%
+    dplyr::select(.data$use_case_id, .data$annotation_r2, dplyr::all_of(metric_col)) %>%
+    dplyr::mutate(
+      label = dplyr::case_when(
+        .data$use_case_id == "susine_vanilla" ~ "truth-warm vanilla",
+        .data$use_case_id == "susine_eb_clamped_scale_var_nonneg" & overall ~ "truth-warm EB",
+        .data$use_case_id == "susine_functional_mu" & overall ~ "truth-warm grid (c=0.5)",
+        .data$use_case_id == "susine_eb_clamped_scale_var_nonneg" ~
+          paste0("truth-warm EB (r\u00b2=", .data$annotation_r2, ")"),
+        .data$use_case_id == "susine_functional_mu" ~
+          paste0("truth-warm grid (c=0.5, r\u00b2=", .data$annotation_r2, ")"),
+        TRUE ~ .data$use_case_id
+      )
+    )
+}
+
 auprc_plot_table <- test_susine:::build_shared_plot_metric_table(
   auprc_pooled_agg,
   auprc_pooled_agg_by_r2,
@@ -151,6 +195,22 @@ tpr05_plot_table <- test_susine:::build_shared_plot_metric_table(
   metric_col = "tpr_fpr05",
   label = "TPR plot table"
 )
+auprc_mean_plot_table <- test_susine:::build_shared_plot_metric_table(
+  auprc_agg,
+  auprc_agg,
+  auprc_individual,
+  auprc_individual,
+  metric_col = "AUPRC",
+  label = "AUPRC mean plot table"
+)
+tpr05_mean_plot_table <- test_susine:::build_shared_plot_metric_table(
+  tpr05_agg,
+  tpr05_agg,
+  tpr05_individual,
+  tpr05_individual,
+  metric_col = "tpr_fpr05",
+  label = "TPR mean plot table"
+)
 
 auprc_plot_overall <- auprc_plot_table %>%
   dplyr::filter(.data$series_type == "aggregated", is.na(.data$annotation_r2))
@@ -160,75 +220,33 @@ tpr05_plot_overall <- tpr05_plot_table %>%
   dplyr::filter(.data$series_type == "aggregated", is.na(.data$annotation_r2))
 tpr05_plot_by_r2 <- tpr05_plot_table %>%
   dplyr::filter(.data$series_type == "aggregated")
+auprc_mean_plot_overall <- auprc_mean_plot_table %>%
+  dplyr::filter(.data$series_type == "aggregated", is.na(.data$annotation_r2))
+auprc_mean_plot_by_r2 <- auprc_mean_plot_table %>%
+  dplyr::filter(.data$series_type == "aggregated")
+tpr05_mean_plot_overall <- tpr05_mean_plot_table %>%
+  dplyr::filter(.data$series_type == "aggregated", is.na(.data$annotation_r2))
+tpr05_mean_plot_by_r2 <- tpr05_mean_plot_table %>%
+  dplyr::filter(.data$series_type == "aggregated")
 
-baseline_auprc <- auprc_plot_table %>%
-  dplyr::filter(
-    .data$series_type == "baseline_single",
-    .data$spec_name == "baseline-single",
-    .data$use_case_id == "susine_vanilla",
-    is.na(.data$annotation_r2)
-  ) %>%
-  dplyr::pull(AUPRC)
-baseline_tpr05 <- tpr05_plot_table %>%
-  dplyr::filter(
-    .data$series_type == "baseline_single",
-    .data$spec_name == "baseline-single",
-    .data$use_case_id == "susine_vanilla",
-    is.na(.data$annotation_r2)
-  ) %>%
-  dplyr::pull(tpr_fpr05)
+baseline_auprc <- extract_baseline_metric(auprc_plot_table, "AUPRC")
+baseline_tpr05 <- extract_baseline_metric(tpr05_plot_table, "tpr_fpr05")
+baseline_auprc_mean <- extract_baseline_metric(auprc_mean_plot_table, "AUPRC")
+baseline_tpr05_mean <- extract_baseline_metric(tpr05_mean_plot_table, "tpr_fpr05")
 
-truth_warm_overall <- auprc_plot_table %>%
-  dplyr::filter(.data$series_type == "truth_warm", is.na(.data$annotation_r2)) %>%
-  dplyr::select(.data$use_case_id, .data$annotation_r2, .data$AUPRC) %>%
-  dplyr::mutate(
-    label = dplyr::case_when(
-      .data$use_case_id == "susine_vanilla" ~ "truth-warm vanilla",
-      .data$use_case_id == "susine_eb_clamped_scale_var_nonneg" ~ "truth-warm EB",
-      .data$use_case_id == "susine_functional_mu" ~ "truth-warm grid (c=0.5)",
-      TRUE ~ .data$use_case_id
-    )
-  )
-truth_warm_by_r2 <- auprc_plot_table %>%
-  dplyr::filter(.data$series_type == "truth_warm", !is.na(.data$annotation_r2)) %>%
-  dplyr::select(.data$use_case_id, .data$annotation_r2, .data$AUPRC) %>%
-  dplyr::mutate(
-    label = dplyr::case_when(
-      .data$use_case_id == "susine_vanilla" ~ "truth-warm vanilla",
-      .data$use_case_id == "susine_eb_clamped_scale_var_nonneg" ~
-        paste0("truth-warm EB (r\u00b2=", .data$annotation_r2, ")"),
-      .data$use_case_id == "susine_functional_mu" ~
-        paste0("truth-warm grid (c=0.5, r\u00b2=", .data$annotation_r2, ")"),
-      TRUE ~ .data$use_case_id
-    )
-  )
-truth_warm_tpr05_overall <- tpr05_plot_table %>%
-  dplyr::filter(.data$series_type == "truth_warm", is.na(.data$annotation_r2)) %>%
-  dplyr::select(.data$use_case_id, .data$annotation_r2, .data$tpr_fpr05) %>%
-  dplyr::mutate(
-    label = dplyr::case_when(
-      .data$use_case_id == "susine_vanilla" ~ "truth-warm vanilla",
-      .data$use_case_id == "susine_eb_clamped_scale_var_nonneg" ~ "truth-warm EB",
-      .data$use_case_id == "susine_functional_mu" ~ "truth-warm grid (c=0.5)",
-      TRUE ~ .data$use_case_id
-    )
-  )
-truth_warm_tpr05_by_r2 <- tpr05_plot_table %>%
-  dplyr::filter(.data$series_type == "truth_warm", !is.na(.data$annotation_r2)) %>%
-  dplyr::select(.data$use_case_id, .data$annotation_r2, .data$tpr_fpr05) %>%
-  dplyr::mutate(
-    label = dplyr::case_when(
-      .data$use_case_id == "susine_vanilla" ~ "truth-warm vanilla",
-      .data$use_case_id == "susine_eb_clamped_scale_var_nonneg" ~
-        paste0("truth-warm EB (r\u00b2=", .data$annotation_r2, ")"),
-      .data$use_case_id == "susine_functional_mu" ~
-        paste0("truth-warm grid (c=0.5, r\u00b2=", .data$annotation_r2, ")"),
-      TRUE ~ .data$use_case_id
-    )
-  )
+truth_warm_overall <- extract_truth_warm_refs(auprc_plot_table, "AUPRC", overall = TRUE)
+truth_warm_by_r2 <- extract_truth_warm_refs(auprc_plot_table, "AUPRC", overall = FALSE)
+truth_warm_tpr05_overall <- extract_truth_warm_refs(tpr05_plot_table, "tpr_fpr05", overall = TRUE)
+truth_warm_tpr05_by_r2 <- extract_truth_warm_refs(tpr05_plot_table, "tpr_fpr05", overall = FALSE)
+truth_warm_mean_overall <- extract_truth_warm_refs(auprc_mean_plot_table, "AUPRC", overall = TRUE)
+truth_warm_mean_by_r2 <- extract_truth_warm_refs(auprc_mean_plot_table, "AUPRC", overall = FALSE)
+truth_warm_tpr05_mean_overall <- extract_truth_warm_refs(tpr05_mean_plot_table, "tpr_fpr05", overall = TRUE)
+truth_warm_tpr05_mean_by_r2 <- extract_truth_warm_refs(tpr05_mean_plot_table, "tpr_fpr05", overall = FALSE)
 
 cat("Baseline pooled AUPRC:", round(baseline_auprc, 4), "\n")
 cat("Baseline pooled TPR@0.05:", round(baseline_tpr05, 4), "\n")
+cat("Baseline mean AUPRC:", round(baseline_auprc_mean, 4), "\n")
+cat("Baseline mean TPR@0.05:", round(baseline_tpr05_mean, 4), "\n")
 cat("Truth-warm overall:\n"); print(truth_warm_overall)
 cat("Truth-warm by r2:\n"); print(truth_warm_by_r2)
 ```
@@ -826,6 +844,60 @@ make_auprc_barplot(r2_filter = 0.2)   # annotation r2 = 0.2
 make_auprc_barplot(r2_filter = 0.5)   # annotation r2 = 0.5
 ```
 
+```{r fig-2c-mean-helper}
+make_auprc_mean_barplot <- function(r2_filter = NULL) {
+  if (is.null(r2_filter)) {
+    plot_data <- auprc_mean_plot_overall
+    tw_data   <- truth_warm_mean_overall
+    title_str <- "AUPRC by Ensemble Method and Aggregation (mean across datasets, all annotation R\u00b2 pooled)"
+    fname     <- "auprc_barplot_by_method_mean_overall.png"
+  } else {
+    plot_data <- auprc_mean_plot_by_r2 %>%
+      dplyr::filter(is.na(annotation_r2) | annotation_r2 == r2_filter)
+    tw_data <- truth_warm_mean_by_r2 %>%
+      dplyr::filter(is.na(annotation_r2) | annotation_r2 == r2_filter)
+    title_str <- paste0("AUPRC by Ensemble Method and Aggregation (mean across datasets, annotation R\u00b2 = ",
+                        r2_filter, ")")
+    fname <- paste0("auprc_barplot_by_method_mean_r2_",
+                    gsub("\\.", "p", as.character(r2_filter)), ".png")
+  }
+
+  if (nrow(plot_data) == 0 || length(baseline_auprc_mean) == 0) return(invisible(NULL))
+
+  p <- ggplot(plot_data, aes(x = spec_name, y = AUPRC, fill = agg_method)) +
+    geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+    geom_hline(yintercept = baseline_auprc_mean, linetype = "dashed",
+               color = "red", linewidth = 0.8) +
+    annotate("text", x = 0.5, y = baseline_auprc_mean, label = "baseline single-fit",
+             vjust = -0.5, hjust = 0, color = "red", size = 3) +
+    labs(x = "Ensemble Method", y = "Mean AUPRC Across Datasets", fill = "Aggregation",
+         title = title_str) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+  for (i in seq_len(nrow(tw_data))) {
+    uc <- tw_data$use_case_id[i]
+    p <- p +
+      geom_hline(yintercept = tw_data$AUPRC[i], linetype = "dotted",
+                 color = tw_colors[uc] %||% "blue", linewidth = 0.6) +
+      annotate("text", x = Inf, y = tw_data$AUPRC[i],
+               label = tw_data$label[i],
+               vjust = -0.5, hjust = 1,
+               color = tw_colors[uc] %||% "blue", size = 2.8)
+  }
+
+  ggsave(file.path(fig_root, "ensemble_performance", fname),
+         p, width = 12, height = 6)
+  invisible(p)
+}
+```
+
+```{r fig-2c-mean, fig.width=12, fig.height=6}
+make_auprc_mean_barplot(r2_filter = NULL)
+make_auprc_mean_barplot(r2_filter = 0)
+make_auprc_mean_barplot(r2_filter = 0.2)
+make_auprc_mean_barplot(r2_filter = 0.5)
+```
+
 ## 2d. TPR @ FPR=0.05 Bar Chart by Method
 
 Mirrors the AUPRC barplot exactly but shows pooled TPR at FPR=0.05.
@@ -887,6 +959,60 @@ make_tpr05_barplot(r2_filter = NULL)  # overall (all r2 pooled)
 make_tpr05_barplot(r2_filter = 0)     # annotation r2 = 0 (null annotations)
 make_tpr05_barplot(r2_filter = 0.2)   # annotation r2 = 0.2
 make_tpr05_barplot(r2_filter = 0.5)   # annotation r2 = 0.5
+```
+
+```{r fig-2d-mean-helper}
+make_tpr05_mean_barplot <- function(r2_filter = NULL) {
+  if (is.null(r2_filter)) {
+    plot_data <- tpr05_mean_plot_overall
+    tw_data   <- truth_warm_tpr05_mean_overall
+    title_str <- "TPR @ FPR=0.05 by Ensemble Method and Aggregation (mean across datasets, all annotation R\u00b2 pooled)"
+    fname     <- "tpr05_barplot_by_method_mean_overall.png"
+  } else {
+    plot_data <- tpr05_mean_plot_by_r2 %>%
+      dplyr::filter(is.na(annotation_r2) | annotation_r2 == r2_filter)
+    tw_data <- truth_warm_tpr05_mean_by_r2 %>%
+      dplyr::filter(is.na(annotation_r2) | annotation_r2 == r2_filter)
+    title_str <- paste0("TPR @ FPR=0.05 by Ensemble Method and Aggregation (mean across datasets, annotation R\u00b2 = ",
+                        r2_filter, ")")
+    fname <- paste0("tpr05_barplot_by_method_mean_r2_",
+                    gsub("\\.", "p", as.character(r2_filter)), ".png")
+  }
+
+  if (nrow(plot_data) == 0 || length(baseline_tpr05_mean) == 0) return(invisible(NULL))
+
+  p <- ggplot(plot_data, aes(x = spec_name, y = tpr_fpr05, fill = agg_method)) +
+    geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+    geom_hline(yintercept = baseline_tpr05_mean, linetype = "dashed",
+               color = "red", linewidth = 0.8) +
+    annotate("text", x = 0.5, y = baseline_tpr05_mean, label = "baseline single-fit",
+             vjust = -0.5, hjust = 0, color = "red", size = 3) +
+    labs(x = "Ensemble Method", y = "Mean TPR @ FPR=0.05 Across Datasets", fill = "Aggregation",
+         title = title_str) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+  for (i in seq_len(nrow(tw_data))) {
+    uc <- tw_data$use_case_id[i]
+    p <- p +
+      geom_hline(yintercept = tw_data$tpr_fpr05[i], linetype = "dotted",
+                 color = tw_colors[uc] %||% "blue", linewidth = 0.6) +
+      annotate("text", x = Inf, y = tw_data$tpr_fpr05[i],
+               label = tw_data$label[i],
+               vjust = -0.5, hjust = 1,
+               color = tw_colors[uc] %||% "blue", size = 2.8)
+  }
+
+  ggsave(file.path(fig_root, "ensemble_performance", fname),
+         p, width = 12, height = 6)
+  invisible(p)
+}
+```
+
+```{r fig-2d-mean, fig.width=12, fig.height=6}
+make_tpr05_mean_barplot(r2_filter = NULL)
+make_tpr05_mean_barplot(r2_filter = 0)
+make_tpr05_mean_barplot(r2_filter = 0.2)
+make_tpr05_mean_barplot(r2_filter = 0.5)
 ```
 
 ## 2e. C-CS Grid Landscape (AUPRC by c × σ₀², faceted by annotation R²)
@@ -2556,14 +2682,20 @@ metric_inventory <- tibble::tribble(
   ~figure_name, ~metric, ~source_table, ~grouping_keys, ~helper_used, ~agg_normalization, ~value_mode,
   "auprc_barplot_by_method_overall.png", "AUPRC", "auprc_plot_table", "spec_name,use_case_id,annotation_r2,agg_method,series_type", "test_susine:::build_shared_plot_metric_table", "normalize_agg_method_id", "pooled aggregated rows",
   "auprc_barplot_by_method_r2_*.png", "AUPRC", "auprc_plot_table", "spec_name,use_case_id,annotation_r2,agg_method,series_type", "test_susine:::build_shared_plot_metric_table", "normalize_agg_method_id", "pooled aggregated rows",
+  "auprc_barplot_by_method_mean_overall.png", "AUPRC", "auprc_mean_plot_table", "spec_name,use_case_id,annotation_r2,agg_method,series_type", "test_susine:::build_shared_plot_metric_table", "normalize_agg_method_id", "mean of per-dataset metric rows",
+  "auprc_barplot_by_method_mean_r2_*.png", "AUPRC", "auprc_mean_plot_table", "spec_name,use_case_id,annotation_r2,agg_method,series_type", "test_susine:::build_shared_plot_metric_table", "normalize_agg_method_id", "mean of per-dataset metric rows",
   "tpr05_barplot_by_method_overall.png", "TPR@FPR=0.05", "tpr05_plot_table", "spec_name,use_case_id,annotation_r2,agg_method,series_type", "test_susine:::build_shared_plot_metric_table", "normalize_agg_method_id", "pooled aggregated rows",
   "tpr05_barplot_by_method_r2_*.png", "TPR@FPR=0.05", "tpr05_plot_table", "spec_name,use_case_id,annotation_r2,agg_method,series_type", "test_susine:::build_shared_plot_metric_table", "normalize_agg_method_id", "pooled aggregated rows",
+  "tpr05_barplot_by_method_mean_overall.png", "TPR@FPR=0.05", "tpr05_mean_plot_table", "spec_name,use_case_id,annotation_r2,agg_method,series_type", "test_susine:::build_shared_plot_metric_table", "normalize_agg_method_id", "mean of per-dataset metric rows",
+  "tpr05_barplot_by_method_mean_r2_*.png", "TPR@FPR=0.05", "tpr05_mean_plot_table", "spec_name,use_case_id,annotation_r2,agg_method,series_type", "test_susine:::build_shared_plot_metric_table", "normalize_agg_method_id", "mean of per-dataset metric rows",
   "auprc_scaling_curves_overall.png", "AUPRC", "scaling_bins_pooled + auprc_plot_table", "spec_name,annotation_r2,n_ensemble,resolution,agg_method,rep", "test_susine:::auprc_from_pooled_bins + test_susine:::overwrite_scaling_terminal_metrics", "normalize_agg_method_id", "subsampled except exact terminal overwrite",
   "auprc_scaling_curves_r2_*.png", "AUPRC", "scaling_bins_pooled + auprc_plot_table", "spec_name,annotation_r2,n_ensemble,resolution,agg_method,rep", "test_susine:::auprc_from_pooled_bins + test_susine:::overwrite_scaling_terminal_metrics", "normalize_agg_method_id", "subsampled except exact terminal overwrite",
   "tpr05_scaling_curves_overall.png", "TPR@FPR=0.05", "scaling_bins_pooled + tpr05_plot_table", "spec_name,annotation_r2,n_ensemble,resolution,agg_method,rep", "test_susine:::tpr_at_fpr_threshold + test_susine:::overwrite_scaling_terminal_metrics", "normalize_agg_method_id", "subsampled except exact terminal overwrite",
   "tpr05_scaling_curves_r2_*.png", "TPR@FPR=0.05", "scaling_bins_pooled + tpr05_plot_table", "spec_name,annotation_r2,n_ensemble,resolution,agg_method,rep", "test_susine:::tpr_at_fpr_threshold + test_susine:::overwrite_scaling_terminal_metrics", "normalize_agg_method_id", "subsampled except exact terminal overwrite",
   "baseline_dashed_lines", "AUPRC + TPR@FPR=0.05", "shared plot tables", "spec_name,use_case_id,annotation_r2,series_type", "test_susine:::build_shared_plot_metric_table", "none", "single global baseline-single / susine_vanilla row",
-  "truth_warm_reference_lines", "AUPRC + TPR@FPR=0.05", "shared plot tables", "spec_name,use_case_id,annotation_r2,series_type", "test_susine:::build_shared_plot_metric_table", "none", "truth-warm pooled individual rows"
+  "truth_warm_reference_lines", "AUPRC + TPR@FPR=0.05", "shared plot tables", "spec_name,use_case_id,annotation_r2,series_type", "test_susine:::build_shared_plot_metric_table", "none", "truth-warm pooled individual rows",
+  "baseline_dashed_lines_mean", "AUPRC + TPR@FPR=0.05", "shared mean plot tables", "spec_name,use_case_id,annotation_r2,series_type", "test_susine:::build_shared_plot_metric_table", "none", "mean baseline-single / susine_vanilla row",
+  "truth_warm_reference_lines_mean", "AUPRC + TPR@FPR=0.05", "shared mean plot tables", "spec_name,use_case_id,annotation_r2,series_type", "test_susine:::build_shared_plot_metric_table", "none", "mean truth-warm individual rows"
 )
 readr::write_csv(metric_inventory, file.path(consolidated_dir, "metric_inventory.csv"))
 cat("Metric inventory written.\n")
