@@ -160,6 +160,123 @@ build_shared_plot_metric_table <- function(agg_overall,
 }
 
 #' @keywords internal
+backfill_single_fit_refine_agg_confusion <- function(confusion_individual,
+                                                     confusion_agg,
+                                                     run_info,
+                                                     agg_methods) {
+  agg_methods <- unique(normalize_agg_method_id(agg_methods))
+  confusion_agg <- normalize_agg_method_df(confusion_agg)
+
+  empty_result <- list(
+    confusion_agg = confusion_agg,
+    repaired_groups = tibble::tibble(),
+    repair_summary = tibble::tibble()
+  )
+
+  if (is.null(confusion_individual) || !nrow(confusion_individual) ||
+      is.null(run_info) || !nrow(run_info) || !length(agg_methods)) {
+    return(empty_result)
+  }
+
+  group_cols <- c("spec_name", "use_case_id", "dataset_bundle_id", "annotation_r2", "group_key")
+  task_lookup <- run_info %>%
+    dplyr::filter(!is.na(.data$task_id)) %>%
+    dplyr::distinct(dplyr::across(dplyr::all_of(c(group_cols, "task_id"))))
+
+  refine_groups <- run_info %>%
+    dplyr::filter(
+      !is.na(.data$spec_name),
+      !.data$spec_name %in% c("baseline-single", "truth-warm"),
+      !is.na(.data$use_case_id),
+      !is.na(.data$dataset_bundle_id),
+      !is.na(.data$group_key),
+      as.character(.data$exploration_methods) == "refine"
+    ) %>%
+    dplyr::distinct(dplyr::across(dplyr::all_of(group_cols)))
+
+  if (!nrow(refine_groups)) {
+    return(empty_result)
+  }
+
+  single_fit_sources <- confusion_individual %>%
+    dplyr::distinct(
+      dplyr::across(dplyr::all_of(group_cols)),
+      .data$run_id,
+      .data$variant_id
+    ) %>%
+    dplyr::group_by(dplyr::across(dplyr::all_of(group_cols))) %>%
+    dplyr::summarise(
+      source_run_id = dplyr::first(.data$run_id),
+      source_variant_id = dplyr::first(.data$variant_id),
+      n_individual_fits = dplyr::n(),
+      .groups = "drop"
+    ) %>%
+    dplyr::filter(.data$n_individual_fits == 1L)
+
+  eligible_groups <- refine_groups %>%
+    dplyr::inner_join(single_fit_sources, by = group_cols)
+
+  if (!nrow(eligible_groups)) {
+    return(empty_result)
+  }
+
+  existing_agg <- confusion_agg %>%
+    dplyr::distinct(dplyr::across(dplyr::all_of(c(group_cols, "agg_method"))))
+
+  missing_agg_groups <- eligible_groups %>%
+    tidyr::crossing(agg_method = agg_methods) %>%
+    dplyr::anti_join(existing_agg, by = c(group_cols, "agg_method")) %>%
+    dplyr::rename(fill_agg_method = .data$agg_method) %>%
+    dplyr::left_join(task_lookup, by = group_cols)
+
+  if (!nrow(missing_agg_groups)) {
+    return(empty_result)
+  }
+
+  repaired_confusion <- confusion_individual %>%
+    dplyr::inner_join(
+      missing_agg_groups,
+      by = setNames(
+        c(group_cols, "source_run_id", "source_variant_id"),
+        c(group_cols, "run_id", "variant_id")
+      ),
+      relationship = "many-to-many"
+    ) %>%
+    dplyr::mutate(
+      explore_method = "aggregation",
+      variant_id = .data$fill_agg_method,
+      agg_method = .data$fill_agg_method
+    ) %>%
+    dplyr::select(dplyr::all_of(names(confusion_individual)))
+
+  if ("variant_id" %in% names(confusion_agg)) {
+    confusion_agg$variant_id <- as.character(confusion_agg$variant_id)
+    repaired_confusion$variant_id <- as.character(repaired_confusion$variant_id)
+  }
+
+  repair_summary <- missing_agg_groups %>%
+    dplyr::count(
+      .data$task_id,
+      .data$spec_name,
+      .data$use_case_id,
+      .data$fill_agg_method,
+      name = "n_backfilled_groups",
+      sort = TRUE
+    ) %>%
+    dplyr::rename(agg_method = .data$fill_agg_method)
+
+  repaired_groups <- missing_agg_groups %>%
+    dplyr::rename(agg_method = .data$fill_agg_method) %>%
+    dplyr::arrange(.data$task_id, .data$spec_name, .data$dataset_bundle_id, .data$agg_method)
+
+  list(
+    confusion_agg = dplyr::bind_rows(confusion_agg, repaired_confusion),
+    repaired_groups = repaired_groups,
+    repair_summary = repair_summary
+  )
+}
+
+#' @keywords internal
 parse_resolution_area <- function(x) {
   parts <- strsplit(as.character(x), "x", fixed = TRUE)
   vapply(parts, function(p) {

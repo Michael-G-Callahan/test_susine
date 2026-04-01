@@ -1064,81 +1064,88 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
       for (group_key in group_keys) {
         group_pips <- primary_pips_by_group[[group_key]]
         group_elbos <- primary_elbos_by_group[[group_key]]
+        if (!length(group_pips)) next
+
+        group_cache <- NULL
+        pip_mat_cols <- NULL
         if (length(group_pips) > 1) {
           group_cache <- prepare_pip_similarity_cache(
             do.call(rbind, lapply(group_pips, as.numeric))
           )
           pip_mat_cols <- t(group_cache$pips_mat)
-          agg_methods_full <- unique(normalize_agg_method_id(c(
-            agg_methods,
-            if (need_scaling_bins) "cluster_weight_jsd_050" else character(0)
-          )))
-          agg_results <- aggregate_use_case_pips(
-            pip_list = group_pips,
-            elbo_vec = group_elbos,
-            methods = agg_methods_full,
-            softmax_temperature = softmax_temperature,
-            jsd_threshold = job_config$job$metrics$jsd_threshold %||% 0.15,
-            pip_cache = group_cache
-          )
-          full_group_bins <- list()
-          if (need_scaling_bins) {
-            scaling_methods <- c("uniform", "max_elbo", "elbo_softmax",
-                                 "cluster_weight", "cluster_weight_jsd_050")
-            for (sm in scaling_methods) {
-              agg_pip_scaling <- aggregate_pip_matrix(
-                pip_mat_cols,
-                group_elbos,
-                sm,
-                hc = group_cache$hc %||% NULL
-              )
-              full_group_bins[[sm]] <- compute_confusion_bins(
-                agg_pip_scaling,
-                as.integer(seq_along(data_bundle$beta) %in% data_bundle$causal_idx),
-                pip_bucket_width = job_config$job$metrics$pip_bucket_width %||% 0.01,
-                pip_breaks = job_config$job$metrics$pip_breaks,
-                causal_mask = top8_causal_mask
-              )
-            }
-          }
-          for (m in names(agg_results)) {
-            agg_pip <- agg_results[[m]]
-            conf_bins <- compute_confusion_bins(
-              agg_pip,
+        }
+
+        # Treat a single retained fit as a degenerate ensemble so pure-refine
+        # groups still emit aggregated confusion rows when BFS never branches.
+        agg_methods_full <- unique(normalize_agg_method_id(c(
+          agg_methods,
+          if (need_scaling_bins && length(group_pips) > 1) "cluster_weight_jsd_050" else character(0)
+        )))
+        agg_results <- aggregate_use_case_pips(
+          pip_list = group_pips,
+          elbo_vec = group_elbos,
+          methods = agg_methods_full,
+          softmax_temperature = softmax_temperature,
+          jsd_threshold = job_config$job$metrics$jsd_threshold %||% 0.15,
+          pip_cache = group_cache
+        )
+        full_group_bins <- list()
+        if (need_scaling_bins && length(group_pips) > 1) {
+          scaling_methods <- c("uniform", "max_elbo", "elbo_softmax",
+                               "cluster_weight", "cluster_weight_jsd_050")
+          for (sm in scaling_methods) {
+            agg_pip_scaling <- aggregate_pip_matrix(
+              pip_mat_cols,
+              group_elbos,
+              sm,
+              hc = group_cache$hc %||% NULL
+            )
+            full_group_bins[[sm]] <- compute_confusion_bins(
+              agg_pip_scaling,
               as.integer(seq_along(data_bundle$beta) %in% data_bundle$causal_idx),
               pip_bucket_width = job_config$job$metrics$pip_bucket_width %||% 0.01,
               pip_breaks = job_config$job$metrics$pip_breaks,
               causal_mask = top8_causal_mask
             )
-            if (!m %in% agg_methods) next
-            agg_meta <- list(
-              explore_method = "aggregation",
-              variant_id = m,
-              agg_method = m,
-              agg_ess = as.numeric(attr(agg_pip, "ess") %||% NA_real_),
-              is_restart = FALSE,
-              is_agg = TRUE
-            )
-            agg_run_row <- group_run_map[[group_key]] %||% uc_runs[1, , drop = FALSE]
-            agg_run_row$restart_id <- NA_integer_
-            agg_run_row$run_type <- NA_character_
-            agg_run_row$c_value <- NA_real_
-            agg_run_row$tau_value <- NA_real_
-            agg_run_row$sigma_0_2_scalar <- NA_character_
-            write_confusion_bins(
-              run_row = agg_run_row,
-              job_config = job_config,
-              conf_bins = conf_bins,
-              buffer_ctx = buffer_ctx,
-              variant_meta = agg_meta
-            )
           }
-          full_group_cache[[group_key]] <- list(
-            pip_cache = group_cache,
-            agg_results = agg_results,
-            bins = full_group_bins
+        }
+        for (m in names(agg_results)) {
+          agg_pip <- agg_results[[m]]
+          conf_bins <- compute_confusion_bins(
+            agg_pip,
+            as.integer(seq_along(data_bundle$beta) %in% data_bundle$causal_idx),
+            pip_bucket_width = job_config$job$metrics$pip_bucket_width %||% 0.01,
+            pip_breaks = job_config$job$metrics$pip_breaks,
+            causal_mask = top8_causal_mask
+          )
+          if (!m %in% agg_methods) next
+          agg_meta <- list(
+            explore_method = "aggregation",
+            variant_id = m,
+            agg_method = m,
+            agg_ess = as.numeric(attr(agg_pip, "ess") %||% NA_real_),
+            is_restart = FALSE,
+            is_agg = TRUE
+          )
+          agg_run_row <- group_run_map[[group_key]] %||% uc_runs[1, , drop = FALSE]
+          agg_run_row$restart_id <- NA_integer_
+          agg_run_row$run_type <- NA_character_
+          agg_run_row$c_value <- NA_real_
+          agg_run_row$tau_value <- NA_real_
+          agg_run_row$sigma_0_2_scalar <- NA_character_
+          write_confusion_bins(
+            run_row = agg_run_row,
+            job_config = job_config,
+            conf_bins = conf_bins,
+            buffer_ctx = buffer_ctx,
+            variant_meta = agg_meta
           )
         }
+        full_group_cache[[group_key]] <- list(
+          pip_cache = group_cache,
+          agg_results = agg_results,
+          bins = full_group_bins
+        )
       }
     }
 

@@ -291,7 +291,7 @@ metadata the downstream summaries and plots actually use.
 ```{r join-metadata}
 run_info <- cfg$tables$runs %>%
   dplyr::select(
-    run_id, dataset_bundle_id, spec_name, use_case_id, prior_spec_id,
+    run_id, task_id, dataset_bundle_id, spec_name, use_case_id, prior_spec_id,
     exploration_methods, sigma_0_2_scalar, warm_method, c_value,
     refine_step, restart_id, annotation_r2, inflate_match, group_key
   )
@@ -362,6 +362,31 @@ confusion_agg <- confusion_bins %>%
 cat("Confusion bins with metadata:", nrow(confusion_individual) + nrow(confusion_agg), "rows\n")
 cat("  Individual:", nrow(confusion_individual), "\n")
 cat("  Aggregated:", nrow(confusion_agg), "\n")
+
+agg_backfill <- test_susine:::backfill_single_fit_refine_agg_confusion(
+  confusion_individual = confusion_individual,
+  confusion_agg = confusion_agg,
+  run_info = run_info,
+  agg_methods = cfg$job$compute$aggregation_methods %||% character(0)
+)
+confusion_agg <- agg_backfill$confusion_agg
+single_fit_refine_backfill_groups <- agg_backfill$repaired_groups
+single_fit_refine_backfill_summary <- agg_backfill$repair_summary
+write_diagnostic_csv(single_fit_refine_backfill_groups, "single_fit_refine_backfill_groups.csv")
+write_diagnostic_csv(single_fit_refine_backfill_summary, "single_fit_refine_backfill_summary.csv")
+
+if (nrow(single_fit_refine_backfill_summary) > 0L) {
+  cat("Applied single-fit refine aggregation backfill.\n")
+  print_diagnostic_table(
+    "Single-Fit Refine Backfill Summary",
+    single_fit_refine_backfill_summary,
+    n = 100L
+  )
+  cat("  Aggregated rows after backfill:", nrow(confusion_agg), "\n")
+} else {
+  cat("No single-fit refine aggregation backfill needed.\n")
+}
+
 rm(confusion_bins)
 invisible(gc())
 ```
