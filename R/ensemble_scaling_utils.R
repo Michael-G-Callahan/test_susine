@@ -114,11 +114,14 @@ build_shared_plot_metric_table <- function(agg_overall,
                                            metric_col,
                                            label) {
   metric_group_vars <- c("spec_name", "use_case_id", "annotation_r2", "agg_method", "series_type")
+  keep_cols <- c("spec_name", "use_case_id", "annotation_r2", "agg_method", metric_col, "series_type")
 
   aggregated_overall <- normalize_agg_method_df(agg_overall) %>%
-    dplyr::mutate(annotation_r2 = NA_real_, series_type = "aggregated")
+    dplyr::mutate(annotation_r2 = NA_real_, series_type = "aggregated") %>%
+    dplyr::select(dplyr::any_of(keep_cols))
   aggregated_by_r2 <- normalize_agg_method_df(agg_by_r2) %>%
-    dplyr::mutate(series_type = "aggregated")
+    dplyr::mutate(series_type = "aggregated") %>%
+    dplyr::select(dplyr::any_of(keep_cols))
   individual_overall <- individual_overall %>%
     dplyr::filter(.data$spec_name %in% c("baseline-single", "truth-warm")) %>%
     dplyr::mutate(
@@ -129,7 +132,8 @@ build_shared_plot_metric_table <- function(agg_overall,
         "baseline_single",
         "truth_warm"
       )
-    )
+    ) %>%
+    dplyr::select(dplyr::any_of(keep_cols))
   individual_by_r2 <- individual_by_r2 %>%
     dplyr::filter(.data$spec_name %in% c("baseline-single", "truth-warm")) %>%
     dplyr::mutate(
@@ -139,7 +143,8 @@ build_shared_plot_metric_table <- function(agg_overall,
         "baseline_single",
         "truth_warm"
       )
-    )
+    ) %>%
+    dplyr::select(dplyr::any_of(keep_cols))
 
   collapse_plot_metric_table(
     dplyr::bind_rows(
