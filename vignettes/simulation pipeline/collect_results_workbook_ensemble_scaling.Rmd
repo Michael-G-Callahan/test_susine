@@ -367,7 +367,10 @@ agg_backfill <- test_susine:::backfill_single_fit_refine_agg_confusion(
   confusion_individual = confusion_individual,
   confusion_agg = confusion_agg,
   run_info = run_info,
-  agg_methods = cfg$job$compute$aggregation_methods %||% character(0)
+  agg_methods = unique(normalize_agg_method_id(c(
+    cfg$job$compute$aggregation_methods %||% character(0),
+    "cluster_weight_jsd_050"
+  )))
 )
 confusion_agg <- agg_backfill$confusion_agg
 single_fit_refine_backfill_groups <- agg_backfill$repaired_groups

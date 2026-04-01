@@ -106,14 +106,20 @@ test_that("collect backfills missing aggregated confusion for single-fit pure-re
     confusion_individual = confusion_individual,
     confusion_agg = confusion_individual[0, ],
     run_info = run_info,
-    agg_methods = c("uniform", "max_elbo", "cluster_weight")
+    agg_methods = c("uniform", "max_elbo", "cluster_weight", "cluster_weight_jsd_050")
   )
 
-  expect_equal(sort(unique(out$confusion_agg$agg_method)), c("cluster_weight", "max_elbo", "uniform"))
-  expect_equal(nrow(out$repaired_groups), 3L)
-  expect_equal(sum(out$repair_summary$n_backfilled_groups), 3L)
+  expect_equal(
+    sort(unique(out$confusion_agg$agg_method)),
+    c("cluster_weight", "cluster_weight_jsd_050", "max_elbo", "uniform")
+  )
+  expect_equal(nrow(out$repaired_groups), 4L)
+  expect_equal(sum(out$repair_summary$n_backfilled_groups), 4L)
   expect_true(all(out$confusion_agg$explore_method == "aggregation"))
-  expect_setequal(unique(out$confusion_agg$variant_id), c("uniform", "max_elbo", "cluster_weight"))
+  expect_setequal(
+    unique(out$confusion_agg$variant_id),
+    c("uniform", "max_elbo", "cluster_weight", "cluster_weight_jsd_050")
+  )
 })
 
 test_that("collect backfills missing aggregated confusion from terminal scaling bins", {
