@@ -387,6 +387,33 @@ if (nrow(single_fit_refine_backfill_summary) > 0L) {
   cat("No single-fit refine aggregation backfill needed.\n")
 }
 
+scaling_agg_backfill <- test_susine:::backfill_terminal_scaling_agg_confusion(
+  scaling_bins_raw = scaling_bins_raw,
+  confusion_agg = confusion_agg,
+  run_info = run_info,
+  agg_methods = unique(normalize_agg_method_id(c(
+    cfg$job$compute$aggregation_methods %||% character(0),
+    "cluster_weight_jsd_050"
+  )))
+)
+confusion_agg <- scaling_agg_backfill$confusion_agg
+terminal_scaling_backfill_groups <- scaling_agg_backfill$repaired_groups
+terminal_scaling_backfill_summary <- scaling_agg_backfill$repair_summary
+write_diagnostic_csv(terminal_scaling_backfill_groups, "terminal_scaling_backfill_groups.csv")
+write_diagnostic_csv(terminal_scaling_backfill_summary, "terminal_scaling_backfill_summary.csv")
+
+if (nrow(terminal_scaling_backfill_summary) > 0L) {
+  cat("Applied terminal-scaling aggregation backfill.\n")
+  print_diagnostic_table(
+    "Terminal-Scaling Backfill Summary",
+    terminal_scaling_backfill_summary,
+    n = 100L
+  )
+  cat("  Aggregated rows after scaling backfill:", nrow(confusion_agg), "\n")
+} else {
+  cat("No terminal-scaling aggregation backfill needed.\n")
+}
+
 rm(confusion_bins)
 invisible(gc())
 ```
@@ -930,98 +957,6 @@ if (!is.null(scaling_bins_raw) && nrow(scaling_bins_raw) > 0L) {
   cat("Pooled scaling bins rows:", nrow(scaling_bins_pooled), "\n")
 } else {
   scaling_bins_pooled <- NULL
-}
-```
-
-```{r supplement-pooled-metrics-from-scaling}
-supplemental_pooled_metrics <- NULL
-
-if (!is.null(scaling_bins_pooled) && nrow(scaling_bins_pooled) > 0L) {
-  scaling_bins_with_overall <- test_susine:::append_overall_scaling_bins(scaling_bins_pooled)
-
-  spec_use_case_map <- run_info %>%
-    dplyr::filter(!is.na(.data$spec_name), !is.na(.data$use_case_id)) %>%
-    dplyr::distinct(.data$spec_name, .data$use_case_id)
-
-  terminal_pure <- scaling_bins_with_overall %>%
-    dplyr::filter(is.na(.data$resolution)) %>%
-    dplyr::group_by(.data$spec_name, .data$annotation_r2, .data$agg_method) %>%
-    dplyr::filter(.data$n_ensemble == max(.data$n_ensemble, na.rm = TRUE)) %>%
-    dplyr::ungroup()
-
-  terminal_inter <- scaling_bins_with_overall %>%
-    dplyr::filter(!is.na(.data$resolution)) %>%
-    dplyr::mutate(.resolution_area = test_susine:::parse_resolution_area(.data$resolution)) %>%
-    dplyr::group_by(.data$spec_name, .data$annotation_r2, .data$agg_method) %>%
-    dplyr::filter(.data$.resolution_area == max(.data$.resolution_area, na.rm = TRUE)) %>%
-    dplyr::ungroup() %>%
-    dplyr::select(-.data$.resolution_area)
-
-  terminal_scaling_bins <- dplyr::bind_rows(terminal_pure, terminal_inter)
-
-  supplemental_pooled_metrics <- terminal_scaling_bins %>%
-    dplyr::group_by(.data$spec_name, .data$annotation_r2, .data$agg_method, .data$rep) %>%
-    dplyr::summarise(
-      AUPRC = test_susine:::auprc_from_pooled_bins(dplyr::pick(dplyr::everything())),
-      tpr_fpr05 = test_susine:::tpr_at_fpr_threshold(dplyr::pick(dplyr::everything())),
-      .groups = "drop"
-    ) %>%
-    dplyr::group_by(.data$spec_name, .data$annotation_r2, .data$agg_method) %>%
-    dplyr::summarise(
-      AUPRC = mean(.data$AUPRC, na.rm = TRUE),
-      tpr_fpr05 = mean(.data$tpr_fpr05, na.rm = TRUE),
-      .groups = "drop"
-    ) %>%
-    dplyr::left_join(spec_use_case_map, by = "spec_name")
-
-  supplemental_auprc_overall <- supplemental_pooled_metrics %>%
-    dplyr::filter(is.na(.data$annotation_r2)) %>%
-    dplyr::select(.data$spec_name, .data$use_case_id, .data$agg_method, .data$AUPRC)
-  supplemental_auprc_by_r2 <- supplemental_pooled_metrics %>%
-    dplyr::filter(!is.na(.data$annotation_r2)) %>%
-    dplyr::select(.data$spec_name, .data$use_case_id, .data$agg_method, .data$annotation_r2, .data$AUPRC)
-  supplemental_tpr_overall <- supplemental_pooled_metrics %>%
-    dplyr::filter(is.na(.data$annotation_r2)) %>%
-    dplyr::select(.data$spec_name, .data$use_case_id, .data$agg_method, .data$tpr_fpr05)
-  supplemental_tpr_by_r2 <- supplemental_pooled_metrics %>%
-    dplyr::filter(!is.na(.data$annotation_r2)) %>%
-    dplyr::select(.data$spec_name, .data$use_case_id, .data$agg_method, .data$annotation_r2, .data$tpr_fpr05)
-
-  auprc_pooled_agg <- dplyr::bind_rows(
-    auprc_pooled_agg,
-    dplyr::anti_join(
-      supplemental_auprc_overall,
-      auprc_pooled_agg,
-      by = c("spec_name", "use_case_id", "agg_method")
-    )
-  )
-  auprc_pooled_agg_by_r2 <- dplyr::bind_rows(
-    auprc_pooled_agg_by_r2,
-    dplyr::anti_join(
-      supplemental_auprc_by_r2,
-      auprc_pooled_agg_by_r2,
-      by = c("spec_name", "use_case_id", "agg_method", "annotation_r2")
-    )
-  )
-  tpr05_pooled_agg <- dplyr::bind_rows(
-    tpr05_pooled_agg,
-    dplyr::anti_join(
-      supplemental_tpr_overall,
-      tpr05_pooled_agg,
-      by = c("spec_name", "use_case_id", "agg_method")
-    )
-  )
-  tpr05_pooled_agg_by_r2 <- dplyr::bind_rows(
-    tpr05_pooled_agg_by_r2,
-    dplyr::anti_join(
-      supplemental_tpr_by_r2,
-      tpr05_pooled_agg_by_r2,
-      by = c("spec_name", "use_case_id", "agg_method", "annotation_r2")
-    )
-  )
-
-  cat("Supplemental pooled scaling-derived rows added:",
-      nrow(supplemental_auprc_overall) + nrow(supplemental_auprc_by_r2), "\n")
 }
 ```
 

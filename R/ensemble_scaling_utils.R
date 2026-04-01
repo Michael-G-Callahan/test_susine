@@ -277,6 +277,166 @@ backfill_single_fit_refine_agg_confusion <- function(confusion_individual,
 }
 
 #' @keywords internal
+backfill_terminal_scaling_agg_confusion <- function(scaling_bins_raw,
+                                                    confusion_agg,
+                                                    run_info,
+                                                    agg_methods) {
+  agg_methods <- unique(normalize_agg_method_id(agg_methods))
+  confusion_agg <- normalize_agg_method_df(confusion_agg)
+
+  empty_result <- list(
+    confusion_agg = confusion_agg,
+    repaired_groups = tibble::tibble(),
+    repair_summary = tibble::tibble()
+  )
+
+  if (is.null(scaling_bins_raw) || !nrow(scaling_bins_raw) ||
+      is.null(run_info) || !nrow(run_info) || !length(agg_methods)) {
+    return(empty_result)
+  }
+
+  scaling_bins_raw <- normalize_agg_method_df(scaling_bins_raw)
+  scaling_methods <- intersect(unique(na.omit(scaling_bins_raw$agg_method)), agg_methods)
+  if (!length(scaling_methods)) {
+    return(empty_result)
+  }
+
+  mapping_base <- run_info %>%
+    dplyr::filter(
+      !is.na(.data$spec_name),
+      !.data$spec_name %in% c("baseline-single", "truth-warm"),
+      !is.na(.data$dataset_bundle_id),
+      !is.na(.data$use_case_id),
+      !is.na(.data$group_key)
+    ) %>%
+    dplyr::group_by(.data$dataset_bundle_id, .data$spec_name, .data$annotation_r2) %>%
+    dplyr::summarise(
+      n_group_rows = dplyr::n_distinct(paste(.data$use_case_id, .data$group_key, sep = "|")),
+      .groups = "drop"
+    )
+
+  ambiguous_mappings <- mapping_base %>%
+    dplyr::filter(.data$n_group_rows > 1L)
+  if (nrow(ambiguous_mappings) > 0L) {
+    stop(
+      "Terminal scaling backfill found ambiguous run-info mappings for: ",
+      paste(
+        sprintf(
+          "%s/%s/%s",
+          ambiguous_mappings$dataset_bundle_id,
+          ambiguous_mappings$spec_name,
+          ifelse(is.na(ambiguous_mappings$annotation_r2), "overall", ambiguous_mappings$annotation_r2)
+        ),
+        collapse = ", "
+      )
+    )
+  }
+
+  mapping <- run_info %>%
+    dplyr::filter(
+      !is.na(.data$spec_name),
+      !.data$spec_name %in% c("baseline-single", "truth-warm"),
+      !is.na(.data$dataset_bundle_id),
+      !is.na(.data$use_case_id),
+      !is.na(.data$group_key)
+    ) %>%
+    dplyr::group_by(.data$dataset_bundle_id, .data$spec_name, .data$annotation_r2) %>%
+    dplyr::summarise(
+      run_id = min(.data$run_id, na.rm = TRUE),
+      task_id = dplyr::first(.data$task_id),
+      use_case_id = dplyr::first(.data$use_case_id),
+      group_key = dplyr::first(.data$group_key),
+      c_value = dplyr::first(.data$c_value),
+      sigma_0_2_scalar = dplyr::first(.data$sigma_0_2_scalar),
+      .groups = "drop"
+    )
+
+  terminal_pure <- scaling_bins_raw %>%
+    dplyr::filter(is.na(.data$resolution), .data$agg_method %in% scaling_methods) %>%
+    dplyr::group_by(.data$dataset_bundle_id, .data$spec_name, .data$annotation_r2, .data$agg_method) %>%
+    dplyr::filter(.data$n_ensemble == max(.data$n_ensemble, na.rm = TRUE)) %>%
+    dplyr::ungroup()
+
+  terminal_inter <- scaling_bins_raw %>%
+    dplyr::filter(!is.na(.data$resolution), .data$agg_method %in% scaling_methods) %>%
+    dplyr::mutate(.resolution_area = parse_resolution_area(.data$resolution)) %>%
+    dplyr::filter(is.finite(.data$.resolution_area)) %>%
+    dplyr::group_by(.data$dataset_bundle_id, .data$spec_name, .data$annotation_r2, .data$agg_method) %>%
+    dplyr::slice_max(order_by = .data$.resolution_area, n = 1L, with_ties = TRUE) %>%
+    dplyr::ungroup() %>%
+    dplyr::select(-.data$.resolution_area)
+
+  terminal_bins <- dplyr::bind_rows(terminal_pure, terminal_inter)
+  if (!nrow(terminal_bins)) {
+    return(empty_result)
+  }
+
+  terminal_group_keys <- terminal_bins %>%
+    dplyr::distinct(.data$dataset_bundle_id, .data$spec_name, .data$annotation_r2, .data$agg_method)
+
+  existing_agg <- confusion_agg %>%
+    dplyr::distinct(.data$dataset_bundle_id, .data$spec_name, .data$annotation_r2, .data$agg_method)
+
+  missing_groups <- terminal_group_keys %>%
+    dplyr::anti_join(
+      existing_agg,
+      by = c("dataset_bundle_id", "spec_name", "annotation_r2", "agg_method")
+    ) %>%
+    dplyr::left_join(
+      mapping,
+      by = c("dataset_bundle_id", "spec_name", "annotation_r2"),
+      relationship = "many-to-one"
+    )
+
+  if (!nrow(missing_groups)) {
+    return(empty_result)
+  }
+
+  repaired_confusion <- terminal_bins %>%
+    dplyr::inner_join(
+      missing_groups,
+      by = c("dataset_bundle_id", "spec_name", "annotation_r2", "agg_method"),
+      relationship = "many-to-many"
+    ) %>%
+    dplyr::mutate(
+      explore_method = "aggregation",
+      variant_id = .data$agg_method
+    ) %>%
+    dplyr::select(
+      dplyr::all_of(c(
+        "run_id", "explore_method", "variant_id", "agg_method",
+        "pip_threshold", "n_causal_at_bucket", "n_noncausal_at_bucket",
+        "dataset_bundle_id", "spec_name", "use_case_id", "annotation_r2",
+        "group_key", "c_value", "sigma_0_2_scalar"
+      ))
+    )
+
+  if ("variant_id" %in% names(confusion_agg)) {
+    confusion_agg$variant_id <- as.character(confusion_agg$variant_id)
+    repaired_confusion$variant_id <- as.character(repaired_confusion$variant_id)
+  }
+
+  repaired_groups <- missing_groups %>%
+    dplyr::arrange(.data$task_id, .data$spec_name, .data$dataset_bundle_id, .data$agg_method)
+
+  repair_summary <- repaired_groups %>%
+    dplyr::count(
+      .data$task_id,
+      .data$spec_name,
+      .data$use_case_id,
+      .data$agg_method,
+      name = "n_backfilled_groups",
+      sort = TRUE
+    )
+
+  list(
+    confusion_agg = dplyr::bind_rows(confusion_agg, repaired_confusion),
+    repaired_groups = repaired_groups,
+    repair_summary = repair_summary
+  )
+}
+
+#' @keywords internal
 parse_resolution_area <- function(x) {
   parts <- strsplit(as.character(x), "x", fixed = TRUE)
   vapply(parts, function(p) {
@@ -305,9 +465,10 @@ overwrite_scaling_terminal_metrics <- function(summary_df, full_targets_df) {
   inter_terminal_flags <- summary_df %>%
     dplyr::filter(!is.na(.data$resolution)) %>%
     dplyr::mutate(.resolution_area = parse_resolution_area(.data$resolution)) %>%
+    dplyr::filter(is.finite(.data$.resolution_area)) %>%
     dplyr::group_by(.data$spec_name, .data$agg_method, .data$annotation_r2) %>%
     dplyr::mutate(
-      .terminal = .data$.resolution_area == max(.data$.resolution_area, na.rm = TRUE)
+      .terminal = dplyr::min_rank(dplyr::desc(.data$.resolution_area)) == 1L
     ) %>%
     dplyr::ungroup() %>%
     dplyr::select(-.data$.resolution_area)

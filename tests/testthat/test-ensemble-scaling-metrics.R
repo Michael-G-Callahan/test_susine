@@ -116,6 +116,67 @@ test_that("collect backfills missing aggregated confusion for single-fit pure-re
   expect_setequal(unique(out$confusion_agg$variant_id), c("uniform", "max_elbo", "cluster_weight"))
 })
 
+test_that("collect backfills missing aggregated confusion from terminal scaling bins", {
+  scaling_bins_raw <- tibble::tibble(
+    dataset_bundle_id = c(9L, 9L, 9L, 9L),
+    spec_name = c("A-RFS", "A-RFS", "A-RFS", "A-RFS"),
+    annotation_r2 = c(NA_real_, NA_real_, NA_real_, NA_real_),
+    n_ensemble = c(16L, 16L, 32L, 32L),
+    resolution = c(NA_character_, NA_character_, NA_character_, NA_character_),
+    agg_method = c("cluster_weight_jsd_050", "cluster_weight_jsd_050", "cluster_weight_jsd_050", "cluster_weight_jsd_050"),
+    rep = c(1L, 1L, 1L, 1L),
+    pip_threshold = c(0.9, 0.2, 0.9, 0.2),
+    n_causal_at_bucket = c(1L, 0L, 2L, 0L),
+    n_noncausal_at_bucket = c(0L, 2L, 0L, 3L)
+  )
+
+  run_info <- tibble::tibble(
+    run_id = 201L,
+    task_id = 12L,
+    dataset_bundle_id = 9L,
+    spec_name = "A-RFS",
+    use_case_id = "susine_vanilla",
+    prior_spec_id = "susine_vanilla",
+    exploration_methods = "restartxrefine",
+    sigma_0_2_scalar = NA_character_,
+    warm_method = NA_character_,
+    c_value = NA_real_,
+    refine_step = NA_integer_,
+    restart_id = NA_integer_,
+    annotation_r2 = NA_real_,
+    inflate_match = NA_real_,
+    group_key = "L=10|r2=NA|inflate=NA|explore=intersect:restartxrefine"
+  )
+
+  out <- test_susine:::backfill_terminal_scaling_agg_confusion(
+    scaling_bins_raw = scaling_bins_raw,
+    confusion_agg = tibble::tibble(
+      run_id = integer(),
+      explore_method = character(),
+      variant_id = character(),
+      agg_method = character(),
+      pip_threshold = numeric(),
+      n_causal_at_bucket = integer(),
+      n_noncausal_at_bucket = integer(),
+      dataset_bundle_id = integer(),
+      spec_name = character(),
+      use_case_id = character(),
+      annotation_r2 = numeric(),
+      group_key = character(),
+      c_value = numeric(),
+      sigma_0_2_scalar = character()
+    ),
+    run_info = run_info,
+    agg_methods = c("uniform", "max_elbo", "elbo_softmax", "cluster_weight", "cluster_weight_jsd_050")
+  )
+
+  expect_equal(nrow(out$repaired_groups), 1L)
+  expect_equal(out$repaired_groups$agg_method[[1]], "cluster_weight_jsd_050")
+  expect_equal(sort(unique(out$confusion_agg$pip_threshold)), c(0.2, 0.9))
+  expect_true(all(out$confusion_agg$agg_method == "cluster_weight_jsd_050"))
+  expect_true(all(out$confusion_agg$explore_method == "aggregation"))
+})
+
 test_that("shared plot table preserves the global vanilla baseline row", {
   auprc_tbl <- test_susine:::build_shared_plot_metric_table(
     agg_overall = tibble::tibble(
