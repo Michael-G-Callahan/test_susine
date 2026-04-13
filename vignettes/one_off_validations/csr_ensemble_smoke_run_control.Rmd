@@ -201,7 +201,13 @@ checkout is used reliably.
 ```{r run-local-smoke, eval=FALSE}
 stopifnot(cfg$job$n_tasks == 1L)
 
-rscript_bin <- file.path(R.home("bin"), "Rscript.exe")
+rscript_name <- if (.Platform$OS.type == "windows") "Rscript.exe" else "Rscript"
+rscript_bin <- Sys.which(rscript_name)
+if (!nzchar(rscript_bin)) {
+  rscript_bin <- file.path(R.home("bin"), rscript_name)
+}
+stopifnot(file.exists(rscript_bin))
+
 script_path <- here("inst", "scripts", "run_task.R")
 
 old_env <- Sys.getenv(
