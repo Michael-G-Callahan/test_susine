@@ -195,23 +195,46 @@ arts
 # 6. Local Smoke Run
 
 This is the one-cell local test run. It executes the single dataset task
-for `C-CSR`.
+for `C-CSR` in a fresh `Rscript` session so the local sibling `susine`
+checkout is used reliably.
 
 ```{r run-local-smoke, eval=FALSE}
 stopifnot(cfg$job$n_tasks == 1L)
 
+rscript_bin <- file.path(R.home("bin"), "Rscript.exe")
+script_path <- here("inst", "scripts", "run_task.R")
+
+old_env <- Sys.getenv(
+  c("SUSINE_DEV", "SUSINE_JOB_NAME", "SUSINE_PARENT_ID"),
+  unset = NA_character_
+)
+on.exit({
+  if (is.na(old_env[[1]])) Sys.unsetenv("SUSINE_DEV") else Sys.setenv(SUSINE_DEV = old_env[[1]])
+  if (is.na(old_env[[2]])) Sys.unsetenv("SUSINE_JOB_NAME") else Sys.setenv(SUSINE_JOB_NAME = old_env[[2]])
+  if (is.na(old_env[[3]])) Sys.unsetenv("SUSINE_PARENT_ID") else Sys.setenv(SUSINE_PARENT_ID = old_env[[3]])
+}, add = TRUE)
+
 Sys.setenv(
+  SUSINE_DEV = "1",
   SUSINE_JOB_NAME = cfg$job$name,
   SUSINE_PARENT_ID = "local_csr_smoke"
 )
 
-run_task(
-  job_name = cfg$job$name,
-  task_id = 1L,
-  job_root = here("output"),
-  config_path = arts$job_config,
-  quiet = FALSE
+status <- system2(
+  rscript_bin,
+  args = c(
+    script_path,
+    "--job-name", cfg$job$name,
+    "--task-id", "1",
+    "--job-root", here("output"),
+    "--config-path", arts$job_config,
+    "--quiet", "FALSE"
+  ),
+  stdout = "",
+  stderr = ""
 )
+
+stopifnot(identical(status, 0L))
 ```
 
 # 7. Quick Output Check
