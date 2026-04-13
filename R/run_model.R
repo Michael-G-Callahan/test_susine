@@ -1565,6 +1565,9 @@ resolve_susine_fn <- function(require_init_effect_fits = FALSE) {
           !file.exists(file.path(local_path, "DESCRIPTION"))) {
         next
       }
+      if ("package:susine" %in% search() || "susine" %in% loadedNamespaces()) {
+        try(pkgload::unload("susine"), silent = TRUE)
+      }
       pkgload::load_all(local_path, quiet = TRUE, reset = TRUE)
       susine_fn <- getExportedValue("susine", "susine")
       if ("init_effect_fits" %in% names(formals(susine_fn))) {
