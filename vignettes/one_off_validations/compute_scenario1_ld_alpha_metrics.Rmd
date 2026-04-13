@@ -1,0 +1,146 @@
+---
+title: "Compute Scenario 1 LD Alpha Metrics"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+One-off workbook to compute continuous LD-tail metrics for the 150
+locally saved scenario-1 genotype matrices.
+
+For each matrix, this workbook computes:
+
+- `mean(|r|^alpha)` over the strict upper triangle for `alpha = 1, ..., 8`
+- the same quantity after zeroing out all pairs with `|r| < 0.5`
+
+It writes one row per `matrix_id`, using the same `matrix_id` assignment
+logic as the run-control code for `scenario_1`.
+
+```{r setup, message=FALSE}
+here::i_am("vignettes/one_off_validations/compute_scenario1_ld_alpha_metrics.Rmd")
+library(here)
+library(devtools)
+devtools::load_all(".")
+library(dplyr)
+library(readr)
+library(knitr)
+```
+
+## 1. Inputs
+
+```{r inputs}
+repo_root <- here()
+summary_path <- here("data", "sampled_simulated_genotypes", "scenario_sampling_summary.csv")
+output_csv <- here("data", "sampled_simulated_genotypes", "scenario_1_ld_alpha_metrics.csv")
+
+alphas <- 1:8
+ld_threshold <- 0.5
+
+cat("Repo root:", repo_root, "\n")
+cat("Summary path:", summary_path, "\n")
+cat("Output CSV:", output_csv, "\n")
+```
+
+## 2. Matrix Catalog
+
+```{r catalog}
+stopifnot(file.exists(summary_path))
+
+matrix_catalog <- test_susine:::build_data_matrix_catalog(
+  requested_scenarios = "scenario_1",
+  repo_root = repo_root,
+  summary_path = summary_path
+) %>%
+  dplyr::filter(.data$data_scenario == "scenario_1") %>%
+  dplyr::arrange(.data$matrix_id)
+
+cat("Scenario-1 matrices:", nrow(matrix_catalog), "\n")
+kable(head(matrix_catalog %>% dplyr::select(.data$matrix_id, .data$dataset_label, .data$matrix_path), 10))
+```
+
+## 3. Helpers
+
+```{r helpers}
+compute_ld_alpha_metrics_one <- function(matrix_path,
+                                         repo_root,
+                                         alphas = 1:8,
+                                         ld_threshold = 0.5) {
+  matrix_path_abs <- if (grepl("^[A-Za-z]:/|^/", matrix_path)) {
+    matrix_path
+  } else {
+    file.path(repo_root, matrix_path)
+  }
+
+  x_tbl <- readr::read_tsv(matrix_path_abs, show_col_types = FALSE)
+  if (ncol(x_tbl) < 2L) {
+    stop("Expected at least one ID column plus genotype columns in: ", matrix_path_abs)
+  }
+
+  x_mat <- as.matrix(x_tbl[, -1, drop = FALSE])
+  storage.mode(x_mat) <- "numeric"
+
+  r_mat <- suppressWarnings(stats::cor(x_mat, use = "pairwise.complete.obs"))
+  abs_r <- abs(r_mat[upper.tri(r_mat)])
+  abs_r_thr <- ifelse(abs_r >= ld_threshold, abs_r, 0)
+
+  raw_vals <- stats::setNames(
+    vapply(alphas, function(alpha) mean(abs_r^alpha, na.rm = TRUE), numeric(1)),
+    paste0("ld_abs_alpha_", alphas)
+  )
+
+  thr_vals <- stats::setNames(
+    vapply(alphas, function(alpha) mean(abs_r_thr^alpha, na.rm = TRUE), numeric(1)),
+    paste0("ld_abs_alpha_", alphas, "_thr_", gsub("\\.", "p", as.character(ld_threshold)))
+  )
+
+  out <- tibble::as_tibble(as.list(c(raw_vals, thr_vals)))
+  rm(x_tbl, x_mat, r_mat, abs_r, abs_r_thr)
+  gc(verbose = FALSE)
+  out
+}
+```
+
+## 4. Compute Metrics
+
+```{r compute}
+metric_rows <- vector("list", nrow(matrix_catalog))
+
+for (i in seq_len(nrow(matrix_catalog))) {
+  row <- matrix_catalog[i, , drop = FALSE]
+  cat(sprintf("[%d/%d] matrix_id=%s %s\n",
+              i, nrow(matrix_catalog), row$matrix_id[[1]], row$dataset_label[[1]]))
+
+  metric_rows[[i]] <- row %>%
+    dplyr::select(
+      "matrix_id", "data_scenario", "dataset_label",
+      "matrix_index", "matrix_path", "manifest_path",
+      "participant_count", "snps_post", "snp_set"
+    ) %>%
+    dplyr::bind_cols(
+      compute_ld_alpha_metrics_one(
+        matrix_path = row$matrix_path[[1]],
+        repo_root = repo_root,
+        alphas = alphas,
+        ld_threshold = ld_threshold
+      )
+    )
+
+  gc(verbose = FALSE)
+}
+
+ld_alpha_metrics <- dplyr::bind_rows(metric_rows) %>%
+  dplyr::arrange(.data$matrix_id)
+
+readr::write_csv(ld_alpha_metrics, output_csv)
+
+cat("Wrote:", output_csv, "\n")
+cat("Rows:", nrow(ld_alpha_metrics), "\n")
+cat("Columns:", ncol(ld_alpha_metrics), "\n")
+
+kable(head(ld_alpha_metrics, 10))
+```

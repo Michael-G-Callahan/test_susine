@@ -1,0 +1,77 @@
+---
+title: "Export GTEx Lung SuSiE Summary Parquet to CSV"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+One-off workbook to read the GTEx Lung SuSiE summary parquet and write a
+CSV copy into the same folder.
+
+```{r setup, message=FALSE}
+here::i_am("vignettes/one_off_validations/export_gtex_lung_susie_summary_to_csv.Rmd")
+
+library(here)
+library(arrow)
+library(dplyr)
+library(readr)
+library(knitr)
+```
+
+## 1. Inputs
+
+```{r inputs}
+input_parquet <- normalizePath(
+  file.path(
+    here(),
+    "..",
+    "eQTL_annotations_for_susine",
+    "data",
+    "gtex",
+    "Lung.v10.eQTLs.SuSiE_summary.parquet"
+  ),
+  winslash = "/",
+  mustWork = TRUE
+)
+
+output_csv <- file.path(
+  dirname(input_parquet),
+  sub("\\.parquet$", ".csv", basename(input_parquet))
+)
+
+cat("Input parquet:", input_parquet, "\n")
+cat("Output csv:", output_csv, "\n")
+```
+
+## 2. Read Parquet
+
+```{r read-parquet}
+lung_tbl <- arrow::read_parquet(input_parquet) %>%
+  tibble::as_tibble()
+
+cat("Rows:", nrow(lung_tbl), "\n")
+cat("Columns:", ncol(lung_tbl), "\n")
+```
+
+## 3. Preview
+
+```{r preview}
+kable(head(lung_tbl, 10))
+```
+
+## 4. Write CSV
+
+```{r write-csv}
+readr::write_csv(lung_tbl, output_csv)
+
+stopifnot(file.exists(output_csv))
+file_info <- file.info(output_csv)
+
+cat("Wrote csv:", output_csv, "\n")
+cat("CSV size (bytes):", file_info$size[[1]], "\n")
+```

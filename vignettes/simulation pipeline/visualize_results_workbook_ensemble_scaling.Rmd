@@ -17,11 +17,12 @@ Reads consolidated outputs from the collect workbook. Generates all
 here::i_am("vignettes/simulation pipeline/visualize_results_workbook_ensemble_scaling.Rmd")
 library(here)
 library(devtools)
-devtools::load_all(".")
 susine_path <- here("..", "susine")
 if (file.exists(file.path(susine_path, "DESCRIPTION"))) {
+  options(test_susine.local_susine_path = normalizePath(susine_path, winslash = "/", mustWork = TRUE))
   devtools::load_all(susine_path)
 }
+devtools::load_all(".")
 library(dplyr)
 library(tidyr)
 library(readr)
@@ -158,18 +159,17 @@ extract_baseline_metric <- function(plot_table, metric_col) {
     dplyr::pull(!!rlang::sym(metric_col))
 }
 
-extract_truth_warm_refs <- function(plot_table, metric_col, overall = TRUE) {
+extract_truth_warm_refs <- function(plot_table, metric_col) {
   plot_table %>%
-    dplyr::filter(
-      .data$series_type == "truth_warm",
-      if (overall) is.na(.data$annotation_r2) else !is.na(.data$annotation_r2)
-    ) %>%
+    dplyr::filter(.data$series_type == "truth_warm") %>%
     dplyr::select(.data$use_case_id, .data$annotation_r2, dplyr::all_of(metric_col)) %>%
     dplyr::mutate(
       label = dplyr::case_when(
         .data$use_case_id == "susine_vanilla" ~ "truth-warm vanilla",
-        .data$use_case_id == "susine_eb_clamped_scale_var_nonneg" & overall ~ "truth-warm EB",
-        .data$use_case_id == "susine_functional_mu" & overall ~ "truth-warm grid (c=0.5)",
+        .data$use_case_id == "susine_eb_clamped_scale_var_nonneg" &
+          is.na(.data$annotation_r2) ~ "truth-warm EB",
+        .data$use_case_id == "susine_functional_mu" &
+          is.na(.data$annotation_r2) ~ "truth-warm grid (c=0.5)",
         .data$use_case_id == "susine_eb_clamped_scale_var_nonneg" ~
           paste0("truth-warm EB (r\u00b2=", .data$annotation_r2, ")"),
         .data$use_case_id == "susine_functional_mu" ~
@@ -212,20 +212,16 @@ tpr05_mean_plot_table <- test_susine:::build_shared_plot_metric_table(
   label = "TPR mean plot table"
 )
 
-auprc_plot_overall <- auprc_plot_table %>%
-  dplyr::filter(.data$series_type == "aggregated", is.na(.data$annotation_r2))
+auprc_plot_overall <- test_susine:::filter_shared_plot_metric_rows(auprc_plot_table)
 auprc_plot_by_r2 <- auprc_plot_table %>%
   dplyr::filter(.data$series_type == "aggregated")
-tpr05_plot_overall <- tpr05_plot_table %>%
-  dplyr::filter(.data$series_type == "aggregated", is.na(.data$annotation_r2))
+tpr05_plot_overall <- test_susine:::filter_shared_plot_metric_rows(tpr05_plot_table)
 tpr05_plot_by_r2 <- tpr05_plot_table %>%
   dplyr::filter(.data$series_type == "aggregated")
-auprc_mean_plot_overall <- auprc_mean_plot_table %>%
-  dplyr::filter(.data$series_type == "aggregated", is.na(.data$annotation_r2))
+auprc_mean_plot_overall <- test_susine:::filter_shared_plot_metric_rows(auprc_mean_plot_table)
 auprc_mean_plot_by_r2 <- auprc_mean_plot_table %>%
   dplyr::filter(.data$series_type == "aggregated")
-tpr05_mean_plot_overall <- tpr05_mean_plot_table %>%
-  dplyr::filter(.data$series_type == "aggregated", is.na(.data$annotation_r2))
+tpr05_mean_plot_overall <- test_susine:::filter_shared_plot_metric_rows(tpr05_mean_plot_table)
 tpr05_mean_plot_by_r2 <- tpr05_mean_plot_table %>%
   dplyr::filter(.data$series_type == "aggregated")
 
@@ -234,21 +230,23 @@ baseline_tpr05 <- extract_baseline_metric(tpr05_plot_table, "tpr_fpr05")
 baseline_auprc_mean <- extract_baseline_metric(auprc_mean_plot_table, "AUPRC")
 baseline_tpr05_mean <- extract_baseline_metric(tpr05_mean_plot_table, "tpr_fpr05")
 
-truth_warm_overall <- extract_truth_warm_refs(auprc_plot_table, "AUPRC", overall = TRUE)
-truth_warm_by_r2 <- extract_truth_warm_refs(auprc_plot_table, "AUPRC", overall = FALSE)
-truth_warm_tpr05_overall <- extract_truth_warm_refs(tpr05_plot_table, "tpr_fpr05", overall = TRUE)
-truth_warm_tpr05_by_r2 <- extract_truth_warm_refs(tpr05_plot_table, "tpr_fpr05", overall = FALSE)
-truth_warm_mean_overall <- extract_truth_warm_refs(auprc_mean_plot_table, "AUPRC", overall = TRUE)
-truth_warm_mean_by_r2 <- extract_truth_warm_refs(auprc_mean_plot_table, "AUPRC", overall = FALSE)
-truth_warm_tpr05_mean_overall <- extract_truth_warm_refs(tpr05_mean_plot_table, "tpr_fpr05", overall = TRUE)
-truth_warm_tpr05_mean_by_r2 <- extract_truth_warm_refs(tpr05_mean_plot_table, "tpr_fpr05", overall = FALSE)
+truth_warm_refs <- extract_truth_warm_refs(auprc_plot_table, "AUPRC")
+truth_warm_tpr05_refs <- extract_truth_warm_refs(tpr05_plot_table, "tpr_fpr05")
+truth_warm_mean_refs <- extract_truth_warm_refs(auprc_mean_plot_table, "AUPRC")
+truth_warm_tpr05_mean_refs <- extract_truth_warm_refs(tpr05_mean_plot_table, "tpr_fpr05")
+
+truth_warm_overall <- test_susine:::filter_truth_warm_reference_rows(truth_warm_refs)
+truth_warm_tpr05_overall <- test_susine:::filter_truth_warm_reference_rows(truth_warm_tpr05_refs)
+truth_warm_mean_overall <- test_susine:::filter_truth_warm_reference_rows(truth_warm_mean_refs)
+truth_warm_tpr05_mean_overall <- test_susine:::filter_truth_warm_reference_rows(truth_warm_tpr05_mean_refs)
 
 cat("Baseline pooled AUPRC:", round(baseline_auprc, 4), "\n")
 cat("Baseline pooled TPR@0.05:", round(baseline_tpr05, 4), "\n")
 cat("Baseline mean AUPRC:", round(baseline_auprc_mean, 4), "\n")
 cat("Baseline mean TPR@0.05:", round(baseline_tpr05_mean, 4), "\n")
 cat("Truth-warm overall:\n"); print(truth_warm_overall)
-cat("Truth-warm by r2:\n"); print(truth_warm_by_r2)
+cat("Truth-warm annotation-specific rows:\n")
+print(truth_warm_refs %>% dplyr::filter(!is.na(.data$annotation_r2)))
 ```
 
 # 1. SuSiE2-Style Plots (Category 1)
@@ -796,12 +794,15 @@ make_auprc_barplot <- function(r2_filter = NULL) {
   } else {
     # Annotation-independent specs have annotation_r2 = NA — always include.
     # Annotation-dependent specs: filter to the target r2 level.
-    plot_data <- auprc_plot_by_r2 %>%
-      dplyr::filter(
-                    is.na(annotation_r2) | annotation_r2 == r2_filter)
+    plot_data <- test_susine:::filter_shared_plot_metric_rows(
+      auprc_plot_table,
+      r2_filter = r2_filter
+    )
     # Truth-warm: vanilla (NA r2) always; EB/grid at matching r2 only.
-    tw_data <- truth_warm_by_r2 %>%
-      dplyr::filter(is.na(annotation_r2) | annotation_r2 == r2_filter)
+    tw_data <- test_susine:::filter_truth_warm_reference_rows(
+      truth_warm_refs,
+      r2_filter = r2_filter
+    )
     title_str <- paste0("AUPRC by Ensemble Method and Aggregation (annotation R\u00b2 = ",
                         r2_filter, ")")
     fname <- paste0("auprc_barplot_by_method_r2_",
@@ -814,7 +815,7 @@ make_auprc_barplot <- function(r2_filter = NULL) {
     geom_col(position = position_dodge(width = 0.8), width = 0.7) +
     geom_hline(yintercept = baseline_auprc, linetype = "dashed",
                color = "red", linewidth = 0.8) +
-    annotate("text", x = 0.5, y = baseline_auprc, label = "baseline single-fit",
+    annotate("text", x = 0.5, y = baseline_auprc, label = "vanilla baseline",
              vjust = -0.5, hjust = 0, color = "red", size = 3) +
     labs(x = "Ensemble Method", y = "Pooled AUPRC", fill = "Aggregation",
          title = title_str) +
@@ -852,10 +853,14 @@ make_auprc_mean_barplot <- function(r2_filter = NULL) {
     title_str <- "AUPRC by Ensemble Method and Aggregation (mean across datasets, all annotation R\u00b2 pooled)"
     fname     <- "auprc_barplot_by_method_mean_overall.png"
   } else {
-    plot_data <- auprc_mean_plot_by_r2 %>%
-      dplyr::filter(is.na(annotation_r2) | annotation_r2 == r2_filter)
-    tw_data <- truth_warm_mean_by_r2 %>%
-      dplyr::filter(is.na(annotation_r2) | annotation_r2 == r2_filter)
+    plot_data <- test_susine:::filter_shared_plot_metric_rows(
+      auprc_mean_plot_table,
+      r2_filter = r2_filter
+    )
+    tw_data <- test_susine:::filter_truth_warm_reference_rows(
+      truth_warm_mean_refs,
+      r2_filter = r2_filter
+    )
     title_str <- paste0("AUPRC by Ensemble Method and Aggregation (mean across datasets, annotation R\u00b2 = ",
                         r2_filter, ")")
     fname <- paste0("auprc_barplot_by_method_mean_r2_",
@@ -868,7 +873,7 @@ make_auprc_mean_barplot <- function(r2_filter = NULL) {
     geom_col(position = position_dodge(width = 0.8), width = 0.7) +
     geom_hline(yintercept = baseline_auprc_mean, linetype = "dashed",
                color = "red", linewidth = 0.8) +
-    annotate("text", x = 0.5, y = baseline_auprc_mean, label = "baseline single-fit",
+    annotate("text", x = 0.5, y = baseline_auprc_mean, label = "vanilla baseline",
              vjust = -0.5, hjust = 0, color = "red", size = 3) +
     labs(x = "Ensemble Method", y = "Mean AUPRC Across Datasets", fill = "Aggregation",
          title = title_str) +
@@ -912,11 +917,14 @@ make_tpr05_barplot <- function(r2_filter = NULL) {
     fname     <- "tpr05_barplot_by_method_overall.png"
     base_val  <- baseline_tpr05
   } else {
-    plot_data <- tpr05_plot_by_r2 %>%
-      dplyr::filter(
-                    is.na(annotation_r2) | annotation_r2 == r2_filter)
-    tw_data <- truth_warm_tpr05_by_r2 %>%
-      dplyr::filter(is.na(annotation_r2) | annotation_r2 == r2_filter)
+    plot_data <- test_susine:::filter_shared_plot_metric_rows(
+      tpr05_plot_table,
+      r2_filter = r2_filter
+    )
+    tw_data <- test_susine:::filter_truth_warm_reference_rows(
+      truth_warm_tpr05_refs,
+      r2_filter = r2_filter
+    )
     # Baseline is annotation-independent; use same pooled overall value
     base_val  <- baseline_tpr05
     title_str <- paste0("TPR @ FPR=0.05 by Ensemble Method and Aggregation (annotation R\u00b2 = ",
@@ -931,7 +939,7 @@ make_tpr05_barplot <- function(r2_filter = NULL) {
     geom_col(position = position_dodge(width = 0.8), width = 0.7) +
     geom_hline(yintercept = base_val, linetype = "dashed",
                color = "red", linewidth = 0.8) +
-    annotate("text", x = 0.5, y = base_val, label = "baseline single-fit",
+    annotate("text", x = 0.5, y = base_val, label = "vanilla baseline",
              vjust = -0.5, hjust = 0, color = "red", size = 3) +
     labs(x = "Ensemble Method", y = "Pooled TPR @ FPR=0.05", fill = "Aggregation",
          title = title_str) +
@@ -969,10 +977,14 @@ make_tpr05_mean_barplot <- function(r2_filter = NULL) {
     title_str <- "TPR @ FPR=0.05 by Ensemble Method and Aggregation (mean across datasets, all annotation R\u00b2 pooled)"
     fname     <- "tpr05_barplot_by_method_mean_overall.png"
   } else {
-    plot_data <- tpr05_mean_plot_by_r2 %>%
-      dplyr::filter(is.na(annotation_r2) | annotation_r2 == r2_filter)
-    tw_data <- truth_warm_tpr05_mean_by_r2 %>%
-      dplyr::filter(is.na(annotation_r2) | annotation_r2 == r2_filter)
+    plot_data <- test_susine:::filter_shared_plot_metric_rows(
+      tpr05_mean_plot_table,
+      r2_filter = r2_filter
+    )
+    tw_data <- test_susine:::filter_truth_warm_reference_rows(
+      truth_warm_tpr05_mean_refs,
+      r2_filter = r2_filter
+    )
     title_str <- paste0("TPR @ FPR=0.05 by Ensemble Method and Aggregation (mean across datasets, annotation R\u00b2 = ",
                         r2_filter, ")")
     fname <- paste0("tpr05_barplot_by_method_mean_r2_",
@@ -985,7 +997,7 @@ make_tpr05_mean_barplot <- function(r2_filter = NULL) {
     geom_col(position = position_dodge(width = 0.8), width = 0.7) +
     geom_hline(yintercept = baseline_tpr05_mean, linetype = "dashed",
                color = "red", linewidth = 0.8) +
-    annotate("text", x = 0.5, y = baseline_tpr05_mean, label = "baseline single-fit",
+    annotate("text", x = 0.5, y = baseline_tpr05_mean, label = "vanilla baseline",
              vjust = -0.5, hjust = 0, color = "red", size = 3) +
     labs(x = "Ensemble Method", y = "Mean TPR @ FPR=0.05 Across Datasets", fill = "Aggregation",
          title = title_str) +
@@ -1936,6 +1948,11 @@ if (file.exists(scaling_bins_path)) {
         by = c("spec_name", "annotation_r2", "agg_method")
       )
   )
+  scaling_summary <- test_susine:::append_scaling_single_fit_points(
+    scaling_summary,
+    auprc_plot_table = auprc_plot_table,
+    tpr05_plot_table = tpr05_plot_table
+  )
 
   # Separate pure-lever and interaction subsets.
   scaling_curves      <- scaling_summary %>% dplyr::filter(is.na(.data$resolution))
@@ -1983,18 +2000,18 @@ if (!is.null(scaling_curves) && nrow(scaling_curves) > 0L) {
       )
     }
 
-    # Baseline single-fit reference line
+    # Global vanilla baseline reference line
     if (!is.null(baseline_val) && is.finite(baseline_val)) {
       p <- p +
         ggplot2::geom_hline(yintercept = baseline_val, linetype = "dashed",
                             color = "red", linewidth = 0.6) +
         ggplot2::annotate("text", x = min(data$n_ensemble, na.rm = TRUE),
-                          y = baseline_val, label = "baseline single-fit",
+                          y = baseline_val, label = "vanilla baseline",
                           vjust = -0.5, hjust = 0, color = "red", size = 2.8)
     }
 
     p +
-      ggplot2::scale_x_continuous(breaks = c(4, 8, 16, 32, 64)) +
+      ggplot2::scale_x_continuous(breaks = c(1, 4, 8, 16, 32, 64)) +
       ggplot2::facet_wrap(~ spec_name, nrow = 2) +
       ggplot2::labs(
         x     = "Ensemble size (# fits)",
@@ -2104,7 +2121,7 @@ if (!is.null(interaction_scaling) && nrow(interaction_scaling) > 0L) {
         ggplot2::geom_hline(yintercept = baseline_val, linetype = "dashed",
                             color = "red", linewidth = 0.6) +
         ggplot2::annotate("text", x = 1, y = baseline_val,
-                          label = "baseline single-fit",
+                          label = "vanilla baseline",
                           vjust = -0.5, hjust = 0, color = "red", size = 2.8)
     }
 
@@ -2282,7 +2299,7 @@ method. Baseline single-fit shown as a black star.
           "text",
           x = baseline_compute_min,
           y = baseline_auprc,
-          label = "baseline single-fit",
+          label = "vanilla baseline",
           hjust = -0.15, vjust = -0.8, size = 3, color = "black"
         ) +
         labs(
@@ -2302,10 +2319,10 @@ method. Baseline single-fit shown as a black star.
       # Per annotation_r2 variant
       for (r2 in sort(unique(na.omit(
         auprc_plot_by_r2$annotation_r2)))) {
-        compute_auprc_r2 <- auprc_plot_by_r2 %>%
-          dplyr::filter(.data$spec_name != "baseline-single",
-                        is.na(.data$annotation_r2) |
-                          .data$annotation_r2 == r2) %>%
+        compute_auprc_r2 <- test_susine:::filter_shared_plot_metric_rows(
+          auprc_plot_table,
+          r2_filter = r2
+        ) %>%
           dplyr::inner_join(wt_per_ensemble, by = "spec_name") %>%
           dplyr::mutate(compute_min = .data$mean_total_wall_sec / 60)
 
@@ -2330,7 +2347,7 @@ method. Baseline single-fit shown as a black star.
             annotate("point", x = baseline_compute_min, y = bl_auprc_r2,
                      shape = 8, size = 4, color = "black", stroke = 1.2) +
             annotate("text", x = baseline_compute_min, y = bl_auprc_r2,
-                     label = "baseline single-fit",
+                     label = "vanilla baseline",
                      hjust = -0.15, vjust = -0.8, size = 3, color = "black") +
             labs(
               x = "Total compute time (minutes, mean over datasets)",

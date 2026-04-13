@@ -68,6 +68,7 @@ exploration_catalog <- function() {
     "single",  "Single fit",
     "restart", "Restart via randomized prior inclusion vectors",
     "c_grid",  "Grid over c for mu_0 = c*a",
+    "cs_grid_refit", "Grid over (c, sigma_0_2) then refit with default priors",
     "tau_grid","Grid over tau for pi = softmax(|a|/tau)",
     "refine",        "Harness-level refinement (perturb + refit BFS)",
     "sigma_0_2_grid","Grid over prior variance sigma_0_2"
@@ -113,6 +114,7 @@ valid_exploration_for_prior <- function(prior_spec_ids = NULL,
       dplyr::select(
         prior_specs,
         .data$prior_spec_id,
+        .data$backend,
         .data$prior_mean_strategy,
         .data$prior_variance_strategy,
         .data$inclusion_prior_strategy,
@@ -130,6 +132,11 @@ valid_exploration_for_prior <- function(prior_spec_ids = NULL,
         .data$exploration_id == "single" ~ TRUE,
         .data$exploration_id == "restart" ~ TRUE,
         .data$exploration_id == "refine" ~ TRUE,
+        .data$exploration_id == "cs_grid_refit" ~
+          .data$prior_mean_strategy == "functional_mu" &
+          .data$prior_variance_strategy == "fixed" &
+          .data$inclusion_prior_strategy == "uniform" &
+          .data$backend == "susine",
         .data$exploration_id == "c_grid" ~
           .data$prior_mean_strategy == "functional_mu" & !.data$.eb_optimizes_c,
         .data$exploration_id == "tau_grid" ~ .data$inclusion_prior_strategy == "functional_pi",

@@ -17,11 +17,12 @@ from confusion bins, add oracle aggregation.
 here::i_am("vignettes/simulation pipeline/collect_results_workbook_ensemble_scaling.Rmd")
 library(here)
 library(devtools)
-devtools::load_all(".")
 susine_path <- here("..", "susine")
 if (file.exists(file.path(susine_path, "DESCRIPTION"))) {
+  options(test_susine.local_susine_path = normalizePath(susine_path, winslash = "/", mustWork = TRUE))
   devtools::load_all(susine_path)
 }
+devtools::load_all(".")
 library(dplyr)
 library(tidyr)
 library(readr)

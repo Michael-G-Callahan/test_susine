@@ -1,0 +1,356 @@
+---
+title: "Screen LD Alpha Metrics Against Baseline Outcomes"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+One-off workbook to join the local baseline difficulty table to the new
+matrix-level LD alpha metrics, then screen the 16 LD metrics against
+two bundle-level outcomes:
+
+1. baseline AUPRC
+2. mean retained effect size
+
+For each outcome, the workbook compares a simple linear fit against a
+nonlinear natural-spline fit for every LD metric, saves a ranked CSV,
+and writes a save-only scatter-plus-smoother plot for the best metric.
+
+```{r setup, message=FALSE}
+here::i_am("vignettes/one_off_validations/screen_ld_alpha_metrics_against_baseline_outcomes.Rmd")
+library(here)
+library(devtools)
+devtools::load_all(".")
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(knitr)
+library(splines)
+
+theme_set(theme_bw(base_size = 12))
+```
+
+## 1. Inputs
+
+```{r inputs}
+input_dir <- here("output", "slurm_output", "ensemble_full_prelim")
+
+difficulty_data_path <- file.path(input_dir, "difficulty_model_data.csv")
+baseline_effects_path <- file.path(input_dir, "baseline_vanilla_effect_metrics_joined.csv")
+dataset_bundles_path <- file.path(input_dir, "dataset_bundles.csv")
+auprc_individual_path <- file.path(input_dir, "auprc_individual.csv")
+ld_metrics_path <- here("data", "sampled_simulated_genotypes", "scenario_1_ld_alpha_metrics.csv")
+
+fig_dir <- file.path(input_dir, "figures", "one_off_validations")
+dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
+
+analysis_csv <- file.path(fig_dir, "baseline_ld_alpha_screen_analysis_table.csv")
+search_csv <- file.path(fig_dir, "baseline_ld_alpha_metric_screen.csv")
+best_by_outcome_csv <- file.path(fig_dir, "baseline_ld_alpha_metric_best_by_outcome.csv")
+overall_metric_csv <- file.path(fig_dir, "baseline_ld_alpha_metric_overall_ranking.csv")
+
+cat("Input dir:", input_dir, "\n")
+cat("Difficulty data:", difficulty_data_path, "\n")
+cat("Baseline effects:", baseline_effects_path, "\n")
+cat("Dataset bundles:", dataset_bundles_path, "\n")
+cat("AUPRC individual:", auprc_individual_path, "\n")
+cat("LD metrics:", ld_metrics_path, "\n")
+cat("Figure dir:", fig_dir, "\n")
+```
+
+## 2. Load Core Tables
+
+```{r load}
+stopifnot(dir.exists(input_dir))
+stopifnot(file.exists(difficulty_data_path))
+stopifnot(file.exists(baseline_effects_path))
+stopifnot(file.exists(dataset_bundles_path))
+stopifnot(file.exists(auprc_individual_path))
+stopifnot(file.exists(ld_metrics_path))
+
+difficulty_df <- readr::read_csv(difficulty_data_path, show_col_types = FALSE) %>%
+  dplyr::mutate(dataset_bundle_id = as.integer(.data$dataset_bundle_id))
+
+baseline_effects_df <- readr::read_csv(baseline_effects_path, show_col_types = FALSE)
+
+dataset_bundles <- readr::read_csv(dataset_bundles_path, show_col_types = FALSE) %>%
+  dplyr::mutate(
+    dataset_bundle_id = as.integer(.data$dataset_bundle_id),
+    matrix_id = as.integer(.data$matrix_id)
+  ) %>%
+  dplyr::distinct(.data$dataset_bundle_id, .keep_all = TRUE)
+
+auprc_individual_df <- readr::read_csv(auprc_individual_path, show_col_types = FALSE) %>%
+  dplyr::mutate(
+    dataset_bundle_id = as.integer(.data$dataset_bundle_id),
+    run_id = as.integer(.data$run_id)
+  )
+
+ld_metrics_df <- readr::read_csv(ld_metrics_path, show_col_types = FALSE) %>%
+  dplyr::mutate(matrix_id = as.integer(.data$matrix_id))
+
+cat("Difficulty rows:", nrow(difficulty_df), "\n")
+cat("Baseline effect rows:", nrow(baseline_effects_df), "\n")
+cat("Dataset bundle rows:", nrow(dataset_bundles), "\n")
+cat("AUPRC individual rows:", nrow(auprc_individual_df), "\n")
+cat("LD metric rows:", nrow(ld_metrics_df), "\n")
+```
+
+## 3. Bundle-Level Baseline Effect Summaries
+
+```{r baseline-effects}
+baseline_run_lookup <- auprc_individual_df %>%
+  dplyr::filter(
+    .data$spec_name == "baseline-single",
+    .data$use_case_id == "susine_vanilla",
+    .data$explore_method == "base"
+  ) %>%
+  dplyr::select("run_id", "dataset_bundle_id") %>%
+  dplyr::distinct(.data$run_id, .keep_all = TRUE)
+
+baseline_effect_summary <- baseline_effects_df %>%
+  dplyr::mutate(
+    run_id = as.integer(.data$run_id),
+    size = as.numeric(.data$size),
+    purity = as.numeric(.data$purity),
+    coverage = as.numeric(.data$coverage)
+  ) %>%
+  dplyr::left_join(
+    baseline_run_lookup,
+    by = "run_id"
+  ) %>%
+  dplyr::left_join(
+    dataset_bundles %>% dplyr::select("dataset_bundle_id", "matrix_id"),
+    by = "dataset_bundle_id"
+  ) %>%
+  dplyr::group_by(.data$dataset_bundle_id, .data$matrix_id) %>%
+  dplyr::summarise(
+    mean_effect_size = mean(.data$size, na.rm = TRUE),
+    pct_effects_cov0 = mean(.data$coverage == 0, na.rm = TRUE),
+    mean_purity = mean(.data$purity, na.rm = TRUE),
+    n_retained_effects = dplyr::n(),
+    .groups = "drop"
+  )
+
+cat("Baseline effect summary rows:", nrow(baseline_effect_summary), "\n")
+kable(head(baseline_effect_summary, 10))
+```
+
+## 4. Join Analysis Table
+
+```{r analysis-table}
+analysis_df <- difficulty_df %>%
+  dplyr::left_join(
+    dataset_bundles %>% dplyr::select("dataset_bundle_id", "matrix_id"),
+    by = "dataset_bundle_id"
+  ) %>%
+  dplyr::left_join(
+    baseline_effect_summary %>%
+      dplyr::select(
+        .data$dataset_bundle_id,
+        .data$mean_effect_size,
+        .data$pct_effects_cov0,
+        .data$mean_purity,
+        .data$n_retained_effects
+      ),
+    by = "dataset_bundle_id"
+  ) %>%
+  dplyr::left_join(ld_metrics_df, by = "matrix_id") %>%
+  dplyr::arrange(.data$dataset_bundle_id)
+
+readr::write_csv(analysis_df, analysis_csv)
+
+cat("Analysis rows:", nrow(analysis_df), "\n")
+cat("Saved analysis table:", analysis_csv, "\n")
+
+kable(head(analysis_df, 10))
+```
+
+## 5. Screen LD Metrics
+
+```{r metric-screen}
+ld_metric_cols <- grep("^ld_abs_alpha_", names(analysis_df), value = TRUE)
+
+outcome_specs <- tibble::tribble(
+  ~outcome, ~label,
+  "auprc_baseline", "Baseline AUPRC",
+  "mean_effect_size", "Mean retained effect size"
+)
+
+fit_one_metric <- function(data, outcome_col, metric_col, model_type = c("linear", "spline")) {
+  model_type <- match.arg(model_type)
+  vars <- c(outcome_col, metric_col)
+  model_df <- data %>%
+    dplyr::select(dplyr::all_of(c("dataset_bundle_id", "matrix_id", vars))) %>%
+    dplyr::filter(dplyr::if_all(dplyr::all_of(vars), ~ is.finite(.x)))
+
+  if (nrow(model_df) < 10L) {
+    return(tibble::tibble(
+      outcome = outcome_col,
+      metric = metric_col,
+      model_type = model_type,
+      n_used = nrow(model_df),
+      r_squared = NA_real_,
+      adj_r_squared = NA_real_,
+      rmse = NA_real_,
+      aic = NA_real_,
+      status = "insufficient_rows"
+    ))
+  }
+
+  formula_obj <- if (model_type == "linear") {
+    stats::as.formula(sprintf("%s ~ %s", outcome_col, metric_col))
+  } else {
+    stats::as.formula(sprintf("%s ~ splines::ns(%s, df = 3)", outcome_col, metric_col))
+  }
+
+  fit <- tryCatch(stats::lm(formula_obj, data = model_df), error = function(e) e)
+  if (inherits(fit, "error")) {
+    return(tibble::tibble(
+      outcome = outcome_col,
+      metric = metric_col,
+      model_type = model_type,
+      n_used = nrow(model_df),
+      r_squared = NA_real_,
+      adj_r_squared = NA_real_,
+      rmse = NA_real_,
+      aic = NA_real_,
+      status = paste0("fit_error: ", fit$message)
+    ))
+  }
+
+  pred <- stats::predict(fit, newdata = model_df)
+  resid <- model_df[[outcome_col]] - pred
+  sm <- summary(fit)
+
+  tibble::tibble(
+    outcome = outcome_col,
+    metric = metric_col,
+    model_type = model_type,
+    n_used = nrow(model_df),
+    r_squared = unname(sm$r.squared),
+    adj_r_squared = unname(sm$adj.r.squared),
+    rmse = sqrt(mean(resid^2)),
+    aic = stats::AIC(fit),
+    status = "ok"
+  )
+}
+
+screen_results <- dplyr::bind_rows(
+  lapply(outcome_specs$outcome, function(outcome_col) {
+    dplyr::bind_rows(
+      lapply(ld_metric_cols, function(metric_col) fit_one_metric(analysis_df, outcome_col, metric_col, "linear")),
+      lapply(ld_metric_cols, function(metric_col) fit_one_metric(analysis_df, outcome_col, metric_col, "spline"))
+    )
+  })
+) %>%
+  dplyr::left_join(outcome_specs, by = "outcome") %>%
+  dplyr::arrange(.data$outcome, dplyr::desc(.data$adj_r_squared), .data$rmse, .data$metric, .data$model_type)
+
+readr::write_csv(screen_results, search_csv)
+cat("Saved screen results:", search_csv, "\n")
+
+best_by_metric_outcome <- screen_results %>%
+  dplyr::filter(.data$status == "ok") %>%
+  dplyr::group_by(.data$outcome, .data$metric) %>%
+  dplyr::slice_max(.data$adj_r_squared, n = 1L, with_ties = FALSE) %>%
+  dplyr::ungroup() %>%
+  dplyr::group_by(.data$outcome) %>%
+  dplyr::mutate(outcome_rank = dplyr::min_rank(dplyr::desc(.data$adj_r_squared))) %>%
+  dplyr::ungroup()
+
+best_by_outcome_table <- best_by_metric_outcome %>%
+  dplyr::arrange(.data$outcome, .data$outcome_rank, dplyr::desc(.data$r_squared)) %>%
+  dplyr::select(
+    .data$outcome,
+    .data$outcome_rank,
+    .data$metric,
+    .data$model_type,
+    .data$r_squared,
+    .data$adj_r_squared,
+    .data$rmse,
+    .data$n_used
+  )
+
+overall_metric_ranking <- best_by_metric_outcome %>%
+  dplyr::group_by(.data$metric) %>%
+  dplyr::summarise(
+    mean_r_squared = mean(.data$r_squared, na.rm = TRUE),
+    mean_adj_r_squared = mean(.data$adj_r_squared, na.rm = TRUE),
+    total_adj_r_squared = sum(.data$adj_r_squared, na.rm = TRUE),
+    mean_outcome_rank = mean(.data$outcome_rank, na.rm = TRUE),
+    wins = sum(.data$outcome_rank == 1L, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  dplyr::arrange(.data$mean_outcome_rank, dplyr::desc(.data$mean_adj_r_squared), dplyr::desc(.data$wins))
+
+readr::write_csv(best_by_outcome_table, best_by_outcome_csv)
+readr::write_csv(overall_metric_ranking, overall_metric_csv)
+cat("Saved best-by-outcome table:", best_by_outcome_csv, "\n")
+cat("Saved overall metric ranking:", overall_metric_csv, "\n")
+```
+
+## 6. Ranking Tables
+
+```{r ranking-tables}
+all_by_outcome <- best_by_outcome_table %>%
+  dplyr::mutate(
+    r_squared = round(.data$r_squared, 4),
+    adj_r_squared = round(.data$adj_r_squared, 4),
+    rmse = round(.data$rmse, 4)
+  )
+
+overall_metric_ranking_print <- overall_metric_ranking %>%
+  dplyr::mutate(
+    mean_r_squared = round(.data$mean_r_squared, 4),
+    mean_adj_r_squared = round(.data$mean_adj_r_squared, 4),
+    total_adj_r_squared = round(.data$total_adj_r_squared, 4),
+    mean_outcome_rank = round(.data$mean_outcome_rank, 2)
+  )
+
+kable(all_by_outcome, caption = "Top LD metrics by outcome")
+kable(overall_metric_ranking_print, caption = "Overall LD metric ranking across outcomes")
+```
+
+## 7. Save Best-Metric Plots
+
+```{r best-plots}
+best_rows <- screen_results %>%
+  dplyr::filter(.data$status == "ok") %>%
+  dplyr::group_by(.data$outcome) %>%
+  dplyr::slice_max(.data$adj_r_squared, n = 1L, with_ties = FALSE) %>%
+  dplyr::ungroup()
+
+for (i in seq_len(nrow(best_rows))) {
+  row <- best_rows[i, , drop = FALSE]
+  outcome_col <- row$outcome[[1]]
+  metric_col <- row$metric[[1]]
+  outcome_label <- row$label[[1]]
+  model_type <- row$model_type[[1]]
+
+  plot_df <- analysis_df %>%
+    dplyr::select(dplyr::all_of(c(metric_col, outcome_col))) %>%
+    dplyr::filter(dplyr::if_all(dplyr::everything(), ~ is.finite(.x)))
+
+  p <- ggplot(plot_df, aes(x = .data[[metric_col]], y = .data[[outcome_col]])) +
+    geom_point(alpha = 0.55, size = 1.8, color = "steelblue4") +
+    geom_smooth(method = "loess", se = FALSE, color = "firebrick", linewidth = 0.9) +
+    labs(
+      x = metric_col,
+      y = outcome_label,
+      title = paste0("Best LD metric for ", outcome_label),
+      subtitle = paste0("Metric = ", metric_col, " | screen winner = ", model_type)
+    )
+
+  out_path <- file.path(fig_dir, paste0("best_ld_metric_", outcome_col, ".png"))
+  ggsave(out_path, p, width = 8, height = 6)
+  cat("Saved plot:", out_path, "\n")
+}
+
+invisible(NULL)
+```

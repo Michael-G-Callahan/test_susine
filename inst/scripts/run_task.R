@@ -34,6 +34,7 @@ if (use_dev) {
   susine_path <- file.path(dirname(repo_root), "susine")
   if (dir.exists(susine_path) && file.exists(file.path(susine_path, "DESCRIPTION"))) {
     message("Loading local dev susine from: ", susine_path)
+    options(test_susine.local_susine_path = normalizePath(susine_path, winslash = "/", mustWork = TRUE))
     devtools::load_all(susine_path)
   }
   devtools::load_all(repo_root)

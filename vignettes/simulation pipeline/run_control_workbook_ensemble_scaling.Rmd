@@ -13,7 +13,7 @@ editor_options:
 Experiment plan: `refs/ensemble_scaling_experiment_plan.md`
 
 Builds a single heterogeneous job config with all specs (A-R through
-C-CSFR) plus standalone truth-warm-start baselines.
+C-CSFR, plus C-CSR) plus standalone truth-warm-start baselines.
 
 ```{r setup, message=FALSE}
 here::i_am("vignettes/simulation pipeline/run_control_workbook_ensemble_scaling.Rmd")
@@ -21,14 +21,14 @@ library(here)
 here()
 
 library(devtools)
-devtools::load_all(".")
-
 susine_path <- here("..", "susine")
 if (file.exists(file.path(susine_path, "DESCRIPTION"))) {
+  options(test_susine.local_susine_path = normalizePath(susine_path, winslash = "/", mustWork = TRUE))
   devtools::load_all(susine_path)
 } else {
   warning("susine package not found at: ", susine_path)
 }
+devtools::load_all(".")
 
 library(dplyr)
 library(tidyr)
@@ -266,6 +266,16 @@ spec_C_CS <- list(
   sigma_0_2_grid_values = sigma_grid_8
 )
 
+spec_C_CSR <- list(
+  name = "C-CSR",
+  use_case_ids = "susine_functional_mu",
+  exploration_methods = "cs_grid_refit",
+  exploration_mode = "separate",
+  K = 64L,
+  c_grid_values = c_grid_8,
+  sigma_0_2_grid_values = sigma_grid_8
+)
+
 spec_C_CSFR <- list(
   name = "C-CSFR",
   use_case_ids = "susine_functional_mu",
@@ -314,9 +324,18 @@ all_specs <- list(
   spec_A_R, spec_A_F, spec_A_S,
   spec_A_RF, spec_A_RS, spec_A_FS, spec_A_RFS,
   spec_B_R, spec_B_F, spec_B_RF,
-  spec_C_C, spec_C_CS, spec_C_CSFR, spec_C_CFR, spec_C_CF,
+  spec_C_C, spec_C_CS, spec_C_CSR, spec_C_CSFR, spec_C_CFR, spec_C_CF,
   spec_baseline_single
 )
+
+expected_spec_names <- c(
+  "A-R", "A-F", "A-S", "A-RF", "A-RS", "A-FS", "A-RFS",
+  "B-R", "B-F", "B-RF",
+  "C-C", "C-CS", "C-CSR", "C-CSFR", "C-CFR", "C-CF",
+  "baseline-single"
+)
+actual_spec_names <- vapply(all_specs, function(s) s$name, character(1))
+stopifnot(setequal(actual_spec_names, expected_spec_names))
 
 cat("Total specs:", length(all_specs), "\n")
 for (s in all_specs) {

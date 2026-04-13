@@ -181,6 +181,14 @@ make_run_tables <- function(use_case_ids,
   if (length(bad_methods)) {
     stop("Unknown exploration method(s): ", paste(bad_methods, collapse = ", "))
   }
+  if ("cs_grid_refit" %in% exploration_methods) {
+    if (length(exploration_methods) != 1L) {
+      stop("cs_grid_refit must be used as a standalone exploration method.")
+    }
+    if (!identical(exploration_mode, "separate")) {
+      stop("cs_grid_refit is only supported with exploration_mode = 'separate'.")
+    }
+  }
 
   prior_specs <- resolve_use_cases(use_case_ids)
   if (!nrow(prior_specs)) {
@@ -442,6 +450,28 @@ make_run_tables <- function(use_case_ids,
 
     if (exploration_mode == "separate") {
       group_rows <- purrr::map_dfr(methods_for_spec, function(m) {
+        if (identical(m, "cs_grid_refit")) {
+          c_vals <- c_grid_values
+          if (is.null(c_vals) || !length(c_vals)) {
+            c_vals <- make_default_grid("c_grid", K)
+          }
+          s_vals <- sigma_0_2_grid_values
+          if (is.null(s_vals) || !length(s_vals)) {
+            s_vals <- make_default_grid("sigma_0_2_grid", K)
+          }
+          return(
+            tidyr::crossing(
+              c_value = as.numeric(c_vals),
+              sigma_0_2_scalar = as.numeric(s_vals)
+            ) %>%
+              dplyr::mutate(
+                run_type = "warm",
+                warm_method = "cs_grid_refit",
+                exploration_mode = "separate",
+                exploration_methods = m
+              )
+          )
+        }
         axis_tbl <- axis_table_for_method(
           method = m,
           mode = "separate",

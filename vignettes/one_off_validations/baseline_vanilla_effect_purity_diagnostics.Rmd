@@ -53,7 +53,7 @@ plot_coverage_purity <- file.path(fig_dir, "baseline_vanilla_coverage_vs_purity.
 plot_size_purity <- file.path(fig_dir, "baseline_vanilla_size_vs_purity.png")
 plot_size_coverage <- file.path(fig_dir, "baseline_vanilla_size_vs_coverage_colored_by_purity.png")
 plot_size_purity_by_coverage <- file.path(fig_dir, "baseline_vanilla_size_vs_purity_by_coverage.png")
-plot_coverage_purity_by_size_bin <- file.path(fig_dir, "baseline_vanilla_coverage_rate_vs_purity_by_size_bin.png")
+plot_coverage_purity_by_size_bin <- file.path(fig_dir, "baseline_vanilla_coverage_rate_vs_purity_by_size_bin_binned.png")
 plot_coverage_heatmap <- file.path(fig_dir, "baseline_vanilla_coverage_rate_heatmap_size_purity.png")
 
 cat("Run history dir:", run_history_dir, "\n")
@@ -246,25 +246,43 @@ p_size_purity_by_coverage <- ggplot(
     title = "Baseline vanilla: purity vs size, split by coverage"
   )
 
+purity_breaks <- c(0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 1.000001)
+purity_labels <- c("[0.50,0.60)", "[0.60,0.70)", "[0.70,0.80)",
+                   "[0.80,0.90)", "[0.90,0.95)", "[0.95,1.00]")
+purity_midpoints <- c(0.55, 0.65, 0.75, 0.85, 0.925, 0.975)
+
+coverage_binned_df <- plot_df %>%
+  dplyr::mutate(
+    purity_bin = cut(
+      .data$purity,
+      breaks = purity_breaks,
+      labels = purity_labels,
+      include.lowest = TRUE,
+      right = FALSE
+    )
+  ) %>%
+  dplyr::filter(!is.na(.data$purity_bin)) %>%
+  dplyr::group_by(.data$size_bin, .data$purity_bin) %>%
+  dplyr::summarise(
+    coverage_rate = mean(.data$coverage, na.rm = TRUE),
+    n = dplyr::n(),
+    .groups = "drop"
+  ) %>%
+  dplyr::mutate(
+    purity_mid = purity_midpoints[match(as.character(.data$purity_bin), purity_labels)]
+  )
+
 p_coverage_purity_by_size_bin <- ggplot(
-  plot_df,
-  aes(x = .data$purity, y = .data$coverage, color = .data$size_bin)
+  coverage_binned_df,
+  aes(x = .data$purity_mid, y = .data$coverage_rate, color = .data$size_bin)
 ) +
-  geom_point(
-    alpha = 0.18,
-    size = 1.3,
-    position = position_jitter(width = 0.005, height = 0.02)
-  ) +
-  geom_smooth(
-    method = "glm",
-    method.args = list(family = binomial()),
-    se = FALSE,
-    linewidth = 0.9
-  ) +
+  geom_line(linewidth = 0.9) +
+  geom_point(aes(size = .data$n), alpha = 0.85) +
   labs(
-    x = "Effect purity",
-    y = "Estimated Pr(coverage = 1)",
+    x = "Purity bin midpoint",
+    y = "Empirical Pr(coverage = 1)",
     color = "Effect size bin",
+    size = "Bin count",
     title = "Baseline vanilla: coverage rate vs purity by effect size"
   )
 

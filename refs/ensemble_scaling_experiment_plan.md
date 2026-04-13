@@ -87,6 +87,7 @@ No default c, so c_grid is always required. 4 levers: c_grid (C), sigma_0_2 grid
 |------|------|------|---------|
 | C-C | 64 c values | 64 | Pure c_grid scaling |
 | C-CS | 8C x 8S | 64 | Joint c x sigma_0_2 surface |
+| C-CSR | 8C x 8S search + exact default-prior refit | 64 | c x sigma search followed by warm refit under default priors |
 | C-CSFR | 3C x 3S x 3F x 3R | 81 | Full 4-way interaction (coarse) |
 | C-CFR | 4C x 4F x 4R | 64 | c x refine x restart (sigma=0.2) |
 | **Total (gross)** | | **273** | |

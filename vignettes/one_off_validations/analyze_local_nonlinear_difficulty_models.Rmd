@@ -1,0 +1,658 @@
+---
+title: "Analyze Local Nonlinear Difficulty Models"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+One-off workbook to search baseline-only nonlinear difficulty models
+using the local `ensemble_full_prelim` files. Each additive candidate
+model includes:
+
+1. `M1`
+2. one thresholded LD alpha metric
+3. any two z metrics
+
+After selecting the best additive four-variable model, the workbook runs
+an AIC-based search over all subsets of two-way interactions among those
+four variables.
+
+```{r setup, message=FALSE}
+here::i_am("vignettes/one_off_validations/analyze_local_nonlinear_difficulty_models.Rmd")
+library(here)
+library(devtools)
+devtools::load_all(".")
+library(dplyr)
+library(tidyr)
+library(readr)
+library(ggplot2)
+library(knitr)
+library(purrr)
+library(mgcv)
+
+theme_set(theme_bw(base_size = 12))
+```
+
+## 1. Inputs
+
+```{r inputs}
+input_dir <- here("output", "slurm_output", "ensemble_full_prelim")
+
+difficulty_data_path <- file.path(input_dir, "difficulty_model_data.csv")
+dataset_bundles_path <- file.path(input_dir, "dataset_bundles.csv")
+ld_metrics_path <- here("data", "sampled_simulated_genotypes", "scenario_1_ld_alpha_metrics.csv")
+
+fig_dir <- file.path(input_dir, "figures", "dataset_difficulty_local")
+dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
+
+cat("Input dir:", input_dir, "\n")
+cat("Difficulty data:", difficulty_data_path, "\n")
+cat("Dataset bundles:", dataset_bundles_path, "\n")
+cat("LD metrics:", ld_metrics_path, "\n")
+cat("Figure dir:", fig_dir, "\n")
+```
+
+## 2. Load and Join Data
+
+```{r load}
+stopifnot(dir.exists(input_dir))
+stopifnot(file.exists(difficulty_data_path))
+stopifnot(file.exists(dataset_bundles_path))
+stopifnot(file.exists(ld_metrics_path))
+
+difficulty_df <- readr::read_csv(difficulty_data_path, show_col_types = FALSE) %>%
+  dplyr::mutate(dataset_bundle_id = as.integer(.data$dataset_bundle_id))
+
+dataset_bundles <- readr::read_csv(dataset_bundles_path, show_col_types = FALSE) %>%
+  dplyr::mutate(
+    dataset_bundle_id = as.integer(.data$dataset_bundle_id),
+    matrix_id = as.integer(.data$matrix_id)
+  ) %>%
+  dplyr::distinct(.data$dataset_bundle_id, .keep_all = TRUE)
+
+ld_metrics_df <- readr::read_csv(ld_metrics_path, show_col_types = FALSE) %>%
+  dplyr::mutate(matrix_id = as.integer(.data$matrix_id))
+
+difficulty_model_data <- difficulty_df %>%
+  dplyr::left_join(
+    dataset_bundles %>% dplyr::select("dataset_bundle_id", "matrix_id"),
+    by = "dataset_bundle_id"
+  ) %>%
+  dplyr::left_join(
+    ld_metrics_df %>%
+      dplyr::select(
+        "matrix_id",
+        "ld_abs_alpha_2_thr_0p5",
+        "ld_abs_alpha_4_thr_0p5"
+      ),
+    by = "matrix_id"
+  ) %>%
+  dplyr::arrange(.data$dataset_bundle_id)
+
+required_cols <- c(
+  "dataset_bundle_id",
+  "matrix_id",
+  "M1",
+  "ld_abs_alpha_2_thr_0p5",
+  "ld_abs_alpha_4_thr_0p5",
+  "z_topk_ratio",
+  "z_max_abs",
+  "z_count_abs_gt_3",
+  "z_eff_signals",
+  "auprc_baseline"
+)
+
+missing_required <- setdiff(required_cols, names(difficulty_model_data))
+if (length(missing_required)) {
+  stop(
+    "Input data are missing required columns: ",
+    paste(missing_required, collapse = ", ")
+  )
+}
+
+cat("Rows:", nrow(difficulty_model_data), "\n")
+cat("Columns:", ncol(difficulty_model_data), "\n")
+```
+
+## 3. Helpers
+
+```{r helpers}
+html_escape <- function(x) {
+  x <- gsub("&", "&amp;", x, fixed = TRUE)
+  x <- gsub("<", "&lt;", x, fixed = TRUE)
+  x <- gsub(">", "&gt;", x, fixed = TRUE)
+  x
+}
+
+format_html_table <- function(df, digits = 4L) {
+  if (is.null(df) || !nrow(df)) {
+    return("<p><em>No rows.</em></p>")
+  }
+  df_fmt <- df
+  is_num <- vapply(df_fmt, is.numeric, logical(1))
+  df_fmt[is_num] <- lapply(df_fmt[is_num], function(col) round(col, digits))
+  header <- paste0(
+    "<tr>",
+    paste(sprintf("<th>%s</th>", html_escape(names(df_fmt))), collapse = ""),
+    "</tr>"
+  )
+  rows <- apply(as.data.frame(df_fmt, stringsAsFactors = FALSE), 1, function(row) {
+    paste0(
+      "<tr>",
+      paste(sprintf("<td>%s</td>", html_escape(as.character(row))), collapse = ""),
+      "</tr>"
+    )
+  })
+  paste0(
+    "<table class='report-table'>",
+    "<thead>", header, "</thead>",
+    "<tbody>", paste(rows, collapse = ""), "</tbody>",
+    "</table>"
+  )
+}
+
+write_html_report <- function(path, title, sections) {
+  html_sections <- vapply(sections, function(section) {
+    header_html <- if (!is.null(section$header) && nzchar(section$header)) {
+      sprintf("<h2>%s</h2>", html_escape(section$header))
+    } else {
+      ""
+    }
+    text_html <- if (!is.null(section$text) && length(section$text)) {
+      paste(sprintf("<p>%s</p>", html_escape(section$text)), collapse = "")
+    } else {
+      ""
+    }
+    digits <- if (!is.null(section$digits)) section$digits else 4L
+    table_html <- if (!is.null(section$table)) {
+      format_html_table(section$table, digits = digits)
+    } else {
+      ""
+    }
+    paste0(header_html, text_html, table_html)
+  }, character(1))
+
+  html <- paste0(
+    "<!DOCTYPE html><html><head><meta charset='utf-8'>",
+    "<title>", html_escape(title), "</title>",
+    "<style>",
+    "body{font-family:Arial,sans-serif;margin:24px;line-height:1.4;}",
+    "h1,h2{margin-bottom:0.4em;}",
+    ".report-table{border-collapse:collapse;width:100%;margin:12px 0 24px 0;}",
+    ".report-table th,.report-table td{border:1px solid #cccccc;padding:6px 8px;text-align:left;}",
+    ".report-table th{background:#f3f3f3;}",
+    "code{background:#f5f5f5;padding:2px 4px;}",
+    "</style></head><body>",
+    "<h1>", html_escape(title), "</h1>",
+    paste(html_sections, collapse = ""),
+    "</body></html>"
+  )
+
+  writeLines(html, con = path, useBytes = TRUE)
+}
+
+enumerate_metric_pairs <- function(metrics) {
+  pairs <- utils::combn(metrics, 2, simplify = FALSE)
+  tibble::tibble(
+    metric1 = vapply(pairs, `[`, character(1), 1),
+    metric2 = vapply(pairs, `[`, character(1), 2)
+  )
+}
+
+choose_k <- function(x, max_k = 5L) {
+  n_unique <- length(unique(x[is.finite(x)]))
+  max(3L, min(max_k, n_unique - 1L))
+}
+
+as_term_table <- function(mat, first_col_name) {
+  if (is.null(mat) || !length(mat)) {
+    return(tibble::tibble())
+  }
+  out <- tibble::as_tibble(mat, rownames = first_col_name)
+  numeric_cols <- vapply(out, is.numeric, logical(1))
+  out[numeric_cols] <- lapply(out[numeric_cols], as.numeric)
+  out
+}
+
+fit_gam_formula <- function(data, outcome_col, predictors, formula_txt, meta = list()) {
+  vars <- c(outcome_col, predictors)
+  model_df <- data %>%
+    dplyr::select(dplyr::all_of(c("dataset_bundle_id", "matrix_id", vars))) %>%
+    dplyr::filter(dplyr::if_all(dplyr::all_of(vars), ~ is.finite(.x)))
+
+  n_used <- nrow(model_df)
+  base_summary <- tibble::tibble(
+    outcome = outcome_col,
+    formula = formula_txt,
+    n_used = n_used,
+    r_squared = NA_real_,
+    approx_adj_r_squared = NA_real_,
+    deviance_explained = NA_real_,
+    rmse = NA_real_,
+    aic = NA_real_,
+    status = "insufficient_rows"
+  )
+  for (nm in names(meta)) {
+    base_summary[[nm]] <- meta[[nm]]
+  }
+
+  if (n_used < 20L) {
+    return(list(
+      summary = base_summary,
+      parametric = tibble::tibble(),
+      smooth = tibble::tibble(),
+      predictions = model_df
+    ))
+  }
+
+  fit <- tryCatch(
+    mgcv::gam(stats::as.formula(formula_txt), data = model_df, method = "REML"),
+    error = function(e) e
+  )
+
+  if (inherits(fit, "error")) {
+    base_summary$status <- paste0("fit_error: ", fit$message)
+    return(list(
+      summary = base_summary,
+      parametric = tibble::tibble(),
+      smooth = tibble::tibble(),
+      predictions = model_df
+    ))
+  }
+
+  sm <- summary(fit)
+  pred <- stats::predict(fit, newdata = model_df)
+  resid <- model_df[[outcome_col]] - pred
+  edf_total <- sum(sm$edf, na.rm = TRUE)
+  approx_adj_r2 <- if (is.finite(sm$r.sq) && n_used > (edf_total + 1)) {
+    1 - (1 - sm$r.sq) * ((n_used - 1) / (n_used - edf_total - 1))
+  } else {
+    NA_real_
+  }
+
+  summary_tbl <- tibble::tibble(
+    outcome = outcome_col,
+    formula = formula_txt,
+    n_used = n_used,
+    r_squared = unname(sm$r.sq),
+    approx_adj_r_squared = approx_adj_r2,
+    deviance_explained = unname(sm$dev.expl),
+    rmse = sqrt(mean(resid^2)),
+    aic = stats::AIC(fit),
+    status = "ok"
+  )
+  for (nm in names(meta)) {
+    summary_tbl[[nm]] <- meta[[nm]]
+  }
+
+  list(
+    summary = summary_tbl,
+    parametric = as_term_table(sm$p.table, "term"),
+    smooth = as_term_table(sm$s.table, "smooth_term"),
+    predictions = model_df %>%
+      dplyr::mutate(
+        predicted = as.numeric(pred),
+        residual = as.numeric(resid)
+      )
+  )
+}
+
+fit_additive_gam_model <- function(data, outcome_col, ld_metric, z_metric1, z_metric2) {
+  predictors <- c("M1", ld_metric, z_metric1, z_metric2)
+  k_vals <- vapply(predictors, function(var) choose_k(data[[var]]), integer(1))
+  formula_txt <- paste0(
+    outcome_col, " ~ ",
+    paste(
+      sprintf("s(%s, k = %d)", predictors, k_vals),
+      collapse = " + "
+    )
+  )
+
+  fit_gam_formula(
+    data = data,
+    outcome_col = outcome_col,
+    predictors = predictors,
+    formula_txt = formula_txt,
+    meta = list(
+      ld_metric = ld_metric,
+      z_metric1 = z_metric1,
+      z_metric2 = z_metric2
+    )
+  )
+}
+
+enumerate_refinement_models <- function(fixed_var, optional_vars) {
+  optional_subsets <- list(character(0))
+  for (m in seq_along(optional_vars)) {
+    optional_subsets <- c(optional_subsets, utils::combn(optional_vars, m, simplify = FALSE))
+  }
+
+  rows <- vector("list", length = 0L)
+  row_id <- 0L
+
+  for (kept_optional in optional_subsets) {
+    included_vars <- c(fixed_var, kept_optional)
+    dropped_vars <- setdiff(optional_vars, kept_optional)
+    pair_list <- if (length(included_vars) >= 2L) utils::combn(included_vars, 2, simplify = FALSE) else list()
+    pair_labels <- vapply(pair_list, function(x) paste(x, collapse = ":"), character(1))
+    pair_idx <- seq_along(pair_list)
+    interaction_subsets <- list(integer(0))
+    for (m in seq_along(pair_idx)) {
+      interaction_subsets <- c(interaction_subsets, utils::combn(pair_idx, m, simplify = FALSE))
+    }
+
+    for (idx in interaction_subsets) {
+      row_id <- row_id + 1L
+      rows[[row_id]] <- tibble::tibble(
+        refinement_id = row_id,
+        included_vars = list(included_vars),
+        dropped_vars = list(dropped_vars),
+        kept_optional_label = if (length(kept_optional)) paste(kept_optional, collapse = ", ") else "none",
+        dropped_label = if (length(dropped_vars)) paste(dropped_vars, collapse = ", ") else "none",
+        interaction_terms = list(pair_list[idx]),
+        interaction_label = if (length(idx)) paste(pair_labels[idx], collapse = " + ") else "additive_only",
+        n_optional_kept = length(kept_optional),
+        n_interactions = length(idx)
+      )
+    }
+  }
+
+  dplyr::bind_rows(rows)
+}
+
+fit_refined_gam_model <- function(data, outcome_col, fixed_var, optional_vars, interaction_terms, interaction_label) {
+  vars <- c(fixed_var, optional_vars)
+  k_vals <- stats::setNames(vapply(vars, function(var) choose_k(data[[var]]), integer(1)), vars)
+  main_terms <- sprintf("s(%s, k = %d)", vars, unname(k_vals))
+  interaction_txt <- if (!length(interaction_terms)) {
+    character(0)
+  } else {
+    vapply(interaction_terms, function(pair) {
+      sprintf(
+        "ti(%s, %s, k = c(%d, %d))",
+        pair[[1]], pair[[2]], k_vals[[pair[[1]]]], k_vals[[pair[[2]]]]
+      )
+    }, character(1))
+  }
+  formula_txt <- paste(outcome_col, "~", paste(c(main_terms, interaction_txt), collapse = " + "))
+
+  fit_gam_formula(
+    data = data,
+    outcome_col = outcome_col,
+    predictors = vars,
+    formula_txt = formula_txt,
+    meta = list(
+      ld_metric = dplyr::first(optional_vars[grepl("^ld_", optional_vars)], default = NA_character_),
+      z_metric1 = dplyr::nth(optional_vars[grepl("^z_", optional_vars)], 1L, default = NA_character_),
+      z_metric2 = dplyr::nth(optional_vars[grepl("^z_", optional_vars)], 2L, default = NA_character_),
+      kept_optional_label = if (length(optional_vars)) paste(optional_vars, collapse = ", ") else "none",
+      dropped_label = NA_character_,
+      interaction_label = interaction_label,
+      n_optional_kept = length(optional_vars),
+      n_interactions = length(interaction_terms)
+    )
+  )
+}
+```
+
+## 4. Additive Search
+
+```{r model-search}
+candidate_ld_metrics <- c("ld_abs_alpha_2_thr_0p5", "ld_abs_alpha_4_thr_0p5")
+candidate_ld_metrics <- candidate_ld_metrics[candidate_ld_metrics %in% names(difficulty_model_data)]
+
+candidate_z_metrics <- c(
+  "z_topk_ratio",
+  "z_max_abs",
+  "z_count_abs_gt_3",
+  "z_eff_signals"
+)
+candidate_z_metrics <- candidate_z_metrics[candidate_z_metrics %in% names(difficulty_model_data)]
+z_pairs <- enumerate_metric_pairs(candidate_z_metrics)
+
+if (!length(candidate_ld_metrics) || nrow(z_pairs) == 0L) {
+  stop("Need at least one candidate LD metric and one z-metric pair.")
+}
+
+search_grid <- tidyr::expand_grid(
+  ld_metric = candidate_ld_metrics,
+  z_metric1 = z_pairs$metric1,
+  z_metric2 = z_pairs$metric2
+)
+
+additive_fits <- purrr::pmap(
+  search_grid,
+  function(ld_metric, z_metric1, z_metric2) {
+    fit_additive_gam_model(
+      difficulty_model_data,
+      outcome_col = "auprc_baseline",
+      ld_metric = ld_metric,
+      z_metric1 = z_metric1,
+      z_metric2 = z_metric2
+    )
+  }
+)
+
+additive_search <- dplyr::bind_rows(lapply(additive_fits, `[[`, "summary")) %>%
+  dplyr::arrange(
+    dplyr::desc(.data$approx_adj_r_squared),
+    dplyr::desc(.data$r_squared),
+    dplyr::desc(.data$deviance_explained),
+    .data$aic,
+    .data$ld_metric,
+    .data$z_metric1,
+    .data$z_metric2
+  )
+
+best_additive_row <- additive_search %>%
+  dplyr::filter(.data$status == "ok") %>%
+  dplyr::slice_head(n = 1)
+
+if (!nrow(best_additive_row)) {
+  stop("No successful additive baseline model fits.")
+}
+
+selected_vars <- c(
+  "M1",
+  best_additive_row$ld_metric[[1]],
+  best_additive_row$z_metric1[[1]],
+  best_additive_row$z_metric2[[1]]
+)
+
+fixed_var <- "M1"
+optional_vars <- setdiff(selected_vars, fixed_var)
+
+refinement_grid <- enumerate_refinement_models(
+  fixed_var = fixed_var,
+  optional_vars = optional_vars
+)
+
+refinement_fits <- lapply(seq_len(nrow(refinement_grid)), function(i) {
+  fit <- fit_refined_gam_model(
+    difficulty_model_data,
+    outcome_col = "auprc_baseline",
+    fixed_var = fixed_var,
+    optional_vars = refinement_grid$included_vars[[i]][refinement_grid$included_vars[[i]] != fixed_var],
+    interaction_terms = refinement_grid$interaction_terms[[i]],
+    interaction_label = refinement_grid$interaction_label[[i]]
+  )
+  fit$summary$dropped_label <- refinement_grid$dropped_label[[i]]
+  fit
+})
+
+refinement_search <- dplyr::bind_rows(lapply(refinement_fits, `[[`, "summary")) %>%
+  dplyr::arrange(
+    .data$aic,
+    dplyr::desc(.data$approx_adj_r_squared),
+    dplyr::desc(.data$r_squared),
+    dplyr::desc(.data$deviance_explained),
+    .data$n_optional_kept,
+    .data$interaction_label
+  )
+
+best_refinement_row <- refinement_search %>%
+  dplyr::filter(.data$status == "ok") %>%
+  dplyr::slice_head(n = 1)
+
+if (!nrow(best_refinement_row)) {
+  stop("No successful refinement baseline model fits.")
+}
+
+kable(best_additive_row)
+kable(head(refinement_search, 10))
+```
+
+## 5. Save Reports and Prediction Tables
+
+```{r reports}
+additive_fit_idx <- which(
+  search_grid$ld_metric == best_additive_row$ld_metric[[1]] &
+    search_grid$z_metric1 == best_additive_row$z_metric1[[1]] &
+    search_grid$z_metric2 == best_additive_row$z_metric2[[1]]
+)[[1]]
+best_additive_fit <- additive_fits[[additive_fit_idx]]
+
+interaction_fit_idx <- which(
+  refinement_search$interaction_label == best_refinement_row$interaction_label[[1]] &
+    refinement_search$formula == best_refinement_row$formula[[1]] &
+    refinement_search$kept_optional_label == best_refinement_row$kept_optional_label[[1]]
+)[[1]]
+best_refinement_fit <- refinement_fits[[interaction_fit_idx]]
+
+search_html <- file.path(fig_dir, "difficulty_model_search_baseline_local.html")
+best_fit_html <- file.path(fig_dir, "difficulty_model_refit_baseline_local.html")
+additive_search_csv <- file.path(fig_dir, "difficulty_model_search_baseline_additive.csv")
+refinement_search_csv <- file.path(fig_dir, "difficulty_model_search_baseline_refinement.csv")
+summary_csv <- file.path(fig_dir, "difficulty_model_best_fit_baseline_summary.csv")
+param_csv <- file.path(fig_dir, "difficulty_model_best_fit_baseline_parametric.csv")
+smooth_csv <- file.path(fig_dir, "difficulty_model_best_fit_baseline_smooth.csv")
+data_csv <- file.path(fig_dir, "difficulty_model_data_baseline_local.csv")
+
+prediction_tbl <- best_refinement_fit$predictions %>%
+  dplyr::transmute(
+    dataset_bundle_id = .data$dataset_bundle_id,
+    predicted_baseline_local = as.numeric(.data$predicted),
+    residual_baseline_local = as.numeric(.data$residual)
+  )
+
+baseline_model_data <- difficulty_model_data %>%
+  dplyr::left_join(prediction_tbl, by = "dataset_bundle_id")
+
+write_html_report(
+  search_html,
+  title = "Baseline AUPRC difficulty model search",
+  sections = list(
+    list(
+      header = "Additive Search Summary",
+      text = c(
+        "Outcome: auprc_baseline",
+        paste0("Candidate LD metrics: ", paste(candidate_ld_metrics, collapse = ", ")),
+        paste0("Candidate z metrics: ", paste(candidate_z_metrics, collapse = ", ")),
+        paste0("Z-metric pairs searched: ", nrow(z_pairs)),
+        paste0("Selected additive LD metric: ", best_additive_row$ld_metric[[1]]),
+        paste0("Selected additive z metrics: ", best_additive_row$z_metric1[[1]], " and ", best_additive_row$z_metric2[[1]]),
+        paste0("Selected additive formula: ", best_additive_row$formula[[1]])
+      ),
+      table = best_additive_row
+    ),
+    list(
+      header = "Refinement Search Summary",
+      text = c(
+        paste0("Starting variables after additive search: ", paste(selected_vars, collapse = ", ")),
+        paste0("Refinement models searched with M1 fixed: ", nrow(refinement_grid)),
+        paste0("Retained optional variables: ", best_refinement_row$kept_optional_label[[1]]),
+        paste0("Dropped optional variables: ", best_refinement_row$dropped_label[[1]]),
+        paste0("Selected interaction set: ", best_refinement_row$interaction_label[[1]]),
+        paste0("Selected final formula: ", best_refinement_row$formula[[1]])
+      ),
+      table = best_refinement_row
+    ),
+    list(
+      header = "All Additive Candidate Models",
+      table = additive_search
+    ),
+    list(
+      header = "All Refinement Candidate Models",
+      table = refinement_search
+    )
+  )
+)
+
+write_html_report(
+  best_fit_html,
+  title = "Baseline AUPRC difficulty model refit",
+  sections = list(
+    list(
+      header = "Final Model Summary",
+      text = c(
+        paste0("Selected LD metric: ", best_additive_row$ld_metric[[1]]),
+        paste0("Selected z metrics: ", best_additive_row$z_metric1[[1]], " and ", best_additive_row$z_metric2[[1]]),
+        paste0("Retained optional variables: ", best_refinement_row$kept_optional_label[[1]]),
+        paste0("Dropped optional variables: ", best_refinement_row$dropped_label[[1]]),
+        paste0("Selected interaction set: ", best_refinement_row$interaction_label[[1]]),
+        paste0("Formula: ", best_refinement_row$formula[[1]])
+      ),
+      table = best_refinement_fit$summary
+    ),
+    list(
+      header = "Parametric Terms",
+      table = best_refinement_fit$parametric
+    ),
+    list(
+      header = "Smooth Terms",
+      table = best_refinement_fit$smooth
+    )
+  )
+)
+
+readr::write_csv(additive_search, additive_search_csv)
+readr::write_csv(refinement_search, refinement_search_csv)
+readr::write_csv(best_refinement_fit$summary, summary_csv)
+readr::write_csv(best_refinement_fit$parametric, param_csv)
+readr::write_csv(best_refinement_fit$smooth, smooth_csv)
+readr::write_csv(baseline_model_data, data_csv)
+
+cat("Saved search HTML:", search_html, "\n")
+cat("Saved refit HTML:", best_fit_html, "\n")
+cat("Saved additive search CSV:", additive_search_csv, "\n")
+cat("Saved refinement search CSV:", refinement_search_csv, "\n")
+cat("Saved summary CSV:", summary_csv, "\n")
+cat("Saved parametric CSV:", param_csv, "\n")
+cat("Saved smooth CSV:", smooth_csv, "\n")
+cat("Saved data CSV:", data_csv, "\n")
+```
+
+## 6. Save Prediction Plots
+
+```{r prediction-plots}
+plot_df <- best_refinement_fit$predictions %>%
+  dplyr::filter(is.finite(.data$predicted), is.finite(.data$auprc_baseline))
+
+p <- ggplot(
+  plot_df,
+  aes(x = .data$predicted, y = .data$auprc_baseline)
+) +
+  geom_point(alpha = 0.65, size = 2.0, color = "steelblue4") +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "gray40") +
+  labs(
+    x = "Predicted baseline AUPRC",
+    y = "Observed baseline AUPRC",
+    title = "Prediction plot: Baseline AUPRC",
+    subtitle = paste0(
+      "kept: ", best_refinement_row$kept_optional_label[[1]],
+      " | dropped: ", best_refinement_row$dropped_label[[1]],
+      " | ", best_refinement_row$interaction_label[[1]]
+    )
+  )
+
+plot_path <- file.path(fig_dir, "difficulty_model_predictions_baseline_local.png")
+ggsave(plot_path, p, width = 8, height = 6)
+cat("Saved plot:", plot_path, "\n")
+
+invisible(NULL)
+```

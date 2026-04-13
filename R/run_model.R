@@ -678,7 +678,8 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
                                group_key,
                                blocked_idx = integer(0),
                                meta_override = list(),
-                               init_alpha_override = NULL) {
+                               init_alpha_override = NULL,
+                               model_result_override = NULL) {
       cache_key <- execution_cache_key(
         use_case = use_case,
         run_row = run_row,
@@ -690,6 +691,7 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
       # Skip cache for refinement refit steps — each has a unique
       # init_alpha_override that the cache key cannot distinguish.
       cache_hit <- is.null(init_alpha_override) &&
+        is.null(model_result_override) &&
         exists(cache_key, envir = execution_cache, inherits = FALSE)
       if (cache_hit) {
         cached <- get(cache_key, envir = execution_cache, inherits = FALSE)
@@ -703,16 +705,20 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
         meta$cache_source_run_id <- as.integer(cached$source_run_id)
         execution_cache_hits <<- execution_cache_hits + 1L
       } else {
-        model_result <- run_use_case(
-          use_case = use_case,
-          run_row = run_row,
-          data_bundle = data_bundle,
-          job_config = job_config,
-          blocked_idx = blocked_idx,
-          init_alpha_override = init_alpha_override
-        )
+        model_result <- model_result_override
+        if (is.null(model_result)) {
+          model_result <- run_use_case(
+            use_case = use_case,
+            run_row = run_row,
+            data_bundle = data_bundle,
+            job_config = job_config,
+            blocked_idx = blocked_idx,
+            init_alpha_override = init_alpha_override
+          )
+        }
         fit <- model_result$fits[[1]]
-        meta <- model_result$fit_meta[[1]]
+        meta <- model_result$fit_meta[[1]] %||%
+          infer_primary_variant_meta(run_row, wall_time_sec = NA_real_)
         eval_res <- evaluate_model(
           fit = fit,
           X = data_bundle$X,
@@ -730,20 +736,24 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
         if (!is.null(model_result$sigma_0_2)) {
           run_data_bundle$sigma_0_2 <- model_result$sigma_0_2
         }
-        assign(
-          cache_key,
-          list(
-            fit = fit,
-            evaluation = eval_res,
-            run_data_bundle = run_data_bundle,
-            source_run_id = as.integer(run_row$run_id),
-            wall_time_sec = as.numeric(meta$wall_time_sec %||% 0)
-          ),
-          envir = execution_cache
-        )
+        if (is.null(model_result_override)) {
+          assign(
+            cache_key,
+            list(
+              fit = fit,
+              evaluation = eval_res,
+              run_data_bundle = run_data_bundle,
+              source_run_id = as.integer(run_row$run_id),
+              wall_time_sec = as.numeric(meta$wall_time_sec %||% 0)
+            ),
+            envir = execution_cache
+          )
+        }
         meta$model_call_executed <- TRUE
         meta$cache_source_run_id <- as.integer(run_row$run_id)
-        execution_cache_misses <<- execution_cache_misses + 1L
+        if (is.null(model_result_override)) {
+          execution_cache_misses <<- execution_cache_misses + 1L
+        }
       }
       if (length(meta_override)) {
         # Add perturb wall time to refit wall time for refine steps so the
@@ -822,7 +832,7 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
           primary_run_meta_by_group[[group_key]],
           list(list(
             run_id           = as.integer(run_row$run_id),
-            spec_name        = as.character(run_row$spec_name %||% NA_character_),
+            spec_name        = as.character(run_row[["spec_name"]] %||% NA_character_),
             restart_id       = as.integer(run_row$restart_id %||% NA_integer_),
             refine_step      = as.integer(run_row$refine_step %||% NA_integer_),
             c_value          = as.numeric(run_row$c_value %||% NA_real_),
@@ -882,6 +892,40 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
       method_raw <- as.character(group_rows$exploration_methods[[1]] %||% "")
       method_ids <- unique(strsplit(method_raw, "x", fixed = TRUE)[[1]])
       is_refine_group <- "refine" %in% method_ids
+      is_cs_grid_refit_group <- identical(method_raw, "cs_grid_refit")
+
+      if (is_cs_grid_refit_group) {
+        for (ii in seq_len(nrow(group_rows))) {
+          run_row <- group_rows[ii, , drop = FALSE]
+          source_result <- run_use_case(
+            use_case = use_case,
+            run_row = run_row,
+            data_bundle = data_bundle,
+            job_config = job_config
+          )
+          source_fit <- source_result$fits[[1]]
+          source_wall_sec <- as.numeric(source_result$fit_meta[[1]]$wall_time_sec %||% 0)
+          refit_result <- run_default_prior_refit(
+            source_fit = source_fit,
+            run_row = run_row,
+            data_bundle = data_bundle,
+            job_config = job_config
+          )
+          run_and_record(
+            run_row = run_row,
+            group_key = gk,
+            meta_override = list(
+              explore_method = "cs_grid_refit",
+              variant_id = as.integer(ii),
+              run_type = "warm",
+              is_restart = FALSE,
+              wall_time_perturb_sec = source_wall_sec
+            ),
+            model_result_override = refit_result
+          )
+        }
+        next
+      }
 
       if (!is_refine_group) {
         for (ii in seq_len(nrow(group_rows))) {
@@ -1475,6 +1519,98 @@ extract_prior_diagnostics <- function(fit, run_id, backend) {
     mu_0_l = mu_0_l,
     sigma_0_2_l = sigma_0_2_l,
     tau2_l = tau2_l
+  )
+}
+
+build_exact_init_effect_fits <- function(fit) {
+  effect_fits <- fit$effect_fits %||% NULL
+  if (is.null(effect_fits)) {
+    stop("Source fit does not contain effect_fits for exact warm start.")
+  }
+
+  required <- c("alpha", "b_hat", "b_2_hat")
+  missing_fields <- required[!vapply(required, function(nm) !is.null(effect_fits[[nm]]), logical(1))]
+  if (length(missing_fields)) {
+    stop(
+      "Source fit is missing effect_fits field(s): ",
+      paste(missing_fields, collapse = ", "),
+      "."
+    )
+  }
+
+  list(
+    alpha = as.matrix(effect_fits$alpha),
+    b_hat = as.matrix(effect_fits$b_hat),
+    b_2_hat = as.matrix(effect_fits$b_2_hat)
+  )
+}
+
+resolve_susine_fn <- function(require_init_effect_fits = FALSE) {
+  susine_fn <- getExportedValue("susine", "susine")
+
+  if (!isTRUE(require_init_effect_fits) ||
+      "init_effect_fits" %in% names(formals(susine_fn))) {
+    return(susine_fn)
+  }
+
+  local_candidates <- unique(stats::na.omit(c(
+    getOption("test_susine.local_susine_path", NULL),
+    file.path(dirname(ensure_repo_root(getwd())), "susine")
+  )))
+
+  if (requireNamespace("pkgload", quietly = TRUE)) {
+    for (local_path in local_candidates) {
+      if (!nzchar(local_path) ||
+          !dir.exists(local_path) ||
+          !file.exists(file.path(local_path, "DESCRIPTION"))) {
+        next
+      }
+      pkgload::load_all(local_path, quiet = TRUE, reset = TRUE)
+      susine_fn <- getExportedValue("susine", "susine")
+      if ("init_effect_fits" %in% names(formals(susine_fn))) {
+        return(susine_fn)
+      }
+    }
+  }
+
+  stop(
+    "The loaded 'susine' namespace does not support 'init_effect_fits'. ",
+    "Set option('test_susine.local_susine_path' = '/path/to/susine') ",
+    "or load a newer local susine checkout before running cs_grid_refit."
+  )
+}
+
+run_default_prior_refit <- function(source_fit, run_row, data_bundle, job_config) {
+  L <- as.integer(run_row$L)
+  p <- ncol(data_bundle$X)
+  max_iter <- as.integer(job_config$job$max_iter %||% 100L)
+  tol <- as.numeric(job_config$job$tol %||% 1e-3)
+  var_y <- stats::var(data_bundle$y)
+  default_sigma_scalar <- 0.2
+  susine_fn <- resolve_susine_fn(require_init_effect_fits = TRUE)
+
+  started <- proc.time()[["elapsed"]]
+  fit <- susine_fn(
+    L = L,
+    X = data_bundle$X,
+    y = data_bundle$y,
+    mu_0 = 0,
+    sigma_0_2 = default_sigma_scalar,
+    prior_inclusion_weights = rep(1 / p, p),
+    prior_update_method = "none",
+    max_iter = max_iter,
+    tol = tol,
+    verbose = FALSE,
+    init_effect_fits = build_exact_init_effect_fits(source_fit)
+  )
+  wall_time_sec <- proc.time()[["elapsed"]] - started
+  fit$settings$L <- fit$settings$L %||% L
+
+  list(
+    fits = list(fit),
+    fit_meta = list(infer_primary_variant_meta(run_row, wall_time_sec = wall_time_sec)),
+    mu_0 = rep(0, p),
+    sigma_0_2 = rep(default_sigma_scalar * var_y, p)
   )
 }
 
@@ -2315,7 +2451,8 @@ compute_scaling_confusion_bins_for_group <- function(pip_list,
 
   expl_raw  <- as.character(group_run_row$exploration_methods[[1]] %||% "")
   method_ids <- unique(trimws(strsplit(expl_raw, "x", fixed = TRUE)[[1]]))
-  is_interaction <- length(method_ids) > 1L
+  is_cs_grid_refit <- "cs_grid_refit" %in% method_ids
+  is_interaction <- length(method_ids) > 1L || is_cs_grid_refit
 
   agg_methods <- c("uniform", "max_elbo", "elbo_softmax", "cluster_weight", "cluster_weight_jsd_050")
 
@@ -2368,8 +2505,8 @@ compute_scaling_confusion_bins_for_group <- function(pip_list,
     axis_info <- list(
       if ("restart"        %in% method_ids) list(col = "restart_id",       planned_col = ".planned_n_restart") else NULL,
       if ("refine"         %in% method_ids) list(col = "refine_step",      planned_col = ".planned_n_refine")  else NULL,
-      if ("c_grid"         %in% method_ids) list(col = "c_value",          planned_col = ".planned_n_c")       else NULL,
-      if ("sigma_0_2_grid" %in% method_ids) list(col = "sigma_0_2_scalar", planned_col = ".planned_n_sigma")   else NULL
+      if ("c_grid"         %in% method_ids || is_cs_grid_refit) list(col = "c_value",          planned_col = ".planned_n_c")       else NULL,
+      if ("sigma_0_2_grid" %in% method_ids || is_cs_grid_refit) list(col = "sigma_0_2_scalar", planned_col = ".planned_n_sigma")   else NULL
     )
     axis_info <- Filter(Negate(is.null), axis_info)
 

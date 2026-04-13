@@ -33,6 +33,7 @@
 | **B-RF** | SuSiE EB | 8 restarts × 4 refine | 64 | ~64 | Like A-RF but with EB σ₀² |
 | **C-C** | SuSiNE | 64 c values | 64 | 64 | Pure c-grid, σ₀² = 0.2 |
 | **C-CS** | SuSiNE | 8 c × 8 σ₀² | 64 | 64 | Joint c × σ₀² grid |
+| **C-CSR** | SuSiNE | 8 c × 8 σ₀² search, then exact default-prior refit | 64 | 64 | `cs_grid_refit`: warm refit using exact alpha, b_hat, b_2_hat |
 | **C-CF** | SuSiNE | 8 c × 4 refine | 64 | ~64 | c-grid + refinement, σ₀² = 0.2 fixed |
 | **C-CFR** | SuSiNE | 4 c × 4 restarts × 2 refine | 64 | 64 | c + restart + refine |
 | **C-CSFR** | SuSiNE | 3 c × 3 σ₀² × 3 refine × 3 restarts | 81 | 81 | All four levers |

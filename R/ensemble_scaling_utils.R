@@ -160,6 +160,65 @@ build_shared_plot_metric_table <- function(agg_overall,
 }
 
 #' @keywords internal
+filter_shared_plot_metric_rows <- function(df, r2_filter = NULL) {
+  if (is.null(df) || !nrow(df)) return(tibble::tibble())
+
+  agg_rows <- df %>%
+    dplyr::filter(
+      .data$series_type == "aggregated",
+      !.data$spec_name %in% c("baseline-single", "truth-warm")
+    )
+
+  if (is.null(r2_filter)) {
+    return(agg_rows %>% dplyr::filter(is.na(.data$annotation_r2)))
+  }
+
+  dependent_keys <- agg_rows %>%
+    dplyr::filter(!is.na(.data$annotation_r2)) %>%
+    dplyr::distinct(.data$spec_name, .data$use_case_id) %>%
+    dplyr::mutate(.annotation_dependent = TRUE)
+
+  agg_rows %>%
+    dplyr::left_join(dependent_keys, by = c("spec_name", "use_case_id")) %>%
+    dplyr::mutate(
+      .annotation_dependent = dplyr::coalesce(.data$.annotation_dependent, FALSE)
+    ) %>%
+    dplyr::filter(
+      (!.data$.annotation_dependent & is.na(.data$annotation_r2)) |
+        (.data$.annotation_dependent & .data$annotation_r2 == r2_filter)
+    ) %>%
+    dplyr::select(-.data$.annotation_dependent)
+}
+
+#' @keywords internal
+filter_truth_warm_reference_rows <- function(df, r2_filter = NULL) {
+  if (is.null(df) || !nrow(df)) return(tibble::tibble())
+
+  truth_rows <- df %>%
+    dplyr::filter(.data$series_type == "truth_warm")
+
+  if (is.null(r2_filter)) {
+    return(truth_rows %>% dplyr::filter(is.na(.data$annotation_r2)))
+  }
+
+  dependent_use_cases <- truth_rows %>%
+    dplyr::filter(!is.na(.data$annotation_r2)) %>%
+    dplyr::distinct(.data$use_case_id) %>%
+    dplyr::mutate(.annotation_dependent = TRUE)
+
+  truth_rows %>%
+    dplyr::left_join(dependent_use_cases, by = "use_case_id") %>%
+    dplyr::mutate(
+      .annotation_dependent = dplyr::coalesce(.data$.annotation_dependent, FALSE)
+    ) %>%
+    dplyr::filter(
+      (!.data$.annotation_dependent & is.na(.data$annotation_r2)) |
+        (.data$.annotation_dependent & .data$annotation_r2 == r2_filter)
+    ) %>%
+    dplyr::select(-.data$.annotation_dependent)
+}
+
+#' @keywords internal
 backfill_single_fit_refine_agg_confusion <- function(confusion_individual,
                                                      confusion_agg,
                                                      run_info,
@@ -617,6 +676,129 @@ parse_resolution_area <- function(x) {
     if (length(nums) < 1L || any(!is.finite(nums))) return(NA_real_)
     prod(nums)
   }, numeric(1L))
+}
+
+#' @keywords internal
+spec_single_fit_use_case <- function(spec_name) {
+  spec_name <- as.character(spec_name)
+  dplyr::case_when(
+    startsWith(spec_name, "A-") ~ "susine_vanilla",
+    startsWith(spec_name, "B-") ~ "susine_eb_clamped_scale_var_nonneg",
+    startsWith(spec_name, "C-") ~ "susine_functional_mu",
+    TRUE ~ NA_character_
+  )
+}
+
+#' @keywords internal
+append_scaling_single_fit_points <- function(summary_df,
+                                             auprc_plot_table,
+                                             tpr05_plot_table) {
+  if (is.null(summary_df) || !nrow(summary_df)) return(summary_df)
+  if (is.null(auprc_plot_table) || !nrow(auprc_plot_table) ||
+      is.null(tpr05_plot_table) || !nrow(tpr05_plot_table)) {
+    return(summary_df)
+  }
+
+  pure_keys <- summary_df %>%
+    dplyr::filter(is.na(.data$resolution)) %>%
+    dplyr::distinct(.data$spec_name, .data$annotation_r2, .data$agg_method) %>%
+    dplyr::mutate(
+      baseline_use_case_id = spec_single_fit_use_case(.data$spec_name)
+    ) %>%
+    dplyr::filter(!is.na(.data$baseline_use_case_id))
+
+  if (!nrow(pure_keys)) {
+    return(summary_df)
+  }
+
+  baseline_auprc <- auprc_plot_table %>%
+    dplyr::filter(
+      .data$series_type == "baseline_single",
+      .data$spec_name == "baseline-single"
+    ) %>%
+    dplyr::select(
+      use_case_id = .data$use_case_id,
+      annotation_r2 = .data$annotation_r2,
+      AUPRC = .data$AUPRC
+    )
+
+  baseline_tpr05 <- tpr05_plot_table %>%
+    dplyr::filter(
+      .data$series_type == "baseline_single",
+      .data$spec_name == "baseline-single"
+    ) %>%
+    dplyr::select(
+      use_case_id = .data$use_case_id,
+      annotation_r2 = .data$annotation_r2,
+      tpr_fpr05 = .data$tpr_fpr05
+    )
+
+  dependent_use_cases <- dplyr::bind_rows(
+    baseline_auprc %>% dplyr::select(.data$use_case_id, .data$annotation_r2),
+    baseline_tpr05 %>% dplyr::select(.data$use_case_id, .data$annotation_r2)
+  ) %>%
+    dplyr::filter(!is.na(.data$annotation_r2)) %>%
+    dplyr::distinct(.data$use_case_id) %>%
+    dplyr::mutate(.annotation_dependent = TRUE)
+
+  single_fit_points <- pure_keys %>%
+    dplyr::left_join(
+      dependent_use_cases,
+      by = c("baseline_use_case_id" = "use_case_id")
+    ) %>%
+    dplyr::mutate(
+      .annotation_dependent = dplyr::coalesce(.data$.annotation_dependent, FALSE),
+      baseline_annotation_r2 = dplyr::if_else(
+        .data$.annotation_dependent,
+        .data$annotation_r2,
+        NA_real_
+      )
+    ) %>%
+    dplyr::left_join(
+      baseline_auprc,
+      by = c(
+        "baseline_use_case_id" = "use_case_id",
+        "baseline_annotation_r2" = "annotation_r2"
+      )
+    ) %>%
+    dplyr::left_join(
+      baseline_tpr05,
+      by = c(
+        "baseline_use_case_id" = "use_case_id",
+        "baseline_annotation_r2" = "annotation_r2"
+      )
+    ) %>%
+    dplyr::transmute(
+      spec_name = .data$spec_name,
+      annotation_r2 = .data$annotation_r2,
+      n_ensemble = 1L,
+      resolution = NA_character_,
+      agg_method = .data$agg_method,
+      AUPRC_mean = .data$AUPRC,
+      AUPRC_se = NA_real_,
+      tpr05_mean = .data$tpr_fpr05,
+      tpr05_se = NA_real_,
+      n_reps = 1L
+    ) %>%
+    dplyr::filter(
+      is.finite(.data$AUPRC_mean) | is.finite(.data$tpr05_mean)
+    )
+
+  if (!nrow(single_fit_points)) {
+    return(summary_df)
+  }
+
+  summary_wo_n1 <- summary_df %>%
+    dplyr::filter(!(is.na(.data$resolution) & .data$n_ensemble == 1L))
+
+  dplyr::bind_rows(summary_wo_n1, single_fit_points) %>%
+    dplyr::arrange(
+      .data$spec_name,
+      .data$annotation_r2,
+      .data$agg_method,
+      .data$n_ensemble,
+      .data$resolution
+    )
 }
 
 #' @keywords internal
