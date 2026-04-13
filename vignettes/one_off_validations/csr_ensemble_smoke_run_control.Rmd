@@ -208,7 +208,13 @@ if (!nzchar(rscript_bin)) {
 }
 stopifnot(file.exists(rscript_bin))
 
-script_path <- here("inst", "scripts", "run_task.R")
+script_path <- normalizePath(
+  here("inst", "scripts", "run_task.R"),
+  winslash = "/",
+  mustWork = TRUE
+)
+job_root_path <- normalizePath(here("output"), winslash = "/", mustWork = TRUE)
+config_path <- normalizePath(arts$job_config, winslash = "/", mustWork = TRUE)
 
 old_env <- Sys.getenv(
   c("SUSINE_DEV", "SUSINE_JOB_NAME", "SUSINE_PARENT_ID"),
@@ -226,16 +232,18 @@ Sys.setenv(
   SUSINE_PARENT_ID = "local_csr_smoke"
 )
 
+system_args <- c(
+  script_path,
+  "--job-name", cfg$job$name,
+  "--task-id", "1",
+  "--job-root", job_root_path,
+  "--config-path", config_path,
+  "--quiet", "FALSE"
+)
+
 status <- system2(
   rscript_bin,
-  args = c(
-    script_path,
-    "--job-name", cfg$job$name,
-    "--task-id", "1",
-    "--job-root", here("output"),
-    "--config-path", arts$job_config,
-    "--quiet", "FALSE"
-  ),
+  args = shQuote(system_args),
   stdout = "",
   stderr = ""
 )
