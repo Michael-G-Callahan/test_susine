@@ -1,0 +1,255 @@
+---
+title: "C-CSR Ensemble Smoke Run Control"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+One-off local smoke test for the `C-CSR` ensemble only. This builds a
+single-dataset-bundle config and includes a bottom cell to run task `1`
+locally.
+
+```{r setup, message=FALSE}
+here::i_am("vignettes/one_off_validations/csr_ensemble_smoke_run_control.Rmd")
+library(here)
+here()
+
+library(devtools)
+
+susine_path <- here("..", "susine")
+if (!file.exists(file.path(susine_path, "DESCRIPTION"))) {
+  stop("susine package not found at: ", susine_path)
+}
+
+options(
+  test_susine.local_susine_path =
+    normalizePath(susine_path, winslash = "/", mustWork = TRUE)
+)
+
+devtools::load_all(susine_path, reset = TRUE)
+devtools::load_all(".", reset = TRUE)
+
+library(dplyr)
+library(tidyr)
+library(readr)
+library(knitr)
+```
+
+# 1. Minimal C-CSR Grid
+
+Use a tiny `c x sigma_0_2` grid so the refit path is exercised without
+turning this into a real compute run.
+
+```{r grids}
+c_grid_smoke <- c(0.0, 0.5)
+sigma_grid_smoke <- c(0.1, 0.2)
+
+stopifnot(length(c_grid_smoke) * length(sigma_grid_smoke) == 4L)
+stopifnot(0.2 %in% sigma_grid_smoke)
+
+cat("c grid:", c_grid_smoke, "\n")
+cat("sigma grid:", sigma_grid_smoke, "\n")
+```
+
+# 2. C-CSR Spec Only
+
+```{r spec}
+spec_C_CSR <- list(
+  name = "C-CSR",
+  use_case_ids = "susine_functional_mu",
+  exploration_methods = "cs_grid_refit",
+  exploration_mode = "separate",
+  K = 4L,
+  c_grid_values = c_grid_smoke,
+  sigma_0_2_grid_values = sigma_grid_smoke
+)
+
+specs <- list(spec_C_CSR)
+
+str(specs)
+```
+
+# 3. Build One-Bundle Config
+
+```{r build-config}
+data_matrix_catalog_full <- test_susine:::build_data_matrix_catalog(
+  requested_scenarios = "scenario_1",
+  repo_root = here(),
+  summary_path = here(
+    "data", "sampled_simulated_genotypes", "scenario_sampling_summary.csv"
+  )
+)
+
+data_matrix_catalog <- data_matrix_catalog_full %>%
+  dplyr::slice_head(n = 1)
+
+cat("Selected matrix rows:", nrow(data_matrix_catalog), "\n")
+knitr::kable(data_matrix_catalog)
+
+cfg <- make_job_config(
+  job_name = "csr_ensemble_smoke",
+  HPC = FALSE,
+  time = "00:20:00",
+  mem = "4G",
+  email = "mgc5166@psu.edu",
+  output_root = here("output"),
+  grid_mode = "full",
+
+  use_case_ids = "susine_functional_mu",
+  exploration_specs = specs,
+
+  L_grid = 10L,
+  y_noise_grid = NA_real_,
+  p_star_grid = NA_integer_,
+  architecture_grid = "susie2_oligogenic",
+  seeds = 1L,
+
+  prior_quality = tibble::tibble(
+    annotation_r2 = 0.2,
+    inflate_match = 1
+  ),
+
+  sigma_0_2_scalars = 0.2,
+
+  data_scenarios = "scenario_1",
+  repo_root = here(),
+  data_matrix_catalog = data_matrix_catalog,
+  sampled_scenario_summary = here(
+    "data", "sampled_simulated_genotypes", "scenario_sampling_summary.csv"
+  ),
+
+  task_unit = "dataset",
+  bundles_per_task = 1L,
+  task_assignment_seed = 1L,
+
+  max_iter = 50L,
+
+  aggregation_methods = c(
+    "cluster_weight",
+    "cluster_weight_jsd_050",
+    "elbo_softmax",
+    "max_elbo",
+    "uniform"
+  ),
+  include_overall_pool = FALSE,
+  softmax_temperature = 1,
+
+  credible_set_rho = 0.95,
+  purity_threshold = 0.50,
+  verbose_file_output = FALSE,
+  write_snps_parquet = TRUE,
+  write_confusion_bins = TRUE,
+  write_tier_cs_metrics = TRUE,
+
+  metrics_settings = list(
+    pip_breaks = sort(unique(c(
+      seq(0.00, 0.05, by = 0.005),
+      seq(0.05, 0.10, by = 0.01),
+      seq(0.10, 1.00, by = 0.02)
+    ))),
+    z_top_k = 10,
+    jsd_threshold = 0.15
+  )
+)
+
+stopifnot(setequal(unique(cfg$tables$runs$spec_name), "C-CSR"))
+stopifnot(cfg$job$n_tasks == 1L)
+```
+
+# 4. Smoke Budget
+
+```{r budget}
+runs <- cfg$tables$runs
+
+cat("Total runs:", nrow(runs), "\n")
+cat("Total dataset bundles:", n_distinct(runs$dataset_bundle_id), "\n")
+cat("Total tasks:", cfg$job$n_tasks, "\n")
+
+runs %>%
+  dplyr::count(
+    spec_name,
+    use_case_id,
+    annotation_r2,
+    exploration_methods,
+    name = "n_runs"
+  ) %>%
+  knitr::kable(caption = "Expected C-CSR smoke runs")
+```
+
+# 5. Write Artifacts
+
+```{r write-artifacts}
+arts <- write_job_artifacts(
+  job_config = cfg,
+  run_task_script = here("inst", "scripts", "run_task.R")
+)
+
+arts
+```
+
+# 6. Local Smoke Run
+
+This is the one-cell local test run. It executes the single dataset task
+for `C-CSR`.
+
+```{r run-local-smoke, eval=FALSE}
+stopifnot(cfg$job$n_tasks == 1L)
+
+Sys.setenv(
+  SUSINE_JOB_NAME = cfg$job$name,
+  SUSINE_PARENT_ID = "local_csr_smoke"
+)
+
+run_task(
+  job_name = cfg$job$name,
+  task_id = 1L,
+  job_root = here("output"),
+  config_path = arts$job_config,
+  quiet = FALSE
+)
+```
+
+# 7. Quick Output Check
+
+```{r validate-local-smoke, eval=FALSE}
+staging_dir <- file.path(
+  cfg$paths$slurm_output_dir,
+  cfg$job$name,
+  "local_csr_smoke",
+  "task-001"
+)
+stopifnot(dir.exists(staging_dir))
+
+staging_files <- list.files(
+  staging_dir,
+  recursive = TRUE,
+  full.names = TRUE
+)
+
+cat("Staging files:", length(staging_files), "\n")
+print(table(tools::file_ext(staging_files)))
+
+model_metrics_files <- list.files(
+  staging_dir,
+  pattern = "model_metrics",
+  recursive = TRUE,
+  full.names = TRUE
+)
+
+cat("Model metrics files:", length(model_metrics_files), "\n")
+
+if (length(model_metrics_files) > 0) {
+  mm <- readr::read_csv(model_metrics_files[1], show_col_types = FALSE)
+  if ("spec_name" %in% names(mm)) {
+    print(table(mm$spec_name))
+  }
+  if ("agg_method" %in% names(mm)) {
+    print(table(mm$agg_method))
+  }
+}
+```
