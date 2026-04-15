@@ -367,6 +367,94 @@ test_that("truth-warm reference filtering also accepts extracted rows without se
                     by_r2$annotation_r2 == 0.5))
 })
 
+test_that("pure refine scaling uses planned thresholds even when BFS truncates the tree", {
+  out <- test_susine:::compute_scaling_confusion_bins_for_group(
+    pip_list = list(
+      c(0.9, 0.1, 0.05),
+      c(0.8, 0.2, 0.05),
+      c(0.7, 0.3, 0.05)
+    ),
+    elbo_vec = c(3, 2, 1),
+    meta_list = list(
+      list(run_id = 1L, spec_name = "A-F", annotation_r2 = NA_real_, refine_step = 1L),
+      list(run_id = 2L, spec_name = "A-F", annotation_r2 = NA_real_, refine_step = 2L),
+      list(run_id = 3L, spec_name = "A-F", annotation_r2 = NA_real_, refine_step = 3L)
+    ),
+    causal_vec = c(1L, 0L, 0L),
+    group_run_row = tibble::tibble(
+      exploration_methods = "refine",
+      .planned_n_refine = 8L
+    ),
+    n_ens_sizes = c(4L, 8L),
+    pip_breaks = c(0, 0.05, 0.1, 0.2, 0.5, 1),
+    dataset_bundle_id = 1L
+  )
+
+  expect_false(is.null(out))
+  expect_setequal(unique(out$n_ensemble), c(4L, 8L))
+})
+
+test_that("collect backfills missing pure-refine scaling thresholds from full aggregated bins", {
+  scaling_bins_raw <- tibble::tibble(
+    spec_name = character(),
+    annotation_r2 = numeric(),
+    dataset_bundle_id = integer(),
+    n_ensemble = integer(),
+    resolution = character(),
+    agg_method = character(),
+    rep = integer(),
+    pip_threshold = numeric(),
+    n_causal_at_bucket = integer(),
+    n_noncausal_at_bucket = integer()
+  )
+
+  confusion_agg <- tibble::tibble(
+    dataset_bundle_id = c(1L, 1L),
+    spec_name = c("A-F", "A-F"),
+    use_case_id = c("susine_vanilla", "susine_vanilla"),
+    annotation_r2 = c(NA_real_, NA_real_),
+    group_key = c("g1", "g1"),
+    explore_method = c("aggregation", "aggregation"),
+    agg_method = c("uniform", "uniform"),
+    pip_threshold = c(0.9, 0.2),
+    n_causal_at_bucket = c(1L, 0L),
+    n_noncausal_at_bucket = c(0L, 2L)
+  )
+
+  model_metrics <- tibble::tibble(
+    dataset_bundle_id = c(1L, 1L, 1L),
+    spec_name = c("A-F", "A-F", "A-F"),
+    use_case_id = c("susine_vanilla", "susine_vanilla", "susine_vanilla"),
+    annotation_r2 = c(NA_real_, NA_real_, NA_real_),
+    group_key = c("g1", "g1", "g1"),
+    explore_method = c("refine", "refine", "refine"),
+    agg_method = c(NA_character_, NA_character_, NA_character_),
+    run_id = c(11L, 12L, 13L)
+  )
+
+  run_info <- tibble::tibble(
+    dataset_bundle_id = rep(1L, 8),
+    spec_name = rep("A-F", 8),
+    use_case_id = rep("susine_vanilla", 8),
+    annotation_r2 = rep(NA_real_, 8),
+    group_key = rep("g1", 8),
+    exploration_methods = rep("refine", 8),
+    refine_step = 1:8
+  )
+
+  out <- test_susine:::backfill_pure_refine_scaling_bins(
+    scaling_bins_raw = scaling_bins_raw,
+    confusion_agg = confusion_agg,
+    model_metrics = model_metrics,
+    run_info = run_info,
+    scaling_n_ens_sizes = c(4L, 8L)
+  )
+
+  expect_equal(sort(unique(out$scaling_bins_raw$n_ensemble)), c(4L, 8L))
+  expect_equal(nrow(out$repaired_groups), 2L)
+  expect_equal(out$repair_summary$n_backfilled_groups[[1]], 2L)
+})
+
 test_that("terminal scaling overwrite replaces pure and interaction endpoints exactly", {
   summary_df <- tibble::tibble(
     spec_name = c("A-F", "A-F", "B-F", "B-F", "C-CS", "C-CS"),

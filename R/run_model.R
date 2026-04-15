@@ -1204,7 +1204,7 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
         pip_list  <- primary_pips_by_group[[group_key]]
         elbo_vec  <- primary_elbos_by_group[[group_key]]
         meta_list <- primary_run_meta_by_group[[group_key]]
-        if (length(pip_list) < 2L || length(meta_list) < 2L) next
+        if (length(pip_list) < 1L || length(meta_list) < 1L) next
         sc_bins <- compute_scaling_confusion_bins_for_group(
           pip_list         = pip_list,
           elbo_vec         = elbo_vec,
@@ -2576,7 +2576,18 @@ compute_scaling_confusion_bins_for_group <- function(pip_list,
     if (is.na(lever_type)) return(NULL)
 
     n_reps <- 1L
-    valid_sizes <- n_ens_sizes[n_ens_sizes <= N]
+    planned_full_size <- switch(
+      lever_type,
+      restart   = as.integer(group_run_row$.planned_n_restart %||% N),
+      refine    = as.integer(group_run_row$.planned_n_refine %||% N),
+      sigma_0_2 = as.integer(group_run_row$.planned_n_sigma %||% N),
+      c_grid    = as.integer(group_run_row$.planned_n_c %||% N),
+      as.integer(N)
+    )
+    if (!is.finite(planned_full_size) || planned_full_size < 1L) {
+      planned_full_size <- as.integer(N)
+    }
+    valid_sizes <- n_ens_sizes[n_ens_sizes <= planned_full_size]
 
     for (n_ens in valid_sizes) {
       for (rep_i in seq_len(n_reps)) {

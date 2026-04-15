@@ -1936,18 +1936,6 @@ if (file.exists(scaling_bins_path)) {
       .groups = "drop"
     )
 
-  scaling_summary <- test_susine:::overwrite_scaling_terminal_metrics(
-    scaling_summary,
-    full_targets_df = auprc_plot_table %>%
-      dplyr::filter(.data$series_type == "aggregated") %>%
-      dplyr::select(.data$spec_name, .data$annotation_r2, .data$agg_method, .data$AUPRC) %>%
-      dplyr::left_join(
-        tpr05_plot_table %>%
-          dplyr::filter(.data$series_type == "aggregated") %>%
-          dplyr::select(.data$spec_name, .data$annotation_r2, .data$agg_method, .data$tpr_fpr05),
-        by = c("spec_name", "annotation_r2", "agg_method")
-      )
-  )
   scaling_summary <- test_susine:::append_scaling_single_fit_points(
     scaling_summary,
     auprc_plot_table = auprc_plot_table,
@@ -2705,10 +2693,10 @@ metric_inventory <- tibble::tribble(
   "tpr05_barplot_by_method_r2_*.png", "TPR@FPR=0.05", "tpr05_plot_table", "spec_name,use_case_id,annotation_r2,agg_method,series_type", "test_susine:::build_shared_plot_metric_table", "normalize_agg_method_id", "pooled aggregated rows",
   "tpr05_barplot_by_method_mean_overall.png", "TPR@FPR=0.05", "tpr05_mean_plot_table", "spec_name,use_case_id,annotation_r2,agg_method,series_type", "test_susine:::build_shared_plot_metric_table", "normalize_agg_method_id", "mean of per-dataset metric rows",
   "tpr05_barplot_by_method_mean_r2_*.png", "TPR@FPR=0.05", "tpr05_mean_plot_table", "spec_name,use_case_id,annotation_r2,agg_method,series_type", "test_susine:::build_shared_plot_metric_table", "normalize_agg_method_id", "mean of per-dataset metric rows",
-  "auprc_scaling_curves_overall.png", "AUPRC", "scaling_bins_pooled + auprc_plot_table", "spec_name,annotation_r2,n_ensemble,resolution,agg_method,rep", "test_susine:::auprc_from_pooled_bins + test_susine:::overwrite_scaling_terminal_metrics", "normalize_agg_method_id", "subsampled except exact terminal overwrite",
-  "auprc_scaling_curves_r2_*.png", "AUPRC", "scaling_bins_pooled + auprc_plot_table", "spec_name,annotation_r2,n_ensemble,resolution,agg_method,rep", "test_susine:::auprc_from_pooled_bins + test_susine:::overwrite_scaling_terminal_metrics", "normalize_agg_method_id", "subsampled except exact terminal overwrite",
-  "tpr05_scaling_curves_overall.png", "TPR@FPR=0.05", "scaling_bins_pooled + tpr05_plot_table", "spec_name,annotation_r2,n_ensemble,resolution,agg_method,rep", "test_susine:::tpr_at_fpr_threshold + test_susine:::overwrite_scaling_terminal_metrics", "normalize_agg_method_id", "subsampled except exact terminal overwrite",
-  "tpr05_scaling_curves_r2_*.png", "TPR@FPR=0.05", "scaling_bins_pooled + tpr05_plot_table", "spec_name,annotation_r2,n_ensemble,resolution,agg_method,rep", "test_susine:::tpr_at_fpr_threshold + test_susine:::overwrite_scaling_terminal_metrics", "normalize_agg_method_id", "subsampled except exact terminal overwrite",
+  "auprc_scaling_curves_overall.png", "AUPRC", "scaling_bins_pooled + auprc_plot_table", "spec_name,annotation_r2,n_ensemble,resolution,agg_method,rep", "test_susine:::auprc_from_pooled_bins", "normalize_agg_method_id", "subsampled directly from scaling bins",
+  "auprc_scaling_curves_r2_*.png", "AUPRC", "scaling_bins_pooled + auprc_plot_table", "spec_name,annotation_r2,n_ensemble,resolution,agg_method,rep", "test_susine:::auprc_from_pooled_bins", "normalize_agg_method_id", "subsampled directly from scaling bins",
+  "tpr05_scaling_curves_overall.png", "TPR@FPR=0.05", "scaling_bins_pooled + tpr05_plot_table", "spec_name,annotation_r2,n_ensemble,resolution,agg_method,rep", "test_susine:::tpr_at_fpr_threshold", "normalize_agg_method_id", "subsampled directly from scaling bins",
+  "tpr05_scaling_curves_r2_*.png", "TPR@FPR=0.05", "scaling_bins_pooled + tpr05_plot_table", "spec_name,annotation_r2,n_ensemble,resolution,agg_method,rep", "test_susine:::tpr_at_fpr_threshold", "normalize_agg_method_id", "subsampled directly from scaling bins",
   "baseline_dashed_lines", "AUPRC + TPR@FPR=0.05", "shared plot tables", "spec_name,use_case_id,annotation_r2,series_type", "test_susine:::build_shared_plot_metric_table", "none", "single global baseline-single / susine_vanilla row",
   "truth_warm_reference_lines", "AUPRC + TPR@FPR=0.05", "shared plot tables", "spec_name,use_case_id,annotation_r2,series_type", "test_susine:::build_shared_plot_metric_table", "none", "truth-warm pooled individual rows",
   "baseline_dashed_lines_mean", "AUPRC + TPR@FPR=0.05", "shared mean plot tables", "spec_name,use_case_id,annotation_r2,series_type", "test_susine:::build_shared_plot_metric_table", "none", "mean baseline-single / susine_vanilla row",

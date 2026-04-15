@@ -15,6 +15,13 @@ normalize_agg_method_df <- function(df, col = "agg_method") {
 }
 
 #' @keywords internal
+annotation_r2_join_key <- function(x) {
+  x_chr <- as.character(x)
+  x_chr[is.na(x)] <- "__NA__"
+  x_chr
+}
+
+#' @keywords internal
 append_overall_scaling_bins <- function(scaling_bins) {
   scaling_bins <- normalize_agg_method_df(scaling_bins)
   if (is.null(scaling_bins) || !nrow(scaling_bins) ||
@@ -59,6 +66,196 @@ append_overall_scaling_bins <- function(scaling_bins) {
   }
 
   dplyr::bind_rows(scaling_bins, overall_bins)
+}
+
+#' @keywords internal
+backfill_pure_refine_scaling_bins <- function(scaling_bins_raw,
+                                              confusion_agg,
+                                              model_metrics,
+                                              run_info,
+                                              scaling_n_ens_sizes = c(4L, 8L, 16L, 32L, 64L)) {
+  if (is.null(scaling_bins_raw) ||
+      is.null(confusion_agg) || !nrow(confusion_agg) ||
+      is.null(model_metrics) || !nrow(model_metrics) ||
+      is.null(run_info) || !nrow(run_info)) {
+    return(list(
+      scaling_bins_raw = scaling_bins_raw,
+      repaired_groups = tibble::tibble(),
+      repair_summary = tibble::tibble()
+    ))
+  }
+
+  scaling_bins_raw <- normalize_agg_method_df(scaling_bins_raw)
+  confusion_agg <- normalize_agg_method_df(confusion_agg)
+  model_metrics <- normalize_agg_method_df(model_metrics)
+
+  pure_refine_plans <- run_info %>%
+    dplyr::filter(.data$exploration_methods == "refine") %>%
+    dplyr::group_by(
+      .data$dataset_bundle_id,
+      .data$spec_name,
+      .data$use_case_id,
+      .data$annotation_r2,
+      .data$group_key
+    ) %>%
+    dplyr::summarise(
+      planned_n = max(.data$refine_step, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    dplyr::filter(is.finite(.data$planned_n), .data$planned_n >= 1L) %>%
+    dplyr::mutate(annotation_r2_key = annotation_r2_join_key(.data$annotation_r2))
+
+  if (!nrow(pure_refine_plans)) {
+    return(list(
+      scaling_bins_raw = scaling_bins_raw,
+      repaired_groups = tibble::tibble(),
+      repair_summary = tibble::tibble()
+    ))
+  }
+
+  actual_refine_counts <- model_metrics %>%
+    dplyr::filter(
+      .data$explore_method == "refine",
+      is.na(.data$agg_method)
+    ) %>%
+    dplyr::group_by(
+      .data$dataset_bundle_id,
+      .data$spec_name,
+      .data$use_case_id,
+      .data$annotation_r2,
+      .data$group_key
+    ) %>%
+    dplyr::summarise(
+      actual_n = dplyr::n_distinct(.data$run_id),
+      .groups = "drop"
+    ) %>%
+    dplyr::mutate(annotation_r2_key = annotation_r2_join_key(.data$annotation_r2))
+
+  planned_thresholds <- pure_refine_plans %>%
+    dplyr::left_join(
+      actual_refine_counts,
+      by = c("dataset_bundle_id", "spec_name", "use_case_id", "annotation_r2_key", "group_key")
+    ) %>%
+    dplyr::select(-tidyselect::any_of("annotation_r2.y")) %>%
+    dplyr::rename(annotation_r2 = .data$annotation_r2.x) %>%
+    dplyr::mutate(actual_n = dplyr::coalesce(.data$actual_n, 0L)) %>%
+    dplyr::rowwise() %>%
+    dplyr::mutate(
+      requested_thresholds = list(
+        as.integer(scaling_n_ens_sizes[scaling_n_ens_sizes <= .data$planned_n])
+      )
+    ) %>%
+    tidyr::unnest_longer(.data$requested_thresholds, values_to = "n_ensemble") %>%
+    dplyr::ungroup() %>%
+    dplyr::filter(.data$n_ensemble > .data$actual_n)
+
+  if (!nrow(planned_thresholds)) {
+    return(list(
+      scaling_bins_raw = scaling_bins_raw,
+      repaired_groups = tibble::tibble(),
+      repair_summary = tibble::tibble()
+    ))
+  }
+
+  full_refine_bins <- confusion_agg %>%
+    dplyr::filter(.data$explore_method == "aggregation") %>%
+    dplyr::group_by(
+      .data$dataset_bundle_id,
+      .data$spec_name,
+      .data$use_case_id,
+      .data$annotation_r2,
+      .data$group_key,
+      .data$agg_method,
+      .data$pip_threshold
+    ) %>%
+    dplyr::summarise(
+      n_causal_at_bucket = sum(.data$n_causal_at_bucket, na.rm = TRUE),
+      n_noncausal_at_bucket = sum(.data$n_noncausal_at_bucket, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    dplyr::mutate(annotation_r2_key = annotation_r2_join_key(.data$annotation_r2))
+
+  backfilled_rows <- planned_thresholds %>%
+    dplyr::inner_join(
+      full_refine_bins,
+      by = c("dataset_bundle_id", "spec_name", "use_case_id", "annotation_r2_key", "group_key")
+    ) %>%
+    dplyr::select(-tidyselect::any_of("annotation_r2.y")) %>%
+    dplyr::rename(annotation_r2 = .data$annotation_r2.x) %>%
+    dplyr::mutate(
+      resolution = NA_character_,
+      rep = 1L
+    ) %>%
+    dplyr::select(
+      .data$spec_name,
+      .data$annotation_r2,
+      .data$dataset_bundle_id,
+      .data$n_ensemble,
+      .data$resolution,
+      .data$agg_method,
+      .data$rep,
+      .data$pip_threshold,
+      .data$n_causal_at_bucket,
+      .data$n_noncausal_at_bucket
+    )
+
+  if (!nrow(backfilled_rows)) {
+    return(list(
+      scaling_bins_raw = scaling_bins_raw,
+      repaired_groups = tibble::tibble(),
+      repair_summary = tibble::tibble()
+    ))
+  }
+
+  existing_keys <- scaling_bins_raw %>%
+    dplyr::mutate(annotation_r2_key = annotation_r2_join_key(.data$annotation_r2)) %>%
+    dplyr::select(
+      .data$spec_name,
+      .data$annotation_r2_key,
+      .data$dataset_bundle_id,
+      .data$n_ensemble,
+      .data$resolution,
+      .data$agg_method,
+      .data$rep,
+      .data$pip_threshold
+    ) %>%
+    dplyr::distinct()
+
+  backfilled_rows <- backfilled_rows %>%
+    dplyr::mutate(annotation_r2_key = annotation_r2_join_key(.data$annotation_r2)) %>%
+    dplyr::anti_join(
+      existing_keys,
+      by = c("spec_name", "annotation_r2_key", "dataset_bundle_id",
+             "n_ensemble", "resolution", "agg_method", "rep", "pip_threshold")
+    ) %>%
+    dplyr::select(-.data$annotation_r2_key)
+
+  repaired_groups <- planned_thresholds %>%
+    dplyr::semi_join(
+      backfilled_rows %>%
+        dplyr::select(
+          .data$spec_name,
+          .data$annotation_r2,
+          .data$dataset_bundle_id,
+          .data$n_ensemble
+        ) %>%
+        dplyr::distinct(),
+      by = c("spec_name", "annotation_r2", "dataset_bundle_id", "n_ensemble")
+    ) %>%
+    dplyr::arrange(.data$spec_name, .data$annotation_r2, .data$dataset_bundle_id, .data$n_ensemble)
+
+  repair_summary <- repaired_groups %>%
+    dplyr::group_by(.data$spec_name, .data$annotation_r2) %>%
+    dplyr::summarise(
+      n_backfilled_groups = dplyr::n(),
+      .groups = "drop"
+    )
+
+  list(
+    scaling_bins_raw = dplyr::bind_rows(scaling_bins_raw, backfilled_rows),
+    repaired_groups = repaired_groups,
+    repair_summary = repair_summary
+  )
 }
 
 #' @keywords internal

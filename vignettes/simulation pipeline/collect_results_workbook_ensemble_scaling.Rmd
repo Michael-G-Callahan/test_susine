@@ -447,6 +447,31 @@ if (nrow(snp_agg_backfill_summary) > 0L) {
   cat("No SNP-based aggregation backfill needed.\n")
 }
 
+scaling_refine_backfill <- test_susine:::backfill_pure_refine_scaling_bins(
+  scaling_bins_raw = scaling_bins_raw,
+  confusion_agg = confusion_agg,
+  model_metrics = model_metrics,
+  run_info = run_info,
+  scaling_n_ens_sizes = cfg$job$compute$scaling_n_ens_sizes %||% c(4L, 8L, 16L, 32L, 64L)
+)
+scaling_bins_raw <- scaling_refine_backfill$scaling_bins_raw
+pure_refine_scaling_backfill_groups <- scaling_refine_backfill$repaired_groups
+pure_refine_scaling_backfill_summary <- scaling_refine_backfill$repair_summary
+write_diagnostic_csv(pure_refine_scaling_backfill_groups, "pure_refine_scaling_backfill_groups.csv")
+write_diagnostic_csv(pure_refine_scaling_backfill_summary, "pure_refine_scaling_backfill_summary.csv")
+
+if (nrow(pure_refine_scaling_backfill_summary) > 0L) {
+  cat("Applied pure-refine scaling-bin backfill.\n")
+  print_diagnostic_table(
+    "Pure-Refine Scaling Backfill Summary",
+    pure_refine_scaling_backfill_summary,
+    n = 100L
+  )
+  cat("  Scaling bins after pure-refine backfill:", nrow(scaling_bins_raw), "\n")
+} else {
+  cat("No pure-refine scaling-bin backfill needed.\n")
+}
+
 rm(confusion_bins)
 invisible(gc())
 ```
