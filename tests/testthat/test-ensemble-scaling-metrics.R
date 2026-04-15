@@ -350,6 +350,23 @@ test_that("per-r2 truth-warm filtering keeps vanilla plus the matching annotatio
                      is.na(out$annotation_r2)))
 })
 
+test_that("truth-warm reference filtering also accepts extracted rows without series_type", {
+  refs_tbl <- tibble::tibble(
+    use_case_id = c("susine_vanilla", "susine_eb_clamped_scale_var_nonneg",
+                    "susine_eb_clamped_scale_var_nonneg"),
+    annotation_r2 = c(NA_real_, NA_real_, 0.5),
+    AUPRC = c(0.15, 0.25, 0.35)
+  )
+
+  overall <- test_susine:::filter_truth_warm_reference_rows(refs_tbl)
+  by_r2 <- test_susine:::filter_truth_warm_reference_rows(refs_tbl, r2_filter = 0.5)
+
+  expect_equal(sort(overall$use_case_id), c("susine_eb_clamped_scale_var_nonneg", "susine_vanilla"))
+  expect_equal(sort(by_r2$use_case_id), c("susine_eb_clamped_scale_var_nonneg", "susine_vanilla"))
+  expect_true(any(by_r2$use_case_id == "susine_eb_clamped_scale_var_nonneg" &
+                    by_r2$annotation_r2 == 0.5))
+})
+
 test_that("terminal scaling overwrite replaces pure and interaction endpoints exactly", {
   summary_df <- tibble::tibble(
     spec_name = c("A-F", "A-F", "B-F", "B-F", "C-CS", "C-CS"),

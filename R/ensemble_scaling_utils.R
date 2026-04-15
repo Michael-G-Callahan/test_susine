@@ -194,8 +194,12 @@ filter_shared_plot_metric_rows <- function(df, r2_filter = NULL) {
 filter_truth_warm_reference_rows <- function(df, r2_filter = NULL) {
   if (is.null(df) || !nrow(df)) return(tibble::tibble())
 
-  truth_rows <- df %>%
-    dplyr::filter(.data$series_type == "truth_warm")
+  truth_rows <- if ("series_type" %in% names(df)) {
+    df %>%
+      dplyr::filter(.data$series_type == "truth_warm")
+  } else {
+    tibble::as_tibble(df)
+  }
 
   if (is.null(r2_filter)) {
     return(truth_rows %>% dplyr::filter(is.na(.data$annotation_r2)))

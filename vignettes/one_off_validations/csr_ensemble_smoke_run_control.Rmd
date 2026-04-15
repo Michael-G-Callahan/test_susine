@@ -282,11 +282,19 @@ cat("Model metrics files:", length(model_metrics_files), "\n")
 
 if (length(model_metrics_files) > 0) {
   mm <- readr::read_csv(model_metrics_files[1], show_col_types = FALSE)
-  if ("spec_name" %in% names(mm)) {
-    print(table(mm$spec_name))
-  }
-  if ("agg_method" %in% names(mm)) {
-    print(table(mm$agg_method))
-  }
+  mm_joined <- mm %>%
+    dplyr::left_join(
+      dplyr::select(cfg$tables$runs, run_id, spec_name, use_case_id),
+      by = "run_id"
+    )
+
+  cat("Explore methods:\n")
+  print(table(mm_joined$explore_method, useNA = "ifany"))
+
+  cat("Spec names (joined from run table):\n")
+  print(table(mm_joined$spec_name, useNA = "ifany"))
+
+  cat("Non-missing cache_source_run_id:\n")
+  print(sum(!is.na(mm_joined$cache_source_run_id)))
 }
 ```
