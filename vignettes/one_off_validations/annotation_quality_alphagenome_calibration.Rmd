@@ -1,0 +1,747 @@
+---
+title: "Annotation Quality AlphaGenome Calibration"
+author: "test_susine"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+editor_options:
+  chunk_output_type: console
+---
+
+Summary: Uses the active `test_susine` simulation helpers to calibrate the annotation-generation parameters `annotation_r2` and `inflate_match` against AlphaGenome-style expression benchmarks. This workbook pools simulated variants across repeated `susie2_oligogenic` loci, states the paper-side benchmark definitions explicitly, and reports three heatmaps over the full `annotation_r2 x inflate_match` grid.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 8.5,
+  fig.height = 6
+)
+```
+
+# Overview
+
+This workbook separates the annotation-quality calibration problem from the
+`tau` study.
+
+For each simulated locus:
+
+- `b` is drawn from the fixed-tier `susie2_oligogenic` architecture;
+- `a` is drawn from the annotation simulator over a grid of
+  `annotation_r2` and `inflate_match`;
+- the causality positives are the top `p_score_causality` true causal SNPs by `|beta|`;
+- the rank-correlation set is the top `p_score_rank` true causal SNPs by `|beta|`;
+- the causality negatives are the true null SNPs only.
+
+The main outputs are:
+
+- pooled equivalent causality `auROC`, obtained by converting pooled
+  sparse-vs-null AUPRC to the balanced-case AUROC under an equal-variance
+  Gaussian score model;
+- pooled signed Spearman correlation on the rank-correlation set;
+- pooled unsigned Spearman correlation on the rank-correlation set.
+
+The intended use is:
+
+- use the causality panel mainly to reason about `inflate_match`;
+- use the signed and unsigned rank-correlation panels mainly to reason about
+  `annotation_r2`;
+- then record a simple working calibration choice for downstream studies.
+
+# Setup
+
+```{r load-package}
+here::i_am("vignettes/one_off_validations/annotation_quality_alphagenome_calibration.Rmd")
+devtools::load_all(here::here(), quiet = TRUE)
+
+library(dplyr)
+library(ggplot2)
+library(knitr)
+library(purrr)
+library(scales)
+library(tidyr)
+```
+
+# User Options
+
+```{r options}
+p <- 1000L
+n_beta_draws <- 600L
+p_score_causality <- 3L
+p_score_rank <- 23L
+
+annotation_r2_grid <- seq(0, 1, by = 0.1)
+inflate_match_grid <- seq(0, 1, by = 0.1)
+
+effect_sd <- 1
+working_annotation_r2 <- 0.30
+working_inflate_match_range <- c(0.95, 1.00)
+
+cat("architecture = susie2_oligogenic\n")
+cat("p =", p, "\n")
+cat("beta draws =", n_beta_draws, "\n")
+cat("p_score_causality =", p_score_causality, "\n")
+cat("p_score_rank =", p_score_rank, "\n")
+cat("annotation_r2 grid =", paste(annotation_r2_grid, collapse = ", "), "\n")
+cat("inflate_match grid =", paste(inflate_match_grid, collapse = ", "), "\n")
+cat("working annotation_r2 =", working_annotation_r2, "\n")
+cat(
+  "working inflate_match range =",
+  paste(signif(working_inflate_match_range, 3), collapse = " to "),
+  "\n"
+)
+```
+
+# AlphaGenome Targets
+
+The AlphaGenome paper evaluates three eQTL tasks that matter for this
+calibration:
+
+1. `eQTL coefficient`
+   Evaluated on fine-mapped GTEx eQTL SNVs. Each example is a unique
+   `variant / gene / tissue` tuple, and the observed target is the SuSiE
+   `beta posterior`. In the main scatter for 17,675 fine-mapped GTEx eQTL
+   tuples, the paper reports:
+
+   - signed Spearman `rho = 0.50`
+   - unsigned Spearman `rho = 0.10`
+
+   In the main text, the tissue-weighted mean signed coefficient performance is
+   reported as `0.49`.
+
+2. `eQTL sign`
+   Also evaluated on the fine-mapped eQTL set. This is a direction-of-effect
+   task on true eQTLs only: the signed AlphaGenome score is used to distinguish
+   positive from negative observed eQTL effects. The main text reports a
+   tissue-weighted mean sign `auROC = 0.80`.
+
+3. `eQTL causality`
+   This is the causal-versus-noncausal classification task. The paper text
+   describes this as distinguishing fine-mapped eQTLs from distance-matched
+   variants. In the benchmark construction, high-confidence positives are SuSiE
+   `PIP >= 0.9` and noncausal controls are `PIP < 0.01`. The main headline
+   values are:
+
+   - zero-shot causality `auROC = 0.71`
+   - supervised random-forest causality `auROC = 0.80`
+
+The current workbook directly targets the causality and coefficient-style
+benchmarks. We do not currently add a separate sign-`auROC` heatmap because the
+signed Spearman panel already captures whether the simulated annotation tracks
+the sign and relative size of the true causal effects, but the AlphaGenome sign
+value `0.80` remains a useful qualitative reference point.
+
+These benchmark descriptions and values come from the main AlphaGenome paper
+and supplementary benchmark construction notes, especially the GTEx eQTL
+coefficient, sign, and causality sections.
+
+# Helpers
+
+```{r helpers}
+`%||%` <- function(x, y) {
+  if (is.null(x)) y else x
+}
+
+fmt_num <- function(x) {
+  formatC(x, format = "f", digits = 2)
+}
+
+top_k_causal_idx <- function(beta, k) {
+  beta <- as.numeric(beta)
+  causal_idx <- which(beta != 0)
+  if (!length(causal_idx)) {
+    return(integer(0))
+  }
+  n_top <- min(as.integer(k), length(causal_idx))
+  causal_idx[order(abs(beta[causal_idx]), decreasing = TRUE)[seq_len(n_top)]]
+}
+
+simulate_priors_zero_safe <- function(beta,
+                                      annotation_r2,
+                                      inflate_match,
+                                      base_sigma2 = NULL,
+                                      effect_sd = NULL,
+                                      seed = NULL) {
+  if (!is.null(seed) && is.finite(seed)) {
+    set.seed(as.integer(seed))
+  }
+
+  p <- length(beta)
+  causal_idx <- which(beta != 0)
+  noncausal_idx <- setdiff(seq_len(p), causal_idx)
+
+  if (is.null(effect_sd) || !is.finite(effect_sd) || effect_sd <= 0) {
+    effect_sd <- sqrt(max(stats::var(beta[causal_idx]), stats::var(beta), 1))
+  }
+
+  if (is.null(annotation_r2) || is.na(annotation_r2)) annotation_r2 <- 0
+  if (is.null(inflate_match) || is.na(inflate_match)) inflate_match <- 0
+  annotation_r2 <- pmin(pmax(annotation_r2, 0), 1)
+  inflate_match <- max(inflate_match, 0)
+
+  causal_var <- stats::var(beta[causal_idx])
+  if (is.na(causal_var) || causal_var == 0) {
+    causal_var <- effect_sd^2
+  }
+
+  mu_0 <- numeric(p)
+  if (length(causal_idx)) {
+    causal_beta <- as.numeric(beta[causal_idx])
+    causal_mean <- mean(causal_beta)
+    causal_centered <- causal_beta - causal_mean
+    causal_scale <- sqrt(mean(causal_centered^2))
+    if (!is.finite(causal_scale) || causal_scale <= 0) {
+      causal_scale <- sqrt(causal_var)
+    }
+
+    if (length(causal_idx) == 1L || !is.finite(causal_scale) || causal_scale <= 0) {
+      mu_0[causal_idx] <- causal_beta
+    } else {
+      signal_unit <- causal_centered / causal_scale
+      noise_unit <- draw_centered_noise(
+        length(causal_idx),
+        target_scale = 1,
+        orthogonal_to = signal_unit
+      )
+      causal_annotation_centered <- causal_scale * (
+        sqrt(annotation_r2) * signal_unit +
+          sqrt(1 - annotation_r2) * noise_unit
+      )
+      mu_0[causal_idx] <- causal_mean + causal_annotation_centered
+    }
+  }
+
+  theoretical_causal_mu0_var <- if (length(causal_idx) > 1L) {
+    mean((mu_0[causal_idx] - mean(mu_0[causal_idx]))^2)
+  } else {
+    causal_var
+  }
+
+  if (length(noncausal_idx)) {
+    if (inflate_match <= 0) {
+      mu_0[noncausal_idx] <- 0
+    } else {
+      noncausal_scale <- sqrt(inflate_match) * sqrt(theoretical_causal_mu0_var)
+      mu_0[noncausal_idx] <- draw_centered_noise(
+        length(noncausal_idx),
+        target_scale = noncausal_scale
+      )
+    }
+  }
+
+  observed_r2 <- NA_real_
+  if (length(causal_idx) > 1 &&
+      stats::sd(beta[causal_idx]) > 0 &&
+      stats::sd(mu_0[causal_idx]) > 0) {
+    observed_r2 <- stats::cor(mu_0[causal_idx], beta[causal_idx])^2
+  }
+
+  base_sigma2 <- base_sigma2 %||% causal_var
+  if (is.na(base_sigma2) || base_sigma2 <= 0) {
+    base_sigma2 <- effect_sd^2
+  }
+
+  sigma_0_2 <- rep(base_sigma2, p)
+
+  list(
+    mu_0 = mu_0,
+    sigma_0_2 = sigma_0_2,
+    observed_r2 = observed_r2
+  )
+}
+
+pooled_spearman <- function(annotation_list, beta_list, positive_idx_list, use_abs = FALSE) {
+  pooled_annotation <- unlist(
+    purrr::map2(annotation_list, positive_idx_list, ~ as.numeric(.x)[.y]),
+    use.names = FALSE
+  )
+  pooled_beta <- unlist(
+    purrr::map2(beta_list, positive_idx_list, ~ as.numeric(.x)[.y]),
+    use.names = FALSE
+  )
+
+  if (use_abs) {
+    pooled_annotation <- abs(pooled_annotation)
+    pooled_beta <- abs(pooled_beta)
+  }
+
+  if (length(pooled_annotation) < 2L ||
+      length(unique(pooled_annotation)) < 2L ||
+      length(unique(pooled_beta)) < 2L) {
+    return(NA_real_)
+  }
+
+  suppressWarnings(
+    stats::cor(pooled_annotation, pooled_beta, method = "spearman")
+  )
+}
+
+pooled_average_precision <- function(annotation_list, positive_idx_list, null_idx_list) {
+  positive_scores <- unlist(
+    purrr::map2(annotation_list, positive_idx_list, ~ abs(as.numeric(.x)[.y])),
+    use.names = FALSE
+  )
+  null_scores <- unlist(
+    purrr::map2(annotation_list, null_idx_list, ~ abs(as.numeric(.x)[.y])),
+    use.names = FALSE
+  )
+
+  scores <- c(positive_scores, null_scores)
+  labels <- c(rep.int(1L, length(positive_scores)), rep.int(0L, length(null_scores)))
+
+  if (!length(scores) || !sum(labels)) {
+    return(NA_real_)
+  }
+
+  auprc_average_precision(scores = scores, labels = labels)
+}
+
+ap_from_dprime <- function(dprime,
+                           prevalence,
+                           lo = -8,
+                           hi = 12,
+                           n = 4000L) {
+  threshold <- seq(lo, hi, length.out = n + 1L)
+  true_positive_rate <- 1 - stats::pnorm(threshold, mean = dprime, sd = 1)
+  false_positive_rate <- 1 - stats::pnorm(threshold, mean = 0, sd = 1)
+  recall <- true_positive_rate
+  precision <- prevalence * true_positive_rate /
+    (prevalence * true_positive_rate + (1 - prevalence) * false_positive_rate)
+  precision[is.nan(precision)] <- 1
+  sum(0.5 * (precision[-1] + precision[-length(precision)]) * abs(diff(recall)))
+}
+
+build_ap_to_balanced_auroc <- function(prevalence,
+                                       d_max = 6,
+                                       d_grid_length = 1201L,
+                                       integration_points = 4000L) {
+  d_grid <- seq(0, d_max, length.out = d_grid_length)
+  ap_grid <- vapply(
+    d_grid,
+    ap_from_dprime,
+    numeric(1),
+    prevalence = prevalence,
+    n = integration_points
+  )
+  ap_grid <- cummax(ap_grid)
+
+  function(observed_ap) {
+    if (!is.finite(observed_ap) || observed_ap <= prevalence) {
+      return(0.5)
+    }
+
+    clamped_ap <- min(observed_ap, max(ap_grid))
+    dprime <- stats::approx(
+      x = ap_grid,
+      y = d_grid,
+      xout = clamped_ap,
+      rule = 2,
+      ties = "ordered"
+    )$y
+    stats::pnorm(dprime / sqrt(2))
+  }
+}
+
+ideal_text_color <- function(fill_hex) {
+  rgb <- grDevices::col2rgb(fill_hex)
+  luminance <- 0.2126 * rgb[1, ] + 0.7152 * rgb[2, ] + 0.0722 * rgb[3, ]
+  ifelse(luminance < 140, "white", "black")
+}
+
+plot_metric_heatmap <- function(summary_tbl,
+                                value_col,
+                                title,
+                                subtitle,
+                                fill_label,
+                                option = "D",
+                                limits = NULL,
+                                digits = 2) {
+  values <- summary_tbl[[value_col]]
+  lims <- limits %||% range(values, na.rm = TRUE)
+  if (!all(is.finite(lims))) {
+    lims <- c(0, 1)
+  }
+  if (diff(lims) <= 0) {
+    lims <- lims + c(-1e-6, 1e-6)
+  }
+
+  palette_values <- viridisLite::viridis(256, option = option, end = 0.98)
+  fill_mapper <- scales::col_numeric(
+    palette = palette_values,
+    domain = lims,
+    na.color = "#bdbdbd"
+  )
+
+  plot_tbl <- summary_tbl %>%
+    dplyr::mutate(
+      metric_value = .data[[value_col]],
+      fill_hex = fill_mapper(.data$metric_value),
+      text_color = ideal_text_color(.data$fill_hex),
+      label = sprintf(paste0("%.", digits, "f"), .data$metric_value)
+    )
+
+  ggplot(plot_tbl, aes(x = .data$annotation_r2_f, y = .data$inflate_match_f, fill = .data$metric_value)) +
+    geom_tile(color = "white", linewidth = 0.5) +
+    geom_text(aes(label = .data$label, color = .data$text_color), size = 4.2, fontface = "bold") +
+    scale_color_identity() +
+    scale_fill_gradientn(colors = palette_values, limits = lims, oob = scales::squish) +
+    labs(
+      title = title,
+      subtitle = subtitle,
+      x = "annotation_r2",
+      y = "inflate_match",
+      fill = fill_label
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(
+      panel.grid = element_blank(),
+      axis.text.x = element_text(angle = 0, hjust = 0.5)
+    )
+}
+```
+
+# Simulate Beta Draws
+
+```{r simulate-b}
+beta_tbl <- tibble::tibble(
+  beta_id = seq_len(n_beta_draws),
+  beta_seed = 10000L + seq_len(n_beta_draws)
+) %>%
+  dplyr::mutate(
+    effects = purrr::map(
+      .data$beta_seed,
+      ~ simulate_effect_sizes_susie2_oligogenic(
+        p = p,
+        seed = .x
+      )
+    ),
+    beta = purrr::map(.data$effects, "beta"),
+    causal_idx = purrr::map(.data$effects, "causal_idx"),
+    effect_tier = purrr::map(.data$effects, "effect_tier"),
+    sparse_idx = purrr::map(.data$effect_tier, ~ which(.x == "sparse")),
+    positive_idx_causality = purrr::map(.data$beta, top_k_causal_idx, k = p_score_causality),
+    positive_idx_rank = purrr::map(.data$beta, top_k_causal_idx, k = p_score_rank),
+    null_idx = purrr::map(.data$effect_tier, ~ which(.x == "none")),
+    n_causal = purrr::map_int(.data$causal_idx, length),
+    n_sparse = purrr::map_int(.data$sparse_idx, length),
+    n_scored_causality = purrr::map_int(.data$positive_idx_causality, length),
+    n_scored_rank = purrr::map_int(.data$positive_idx_rank, length),
+    n_null = purrr::map_int(.data$null_idx, length)
+  ) %>%
+  dplyr::select(-.data$effects)
+
+beta_tbl %>%
+  dplyr::summarise(
+    n_beta_draws = dplyr::n(),
+    causal_per_draw = first(.data$n_causal),
+    sparse_per_draw = first(.data$n_sparse),
+    causality_positives_per_draw = first(.data$n_scored_causality),
+    rank_variants_per_draw = first(.data$n_scored_rank),
+    null_per_draw = first(.data$n_null)
+  ) %>%
+  knitr::kable(
+    digits = 0,
+    caption = "Architecture check and scored-set size under the fixed susie2_oligogenic simulation"
+  )
+```
+
+# Simulate Annotations over the Grid
+
+```{r simulate-a}
+settings_tbl <- tidyr::expand_grid(
+  annotation_r2 = annotation_r2_grid,
+  inflate_match = inflate_match_grid
+) %>%
+  dplyr::arrange(.data$annotation_r2, .data$inflate_match) %>%
+  dplyr::mutate(
+    setting_id = dplyr::row_number(),
+    annotation_r2_f = factor(fmt_num(.data$annotation_r2), levels = fmt_num(annotation_r2_grid)),
+    inflate_match_f = factor(fmt_num(.data$inflate_match), levels = fmt_num(inflate_match_grid))
+  )
+
+annotation_tbl <- tidyr::expand_grid(
+  beta_id = beta_tbl$beta_id,
+  setting_id = settings_tbl$setting_id
+) %>%
+  dplyr::left_join(beta_tbl, by = "beta_id") %>%
+  dplyr::left_join(settings_tbl, by = "setting_id") %>%
+  dplyr::mutate(
+    annotation_seed = 500000L + .data$beta_id * 1000L + .data$setting_id,
+    priors = purrr::pmap(
+      list(.data$beta, .data$annotation_r2, .data$inflate_match, .data$annotation_seed),
+      function(beta, annotation_r2, inflate_match, annotation_seed) {
+        simulate_priors_zero_safe(
+          beta = beta,
+          annotation_r2 = annotation_r2,
+          inflate_match = inflate_match,
+          base_sigma2 = effect_sd^2,
+          effect_sd = effect_sd,
+          seed = annotation_seed
+        )
+      }
+    ),
+    annotation = purrr::map(.data$priors, "mu_0"),
+    observed_r2 = purrr::map_dbl(.data$priors, "observed_r2")
+  ) %>%
+  dplyr::select(
+    .data$beta_id,
+    .data$setting_id,
+    .data$annotation_r2,
+    .data$inflate_match,
+    .data$annotation_r2_f,
+    .data$inflate_match_f,
+    .data$beta,
+    .data$annotation,
+    .data$positive_idx_causality,
+    .data$positive_idx_rank,
+    .data$null_idx,
+    .data$n_scored_causality,
+    .data$n_scored_rank,
+    .data$n_null,
+    .data$observed_r2
+  )
+
+annotation_tbl %>%
+  dplyr::group_by(.data$annotation_r2, .data$inflate_match) %>%
+  dplyr::summarise(
+    mean_observed_r2 = mean(.data$observed_r2, na.rm = TRUE),
+    sd_observed_r2 = stats::sd(.data$observed_r2, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  knitr::kable(
+    digits = 3,
+    caption = "Observed annotation R^2 by grid point"
+  )
+```
+
+# AlphaGenome-Style Calibration Logic
+
+The point of this workbook is not to claim that our simulation is the same as
+the AlphaGenome evaluation. The point is to build a simple, explicit bridge
+from their benchmark definitions to our simulator, then use that bridge to pick
+reasonable annotation-generation parameters.
+
+Our mapping is:
+
+- AlphaGenome eQTL causality `->` our top-`p_score_causality` versus true-null
+  task
+- AlphaGenome eQTL coefficient `->` our pooled rank-correlation task on the top
+  `p_score_rank` true causal SNPs
+
+For the causality benchmark we use:
+
+- positives = top `p_score_causality` true causal SNPs by `|beta|`;
+- negatives = true null SNPs only;
+- weaker true causal SNPs are excluded from the task.
+
+This matches the intended analogy of high-confidence positives versus clear
+noncausal negatives, rather than folding weak true signals into the negative
+class.
+
+For the coefficient-style benchmarks we use:
+
+- the top `p_score_rank` true causal SNPs only;
+- pooled signed Spearman between `a` and `beta`;
+- pooled unsigned Spearman between `|a|` and `|beta|`.
+
+This is meant to mimic the AlphaGenome coefficient task, which is evaluated on
+true eQTLs rather than on all variants.
+
+For a pooled sparse-vs-null AUPRC value `AP`, we convert it to a balanced-case
+equivalent `auROC` under the equal-variance Gaussian score model:
+
+$$
+S_0 \sim N(0, 1), \qquad S_1 \sim N(d', 1).
+$$
+
+For a fixed prevalence `pi`, this model induces a precision-recall curve and a
+unique AUPRC. We numerically invert that map to recover `d'`, then report the
+balanced-case discrimination level:
+
+$$
+\mathrm{auROC}_{\mathrm{eq}} = \Phi\left(\frac{d'}{\sqrt{2}}\right).
+$$
+
+The signed and unsigned Spearman panels pool only the top `p_score_rank` true
+causal SNPs across all loci. Those panels are intended to anchor
+`annotation_r2`, whereas the causality panel is intended to anchor
+`inflate_match`.
+
+So the interpretation is:
+
+- if a grid point gets the causality panel into the AlphaGenome-like range,
+  that primarily supports its `inflate_match`;
+- if a grid point gets the signed and unsigned Spearman panels into the
+  AlphaGenome-like range, that primarily supports its `annotation_r2`.
+
+```{r inverse-sanity}
+scored_per_draw <- annotation_tbl$n_scored_causality[[1]]
+null_per_draw <- annotation_tbl$n_null[[1]]
+scored_prevalence <- scored_per_draw / (scored_per_draw + null_per_draw)
+
+ap_to_balanced_auroc <- build_ap_to_balanced_auroc(prevalence = scored_prevalence)
+
+inverse_sanity_tbl <- tibble::tibble(
+  balanced_auroc = c(0.50, 0.60, 0.70, 0.80),
+  dprime = sqrt(2) * stats::qnorm(.data$balanced_auroc),
+  pooled_auprc = purrr::map_dbl(.data$dprime, ap_from_dprime, prevalence = scored_prevalence),
+  recovered_balanced_auroc = purrr::map_dbl(.data$pooled_auprc, ap_to_balanced_auroc)
+)
+
+inverse_sanity_tbl %>%
+  knitr::kable(
+    digits = 4,
+    caption = "Sanity check for the pooled AUPRC to balanced-case auROC inversion"
+  )
+```
+
+# Pooled Grid Metrics
+
+```{r pooled-metrics}
+pooled_summary_tbl <- annotation_tbl %>%
+  dplyr::group_by(
+    .data$setting_id,
+    .data$annotation_r2,
+    .data$inflate_match,
+    .data$annotation_r2_f,
+    .data$inflate_match_f
+  ) %>%
+  dplyr::group_modify(function(.x, .y) {
+    pooled_auprc <- pooled_average_precision(
+      annotation_list = .x$annotation,
+      positive_idx_list = .x$positive_idx_causality,
+      null_idx_list = .x$null_idx
+    )
+
+    tibble::tibble(
+      pooled_causality_positive_count = sum(lengths(.x$positive_idx_causality)),
+      pooled_rank_count = sum(lengths(.x$positive_idx_rank)),
+      pooled_null_count = sum(lengths(.x$null_idx)),
+      pooled_auprc = pooled_auprc,
+      equivalent_causality_auroc = ap_to_balanced_auroc(pooled_auprc),
+      signed_spearman = pooled_spearman(
+        annotation_list = .x$annotation,
+        beta_list = .x$beta,
+        positive_idx_list = .x$positive_idx_rank,
+        use_abs = FALSE
+      ),
+      unsigned_spearman = pooled_spearman(
+        annotation_list = .x$annotation,
+        beta_list = .x$beta,
+        positive_idx_list = .x$positive_idx_rank,
+        use_abs = TRUE
+      )
+    )
+  }) %>%
+  dplyr::ungroup()
+
+pooled_summary_tbl %>%
+  dplyr::select(
+    .data$annotation_r2,
+    .data$inflate_match,
+    .data$equivalent_causality_auroc,
+    .data$signed_spearman,
+    .data$unsigned_spearman,
+    .data$pooled_auprc,
+    .data$pooled_causality_positive_count,
+    .data$pooled_rank_count
+  ) %>%
+  knitr::kable(
+    digits = 3,
+    caption = "Pooled AlphaGenome-style calibration metrics by grid point"
+  )
+```
+
+# Heatmaps
+
+```{r equivalent-auroc-heatmap}
+plot_metric_heatmap(
+  pooled_summary_tbl,
+  value_col = "equivalent_causality_auroc",
+  title = "Equivalent causality auROC from pooled sparse-vs-null AUPRC",
+  subtitle = paste0(
+    "Pooled over ", n_beta_draws,
+    " loci; positives are top-", p_score_causality,
+    " causal SNPs by |beta| and negatives are true nulls only"
+  ),
+  fill_label = "Equivalent auROC",
+  option = "D",
+  limits = c(0.5, 1),
+  digits = 2
+)
+```
+
+```{r signed-spearman-heatmap}
+plot_metric_heatmap(
+  pooled_summary_tbl,
+  value_col = "signed_spearman",
+  title = "Pooled signed Spearman correlation on top-p_score_rank causal SNPs",
+  subtitle = paste0(
+    "Pooled over ", n_beta_draws,
+    " loci; computed on the top-", p_score_rank,
+    " true causal SNPs by |beta|"
+  ),
+  fill_label = "Signed rho",
+  option = "C",
+  limits = c(-1, 1),
+  digits = 2
+)
+```
+
+```{r unsigned-spearman-heatmap}
+plot_metric_heatmap(
+  pooled_summary_tbl,
+  value_col = "unsigned_spearman",
+  title = "Pooled unsigned Spearman correlation on top-p_score_rank causal SNPs",
+  subtitle = paste0(
+    "Pooled over ", n_beta_draws,
+    " loci; computed on the top-", p_score_rank,
+    " true causal SNPs by |beta|"
+  ),
+  fill_label = "Unsigned rho",
+  option = "C",
+  limits = c(0, 1),
+  digits = 2
+)
+```
+
+# Working Calibration Choice
+
+The purpose of the heatmaps is to support a practical downstream choice, not to
+pretend that there is a single exact inverse map from AlphaGenome into this
+simulator. Our current working interpretation is:
+
+- `inflate_match` should be very close to `1`
+- `annotation_r2` should be moderate rather than high
+
+For downstream studies, the working estimate we will carry forward is:
+
+- `inflate_match in [0.95, 1.00]`
+- `annotation_r2 = 0.30`
+
+This choice reflects the following judgment:
+
+- the causality panel is being used mainly to place `inflate_match`, and the
+  realistic regime appears to be the nearly matched one rather than the
+  artificially easy low-`inflate_match` regime;
+- the coefficient-style panels are being used mainly to place `annotation_r2`,
+  and a value around `0.30` gives a moderate but nontrivial alignment between
+  annotation and true effect size, which is more believable than a near-perfect
+  annotation generator.
+
+# Notes
+
+- The simulator architecture is fixed at 3 sparse, 5 oligogenic, and 15
+  polygenic causal SNPs per locus.
+- If `p_score_causality` is changed, the causality-positive set is always the
+  top `p_score_causality` true causal SNPs by `|beta|`, capped at the number of
+  true causal SNPs.
+- If `p_score_rank` is changed, the rank-correlation set is always the top
+  `p_score_rank` true causal SNPs by `|beta|`, capped at the number of true
+  causal SNPs.
+- The equivalent `auROC` conversion is a rough bridge for calibration, not a
+  claim that the AlphaGenome and simulated tasks are exactly the same.

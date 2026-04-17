@@ -77,14 +77,100 @@ overlap_rate_from_sets <- function(list_of_sets) {
   mean(overlaps)
 }
 
+# Normalize a numeric vector onto the probability simplex.
+normalize_prob_vec <- function(x) {
+  if (!is.numeric(x)) stop("x must be numeric")
+  x <- as.numeric(x)
+  x[!is.finite(x)] <- 0
+  x[x < 0] <- 0
+  s <- sum(x)
+  if (!is.finite(s) || s <= 0) {
+    return(rep(0, length(x)))
+  }
+  x / s
+}
+
+prob_entropy <- function(prob) {
+  p <- normalize_prob_vec(prob)
+  if (!any(p > 0)) return(NA_real_)
+  -sum(p[p > 0] * log(p[p > 0]))
+}
+
+prob_k_eff <- function(prob) {
+  h <- prob_entropy(prob)
+  if (!is.finite(h)) return(NA_real_)
+  exp(h)
+}
+
+prob_entropy_core <- function(prob, rho = 0.95) {
+  p <- normalize_prob_vec(prob)
+  idx <- get_credible_set(p, rho = rho)
+  if (!length(idx)) return(NA_real_)
+  prob_entropy(p[idx])
+}
+
+prob_k_eff_core <- function(prob, rho = 0.95) {
+  h <- prob_entropy_core(prob, rho = rho)
+  if (!is.finite(h)) return(NA_real_)
+  exp(h)
+}
+
+effect_accuracy_ratio <- function(alpha_vec, causal_idx) {
+  p <- normalize_prob_vec(alpha_vec)
+  if (!length(causal_idx)) return(NA_real_)
+
+  valid_causal <- unique(as.integer(causal_idx[is.finite(causal_idx)]))
+  valid_causal <- valid_causal[valid_causal >= 1L & valid_causal <= length(p)]
+  if (!length(valid_causal)) return(NA_real_)
+
+  max_any <- max(p, na.rm = TRUE)
+  if (!is.finite(max_any) || max_any <= 0) return(NA_real_)
+
+  max_causal <- max(p[valid_causal], na.rm = TRUE)
+  if (!is.finite(max_causal)) return(NA_real_)
+
+  max_causal / max_any
+}
+
 # Per-effect metrics given one alpha vector
 cs_metrics_one_effect <- function(alpha_vec, X, causal_idx, rho = 0.95,
                                   purity_cache = NULL, cor_mat = NULL) {
-  cs <- get_credible_set(alpha_vec, rho)
+  alpha_prob <- normalize_prob_vec(alpha_vec)
+  cs <- get_credible_set(alpha_prob, rho)
   size <- length(cs)
   purity <- cs_purity_min_abs(X, cs, cache = purity_cache, cor_mat = cor_mat)
   coverage <- as.integer(size > 0 && any(cs %in% causal_idx))
-  list(indices = cs, size = size, purity = purity, coverage = coverage)
+  effect_pip_entropy <- prob_entropy(alpha_prob)
+  effect_pip_entropy_core95 <- prob_entropy_core(alpha_prob, rho = 0.95)
+  effect_k_eff_signal <- prob_k_eff(alpha_prob)
+  effect_k_eff_signal_core95 <- prob_k_eff_core(alpha_prob, rho = 0.95)
+  tail_inflation_ratio <- if (is.finite(effect_k_eff_signal) &&
+                              is.finite(effect_k_eff_signal_core95) &&
+                              effect_k_eff_signal_core95 > 0) {
+    effect_k_eff_signal / effect_k_eff_signal_core95
+  } else {
+    NA_real_
+  }
+  tail_inflation_log <- if (is.finite(effect_pip_entropy) &&
+                            is.finite(effect_pip_entropy_core95)) {
+    effect_pip_entropy - effect_pip_entropy_core95
+  } else {
+    NA_real_
+  }
+  accuracy_ratio <- effect_accuracy_ratio(alpha_prob, causal_idx)
+  list(
+    indices = cs,
+    size = size,
+    purity = purity,
+    coverage = coverage,
+    effect_pip_entropy = effect_pip_entropy,
+    effect_pip_entropy_core95 = effect_pip_entropy_core95,
+    effect_k_eff_signal = effect_k_eff_signal,
+    effect_k_eff_signal_core95 = effect_k_eff_signal_core95,
+    tail_inflation_ratio = tail_inflation_ratio,
+    tail_inflation_log = tail_inflation_log,
+    accuracy_ratio = accuracy_ratio
+  )
 }
 
 # ---------- classification-style metrics on combined PIPs ----------
@@ -260,10 +346,17 @@ evaluate_model <- function(fit, X, y = NULL, causal_idx = integer(0),
   }
 
   effects_unfiltered <- data.frame(
-    effect   = seq_len(L),
-    size     = sapply(eff, `[[`, "size"),
-    purity   = sapply(eff, `[[`, "purity"),
-    coverage = sapply(eff, `[[`, "coverage"),
+    effect                      = seq_len(L),
+    size                        = sapply(eff, `[[`, "size"),
+    purity                      = sapply(eff, `[[`, "purity"),
+    coverage                    = sapply(eff, `[[`, "coverage"),
+    effect_pip_entropy          = sapply(eff, `[[`, "effect_pip_entropy"),
+    effect_pip_entropy_core95   = sapply(eff, `[[`, "effect_pip_entropy_core95"),
+    effect_k_eff_signal         = sapply(eff, `[[`, "effect_k_eff_signal"),
+    effect_k_eff_signal_core95  = sapply(eff, `[[`, "effect_k_eff_signal_core95"),
+    tail_inflation_ratio        = sapply(eff, `[[`, "tail_inflation_ratio"),
+    tail_inflation_log          = sapply(eff, `[[`, "tail_inflation_log"),
+    accuracy_ratio              = sapply(eff, `[[`, "accuracy_ratio"),
     stringsAsFactors = FALSE
   )
   effects_unfiltered$indices <- I(lapply(eff, `[[`, "indices"))

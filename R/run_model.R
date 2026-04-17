@@ -30,6 +30,7 @@ run_task <- function(job_name,
     buffer_ctx$buffers <- list(
       model = list(),
       effect = list(),
+      effect_unfiltered = list(),
       tier_cs_metrics = list(),
       snps = list(),
       confusion = list(),
@@ -2219,6 +2220,13 @@ write_run_outputs <- function(run_row,
   }
 
   effect_metrics <- NULL
+  effect_metrics_unfiltered <- NULL
+  if (!is.null(evaluation$effects_unfiltered) && nrow(evaluation$effects_unfiltered)) {
+    effect_metrics_unfiltered <- dplyr::mutate(
+      dplyr::select(evaluation$effects_unfiltered, -dplyr::any_of("indices")),
+      run_id = run_row$run_id
+    ) %>% dplyr::bind_cols(effect_meta_tbl)
+  }
   if (!is.null(evaluation$effects_filtered) && nrow(evaluation$effects_filtered)) {
     effect_metrics <- dplyr::mutate(
       dplyr::select(evaluation$effects_filtered, -dplyr::any_of("indices")),
@@ -2227,6 +2235,12 @@ write_run_outputs <- function(run_row,
   }
   if (!is.null(effect_metrics) && nrow(effect_metrics) && verbose_output) {
     readr::write_csv(effect_metrics, file.path(run_dir, "effect_metrics.csv"))
+  }
+  if (!is.null(effect_metrics_unfiltered) && nrow(effect_metrics_unfiltered) && verbose_output) {
+    readr::write_csv(
+      effect_metrics_unfiltered,
+      file.path(run_dir, "effect_metrics_unfiltered.csv")
+    )
   }
 
   snp_tbl <- NULL
@@ -2302,6 +2316,7 @@ write_run_outputs <- function(run_row,
       buffer_ctx = buffer_ctx,
       model_metrics = model_metrics,
       effect_metrics = effect_metrics,
+      effect_metrics_unfiltered = effect_metrics_unfiltered,
       snp_tbl = if (isTRUE(job_config$job$write_snps_parquet)) snp_tbl else NULL,
       validation_row = build_validation_row(run_row)
     )
@@ -2396,6 +2411,7 @@ build_validation_row <- function(run_row) {
 buffer_task_outputs <- function(buffer_ctx,
                                 model_metrics,
                                 effect_metrics,
+                                effect_metrics_unfiltered,
                                 snp_tbl,
                                 validation_row,
                                 confusion_bins = NULL,
@@ -2409,6 +2425,9 @@ buffer_task_outputs <- function(buffer_ctx,
   }
   if (!is.null(effect_metrics) && nrow(effect_metrics)) {
     buffer_ctx$buffers$effect[[length(buffer_ctx$buffers$effect) + 1L]] <- effect_metrics
+  }
+  if (!is.null(effect_metrics_unfiltered) && nrow(effect_metrics_unfiltered)) {
+    buffer_ctx$buffers$effect_unfiltered[[length(buffer_ctx$buffers$effect_unfiltered) + 1L]] <- effect_metrics_unfiltered
   }
   if (!is.null(snp_tbl) && nrow(snp_tbl)) {
     buffer_ctx$buffers$snps[[length(buffer_ctx$buffers$snps) + 1L]] <- snp_tbl
@@ -2697,7 +2716,7 @@ compute_hg2_by_agg <- function(pip_list,
 flush_task_buffers <- function(buffer_ctx) {
   buf <- buffer_ctx$buffers
   if (is.null(buf) ||
-      !length(buf$model) && !length(buf$effect) && !length(buf$snps) &&
+      !length(buf$model) && !length(buf$effect) && !length(buf$effect_unfiltered) && !length(buf$snps) &&
       !length(buf$confusion) && !length(buf$dataset_metrics) && !length(buf$multimodal) &&
       !length(buf$refine_depth) && !length(buf$scaling_bins) &&
       !length(buf$validation) && !length(buf$prior_diagnostics) &&
@@ -2718,6 +2737,7 @@ flush_task_buffers <- function(buffer_ctx) {
 
   model_tbl <- if (length(buf$model)) dplyr::bind_rows(buf$model) else NULL
   effect_tbl <- if (length(buf$effect)) dplyr::bind_rows(buf$effect) else NULL
+  effect_unfiltered_tbl <- if (length(buf$effect_unfiltered)) dplyr::bind_rows(buf$effect_unfiltered) else NULL
   snp_tbl <- if (length(buf$snps)) dplyr::bind_rows(buf$snps) else NULL
   validation_tbl <- if (length(buf$validation)) dplyr::bind_rows(buf$validation) else NULL
   confusion_tbl <- if (length(buf$confusion)) dplyr::bind_rows(buf$confusion) else NULL
@@ -2735,6 +2755,7 @@ flush_task_buffers <- function(buffer_ctx) {
     task_id = buffer_ctx$task_id,
     model_metrics = model_tbl,
     effect_metrics = effect_tbl,
+    effect_metrics_unfiltered = effect_unfiltered_tbl,
     snp_tbl = snp_tbl,
     validation_row = validation_tbl,
     confusion_bins = confusion_tbl,
@@ -2760,6 +2781,7 @@ flush_task_buffers <- function(buffer_ctx) {
   buffer_ctx$buffers <- list(
     model = list(),
     effect = list(),
+    effect_unfiltered = list(),
     snps = list(),
     confusion = list(),
     dataset_metrics = list(),
@@ -2779,6 +2801,7 @@ write_flush_outputs <- function(staging_dir,
                                 task_id,
                                 model_metrics,
                                 effect_metrics,
+                                effect_metrics_unfiltered,
                                 snp_tbl,
                                 validation_row,
                                 confusion_bins = NULL,
@@ -2796,6 +2819,17 @@ write_flush_outputs <- function(staging_dir,
   if (!is.null(effect_metrics) && nrow(effect_metrics)) {
     effect_metrics <- dplyr::mutate(effect_metrics, task_id = task_id, flush_id = flush_label)
     readr::write_csv(effect_metrics, file.path(staging_dir, sprintf("%s_effect_metrics.csv", flush_label)))
+  }
+  if (!is.null(effect_metrics_unfiltered) && nrow(effect_metrics_unfiltered)) {
+    effect_metrics_unfiltered <- dplyr::mutate(
+      effect_metrics_unfiltered,
+      task_id = task_id,
+      flush_id = flush_label
+    )
+    readr::write_csv(
+      effect_metrics_unfiltered,
+      file.path(staging_dir, sprintf("%s_effect_metrics_unfiltered.csv", flush_label))
+    )
   }
   if (!is.null(snp_tbl) && nrow(snp_tbl)) {
     snp_tbl <- dplyr::mutate(snp_tbl, task_id = task_id, flush_id = flush_label)

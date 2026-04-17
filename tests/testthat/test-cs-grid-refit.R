@@ -18,6 +18,7 @@ make_test_buffer_ctx <- function() {
   buffer_ctx$buffers <- list(
     model = list(),
     effect = list(),
+    effect_unfiltered = list(),
     tier_cs_metrics = list(),
     snps = list(),
     confusion = list(),

@@ -1,0 +1,350 @@
+---
+title: "Baseline Sims Screening - Smoke Test"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+Minimal local smoke test for the baseline-screening pipeline. This keeps
+the same baseline model families as the full baseline workbook, but
+shrinks to 1 dataset, 1 phenotype seed, 1 annotation setting, and small
+tuning grids so the whole job fits in a single local task.
+
+```{r setup, message=FALSE}
+here::i_am("vignettes/simulation pipeline/run_control_workbook_baseline_sims_smoke.Rmd")
+library(here)
+library(devtools)
+
+susine_path <- here("..", "susine")
+if (file.exists(file.path(susine_path, "DESCRIPTION"))) {
+  options(test_susine.local_susine_path = normalizePath(susine_path, winslash = "/", mustWork = TRUE))
+  devtools::load_all(susine_path)
+}
+devtools::load_all(".")
+
+library(dplyr)
+library(readr)
+library(knitr)
+library(tidyr)
+```
+
+# 1. Smoke Grid Values
+
+```{r grid-values}
+job_name <- "baseline_sims_screen_smoke"
+
+sigma_0_2_default <- 0.2
+sigma_grid_vanilla <- c(0.1, 0.2)
+sigma_grid_functional_mu <- c(0.1, 0.2)
+c_grid_functional_mu <- c(0, 1.5)
+tau_grid_functional_pi <- exp(seq(log(0.01), log(10), length.out = 4))
+
+annotation_r2_levels <- 0.3
+inflate_match_levels <- 1
+
+L_grid <- 10L
+seeds <- 1L
+n_matrices_target <- 1L
+
+max_iter <- 50L
+task_unit <- "dataset"
+bundles_per_task <- 1L
+task_assignment_seed <- 1L
+
+cat("sigma_grid_vanilla:", sigma_grid_vanilla, "\n")
+cat("sigma_grid_functional_mu:", sigma_grid_functional_mu, "\n")
+cat("c_grid_functional_mu:", c_grid_functional_mu, "\n")
+cat("tau_grid_functional_pi:", signif(tau_grid_functional_pi, 3), "\n")
+```
+
+# 2. Smoke Spec Catalog
+
+```{r smoke-specs}
+spec_susie_vanilla_sigma <- list(
+  name = "susie_vanilla_sigma_smoke",
+  use_case_ids = "susie_vanilla",
+  exploration_methods = "sigma_0_2_grid",
+  exploration_mode = "separate",
+  K = length(sigma_grid_vanilla),
+  sigma_0_2_grid_values = sigma_grid_vanilla
+)
+
+spec_susine_vanilla_sigma <- list(
+  name = "susine_vanilla_sigma_smoke",
+  use_case_ids = "susine_vanilla",
+  exploration_methods = "sigma_0_2_grid",
+  exploration_mode = "separate",
+  K = length(sigma_grid_vanilla),
+  sigma_0_2_grid_values = sigma_grid_vanilla
+)
+
+spec_susie_eb_single <- list(
+  name = "susie_eb_single_smoke",
+  use_case_ids = "susie_eb",
+  exploration_methods = "single",
+  exploration_mode = "separate",
+  K = 1L
+)
+
+spec_susie_inf_single <- list(
+  name = "susie_inf_single_smoke",
+  use_case_ids = "susie_inf",
+  exploration_methods = "single",
+  exploration_mode = "separate",
+  K = 1L
+)
+
+spec_susie_ash_fixed_single <- list(
+  name = "susie_ash_fixed_single_smoke",
+  use_case_ids = "susie_ash_fixed",
+  exploration_methods = "single",
+  exploration_mode = "separate",
+  K = 1L
+)
+
+spec_susine_functional_mu_grid <- list(
+  name = "susine_functional_mu_grid_smoke",
+  use_case_ids = "susine_functional_mu",
+  exploration_methods = c("c_grid", "sigma_0_2_grid"),
+  exploration_mode = "intersect",
+  K = length(c_grid_functional_mu) * length(sigma_grid_functional_mu),
+  c_grid_values = c_grid_functional_mu,
+  sigma_0_2_grid_values = sigma_grid_functional_mu
+)
+
+spec_susine_eb_clamped_single <- list(
+  name = "susine_eb_clamped_scale_var_nonneg_single_smoke",
+  use_case_ids = "susine_eb_clamped_scale_var_nonneg",
+  exploration_methods = "single",
+  exploration_mode = "separate",
+  K = 1L
+)
+
+spec_susie_functional_pi_tau <- list(
+  name = "susie_functional_pi_tau_smoke",
+  use_case_ids = "susie_functional_pi",
+  exploration_methods = "tau_grid",
+  exploration_mode = "separate",
+  K = length(tau_grid_functional_pi),
+  tau_grid_values = tau_grid_functional_pi
+)
+
+all_specs <- list(
+  spec_susie_vanilla_sigma,
+  spec_susine_vanilla_sigma,
+  spec_susie_eb_single,
+  spec_susie_inf_single,
+  spec_susie_ash_fixed_single,
+  spec_susine_functional_mu_grid,
+  spec_susine_eb_clamped_single,
+  spec_susie_functional_pi_tau
+)
+
+cat("Smoke specs:", length(all_specs), "\n")
+for (s in all_specs) {
+  cat(sprintf("  %-52s K=%-2d methods=%s\n",
+              s$name, s$K, paste(s$exploration_methods, collapse = "x")))
+}
+```
+
+# 3. Matrix Selection
+
+```{r matrix-selection}
+data_matrix_catalog_full <- test_susine:::build_data_matrix_catalog(
+  requested_scenarios = "scenario_1",
+  repo_root = here(),
+  summary_path = here(
+    "data", "sampled_simulated_genotypes", "scenario_sampling_summary.csv"
+  )
+)
+cat("Total available genotype matrices:", nrow(data_matrix_catalog_full), "\n")
+
+data_matrix_catalog <- data_matrix_catalog_full %>%
+  dplyr::slice_head(n = n_matrices_target)
+
+cat("Smoke-test matrices selected:", nrow(data_matrix_catalog), "\n")
+cat("Phenotype seeds:", paste(seeds, collapse = ", "), "\n")
+```
+
+# 4. Build Smoke Config
+
+```{r build-config}
+cfg <- make_job_config(
+  job_name = job_name,
+  HPC = FALSE,
+  time = "00:30:00",
+  mem = "4G",
+  email = "mgc5166@psu.edu",
+  output_root = here("output"),
+  grid_mode = "full",
+  use_case_ids = c(
+    "susie_vanilla",
+    "susine_vanilla",
+    "susie_eb",
+    "susie_inf",
+    "susie_ash_fixed",
+    "susine_functional_mu",
+    "susine_eb_clamped_scale_var_nonneg",
+    "susie_functional_pi"
+  ),
+  exploration_specs = all_specs,
+  L_grid = L_grid,
+  y_noise_grid = NA_real_,
+  p_star_grid = NA_integer_,
+  architecture_grid = "susie2_oligogenic",
+  seeds = seeds,
+  prior_quality = tidyr::expand_grid(
+    annotation_r2 = annotation_r2_levels,
+    inflate_match = inflate_match_levels
+  ),
+  sigma_0_2_scalars = sigma_0_2_default,
+  data_scenarios = "scenario_1",
+  repo_root = here(),
+  data_matrix_catalog = data_matrix_catalog,
+  sampled_scenario_summary = here(
+    "data", "sampled_simulated_genotypes", "scenario_sampling_summary.csv"
+  ),
+  task_unit = task_unit,
+  bundles_per_task = bundles_per_task,
+  task_assignment_seed = task_assignment_seed,
+  max_iter = max_iter,
+  aggregation_methods = character(0),
+  include_overall_pool = FALSE,
+  credible_set_rho = 0.95,
+  purity_threshold = 0.50,
+  verbose_file_output = FALSE,
+  write_snps_parquet = FALSE,
+  write_confusion_bins = TRUE,
+  write_tier_cs_metrics = TRUE,
+  write_scaling_confusion_bins = FALSE,
+  metrics_settings = list(
+    pip_breaks = sort(unique(c(
+      seq(0.00, 0.05, by = 0.005),
+      seq(0.05, 0.10, by = 0.01),
+      seq(0.10, 1.00, by = 0.02)
+    ))),
+    z_top_k = 10L,
+    jsd_threshold = 0.15
+  )
+)
+```
+
+# 5. Budget Summary
+
+```{r budget-summary}
+runs <- cfg$tables$runs
+
+cat("Total runs:", nrow(runs), "\n")
+cat("Tasks:", cfg$job$n_tasks, "\n")
+cat("Dataset bundles:", dplyr::n_distinct(runs$dataset_bundle_id), "\n")
+
+runs %>%
+  dplyr::group_by(.data$spec_name, .data$use_case_id) %>%
+  dplyr::summarise(
+    n_runs = dplyr::n(),
+    n_datasets = dplyr::n_distinct(.data$dataset_bundle_id),
+    .groups = "drop"
+  ) %>%
+  knitr::kable(caption = "Runs per smoke-test baseline spec")
+```
+
+# 6. Smoke Checks
+
+```{r smoke-checks}
+stopifnot(cfg$job$n_tasks == 1L)
+stopifnot(nrow(cfg$tables$dataset_bundles) == 1L)
+stopifnot(length(unique(runs$phenotype_seed)) == 1L)
+stopifnot(length(unique(runs$dataset_bundle_id)) == 1L)
+
+expected_specs <- c(
+  "susie_vanilla_sigma_smoke",
+  "susine_vanilla_sigma_smoke",
+  "susie_eb_single_smoke",
+  "susie_inf_single_smoke",
+  "susie_ash_fixed_single_smoke",
+  "susine_functional_mu_grid_smoke",
+  "susine_eb_clamped_scale_var_nonneg_single_smoke",
+  "susie_functional_pi_tau_smoke"
+)
+stopifnot(all(expected_specs %in% unique(runs$spec_name)))
+
+annotated_specs <- c(
+  "susine_functional_mu_grid_smoke",
+  "susine_eb_clamped_scale_var_nonneg_single_smoke",
+  "susie_functional_pi_tau_smoke"
+)
+annotated_runs <- runs %>%
+  dplyr::filter(.data$spec_name %in% annotated_specs)
+
+stopifnot(all(unique(annotated_runs$annotation_r2) == 0.3))
+stopifnot(all(unique(annotated_runs$inflate_match) == 1))
+
+cat("Smoke checks passed.\n")
+```
+
+# 7. Write Artifacts
+
+```{r write-artifacts, eval=FALSE}
+arts <- write_job_artifacts(
+  job_config = cfg,
+  run_task_script = here("inst", "scripts", "run_task.R")
+)
+cat("Job config written to:", arts$job_config, "\n")
+cat("SLURM script written to:", arts$slurm_script, "\n")
+```
+
+# 8. Run Locally
+
+```{r run-locally, eval=FALSE}
+arts <- write_job_artifacts(
+  job_config = cfg,
+  run_task_script = here("inst", "scripts", "run_task.R")
+)
+
+run_task(
+  job_name = cfg$job$name,
+  task_id = 1L,
+  job_root = here("output"),
+  config_path = arts$job_config,
+  quiet = FALSE
+)
+```
+
+# 9. Quick Validation
+
+```{r validate, eval=FALSE}
+staging_dir <- file.path(cfg$paths$temp_dir, "staging")
+if (dir.exists(staging_dir)) {
+  staging_files <- list.files(staging_dir, recursive = TRUE)
+  cat("Staging files:", length(staging_files), "\n")
+  print(table(tools::file_ext(staging_files)))
+} else {
+  cat("No staging directory found -- check the local run above.\n")
+}
+
+model_metrics_files <- list.files(
+  staging_dir,
+  pattern = "model_metrics",
+  recursive = TRUE
+)
+cat("Model metrics files:", length(model_metrics_files), "\n")
+
+effect_metrics_files <- list.files(
+  staging_dir,
+  pattern = "effect_metrics",
+  recursive = TRUE
+)
+cat("Effect metrics files:", length(effect_metrics_files), "\n")
+
+confusion_files <- list.files(
+  staging_dir,
+  pattern = "confusion",
+  recursive = TRUE
+)
+cat("Confusion bin files:", length(confusion_files), "\n")
+```

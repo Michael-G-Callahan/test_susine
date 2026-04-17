@@ -1,0 +1,345 @@
+---
+title: "k_eff vs Entropy Tuning"
+date: "2026-04-17"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+One-off workbook to calibrate how row entropy maps to an interpretable
+"effective number of signals" summary for a single `alpha` row.
+
+We construct synthetic `alpha` rows with:
+
+- `p = 1000` total variants
+- a high-mass set of size `k`
+- `background_mass` spread uniformly across the remaining `p - k`
+  variants
+
+For example, when `k = 2` and `background_mass = 0.1`, the row is:
+
+- `alpha_1 = alpha_2 = 0.45`
+- all other variants get `0.1 / 998`
+
+The main tuning question is how the raw row entropy changes as the row
+behaves more like "mass spread across about `k` variants."
+
+```{r setup, message=FALSE}
+here::i_am("vignettes/one_off_validations/k_eff_vs_entropy_tuning.Rmd")
+library(here)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(readr)
+library(knitr)
+
+theme_set(theme_bw(base_size = 12))
+```
+
+## 1. Inputs
+
+```{r inputs}
+p <- 1000L
+k_grid <- 1:1000
+background_mass_grid <- c(0, 0.1, 0.2)
+
+fig_dir <- here("output", "one_off_validations", "k_eff_vs_entropy_tuning")
+dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
+
+curve_csv <- file.path(fig_dir, "k_eff_vs_entropy_curve.csv")
+plot_k_vs_entropy_png <- file.path(fig_dir, "k_vs_entropy.png")
+plot_keff_vs_entropy_png <- file.path(fig_dir, "k_eff_vs_entropy.png")
+plot_keff_vs_k_png <- file.path(fig_dir, "k_eff_vs_k.png")
+
+cat("p:", p, "\n")
+cat("Figure dir:", fig_dir, "\n")
+cat("Curve CSV:", curve_csv, "\n")
+```
+
+## 2. Helpers
+
+```{r helpers}
+xlogx <- function(x) {
+  ifelse(x > 0, x * log(x), 0)
+}
+
+make_alpha_row <- function(p, k, background_mass) {
+  stopifnot(length(p) == 1L, length(k) == 1L, length(background_mass) == 1L)
+  stopifnot(k >= 1L, k <= p)
+  stopifnot(background_mass >= 0, background_mass < 1)
+
+  if (k == p && background_mass > 0) {
+    stop("background_mass > 0 is infeasible when k == p because no background variants remain.")
+  }
+
+  alpha <- numeric(p)
+  alpha[seq_len(k)] <- (1 - background_mass) / k
+
+  if (k < p && background_mass > 0) {
+    alpha[(k + 1):p] <- background_mass / (p - k)
+  }
+
+  alpha
+}
+
+row_entropy <- function(alpha_row) {
+  probs <- alpha_row[alpha_row > 0]
+  -sum(probs * log(probs))
+}
+
+row_k_eff <- function(alpha_row) {
+  exp(row_entropy(alpha_row))
+}
+
+compute_row_summary <- function(p, k, background_mass) {
+  if (k == p && background_mass > 0) {
+    return(NULL)
+  }
+
+  main_mass_each <- (1 - background_mass) / k
+  background_each <- if (k < p && background_mass > 0) {
+    background_mass / (p - k)
+  } else {
+    0
+  }
+
+  entropy <- -(
+    k * xlogx(main_mass_each) +
+      (p - k) * xlogx(background_each)
+  )
+
+  tibble(
+    p = p,
+    k = k,
+    background_mass = background_mass,
+    main_mass_each = main_mass_each,
+    background_each = background_each,
+    entropy = entropy,
+    k_eff_entropy = exp(entropy)
+  )
+}
+```
+
+`k_eff_entropy = exp(H)` is the entropy-equivalent support size: the
+number of equally weighted variants that would have the same entropy.
+
+## 3. Build the Tuning Grid
+
+```{r build-grid}
+curve_df <- tidyr::expand_grid(
+  k = k_grid,
+  background_mass = background_mass_grid
+) %>%
+  dplyr::arrange(.data$background_mass, .data$k)
+
+curve_rows <- lapply(seq_len(nrow(curve_df)), function(i) {
+  compute_row_summary(
+    p = p,
+    k = curve_df$k[[i]],
+    background_mass = curve_df$background_mass[[i]]
+  )
+})
+
+curve_tbl <- dplyr::bind_rows(curve_rows) %>%
+  dplyr::mutate(
+    background_mass_label = factor(
+      .data$background_mass,
+      levels = background_mass_grid,
+      labels = paste0("background_mass = ", background_mass_grid)
+    )
+  )
+
+readr::write_csv(curve_tbl, curve_csv)
+
+cat("Rows written:", nrow(curve_tbl), "\n")
+cat("Feasible rows dropped:", nrow(curve_df) - nrow(curve_tbl), "\n")
+
+kable(
+  curve_tbl %>%
+    dplyr::filter(.data$k %in% c(1, 2, 5, 10, 50, 100, 500, 999, 1000)),
+  digits = 4
+)
+```
+
+Feasibility note: when `k = p = 1000`, positive `background_mass` is not
+possible because there are no non-top-set variants left to hold the
+background. Those two infeasible rows are omitted.
+
+## 4. Spot-Check the Construction
+
+```{r spot-check}
+example_alpha <- make_alpha_row(p = 1000L, k = 2L, background_mass = 0.1)
+
+tibble(
+  entry = c("alpha[1]", "alpha[2]", "alpha[3]", "sum(alpha)", "entropy", "k_eff_entropy"),
+  value = c(
+    example_alpha[1],
+    example_alpha[2],
+    example_alpha[3],
+    sum(example_alpha),
+    row_entropy(example_alpha),
+    row_k_eff(example_alpha)
+  )
+) %>%
+  kable(digits = 6)
+```
+
+## 5. Plot Entropy vs `k`
+
+Swapped-axis version of the tuning plot: use intended high-mass support
+size `k` on the x-axis, entropy on the y-axis, and color by
+`background_mass`.
+
+```{r plot-k-vs-entropy, fig.width=9, fig.height=6}
+p_k_vs_entropy <- ggplot(
+  curve_tbl,
+  aes(x = .data$k, y = .data$entropy, color = .data$background_mass_label)
+) +
+  geom_line(linewidth = 1.0) +
+  labs(
+    title = "Entropy vs intended high-mass support size",
+    subtitle = "p = 1000; curves differ by how much mass is left in the background tail",
+    x = "Intended high-mass support k",
+    y = "Row entropy H(alpha)",
+    color = NULL
+  )
+
+print(p_k_vs_entropy)
+
+ggsave(
+  filename = plot_k_vs_entropy_png,
+  plot = p_k_vs_entropy,
+  width = 9,
+  height = 6,
+  dpi = 200
+)
+```
+
+## 6. Why This Is Not One-to-One in `k`
+
+For fixed `background_mass = b`, the synthetic row has entropy
+
+$$
+H(k, b) =
+-(1-b)\log\left(\frac{1-b}{k}\right)
+- b\log\left(\frac{b}{p-k}\right)
+$$
+
+which can be rearranged as
+
+$$
+H(k, b) =
+(1-b)\log(k) + b\log(p-k) - (1-b)\log(1-b) - b\log(b).
+$$
+
+This shows the key point:
+
+- when `k` increases, the top-set term `((1-b) log k)` pushes entropy up
+- but the background term `(b log(p-k))` pushes entropy down because the
+  same background mass is being packed into fewer remaining variants
+
+So for `b > 0`, entropy is generally **not monotone in `k`**. It rises,
+then falls, with its maximum at
+
+$$
+k^* = (1-b)p.
+$$
+
+In this workbook that means:
+
+- `background_mass = 0` peaks at `k = 1000`
+- `background_mass = 0.1` peaks at `k = 900`
+- `background_mass = 0.2` peaks at `k = 800`
+
+So the current plot should not be expected to be one-to-one in `k`.
+Two different `k` values can give the same entropy once
+`background_mass > 0`.
+
+By contrast, if you define
+
+$$
+k_{\mathrm{eff}} = \exp(H),
+$$
+
+then `k_eff` and entropy are exactly one-to-one, because `exp()` is a
+strictly increasing transform.
+
+## 7. Plot `k_eff` vs Entropy
+
+This is the direct entropy-to-effective-support mapping.
+
+```{r plot-keff-vs-entropy, fig.width=9, fig.height=6}
+p_keff_vs_entropy <- ggplot(
+  curve_tbl,
+  aes(x = .data$entropy, y = .data$k_eff_entropy, color = .data$background_mass_label)
+) +
+  geom_line(linewidth = 1.0) +
+  labs(
+    title = "Entropy-equivalent support size vs entropy",
+    subtitle = "k_eff = exp(H); uniform rows lie on the exact exp(H) curve",
+    x = "Row entropy H(alpha)",
+    y = "k_eff = exp(H(alpha))",
+    color = NULL
+  )
+
+print(p_keff_vs_entropy)
+
+ggsave(
+  filename = plot_keff_vs_entropy_png,
+  plot = p_keff_vs_entropy,
+  width = 9,
+  height = 6,
+  dpi = 200
+)
+```
+
+## 8. Plot `k_eff` vs Intended `k`
+
+This view is often the most interpretable for threshold selection: it
+shows how much the entropy-equivalent support exceeds the nominal
+high-mass set size once a background tail is introduced.
+
+```{r plot-keff-vs-k, fig.width=9, fig.height=6}
+p_keff_vs_k <- ggplot(
+  curve_tbl,
+  aes(x = .data$k, y = .data$k_eff_entropy, color = .data$background_mass_label)
+) +
+  geom_line(linewidth = 1.0) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey40") +
+  labs(
+    title = "Entropy-equivalent support vs intended high-mass support",
+    subtitle = "Dashed line = k_eff equals k",
+    x = "Intended high-mass support k",
+    y = "k_eff = exp(H(alpha))",
+    color = NULL
+  )
+
+print(p_keff_vs_k)
+
+ggsave(
+  filename = plot_keff_vs_k_png,
+  plot = p_keff_vs_k,
+  width = 9,
+  height = 6,
+  dpi = 200
+)
+```
+
+## 9. Quick Readout
+
+```{r quick-readout}
+curve_tbl %>%
+  dplyr::filter(.data$k %in% c(2, 5, 10, 20, 50, 100, 200, 500)) %>%
+  dplyr::select(.data$k, .data$background_mass, .data$entropy, .data$k_eff_entropy) %>%
+  tidyr::pivot_wider(
+    names_from = .data$background_mass,
+    values_from = c(.data$entropy, .data$k_eff_entropy),
+    names_glue = "{.value}_bg{background_mass}"
+  ) %>%
+  kable(digits = 4)
+```

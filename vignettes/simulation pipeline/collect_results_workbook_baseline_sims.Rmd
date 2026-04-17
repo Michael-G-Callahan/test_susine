@@ -1,0 +1,270 @@
+---
+title: "Baseline Sims Screening - Collect Results"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+Post-hoc collection for the baseline screening job. This merges staged
+flush files, derives baseline-specific identifiers, and writes a
+consolidated directory for the baseline visualization workbook.
+
+```{r setup, message=FALSE}
+here::i_am("vignettes/simulation pipeline/collect_results_workbook_baseline_sims.Rmd")
+library(here)
+library(devtools)
+
+susine_path <- here("..", "susine")
+if (file.exists(file.path(susine_path, "DESCRIPTION"))) {
+  options(test_susine.local_susine_path = normalizePath(susine_path, winslash = "/", mustWork = TRUE))
+  devtools::load_all(susine_path)
+}
+devtools::load_all(".")
+
+library(dplyr)
+library(readr)
+library(tidyr)
+library(knitr)
+```
+
+# 1. Locate Output
+
+```{r locate}
+job_name <- "baseline_sims_screen"
+parent_job_id <- "REPLACE_ME"
+output_root <- here("output")
+
+job_dir <- file.path(output_root, "slurm_output", job_name, parent_job_id)
+cfg_path <- file.path(output_root, "run_history", job_name, parent_job_id, "job_config.json")
+cfg <- test_susine:::load_job_config(cfg_path)
+
+aggregated_dir <- file.path(job_dir, "aggregated")
+consolidated_dir <- file.path(job_dir, "consolidated")
+dir.create(consolidated_dir, recursive = TRUE, showWarnings = FALSE)
+
+cat("Job dir:", job_dir, "\n")
+cat("Aggregated dir:", aggregated_dir, "\n")
+cat("Consolidated dir:", consolidated_dir, "\n")
+```
+
+# 2. Aggregate Staging Outputs
+
+```{r aggregate}
+agg <- test_susine::aggregate_staging_outputs(
+  job_name = job_name,
+  parent_job_id = parent_job_id,
+  output_root = output_root,
+  validate = TRUE,
+  output_dir = aggregated_dir,
+  write_snps_dataset = FALSE
+)
+
+if (!is.null(agg$validation) && nrow(agg$validation)) {
+  cat("Validated staged files:", nrow(agg$validation), "\n")
+}
+```
+
+# 3. Load Aggregated Tables
+
+```{r load-aggregated}
+read_optional_csv <- function(path) {
+  if (!file.exists(path)) {
+    return(NULL)
+  }
+  readr::read_csv(path, show_col_types = FALSE)
+}
+
+model_metrics <- read_optional_csv(file.path(aggregated_dir, "model_metrics.csv"))
+effect_metrics <- read_optional_csv(file.path(aggregated_dir, "effect_metrics.csv"))
+effect_metrics_unfiltered <- read_optional_csv(file.path(aggregated_dir, "effect_metrics_unfiltered.csv"))
+confusion_bins <- read_optional_csv(file.path(aggregated_dir, "confusion_bins.csv"))
+dataset_metrics <- read_optional_csv(file.path(aggregated_dir, "dataset_metrics.csv"))
+tier_cs_metrics <- read_optional_csv(file.path(aggregated_dir, "tier_cs_metrics.csv"))
+validation <- read_optional_csv(file.path(aggregated_dir, "validation.csv"))
+
+cat("Model metrics rows:", if (is.null(model_metrics)) 0 else nrow(model_metrics), "\n")
+cat("Filtered effect rows:", if (is.null(effect_metrics)) 0 else nrow(effect_metrics), "\n")
+cat("Unfiltered effect rows:", if (is.null(effect_metrics_unfiltered)) 0 else nrow(effect_metrics_unfiltered), "\n")
+cat("Confusion-bin rows:", if (is.null(confusion_bins)) 0 else nrow(confusion_bins), "\n")
+cat("Dataset-metric rows:", if (is.null(dataset_metrics)) 0 else nrow(dataset_metrics), "\n")
+cat("Tier-CS rows:", if (is.null(tier_cs_metrics)) 0 else nrow(tier_cs_metrics), "\n")
+```
+
+# 4. Derive Baseline Identifiers
+
+```{r identifiers}
+fmt_num <- function(x, digits = 3) {
+  out <- format(signif(as.numeric(x), digits), trim = TRUE, scientific = FALSE)
+  out
+}
+
+annot_label <- function(annotation_r2, inflate_match) {
+  dplyr::if_else(
+    is.na(annotation_r2) | is.na(inflate_match),
+    "no_annotation",
+    paste0("r2=", fmt_num(annotation_r2, 2), " | inflate=", fmt_num(inflate_match, 2))
+  )
+}
+
+derive_baseline_identifiers <- function(df) {
+  if (is.null(df) || !nrow(df)) {
+    return(df)
+  }
+  if (!"use_case_id" %in% names(df)) {
+    return(df)
+  }
+
+  df %>%
+    dplyr::mutate(
+      method_family = dplyr::case_when(
+        .data$use_case_id == "susie_vanilla" ~ "susie_vanilla",
+        .data$use_case_id == "susine_vanilla" ~ "susine_vanilla",
+        .data$use_case_id == "susie_eb" ~ "susie_eb",
+        .data$use_case_id == "susie_inf" ~ "susie_inf",
+        .data$use_case_id == "susie_ash_fixed" ~ "susie_ash_fixed",
+        .data$use_case_id == "susine_functional_mu" ~ "susine_functional_mu",
+        .data$use_case_id == "susine_eb_clamped_scale_var_nonneg" ~ "susine_eb_clamped_scale_var_nonneg",
+        .data$use_case_id == "susie_functional_pi" ~ "susie_functional_pi",
+        TRUE ~ .data$use_case_id
+      ),
+      annotation_label = annot_label(.data$annotation_r2, .data$inflate_match),
+      setting_label = dplyr::case_when(
+        .data$method_family %in% c("susie_vanilla", "susine_vanilla", "susie_inf", "susie_ash_fixed") ~
+          paste0(.data$method_family, " | sigma=", .data$sigma_0_2_scalar),
+        .data$method_family == "susie_functional_pi" ~
+          paste0(.data$method_family, " | tau=", fmt_num(.data$tau_value, 3)),
+        .data$method_family == "susine_functional_mu" ~
+          paste0(
+            .data$method_family,
+            " | c=", fmt_num(.data$c_value, 3),
+            " | sigma=", .data$sigma_0_2_scalar
+          ),
+        TRUE ~ .data$method_family
+      )
+    )
+}
+
+model_metrics <- derive_baseline_identifiers(model_metrics)
+effect_metrics <- derive_baseline_identifiers(effect_metrics)
+effect_metrics_unfiltered <- derive_baseline_identifiers(effect_metrics_unfiltered)
+confusion_bins <- derive_baseline_identifiers(confusion_bins)
+tier_cs_metrics <- derive_baseline_identifiers(tier_cs_metrics)
+```
+
+# 5. Compute Baseline Screening Metrics
+
+```{r screening-metrics}
+per_dataset_group_vars <- c(
+  "dataset_bundle_id", "run_id", "spec_name", "use_case_id",
+  "method_family", "setting_label", "annotation_label",
+  "annotation_r2", "inflate_match",
+  "sigma_0_2_scalar", "c_value", "tau_value"
+)
+pooled_group_vars <- c(
+  "spec_name", "use_case_id", "method_family", "setting_label",
+  "annotation_label", "annotation_r2", "inflate_match",
+  "sigma_0_2_scalar", "c_value", "tau_value"
+)
+annotation_group_vars <- c(
+  "spec_name", "use_case_id", "method_family", "setting_label",
+  "annotation_label", "sigma_0_2_scalar", "c_value", "tau_value"
+)
+
+auprc_per_dataset <- if (!is.null(confusion_bins) && nrow(confusion_bins)) {
+  test_susine::compute_auprc_from_confusion(
+    confusion_bins,
+    group_vars = per_dataset_group_vars
+  )
+} else {
+  tibble::tibble()
+}
+
+auprc_pooled_overall <- if (!is.null(confusion_bins) && nrow(confusion_bins)) {
+  test_susine::compute_auprc_from_confusion(
+    confusion_bins,
+    group_vars = pooled_group_vars
+  )
+} else {
+  tibble::tibble()
+}
+
+auprc_pooled_by_annotation <- if (!is.null(confusion_bins) && nrow(confusion_bins)) {
+  test_susine::compute_auprc_from_confusion(
+    confusion_bins,
+    group_vars = annotation_group_vars
+  )
+} else {
+  tibble::tibble()
+}
+tpr05_per_dataset <- if (!is.null(confusion_bins) && nrow(confusion_bins)) {
+  pooled <- test_susine:::pool_confusion_bins(confusion_bins, per_dataset_group_vars)
+  test_susine:::compute_tpr05_from_pooled_confusion(
+    pooled,
+    group_vars = per_dataset_group_vars
+  )
+} else {
+  tibble::tibble()
+}
+
+tpr05_pooled_overall <- if (!is.null(confusion_bins) && nrow(confusion_bins)) {
+  pooled <- test_susine:::pool_confusion_bins(confusion_bins, pooled_group_vars)
+  test_susine:::compute_tpr05_from_pooled_confusion(
+    pooled,
+    group_vars = pooled_group_vars
+  )
+} else {
+  tibble::tibble()
+}
+
+tpr05_pooled_by_annotation <- if (!is.null(confusion_bins) && nrow(confusion_bins)) {
+  pooled <- test_susine:::pool_confusion_bins(confusion_bins, annotation_group_vars)
+  test_susine:::compute_tpr05_from_pooled_confusion(
+    pooled,
+    group_vars = annotation_group_vars
+  )
+} else {
+  tibble::tibble()
+}
+
+screening_summary <- auprc_pooled_overall %>%
+  dplyr::left_join(
+    tpr05_pooled_overall,
+    by = pooled_group_vars
+  ) %>%
+  dplyr::arrange(dplyr::desc(.data$AUPRC), dplyr::desc(.data$tpr_fpr05))
+
+kable(head(screening_summary, 20), digits = 4, caption = "Top pooled baseline settings")
+```
+
+# 6. Export Consolidated Files
+
+```{r export}
+write_if_present <- function(df, filename) {
+  if (!is.null(df) && nrow(df)) {
+    readr::write_csv(df, file.path(consolidated_dir, filename))
+  }
+}
+
+write_if_present(model_metrics, "model_metrics_full.csv")
+write_if_present(effect_metrics, "effect_metrics_full.csv")
+write_if_present(effect_metrics_unfiltered, "effect_metrics_unfiltered_full.csv")
+write_if_present(confusion_bins, "confusion_bins_full.csv")
+write_if_present(dataset_metrics, "dataset_metrics_full.csv")
+write_if_present(tier_cs_metrics, "tier_cs_metrics_full.csv")
+write_if_present(validation, "validation_full.csv")
+
+write_if_present(auprc_per_dataset, "auprc_per_dataset.csv")
+write_if_present(auprc_pooled_overall, "auprc_pooled_overall.csv")
+write_if_present(auprc_pooled_by_annotation, "auprc_pooled_by_annotation.csv")
+write_if_present(tpr05_per_dataset, "tpr05_per_dataset.csv")
+write_if_present(tpr05_pooled_overall, "tpr05_pooled_overall.csv")
+write_if_present(tpr05_pooled_by_annotation, "tpr05_pooled_by_annotation.csv")
+write_if_present(screening_summary, "screening_summary.csv")
+
+cat("Consolidated files written to:", consolidated_dir, "\n")
+```

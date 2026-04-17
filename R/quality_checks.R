@@ -25,7 +25,12 @@ missing_required_cols <- function(df, required_cols) {
 validate_metrics_coverage <- function(aggregated_dir, require_multimodal = TRUE) {
   required <- list(
     model_metrics = c("run_id", "use_case_id", "filtering", "power", "mean_size", "mean_purity", "AUPRC", "cross_entropy", "hg2", "elbo_final"),
-    effect_metrics = c("run_id", "use_case_id", "effect", "size", "purity", "coverage"),
+    effect_metrics = c(
+      "run_id", "use_case_id", "effect", "size", "purity", "coverage",
+      "effect_pip_entropy", "effect_pip_entropy_core95",
+      "effect_k_eff_signal", "effect_k_eff_signal_core95",
+      "tail_inflation_ratio", "tail_inflation_log", "accuracy_ratio"
+    ),
     dataset_metrics = c("dataset_bundle_id", "M1", "z_topk_ratio", "z_max_abs", "z_count_abs_gt_3", "z_eff_signals", "high_ld_count_095", "high_ld_count_095_per_snp", "high_ld_frac_095"),
     confusion_bins = c("run_id", "pip_threshold", "n_causal_at_bucket", "n_noncausal_at_bucket"),
     validation = c("run_id", "task_id", "has_issues"),

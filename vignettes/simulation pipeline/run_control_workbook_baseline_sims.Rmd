@@ -1,0 +1,357 @@
+---
+title: "Baseline Sims Screening - Run Control"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+Baseline screening job config for the pre-ensemble simulation pass. This
+keeps the same dataset/phenotype setup as the large ensemble-scaling
+study, but only runs single-fit and grid-screening baseline families.
+
+```{r setup, message=FALSE}
+here::i_am("vignettes/simulation pipeline/run_control_workbook_baseline_sims.Rmd")
+library(here)
+library(devtools)
+
+susine_path <- here("..", "susine")
+if (file.exists(file.path(susine_path, "DESCRIPTION"))) {
+  options(test_susine.local_susine_path = normalizePath(susine_path, winslash = "/", mustWork = TRUE))
+  devtools::load_all(susine_path)
+}
+devtools::load_all(".")
+
+library(dplyr)
+library(readr)
+library(knitr)
+library(tidyr)
+```
+
+# 0. User Configuration
+
+```{r user-config}
+job_name <- "baseline_sims_screen"
+email <- "mgc5166@psu.edu"
+
+slurm_time <- "05:59:59"
+slurm_mem <- "8G"
+
+n_matrices_target <- 150L
+seeds <- 1:4
+
+L_grid <- 10L
+y_noise_grid <- NA_real_
+p_star_grid <- NA_integer_
+architecture_grid <- "susie2_oligogenic"
+
+annotation_r2_levels <- c(0, 0.3, 0.5)
+inflate_match_levels <- c(1, 0.9, 0.8)
+
+sigma_0_2_default <- 0.2
+sigma_grid_vanilla <- c(0.1, 0.2, 0.4)
+sigma_grid_functional_mu <- c(0.01, 0.03, 0.1, 0.2, 0.4)
+c_grid_functional_mu <- seq(0, 1.5, length.out = 8)
+tau_grid_functional_pi <- exp(seq(log(0.01), log(10), length.out = 10))
+
+max_iter <- 100L
+
+task_unit <- "dataset"
+bundles_per_task <- 4L
+task_assignment_seed <- 42L
+
+credible_set_rho <- 0.95
+purity_threshold <- 0.50
+verbose_file_output <- FALSE
+write_snps_parquet <- FALSE
+write_confusion_bins <- TRUE
+write_tier_cs_metrics <- TRUE
+
+pip_breaks <- sort(unique(c(
+  seq(0.00, 0.05, by = 0.005),
+  seq(0.05, 0.10, by = 0.01),
+  seq(0.10, 1.00, by = 0.02)
+)))
+z_top_k <- 10L
+jsd_threshold <- 0.15
+```
+
+# 1. Baseline Spec Catalog
+
+```{r baseline-specs}
+spec_susie_vanilla_sigma <- list(
+  name = "susie_vanilla_sigma",
+  use_case_ids = "susie_vanilla",
+  exploration_methods = "sigma_0_2_grid",
+  exploration_mode = "separate",
+  K = length(sigma_grid_vanilla),
+  sigma_0_2_grid_values = sigma_grid_vanilla
+)
+
+spec_susine_vanilla_sigma <- list(
+  name = "susine_vanilla_sigma",
+  use_case_ids = "susine_vanilla",
+  exploration_methods = "sigma_0_2_grid",
+  exploration_mode = "separate",
+  K = length(sigma_grid_vanilla),
+  sigma_0_2_grid_values = sigma_grid_vanilla
+)
+
+spec_susie_eb_single <- list(
+  name = "susie_eb_single",
+  use_case_ids = "susie_eb",
+  exploration_methods = "single",
+  exploration_mode = "separate",
+  K = 1L
+)
+
+spec_susie_inf_single <- list(
+  name = "susie_inf_single",
+  use_case_ids = "susie_inf",
+  exploration_methods = "single",
+  exploration_mode = "separate",
+  K = 1L
+)
+
+spec_susie_ash_fixed_single <- list(
+  name = "susie_ash_fixed_single",
+  use_case_ids = "susie_ash_fixed",
+  exploration_methods = "single",
+  exploration_mode = "separate",
+  K = 1L
+)
+
+spec_susine_functional_mu_grid <- list(
+  name = "susine_functional_mu_grid",
+  use_case_ids = "susine_functional_mu",
+  exploration_methods = c("c_grid", "sigma_0_2_grid"),
+  exploration_mode = "intersect",
+  K = length(c_grid_functional_mu) * length(sigma_grid_functional_mu),
+  c_grid_values = c_grid_functional_mu,
+  sigma_0_2_grid_values = sigma_grid_functional_mu
+)
+
+spec_susine_eb_clamped_single <- list(
+  name = "susine_eb_clamped_scale_var_nonneg_single",
+  use_case_ids = "susine_eb_clamped_scale_var_nonneg",
+  exploration_methods = "single",
+  exploration_mode = "separate",
+  K = 1L
+)
+
+spec_susie_functional_pi_tau <- list(
+  name = "susie_functional_pi_tau",
+  use_case_ids = "susie_functional_pi",
+  exploration_methods = "tau_grid",
+  exploration_mode = "separate",
+  K = length(tau_grid_functional_pi),
+  tau_grid_values = tau_grid_functional_pi
+)
+
+all_specs <- list(
+  spec_susie_vanilla_sigma,
+  spec_susine_vanilla_sigma,
+  spec_susie_eb_single,
+  spec_susie_inf_single,
+  spec_susie_ash_fixed_single,
+  spec_susine_functional_mu_grid,
+  spec_susine_eb_clamped_single,
+  spec_susie_functional_pi_tau
+)
+
+cat("Total baseline specs:", length(all_specs), "\n")
+for (s in all_specs) {
+  cat(sprintf("  %-42s methods=%s\n",
+              s$name,
+              paste(s$exploration_methods, collapse = "x")))
+}
+```
+
+# 2. Matrix Selection
+
+```{r matrix-selection}
+data_matrix_catalog_full <- test_susine:::build_data_matrix_catalog(
+  requested_scenarios = "scenario_1",
+  repo_root = here(),
+  summary_path = here(
+    "data", "sampled_simulated_genotypes", "scenario_sampling_summary.csv"
+  )
+)
+cat("Total available genotype matrices:", nrow(data_matrix_catalog_full), "\n")
+
+m1_summary_path <- here(
+  "data", "sampled_simulated_genotypes", "scenario_sampling_summary_with_m1.csv"
+)
+if (file.exists(m1_summary_path)) {
+  catalog_with_m1 <- readr::read_csv(m1_summary_path, show_col_types = FALSE)
+} else {
+  m1_tbl <- test_susine::build_x_metrics_table(
+    matrix_paths_df = data_matrix_catalog_full %>%
+      dplyr::select(matrix_id, matrix_path),
+    base_dir = here()
+  ) %>%
+    dplyr::select(matrix_id, M1)
+  catalog_with_m1 <- data_matrix_catalog_full %>%
+    dplyr::left_join(m1_tbl, by = "matrix_id")
+  readr::write_csv(catalog_with_m1, m1_summary_path)
+}
+
+if (!"matrix_id" %in% names(catalog_with_m1)) {
+  if ("gene" %in% names(catalog_with_m1)) {
+    catalog_with_m1 <- dplyr::rename(catalog_with_m1, dataset_label = gene)
+  }
+  join_col <- intersect(c("dataset_label", "matrix_path"), names(catalog_with_m1))[[1L]]
+  catalog_with_m1 <- catalog_with_m1 %>%
+    dplyr::left_join(
+      data_matrix_catalog_full %>%
+        dplyr::select(matrix_id, dplyr::all_of(join_col)),
+      by = join_col
+    )
+}
+
+catalog_with_m1 <- catalog_with_m1 %>%
+  dplyr::filter(!is.na(.data$M1)) %>%
+  dplyr::arrange(.data$M1)
+
+n_target <- min(n_matrices_target, nrow(catalog_with_m1))
+idx <- unique(round(seq(1, nrow(catalog_with_m1), length.out = n_target)))
+selected <- catalog_with_m1[idx, , drop = FALSE]
+
+data_matrix_catalog <- data_matrix_catalog_full %>%
+  dplyr::semi_join(dplyr::select(selected, .data$matrix_id), by = "matrix_id")
+
+cat("Matrices selected (M1-stratified):", nrow(data_matrix_catalog), "\n")
+cat("Phenotype seeds:", paste(seeds, collapse = ", "), "\n")
+```
+
+# 3. Build Job Config
+
+```{r build-config}
+cfg <- make_job_config(
+  job_name = job_name,
+  HPC = TRUE,
+  time = slurm_time,
+  mem = slurm_mem,
+  email = email,
+  output_root = here("output"),
+  grid_mode = "full",
+  use_case_ids = c(
+    "susie_vanilla",
+    "susine_vanilla",
+    "susie_eb",
+    "susie_inf",
+    "susie_ash_fixed",
+    "susine_functional_mu",
+    "susine_eb_clamped_scale_var_nonneg",
+    "susie_functional_pi"
+  ),
+  exploration_specs = all_specs,
+  L_grid = L_grid,
+  y_noise_grid = y_noise_grid,
+  p_star_grid = p_star_grid,
+  architecture_grid = architecture_grid,
+  seeds = seeds,
+  prior_quality = tidyr::expand_grid(
+    annotation_r2 = annotation_r2_levels,
+    inflate_match = inflate_match_levels
+  ) %>%
+    dplyr::arrange(.data$annotation_r2, dplyr::desc(.data$inflate_match)),
+  sigma_0_2_scalars = sigma_0_2_default,
+  data_scenarios = "scenario_1",
+  repo_root = here(),
+  data_matrix_catalog = data_matrix_catalog,
+  sampled_scenario_summary = here(
+    "data", "sampled_simulated_genotypes", "scenario_sampling_summary.csv"
+  ),
+  task_unit = task_unit,
+  bundles_per_task = bundles_per_task,
+  task_assignment_seed = task_assignment_seed,
+  max_iter = max_iter,
+  aggregation_methods = character(0),
+  include_overall_pool = FALSE,
+  credible_set_rho = credible_set_rho,
+  purity_threshold = purity_threshold,
+  verbose_file_output = verbose_file_output,
+  write_snps_parquet = write_snps_parquet,
+  write_confusion_bins = write_confusion_bins,
+  write_tier_cs_metrics = write_tier_cs_metrics,
+  write_scaling_confusion_bins = FALSE,
+  metrics_settings = list(
+    pip_breaks = pip_breaks,
+    z_top_k = z_top_k,
+    jsd_threshold = jsd_threshold
+  )
+)
+```
+
+# 4. Budget Summary
+
+```{r budget-summary}
+runs <- cfg$tables$runs
+
+cat("Total runs:", nrow(runs), "\n")
+cat("Datasets:", dplyr::n_distinct(runs$dataset_bundle_id), "\n")
+cat("Use cases:", paste(sort(unique(runs$use_case_id)), collapse = ", "), "\n")
+
+runs %>%
+  dplyr::group_by(.data$spec_name, .data$use_case_id) %>%
+  dplyr::summarise(
+    n_runs = dplyr::n(),
+    n_datasets = dplyr::n_distinct(.data$dataset_bundle_id),
+    n_annotation_settings = dplyr::n_distinct(
+      paste(.data$annotation_r2, .data$inflate_match, sep = "|"),
+      na.rm = TRUE
+    ),
+    .groups = "drop"
+  ) %>%
+  knitr::kable(caption = "Runs per baseline spec")
+```
+
+# 5. Smoke Checks
+
+```{r smoke-checks}
+stopifnot(all(c(
+  "susie_vanilla_sigma",
+  "susine_vanilla_sigma",
+  "susie_eb_single",
+  "susie_inf_single",
+  "susie_ash_fixed_single",
+  "susine_functional_mu_grid",
+  "susine_eb_clamped_scale_var_nonneg_single",
+  "susie_functional_pi_tau"
+) %in% unique(runs$spec_name)))
+
+annotated_specs <- c(
+  "susine_functional_mu_grid",
+  "susine_eb_clamped_scale_var_nonneg_single",
+  "susie_functional_pi_tau"
+)
+annotated_runs <- runs %>%
+  dplyr::filter(.data$spec_name %in% annotated_specs)
+
+stopifnot(all(c(0, 0.3, 0.5) %in% unique(annotated_runs$annotation_r2)))
+stopifnot(all(c(1, 0.9, 0.8) %in% unique(annotated_runs$inflate_match)))
+
+cat("Smoke checks passed.\n")
+```
+
+# 6. Write Artifacts
+
+```{r write-artifacts, eval=FALSE}
+arts <- write_job_artifacts(
+  job_config = cfg,
+  run_task_script = here("inst", "scripts", "run_task.R")
+)
+cat("Job config written to:", arts$job_config, "\n")
+cat("SLURM script:", arts$slurm_script, "\n")
+```
+
+# 7. Submit
+
+```{r submit, eval=FALSE}
+# sbatch <slurm_script_path>
+```

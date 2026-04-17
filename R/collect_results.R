@@ -54,6 +54,7 @@ index_staging_outputs <- function(job_name,
   }
   parse_type <- function(fname) {
     if (grepl("_model_metrics\\.csv$", fname)) return("model_metrics")
+    if (grepl("_effect_metrics_unfiltered\\.csv$", fname)) return("effect_metrics_unfiltered")
     if (grepl("_effect_metrics\\.csv$", fname)) return("effect_metrics")
     if (grepl("_validation\\.csv$", fname)) return("validation")
     if (grepl("_confusion_bins\\.csv$", fname)) return("confusion_bins")
@@ -107,6 +108,7 @@ validate_staging_outputs <- function(file_index) {
     reader <- switch(
       type,
       model_metrics = function(p) readr::read_csv(p, show_col_types = FALSE, n_max = 1L, progress = FALSE),
+      effect_metrics_unfiltered = function(p) readr::read_csv(p, show_col_types = FALSE, n_max = 1L, progress = FALSE),
       effect_metrics = function(p) readr::read_csv(p, show_col_types = FALSE, n_max = 1L, progress = FALSE),
       validation = function(p) readr::read_csv(p, show_col_types = FALSE, n_max = 1L, progress = FALSE),
       confusion_bins = function(p) readr::read_csv(p, show_col_types = FALSE, n_max = 1L, progress = FALSE),
@@ -279,6 +281,7 @@ aggregate_staging_outputs <- function(job_name,
 
   model_files <- dplyr::filter(idx, .data$type == "model_metrics")$path
   effect_files <- dplyr::filter(idx, .data$type == "effect_metrics")$path
+  effect_unfiltered_files <- dplyr::filter(idx, .data$type == "effect_metrics_unfiltered")$path
   validation_files <- dplyr::filter(idx, .data$type == "validation")$path
   confusion_files <- dplyr::filter(idx, .data$type == "confusion_bins")$path
   dataset_files <- dplyr::filter(idx, .data$type == "dataset_metrics")$path
@@ -315,6 +318,17 @@ aggregate_staging_outputs <- function(job_name,
     readr::write_csv(effect_tbl, file.path(output_dir, "effect_metrics.csv"))
     log_progress("Wrote effect_metrics.csv")
     rm(effect_tbl, effect_files)
+    gc()
+  }
+  if (length(effect_unfiltered_files)) {
+    effect_unfiltered_tbl <- read_csv_safe(effect_unfiltered_files, idx) %>%
+      enrich_from_run_table(cols = run_enrich_core)
+    readr::write_csv(
+      effect_unfiltered_tbl,
+      file.path(output_dir, "effect_metrics_unfiltered.csv")
+    )
+    log_progress("Wrote effect_metrics_unfiltered.csv")
+    rm(effect_unfiltered_tbl, effect_unfiltered_files)
     gc()
   }
   if (length(validation_files)) {

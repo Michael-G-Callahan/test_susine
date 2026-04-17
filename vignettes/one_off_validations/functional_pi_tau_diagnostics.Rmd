@@ -1,0 +1,837 @@
+---
+title: "Functional pi Tau Diagnostics"
+author: "test_susine"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+editor_options:
+  chunk_output_type: console
+---
+
+Summary: Uses the active `test_susine` simulation helpers to generate fixed-tier `susie2_oligogenic` effect vectors `b`, annotation vectors `a`, and normalized-softmax prior inclusion vectors `pi(tau)`. The workbook grids over `annotation_r2` and `inflate_match` so we can see how the `tau` regime changes across annotation quality settings for `p = 1000`.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 8,
+  fig.height = 5
+)
+```
+
+# Overview
+
+We study the transform
+
+$$
+\pi_j(\tau) \propto \exp\left(\frac{|a_j| / s(a)}{\tau}\right),
+$$
+
+where `s(a)` is a robust scale estimate of `|a|`.
+
+In this workbook:
+
+- `b` is simulated with `simulate_effect_sizes_susie2_oligogenic()`;
+- `a` is simulated with `simulate_priors()` over a grid of `annotation_r2` and `inflate_match`;
+- `pi(tau)` is computed for a log-spaced grid of `tau` values.
+
+The main diagnostics are:
+
+- normalized entropy: `1 = uniform`, `0 = binary`;
+- effective support size: `1 / sum(pi^2)`;
+- top-k mass;
+- largest prior inclusion weight;
+- total mass assigned to the true causal set.
+
+# Setup
+
+```{r load-package}
+here::i_am("vignettes/one_off_validations/functional_pi_tau_diagnostics.Rmd")
+devtools::load_all(here::here(), quiet = TRUE)
+
+library(dplyr)
+library(ggplot2)
+library(knitr)
+library(purrr)
+library(scales)
+library(tidyr)
+```
+
+# User Options
+
+```{r options}
+p <- 1000L
+architecture_label <- "susie2_oligogenic"
+effect_sd <- 1
+
+# Smoke-size defaults for fast iteration.
+annotation_r2_grid <- c(0, 0.5)
+inflate_match_grid <- c(0.2, 1.0)
+
+n_beta_draws <- 4L
+n_annotations_per_beta <- 2L
+
+# Full grid requested for the main pass:
+# annotation_r2_grid <- c(0, 0.2, 0.5)
+# inflate_match_grid <- c(0.01, 0.2, 0.5, 0.8, 1.0)
+# n_beta_draws <- 20L
+# n_annotations_per_beta <- 4L
+
+eta_uniform <- 0
+tau_grid <- exp(seq(log(0.01), log(10), length.out = 10))
+
+ess_targets <- c(
+  "binary-ish" = 0.01,
+  "focused" = 0.05,
+  "intermediate" = 0.20,
+  "diffuse" = 0.50,
+  "uniform-ish" = 0.90
+)
+
+reference_regimes <- c("binary-ish", "intermediate", "uniform-ish")
+uniform_pi <- 1 / p
+
+cat("architecture =", architecture_label, "\n")
+cat("p =", p, "\n")
+cat("uniform pi =", signif(uniform_pi, 3), "\n")
+cat("annotation_r2 grid =", paste(annotation_r2_grid, collapse = ", "), "\n")
+cat("inflate_match grid =", paste(inflate_match_grid, collapse = ", "), "\n")
+cat("beta draws per setting grid =", n_beta_draws, "\n")
+cat("annotation draws per beta =", n_annotations_per_beta, "\n")
+cat("tau range =", signif(min(tau_grid), 3), "to", signif(max(tau_grid), 3), "\n")
+```
+
+# Helpers
+
+```{r helpers}
+fmt_num <- function(x) {
+  formatC(x, format = "f", digits = 2)
+}
+
+make_setting_label <- function(annotation_r2, inflate_match) {
+  paste0("R2=", fmt_num(annotation_r2), " | infl=", fmt_num(inflate_match))
+}
+
+robust_abs_scale <- function(annotation, eps = 1e-8) {
+  abs_a <- abs(as.numeric(annotation))
+  scale_val <- stats::mad(
+    abs_a,
+    center = stats::median(abs_a),
+    constant = 1,
+    na.rm = TRUE
+  )
+  if (!is.finite(scale_val) || scale_val <= eps) {
+    scale_val <- stats::sd(abs_a, na.rm = TRUE)
+  }
+  if (!is.finite(scale_val) || scale_val <= eps) {
+    scale_val <- 1
+  }
+  scale_val
+}
+
+softmax_pi_from_annotation <- function(annotation,
+                                       tau,
+                                       eta = 0,
+                                       eps = 1e-8) {
+  stopifnot(length(annotation) > 0, is.finite(tau), tau > 0)
+  stopifnot(is.finite(eta), eta >= 0, eta < 1)
+
+  scale_val <- robust_abs_scale(annotation, eps = eps)
+  score <- abs(as.numeric(annotation)) / (scale_val + eps)
+  logits <- score / tau
+  logits <- logits - max(logits, na.rm = TRUE)
+  weights <- exp(logits)
+  weights <- weights / sum(weights)
+
+  if (eta > 0) {
+    weights <- (1 - eta) * weights + eta / length(weights)
+  }
+
+  list(
+    pi = as.numeric(weights),
+    score = as.numeric(score),
+    scale_val = scale_val
+  )
+}
+
+compute_pi_diagnostics <- function(pi, causal_idx, p) {
+  pi <- as.numeric(pi)
+  sorted_pi <- sort(pi, decreasing = TRUE)
+  entropy <- -sum(pi * log(pmax(pi, 1e-16)))
+  ess <- 1 / sum(pi^2)
+
+  tibble::tibble(
+    entropy_norm = entropy / log(p),
+    ess = ess,
+    ess_frac = ess / p,
+    max_pi = max(pi),
+    top1_mass = sum(sorted_pi[seq_len(min(1L, p))]),
+    top5_mass = sum(sorted_pi[seq_len(min(5L, p))]),
+    top10_mass = sum(sorted_pi[seq_len(min(10L, p))]),
+    top25_mass = sum(sorted_pi[seq_len(min(25L, p))]),
+    top50_mass = sum(sorted_pi[seq_len(min(50L, p))]),
+    causal_mass = sum(pi[causal_idx]),
+    n_gt_5x_uniform = sum(pi > 5 / p),
+    n_gt_10x_uniform = sum(pi > 10 / p)
+  )
+}
+
+pick_reference_tau <- function(summary_tbl, targets) {
+  purrr::imap_dfr(targets, function(target, label) {
+    idx <- which.min(abs(summary_tbl$ess_frac_median - target))
+    tibble::tibble(
+      regime = label,
+      target_ess_frac = target,
+      tau = summary_tbl$tau[idx],
+      ess_frac_median = summary_tbl$ess_frac_median[idx],
+      entropy_norm_median = summary_tbl$entropy_norm_median[idx],
+      max_pi_median = summary_tbl$max_pi_median[idx],
+      top10_mass_median = summary_tbl$top10_mass_median[idx],
+      causal_mass_median = summary_tbl$causal_mass_median[idx]
+    )
+  })
+}
+
+simulate_priors_zero_safe <- function(beta,
+                                      annotation_r2,
+                                      inflate_match,
+                                      base_sigma2 = NULL,
+                                      effect_sd = NULL,
+                                      seed = NULL) {
+  if (!is.null(seed) && is.finite(seed)) {
+    set.seed(as.integer(seed))
+  }
+
+  p <- length(beta)
+  causal_idx <- which(beta != 0)
+  noncausal_idx <- setdiff(seq_len(p), causal_idx)
+
+  if (is.null(effect_sd) || !is.finite(effect_sd) || effect_sd <= 0) {
+    effect_sd <- sqrt(max(stats::var(beta[causal_idx]), stats::var(beta), 1))
+  }
+
+  if (is.null(annotation_r2) || is.na(annotation_r2)) annotation_r2 <- 0
+  if (is.null(inflate_match) || is.na(inflate_match)) inflate_match <- 0
+  annotation_r2 <- pmin(pmax(annotation_r2, 0), 1)
+  inflate_match <- max(inflate_match, 0)
+
+  causal_var <- stats::var(beta[causal_idx])
+  if (is.na(causal_var) || causal_var == 0) {
+    causal_var <- effect_sd^2
+  }
+
+  mu_0 <- numeric(p)
+  if (length(causal_idx)) {
+    causal_beta <- as.numeric(beta[causal_idx])
+    causal_mean <- mean(causal_beta)
+    causal_centered <- causal_beta - causal_mean
+    causal_scale <- sqrt(mean(causal_centered^2))
+    if (!is.finite(causal_scale) || causal_scale <= 0) {
+      causal_scale <- sqrt(causal_var)
+    }
+
+    if (length(causal_idx) == 1L || !is.finite(causal_scale) || causal_scale <= 0) {
+      mu_0[causal_idx] <- causal_beta
+    } else {
+      signal_unit <- causal_centered / causal_scale
+      noise_unit <- draw_centered_noise(
+        length(causal_idx),
+        target_scale = 1,
+        orthogonal_to = signal_unit
+      )
+      causal_annotation_centered <- causal_scale * (
+        sqrt(annotation_r2) * signal_unit +
+          sqrt(1 - annotation_r2) * noise_unit
+      )
+      mu_0[causal_idx] <- causal_mean + causal_annotation_centered
+    }
+  }
+
+  theoretical_causal_mu0_var <- if (length(causal_idx) > 1L) {
+    mean((mu_0[causal_idx] - mean(mu_0[causal_idx]))^2)
+  } else {
+    causal_var
+  }
+
+  if (length(noncausal_idx)) {
+    if (inflate_match <= 0) {
+      mu_0[noncausal_idx] <- 0
+    } else {
+      noncausal_scale <- sqrt(inflate_match) * sqrt(theoretical_causal_mu0_var)
+      mu_0[noncausal_idx] <- draw_centered_noise(
+        length(noncausal_idx),
+        target_scale = noncausal_scale
+      )
+    }
+  }
+
+  observed_r2 <- NA_real_
+  if (length(causal_idx) > 1 && stats::sd(beta[causal_idx]) > 0 && stats::sd(mu_0[causal_idx]) > 0) {
+    observed_r2 <- stats::cor(mu_0[causal_idx], beta[causal_idx])^2
+  }
+
+  base_sigma2 <- base_sigma2 %||% causal_var
+  if (is.na(base_sigma2) || base_sigma2 <= 0) {
+    base_sigma2 <- effect_sd^2
+  }
+
+  sigma_0_2 <- rep(base_sigma2, p)
+
+  list(
+    mu_0 = mu_0,
+    sigma_0_2 = sigma_0_2,
+    observed_r2 = observed_r2
+  )
+}
+
+plot_metric_facet <- function(summary_tbl,
+                              y_med,
+                              y_lo,
+                              y_hi,
+                              title,
+                              y_label,
+                              percent_y = TRUE) {
+  p <- ggplot(summary_tbl, aes(x = .data$tau))
+  p <- p +
+    geom_ribbon(aes(ymin = {{ y_lo }}, ymax = {{ y_hi }}), fill = "#9ecae1", alpha = 0.35) +
+    geom_line(aes(y = {{ y_med }}), color = "#08519c", linewidth = 0.8) +
+    scale_x_log10() +
+    facet_grid(.data$inflate_match_f ~ .data$annotation_r2_f) +
+    labs(
+      title = title,
+      subtitle = "Columns: annotation_r2, rows: inflate_match",
+      x = "tau (log scale)",
+      y = y_label
+    ) +
+    theme_minimal(base_size = 11)
+
+  if (percent_y) {
+    p <- p + scale_y_continuous(labels = scales::percent_format(accuracy = 1))
+  }
+
+  p
+}
+```
+
+# Simulate b
+
+This workbook now matches the fixed-tier `susie2_oligogenic` architecture rather than the generic `oligogenic` helper. That means there is no `p_star` knob here: every effect draw has exactly 3 sparse, 5 oligogenic, and 15 polygenic causal variants.
+
+```{r simulate-b}
+beta_tbl <- tibble::tibble(
+  beta_id = seq_len(n_beta_draws),
+  beta_seed = 10000L + seq_len(n_beta_draws)
+) %>%
+  dplyr::mutate(
+    effects = purrr::map(
+      .data$beta_seed,
+      ~ simulate_effect_sizes_susie2_oligogenic(
+        p = p,
+        seed = .x
+      )
+    ),
+    beta = purrr::map(.data$effects, "beta"),
+    causal_idx = purrr::map(.data$effects, "causal_idx"),
+    effect_tier = purrr::map(.data$effects, "effect_tier"),
+    n_causal = purrr::map_int(.data$causal_idx, length),
+    n_sparse = purrr::map_int(.data$effect_tier, ~ sum(.x == "sparse")),
+    n_oligogenic = purrr::map_int(.data$effect_tier, ~ sum(.x == "oligogenic")),
+    n_polygenic = purrr::map_int(.data$effect_tier, ~ sum(.x == "polygenic"))
+  ) %>%
+  dplyr::select(-.data$effects)
+
+beta_tbl %>%
+  dplyr::summarise(
+    n_beta_draws = dplyr::n(),
+    min_n_causal = min(.data$n_causal),
+    max_n_causal = max(.data$n_causal),
+    sparse_per_draw = first(.data$n_sparse),
+    oligogenic_per_draw = first(.data$n_oligogenic),
+    polygenic_per_draw = first(.data$n_polygenic)
+  ) %>%
+  knitr::kable(
+    digits = 0,
+    caption = "Architecture check: every draw matches the fixed susie2_oligogenic 3/5/15 pattern"
+  )
+```
+
+# Simulate a over the annotation-quality grid
+
+```{r simulate-a}
+settings_tbl <- tidyr::expand_grid(
+  annotation_r2 = annotation_r2_grid,
+  inflate_match = inflate_match_grid
+) %>%
+  dplyr::arrange(.data$annotation_r2, .data$inflate_match) %>%
+  dplyr::mutate(
+    setting_id = dplyr::row_number(),
+    setting_label = make_setting_label(.data$annotation_r2, .data$inflate_match),
+    annotation_r2_f = factor(fmt_num(.data$annotation_r2), levels = fmt_num(annotation_r2_grid)),
+    inflate_match_f = factor(fmt_num(.data$inflate_match), levels = fmt_num(inflate_match_grid))
+  )
+
+annotation_tbl <- tidyr::expand_grid(
+  beta_id = beta_tbl$beta_id,
+  setting_id = settings_tbl$setting_id,
+  annotation_id = seq_len(n_annotations_per_beta)
+) %>%
+  dplyr::left_join(beta_tbl, by = "beta_id") %>%
+  dplyr::left_join(settings_tbl, by = "setting_id") %>%
+  dplyr::mutate(
+    annotation_seed = 500000L + .data$beta_id * 1000L + .data$setting_id * 10L + .data$annotation_id,
+    priors = purrr::pmap(
+      list(.data$beta, .data$annotation_r2, .data$inflate_match, .data$annotation_seed),
+      function(beta, annotation_r2, inflate_match, annotation_seed) {
+        simulate_priors_zero_safe(
+          beta = beta,
+          annotation_r2 = annotation_r2,
+          inflate_match = inflate_match,
+          base_sigma2 = effect_sd^2,
+          effect_sd = effect_sd,
+          seed = annotation_seed
+        )
+      }
+    ),
+    annotation = purrr::map(.data$priors, "mu_0"),
+    annotation_r2_observed = purrr::map_dbl(.data$priors, "observed_r2"),
+    annotation_scale = purrr::map_dbl(.data$annotation, robust_abs_scale),
+    causal_abs_mean = purrr::map2_dbl(
+      .data$annotation,
+      .data$causal_idx,
+      ~ mean(abs(.x[.y]))
+    ),
+    noncausal_abs_mean = purrr::map2_dbl(
+      .data$annotation,
+      .data$causal_idx,
+      ~ mean(abs(.x[-.y]))
+    )
+  ) %>%
+  dplyr::select(
+    .data$beta_id,
+    .data$annotation_id,
+    .data$setting_id,
+    .data$setting_label,
+    .data$annotation_r2,
+    .data$inflate_match,
+    .data$annotation_r2_f,
+    .data$inflate_match_f,
+    .data$annotation_seed,
+    .data$beta,
+    .data$annotation,
+    .data$causal_idx,
+    .data$n_causal,
+    .data$annotation_r2_observed,
+    .data$annotation_scale,
+    .data$causal_abs_mean,
+    .data$noncausal_abs_mean
+  )
+```
+
+```{r annotation-summary}
+annotation_tbl %>%
+  dplyr::group_by(.data$annotation_r2, .data$inflate_match) %>%
+  dplyr::summarise(
+    n_annotations = dplyr::n(),
+    observed_r2_mean = mean(.data$annotation_r2_observed, na.rm = TRUE),
+    observed_r2_sd = stats::sd(.data$annotation_r2_observed, na.rm = TRUE),
+    annotation_scale_mean = mean(.data$annotation_scale),
+    causal_abs_mean = mean(.data$causal_abs_mean),
+    noncausal_abs_mean = mean(.data$noncausal_abs_mean),
+    .groups = "drop"
+  ) %>%
+  knitr::kable(
+    digits = 3,
+    caption = "Annotation diagnostics by annotation_r2 x inflate_match"
+  )
+```
+
+```{r observed-r2-plot}
+ggplot(annotation_tbl, aes(x = .data$annotation_r2_observed)) +
+  geom_histogram(bins = 20, fill = "#3465a4", color = "white") +
+  geom_vline(
+    aes(xintercept = .data$annotation_r2),
+    linetype = "dashed",
+    color = "#cc0000",
+    linewidth = 0.7,
+    inherit.aes = FALSE,
+    data = settings_tbl
+  ) +
+  facet_grid(.data$inflate_match_f ~ .data$annotation_r2_f) +
+  labs(
+    title = "Observed annotation R^2 across the annotation-quality grid",
+    subtitle = "Columns: target annotation_r2, rows: inflate_match",
+    x = "Observed R^2 on causal SNPs",
+    y = "Count"
+  ) +
+  theme_minimal(base_size = 11)
+```
+
+# Sweep tau
+
+```{r sweep-tau}
+tau_results <- tidyr::expand_grid(
+  annotation_row = seq_len(nrow(annotation_tbl)),
+  tau = tau_grid
+) %>%
+  dplyr::mutate(
+    annotation = annotation_tbl$annotation[.data$annotation_row],
+    causal_idx = annotation_tbl$causal_idx[.data$annotation_row],
+    beta_id = annotation_tbl$beta_id[.data$annotation_row],
+    annotation_id = annotation_tbl$annotation_id[.data$annotation_row],
+    setting_id = annotation_tbl$setting_id[.data$annotation_row],
+    setting_label = annotation_tbl$setting_label[.data$annotation_row],
+    annotation_r2 = annotation_tbl$annotation_r2[.data$annotation_row],
+    inflate_match = annotation_tbl$inflate_match[.data$annotation_row],
+    annotation_r2_f = annotation_tbl$annotation_r2_f[.data$annotation_row],
+    inflate_match_f = annotation_tbl$inflate_match_f[.data$annotation_row],
+    annotation_r2_observed = annotation_tbl$annotation_r2_observed[.data$annotation_row],
+    pi_fit = purrr::map2(.data$annotation, .data$tau, ~ softmax_pi_from_annotation(
+      annotation = .x,
+      tau = .y,
+      eta = eta_uniform
+    )),
+    diagnostics = purrr::map2(.data$pi_fit, .data$causal_idx, ~ compute_pi_diagnostics(
+      pi = .x$pi,
+      causal_idx = .y,
+      p = p
+    )),
+    score_scale = purrr::map_dbl(.data$pi_fit, "scale_val")
+  ) %>%
+  tidyr::unnest(.data$diagnostics) %>%
+  dplyr::select(
+    .data$setting_id,
+    .data$setting_label,
+    .data$annotation_r2,
+    .data$inflate_match,
+    .data$annotation_r2_f,
+    .data$inflate_match_f,
+    .data$beta_id,
+    .data$annotation_id,
+    .data$annotation_r2_observed,
+    .data$tau,
+    .data$score_scale,
+    .data$entropy_norm,
+    .data$ess,
+    .data$ess_frac,
+    .data$max_pi,
+    .data$top1_mass,
+    .data$top5_mass,
+    .data$top10_mass,
+    .data$top25_mass,
+    .data$top50_mass,
+    .data$causal_mass,
+    .data$n_gt_5x_uniform,
+    .data$n_gt_10x_uniform
+  )
+
+cat("Rows in tau_results:", nrow(tau_results), "\n")
+```
+
+# Aggregate Diagnostics
+
+```{r aggregate}
+summary_by_tau <- tau_results %>%
+  dplyr::group_by(
+    .data$setting_id,
+    .data$setting_label,
+    .data$annotation_r2,
+    .data$inflate_match,
+    .data$annotation_r2_f,
+    .data$inflate_match_f,
+    .data$tau
+  ) %>%
+  dplyr::summarise(
+    entropy_norm_median = stats::median(.data$entropy_norm),
+    entropy_norm_q10 = stats::quantile(.data$entropy_norm, probs = 0.10),
+    entropy_norm_q90 = stats::quantile(.data$entropy_norm, probs = 0.90),
+    ess_frac_median = stats::median(.data$ess_frac),
+    ess_frac_q10 = stats::quantile(.data$ess_frac, probs = 0.10),
+    ess_frac_q90 = stats::quantile(.data$ess_frac, probs = 0.90),
+    max_pi_median = stats::median(.data$max_pi),
+    max_pi_q10 = stats::quantile(.data$max_pi, probs = 0.10),
+    max_pi_q90 = stats::quantile(.data$max_pi, probs = 0.90),
+    top10_mass_median = stats::median(.data$top10_mass),
+    top10_mass_q10 = stats::quantile(.data$top10_mass, probs = 0.10),
+    top10_mass_q90 = stats::quantile(.data$top10_mass, probs = 0.90),
+    causal_mass_median = stats::median(.data$causal_mass),
+    causal_mass_q10 = stats::quantile(.data$causal_mass, probs = 0.10),
+    causal_mass_q90 = stats::quantile(.data$causal_mass, probs = 0.90),
+    n_gt_10x_uniform_median = stats::median(.data$n_gt_10x_uniform),
+    .groups = "drop"
+  )
+
+reference_tau_tbl <- summary_by_tau %>%
+  dplyr::group_by(
+    .data$setting_id,
+    .data$setting_label,
+    .data$annotation_r2,
+    .data$inflate_match,
+    .data$annotation_r2_f,
+    .data$inflate_match_f
+  ) %>%
+  dplyr::group_modify(~ pick_reference_tau(.x, ess_targets)) %>%
+  dplyr::ungroup()
+
+selected_reference_tau <- reference_tau_tbl %>%
+  dplyr::filter(.data$regime %in% reference_regimes)
+```
+
+```{r tau-lookup-table}
+selected_reference_tau %>%
+  dplyr::transmute(
+    annotation_r2 = .data$annotation_r2,
+    inflate_match = .data$inflate_match,
+    regime = .data$regime,
+    tau = signif(.data$tau, 3),
+    ess_frac = percent(.data$ess_frac_median, accuracy = 0.1),
+    entropy = percent(.data$entropy_norm_median, accuracy = 0.1),
+    max_pi = percent(.data$max_pi_median, accuracy = 0.1),
+    top10_mass = percent(.data$top10_mass_median, accuracy = 0.1),
+    causal_mass = percent(.data$causal_mass_median, accuracy = 0.1)
+  ) %>%
+  dplyr::arrange(.data$annotation_r2, .data$inflate_match, .data$regime) %>%
+  knitr::kable(
+    caption = "Representative tau values by annotation-quality grid point"
+  )
+```
+
+# Main Plots
+
+```{r entropy-colored-grid}
+ggplot(
+  summary_by_tau,
+  aes(
+    x = .data$tau,
+    y = .data$entropy_norm_median,
+    color = .data$setting_label,
+    group = .data$setting_label
+  )
+) +
+  geom_line(linewidth = 0.9) +
+  scale_x_log10() +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  scale_color_viridis_d(option = "turbo", end = 0.95) +
+  labs(
+    title = "Normalized entropy colored by annotation-quality grid point",
+    subtitle = "Each line is one (annotation_r2, inflate_match) setting",
+    x = "tau (log scale)",
+    y = "Normalized entropy",
+    color = "Grid point"
+  ) +
+  theme_minimal(base_size = 12) +
+  guides(color = guide_legend(ncol = 2))
+```
+
+```{r entropy-facet}
+plot_metric_facet(
+  summary_by_tau,
+  entropy_norm_median,
+  entropy_norm_q10,
+  entropy_norm_q90,
+  title = "Normalized entropy: 1 is uniform, 0 is binary",
+  y_label = "Normalized entropy"
+)
+```
+
+```{r ess-plot}
+plot_metric_facet(
+  summary_by_tau,
+  ess_frac_median,
+  ess_frac_q10,
+  ess_frac_q90,
+  title = "Effective support fraction",
+  y_label = "ESS / p"
+)
+```
+
+```{r max-pi-plot}
+plot_metric_facet(
+  summary_by_tau,
+  max_pi_median,
+  max_pi_q10,
+  max_pi_q90,
+  title = "Largest prior inclusion weight",
+  y_label = "max(pi)"
+)
+```
+
+```{r top10-plot}
+plot_metric_facet(
+  summary_by_tau,
+  top10_mass_median,
+  top10_mass_q10,
+  top10_mass_q90,
+  title = "Mass captured by the top 10 SNPs",
+  y_label = "Top-10 mass"
+)
+```
+
+```{r causal-mass-plot}
+plot_metric_facet(
+  summary_by_tau,
+  causal_mass_median,
+  causal_mass_q10,
+  causal_mass_q90,
+  title = "Mass assigned to the true causal set",
+  y_label = "Causal-set mass"
+)
+```
+
+# Rank-Mass Curves for Representative Tau Values
+
+```{r rank-mass}
+representative_rows <- annotation_tbl %>%
+  dplyr::group_by(
+    .data$setting_id,
+    .data$setting_label,
+    .data$annotation_r2,
+    .data$inflate_match,
+    .data$annotation_r2_f,
+    .data$inflate_match_f
+  ) %>%
+  dplyr::slice(1) %>%
+  dplyr::ungroup()
+
+rank_curve_tbl <- selected_reference_tau %>%
+  dplyr::left_join(
+    representative_rows %>%
+      dplyr::select(
+        .data$setting_id,
+        .data$annotation,
+        .data$causal_idx,
+        .data$annotation_r2_f,
+        .data$inflate_match_f
+      ),
+    by = c("setting_id", "annotation_r2_f", "inflate_match_f")
+  ) %>%
+  dplyr::mutate(
+    rank_curve = purrr::pmap(
+      list(.data$annotation, .data$tau, .data$regime),
+      function(annotation, tau, regime) {
+        pi_vec <- softmax_pi_from_annotation(
+          annotation = annotation,
+          tau = tau,
+          eta = eta_uniform
+        )$pi
+        tibble::tibble(
+          regime = regime,
+          rank = seq_along(pi_vec),
+          pi = sort(pi_vec, decreasing = TRUE),
+          cumulative_mass = cumsum(sort(pi_vec, decreasing = TRUE))
+        )
+      }
+    )
+  ) %>%
+  dplyr::select(
+    .data$annotation_r2_f,
+    .data$inflate_match_f,
+    .data$rank_curve
+  ) %>%
+  tidyr::unnest(.data$rank_curve)
+
+ggplot(
+  dplyr::filter(rank_curve_tbl, .data$rank <= 75),
+  aes(x = .data$rank, y = .data$pi, color = .data$regime)
+) +
+  geom_line(linewidth = 0.9) +
+  facet_grid(.data$inflate_match_f ~ .data$annotation_r2_f) +
+  scale_y_continuous(labels = scales::label_number(accuracy = 0.001)) +
+  labs(
+    title = "Top-rank pi curves for representative tau values",
+    subtitle = "One representative annotation draw per grid point",
+    x = "Rank after sorting pi from largest to smallest",
+    y = "pi at rank",
+    color = "Regime"
+  ) +
+  theme_minimal(base_size = 11)
+```
+
+```{r cumulative-rank-mass}
+ggplot(
+  dplyr::filter(rank_curve_tbl, .data$rank <= 75),
+  aes(x = .data$rank, y = .data$cumulative_mass, color = .data$regime)
+) +
+  geom_line(linewidth = 0.9) +
+  facet_grid(.data$inflate_match_f ~ .data$annotation_r2_f) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(
+    title = "Cumulative mass in the top-ranked SNPs",
+    subtitle = "One representative annotation draw per grid point",
+    x = "Top-ranked SNP count",
+    y = "Cumulative mass",
+    color = "Regime"
+  ) +
+  theme_minimal(base_size = 11)
+```
+
+# A Single-Draw View in Annotation Space
+
+```{r single-draw-space}
+intermediate_tau_tbl <- selected_reference_tau %>%
+  dplyr::filter(.data$regime == "intermediate") %>%
+  dplyr::left_join(
+    representative_rows %>%
+      dplyr::select(
+        .data$setting_id,
+        .data$beta,
+        .data$annotation,
+        .data$causal_idx,
+        .data$annotation_r2_f,
+        .data$inflate_match_f
+      ),
+    by = c("setting_id", "annotation_r2_f", "inflate_match_f")
+  ) %>%
+  dplyr::mutate(
+    plot_tbl = purrr::pmap(
+      list(.data$beta, .data$annotation, .data$tau),
+      function(beta, annotation, tau) {
+        pi_vec <- softmax_pi_from_annotation(
+          annotation = annotation,
+          tau = tau,
+          eta = eta_uniform
+        )$pi
+        tibble::tibble(
+          snp = seq_along(annotation),
+          beta = beta,
+          annotation = annotation,
+          pi = pi_vec
+        )
+      }
+    )
+  ) %>%
+  dplyr::select(
+    .data$annotation_r2_f,
+    .data$inflate_match_f,
+    .data$causal_idx,
+    .data$plot_tbl
+  ) %>%
+  tidyr::unnest(.data$plot_tbl) %>%
+  dplyr::mutate(
+    causal = purrr::map2_lgl(.data$snp, .data$causal_idx, ~ .x %in% .y)
+  )
+
+ggplot(intermediate_tau_tbl, aes(x = abs(.data$annotation), y = .data$pi, color = .data$causal)) +
+  geom_point(alpha = 0.55) +
+  facet_grid(.data$inflate_match_f ~ .data$annotation_r2_f) +
+  scale_color_manual(values = c("FALSE" = "#7f7f7f", "TRUE" = "#d62728")) +
+  scale_y_continuous(labels = scales::label_number(accuracy = 0.001)) +
+  labs(
+    title = "Intermediate tau mapped back onto annotation magnitudes",
+    subtitle = "One representative annotation draw per grid point",
+    x = "|annotation|",
+    y = "pi",
+    color = "Causal"
+  ) +
+  theme_minimal(base_size = 11)
+```
+
+# Notes
+
+- This workbook now matches the fixed `susie2_oligogenic` architecture exactly. The causal architecture is 3 sparse + 5 oligogenic + 15 polygenic variants, so `p_star` is intentionally absent.
+- The annotation transform is normalized by a robust scale estimate of `|a|`, so `tau` is dimensionless.
+- For `p = 1000`, the uniform baseline is `0.001` per SNP. The counts `n_gt_5x_uniform` and `n_gt_10x_uniform` are stored in `tau_results` if you want to inspect how many variants are materially favored at each `tau`.
+- If this workbook points to a narrow stable `tau` window across the grid, that window can be promoted into a formal `tau_grid_values` proposal in the run-control layer.
