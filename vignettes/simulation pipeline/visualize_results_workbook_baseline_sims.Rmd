@@ -393,6 +393,7 @@ make_annotation_response_plot <- function(metric_col, y_label, title) {
 
   pi_df <- annotation_df %>%
     dplyr::filter(.data$method_family == "susie_functional_pi") %>%
+    dplyr::filter(is.na(.data$tau_value) | .data$tau_value >= 0.01) %>%
     dplyr::mutate(
       plot_value = .data[[metric_col]],
       param_label = paste0("pi tau=", fmt_num(.data$tau_value, 3))
@@ -401,13 +402,26 @@ make_annotation_response_plot <- function(metric_col, y_label, title) {
   ref_df <- non_annotation_reference %>%
     dplyr::mutate(plot_value = .data[[metric_col]])
 
-  ggplot() +
+  mu_labels <- mu_df %>%
+    dplyr::arrange(.data$sigma_value) %>%
+    dplyr::distinct(.data$param_label) %>%
+    dplyr::pull(.data$param_label)
+  pi_labels <- pi_df %>%
+    dplyr::arrange(.data$tau_value) %>%
+    dplyr::distinct(.data$param_label) %>%
+    dplyr::pull(.data$param_label)
+  color_values <- c(
+    stats::setNames(grDevices::colorRampPalette(c("#2c7fb8", "#41ab5d"))(length(mu_labels)), mu_labels),
+    stats::setNames(grDevices::colorRampPalette(c("#d73027", "#fee08b"))(length(pi_labels)), pi_labels)
+  )
+
+  p <- ggplot() +
     geom_hline(
       data = ref_df,
       aes(yintercept = .data$plot_value, linetype = .data$method_family),
-      color = "grey45",
-      linewidth = 0.5,
-      alpha = 0.65
+      color = "black",
+      linewidth = 0.6,
+      alpha = 0.8
     ) +
     geom_line(
       data = mu_df,
@@ -438,7 +452,16 @@ make_annotation_response_plot <- function(metric_col, y_label, title) {
       linetype = "Non-annotation reference",
       title = title
     ) +
+    guides(
+      color = guide_legend(nrow = 3, byrow = TRUE),
+      linetype = guide_legend(nrow = 1)
+    ) +
     theme(legend.position = "bottom")
+
+  if (length(color_values)) {
+    p <- p + scale_color_manual(values = color_values)
+  }
+  p
 }
 
 p_ann_auprc <- make_annotation_response_plot(
@@ -462,7 +485,8 @@ ggsave(file.path(fig_root, "baseline_performance", "tpr05_annotation_consuming.p
 ```{r tau-sweep, fig.width=10, fig.height=6}
 tau_sweeps <- screening_plot_df %>%
   dplyr::filter(.data$method_family == "susie_functional_pi") %>%
-  dplyr::filter(!is.na(.data$inflate_match))
+  dplyr::filter(!is.na(.data$inflate_match)) %>%
+  dplyr::filter(is.na(.data$tau_value) | .data$tau_value >= 0.01)
 
 p_tau <- ggplot(
   tau_sweeps,
@@ -609,10 +633,112 @@ if (!is.null(effect_metrics_unfiltered) && nrow(effect_metrics_unfiltered)) {
       title = "Effect diffuseness vs accuracy ratio density"
     )
 
+  annotation_grid <- screening_plot_df %>%
+    dplyr::filter(.data$method_family %in% annotation_methods) %>%
+    dplyr::filter(!is.na(.data$annotation_r2), !is.na(.data$inflate_match)) %>%
+    dplyr::distinct(
+      .data$annotation_r2,
+      .data$inflate_match,
+      .data$annotation_r2_f,
+      .data$inflate_match_f
+    )
+
+  best_annotation_settings <- screening_plot_df %>%
+    dplyr::filter(.data$method_family %in% annotation_methods) %>%
+    dplyr::filter(!is.na(.data$annotation_r2), !is.na(.data$inflate_match)) %>%
+    dplyr::group_by(.data$method_family, .data$annotation_r2, .data$inflate_match) %>%
+    dplyr::slice_max(.data$AUPRC, n = 1L, with_ties = FALSE) %>%
+    dplyr::ungroup() %>%
+    dplyr::select(
+      .data$method_family,
+      .data$setting_label,
+      .data$annotation_label,
+      .data$annotation_r2,
+      .data$inflate_match
+    )
+
+  best_vanilla_setting <- screening_plot_df %>%
+    dplyr::filter(.data$method_family == "susie_vanilla") %>%
+    dplyr::slice_max(.data$AUPRC, n = 1L, with_ties = FALSE) %>%
+    dplyr::select(.data$method_family, .data$setting_label)
+
+  annotation_effect_density <- effect_metrics_unfiltered %>%
+    dplyr::semi_join(
+      best_annotation_settings,
+      by = c("method_family", "setting_label", "annotation_label", "annotation_r2", "inflate_match")
+    ) %>%
+    dplyr::mutate(
+      annotation_r2_f = ifelse(is.na(.data$annotation_r2), "none", fmt_num(.data$annotation_r2, 3)),
+      inflate_match_f = ifelse(is.na(.data$inflate_match), "none", fmt_num(.data$inflate_match, 3)),
+      density_label = .data$method_family
+    )
+
+  vanilla_effect_density <- effect_metrics_unfiltered %>%
+    dplyr::semi_join(best_vanilla_setting, by = c("method_family", "setting_label")) %>%
+    dplyr::select(
+      -dplyr::any_of(c("annotation_r2", "inflate_match", "annotation_label"))
+    ) %>%
+    dplyr::mutate(density_label = "susie_vanilla") %>%
+    { tidyr::expand_grid(annotation_grid, .) }
+
+  effect_density_df <- dplyr::bind_rows(
+    vanilla_effect_density,
+    annotation_effect_density
+  ) %>%
+    dplyr::mutate(
+      density_label = factor(
+        .data$density_label,
+        levels = c("susie_vanilla", "susine_functional_mu", "susie_functional_pi")
+      )
+    )
+
+  density_colors <- c(
+    susie_vanilla = "black",
+    susine_functional_mu = "#2c7fb8",
+    susie_functional_pi = "#d73027"
+  )
+
+  p_accuracy_density <- ggplot(
+    effect_density_df,
+    aes(x = .data$accuracy_ratio, color = .data$density_label, fill = .data$density_label)
+  ) +
+    geom_density(alpha = 0.12, linewidth = 0.8, na.rm = TRUE) +
+    facet_grid(rows = vars(inflate_match_f), cols = vars(annotation_r2_f)) +
+    scale_color_manual(values = density_colors, drop = FALSE) +
+    scale_fill_manual(values = density_colors, drop = FALSE) +
+    coord_cartesian(xlim = c(0, 1)) +
+    labs(
+      x = "accuracy_ratio",
+      y = "Density",
+      color = "Model",
+      fill = "Model",
+      title = "Effect accuracy density for best annotation settings"
+    ) +
+    theme(legend.position = "bottom")
+
+  p_entropy_density <- ggplot(
+    effect_density_df,
+    aes(x = .data$effect_pip_entropy_core95, color = .data$density_label, fill = .data$density_label)
+  ) +
+    geom_density(alpha = 0.12, linewidth = 0.8, na.rm = TRUE) +
+    facet_grid(rows = vars(inflate_match_f), cols = vars(annotation_r2_f)) +
+    scale_color_manual(values = density_colors, drop = FALSE) +
+    scale_fill_manual(values = density_colors, drop = FALSE) +
+    labs(
+      x = "effect_pip_entropy_core95",
+      y = "Density",
+      color = "Model",
+      fill = "Model",
+      title = "Effect core-95 entropy density for best annotation settings"
+    ) +
+    theme(legend.position = "bottom")
+
   ggsave(file.path(fig_root, "effect_diagnostics", "effect_keff_core95_vs_accuracy_ratio.png"), p_main, width = 12, height = 8, dpi = 150)
   ggsave(file.path(fig_root, "effect_diagnostics", "tail_inflation_ratio_vs_accuracy_ratio.png"), p_tail, width = 12, height = 8, dpi = 150)
   ggsave(file.path(fig_root, "effect_diagnostics", "tail_inflation_log_vs_accuracy_ratio.png"), p_tail_log, width = 12, height = 8, dpi = 150)
   ggsave(file.path(fig_root, "effect_diagnostics", "effect_entropy_core95_vs_accuracy_ratio.png"), p_entropy, width = 12, height = 8, dpi = 150)
   ggsave(file.path(fig_root, "effect_diagnostics", "effect_keff_core95_vs_accuracy_ratio_bin2d.png"), p_bin2d, width = 14, height = 10, dpi = 150)
+  ggsave(file.path(fig_root, "effect_diagnostics", "accuracy_ratio_density_best_annotation_settings.png"), p_accuracy_density, width = 14, height = 9, dpi = 150)
+  ggsave(file.path(fig_root, "effect_diagnostics", "effect_entropy_core95_density_best_annotation_settings.png"), p_entropy_density, width = 14, height = 9, dpi = 150)
 }
 ```
