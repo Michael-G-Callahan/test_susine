@@ -50,6 +50,7 @@ fig_root <- file.path(job_dir, "figures")
 fig_dirs <- c(
   "susie2_plots",
   "baseline_performance",
+  file.path("baseline_performance", "confirmation"),
   "dataset_difficulty",
   "effect_diagnostics"
 )
@@ -257,113 +258,231 @@ if (!is.null(tier_cs_metrics) && nrow(tier_cs_metrics)) {
 
 # 3. Baseline Performance
 
-## 3.1 Overall screening summaries
+## 3.1 Method groups
 
 ```{r overall-screening, fig.width=14, fig.height=8}
-p_auprc <- auprc_pooled_overall %>%
-  dplyr::left_join(
-    screening_summary %>% dplyr::select(.data$setting_label, .data$annotation_label, .data$method_family),
-    by = c("setting_label", "annotation_label", "method_family")
-  ) %>%
-  dplyr::mutate(display_label = paste(.data$setting_label, "[", .data$annotation_label, "]")) %>%
-  ggplot(aes(x = reorder(.data$display_label, .data$AUPRC), y = .data$AUPRC, fill = .data$method_family)) +
-  geom_col() +
-  coord_flip() +
-  labs(x = "Setting", y = "Pooled AUPRC", fill = "Method family",
-       title = "Overall baseline screening by pooled AUPRC")
+obsolete_baseline_plots <- c(
+  "auprc_overall_all_settings.png",
+  "tpr05_overall_all_settings.png",
+  "sigma_sweeps.png",
+  "susine_functional_mu_heatmap.png",
+  "tpr05_by_annotation.png"
+)
+unlink(file.path(fig_root, "baseline_performance", obsolete_baseline_plots))
 
-p_tpr <- tpr05_pooled_overall %>%
-  dplyr::left_join(
-    screening_summary %>% dplyr::select(.data$setting_label, .data$annotation_label, .data$method_family),
-    by = c("setting_label", "annotation_label", "method_family")
-  ) %>%
-  dplyr::mutate(display_label = paste(.data$setting_label, "[", .data$annotation_label, "]")) %>%
-  ggplot(aes(x = reorder(.data$display_label, .data$tpr_fpr05), y = .data$tpr_fpr05, fill = .data$method_family)) +
-  geom_col() +
-  coord_flip() +
-  labs(x = "Setting", y = "TPR@FPR=0.05", fill = "Method family",
-       title = "Overall baseline screening by pooled TPR@FPR=0.05")
+annotation_methods <- c("susine_functional_mu", "susie_functional_pi")
+confirmation_methods <- c("susie_vanilla", "susine_vanilla")
+non_annotation_methods <- intersect(
+  c("susie_vanilla", "susie_inf", "susie_ash_fixed", "susie_eb"),
+  unique(screening_summary$method_family)
+)
 
-ggsave(file.path(fig_root, "baseline_performance", "auprc_overall_all_settings.png"), p_auprc, width = 14, height = 8, dpi = 150)
-ggsave(file.path(fig_root, "baseline_performance", "tpr05_overall_all_settings.png"), p_tpr, width = 14, height = 8, dpi = 150)
+metric_param_label <- function(df) {
+  df %>%
+    dplyr::mutate(
+      sigma_value = as.numeric(.data$sigma_0_2_scalar),
+      param_label = dplyr::case_when(
+        !is.na(.data$sigma_value) ~ paste0("sigma=", fmt_num(.data$sigma_value, 3)),
+        !is.na(.data$c_value) ~ paste0("c=", fmt_num(.data$c_value, 3)),
+        !is.na(.data$tau_value) ~ paste0("tau=", fmt_num(.data$tau_value, 3)),
+        TRUE ~ "default"
+      ),
+      annotation_r2_f = ifelse(is.na(.data$annotation_r2), "none", fmt_num(.data$annotation_r2, 3)),
+      inflate_match_f = ifelse(is.na(.data$inflate_match), "none", fmt_num(.data$inflate_match, 3))
+    )
+}
+
+screening_plot_df <- metric_param_label(screening_summary)
 ```
 
-## 3.2 By-annotation summaries
+## 3.2 Vanilla confirmation
 
-```{r by-annotation, fig.width=14, fig.height=8}
-p_auprc_ann <- ggplot(
-  auprc_pooled_by_annotation,
-  aes(x = reorder(.data$setting_label, .data$AUPRC), y = .data$AUPRC, fill = .data$method_family)
+```{r vanilla-confirmation, fig.width=10, fig.height=5}
+vanilla_confirmation <- screening_plot_df %>%
+  dplyr::filter(.data$method_family %in% confirmation_methods)
+
+p_confirm_auprc <- ggplot(
+  vanilla_confirmation,
+  aes(x = .data$sigma_value, y = .data$AUPRC, color = .data$method_family, group = .data$method_family)
 ) +
-  geom_col() +
-  coord_flip() +
-  facet_wrap(~annotation_label, scales = "free_y") +
-  labs(x = "Setting", y = "Pooled AUPRC", fill = "Method family",
-       title = "Baseline screening by annotation setting")
+  geom_point(size = 2) +
+  geom_line(linewidth = 0.7) +
+  labs(
+    x = expression(sigma[0]^2 / var(y)),
+    y = "Pooled AUPRC",
+    color = "Method family",
+    title = "Vanilla implementation confirmation"
+  )
 
-p_tpr_ann <- ggplot(
-  tpr05_pooled_by_annotation,
-  aes(x = reorder(.data$setting_label, .data$tpr_fpr05), y = .data$tpr_fpr05, fill = .data$method_family)
+p_confirm_tpr <- ggplot(
+  vanilla_confirmation,
+  aes(x = .data$sigma_value, y = .data$tpr_fpr05, color = .data$method_family, group = .data$method_family)
 ) +
-  geom_col() +
-  coord_flip() +
-  facet_wrap(~annotation_label, scales = "free_y") +
-  labs(x = "Setting", y = "TPR@FPR=0.05", fill = "Method family",
-       title = "Baseline TPR@FPR=0.05 by annotation setting")
+  geom_point(size = 2) +
+  geom_line(linewidth = 0.7) +
+  labs(
+    x = expression(sigma[0]^2 / var(y)),
+    y = "TPR@FPR=0.05",
+    color = "Method family",
+    title = "Vanilla implementation confirmation"
+  )
 
-ggsave(file.path(fig_root, "baseline_performance", "auprc_by_annotation.png"), p_auprc_ann, width = 14, height = 8, dpi = 150)
-ggsave(file.path(fig_root, "baseline_performance", "tpr05_by_annotation.png"), p_tpr_ann, width = 14, height = 8, dpi = 150)
+ggsave(file.path(fig_root, "baseline_performance", "confirmation", "susie_vs_susine_vanilla_auprc.png"), p_confirm_auprc, width = 10, height = 5, dpi = 150)
+ggsave(file.path(fig_root, "baseline_performance", "confirmation", "susie_vs_susine_vanilla_tpr05.png"), p_confirm_tpr, width = 10, height = 5, dpi = 150)
 ```
 
-## 3.3 Family-specific screening views
+## 3.3 Non-annotation baselines
 
-```{r family-screening, fig.width=12, fig.height=8}
-vanilla_sweeps <- screening_summary %>%
-  dplyr::filter(.data$method_family %in% c("susie_vanilla", "susine_vanilla", "susie_inf", "susie_ash_fixed")) %>%
-  dplyr::mutate(sigma_value = as.numeric(.data$sigma_0_2_scalar))
+```{r non-annotation-baselines, fig.width=12, fig.height=6}
+non_annotation_df <- screening_plot_df %>%
+  dplyr::filter(.data$method_family %in% non_annotation_methods)
 
-p_vanilla_sigma <- ggplot(vanilla_sweeps, aes(x = .data$sigma_value, y = .data$AUPRC, color = .data$annotation_label)) +
-  geom_point() +
-  geom_line() +
-  facet_wrap(~method_family, scales = "free_y") +
-  labs(x = expression(sigma[0]^2 / var(y)), y = "Pooled AUPRC", color = "Annotation",
-       title = "Sigma sweeps for vanilla/fixed-sigma baseline families")
+p_non_ann_auprc <- ggplot(
+  non_annotation_df,
+  aes(x = .data$method_family, y = .data$AUPRC, fill = .data$param_label)
+) +
+  geom_col(position = position_dodge2(width = 0.8, preserve = "single")) +
+  labs(
+    x = "Method family",
+    y = "Pooled AUPRC",
+    fill = "Parameter",
+    title = "Non-annotation baseline AUPRC"
+  ) +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
 
-tau_sweeps <- screening_summary %>%
-  dplyr::filter(.data$method_family == "susie_functional_pi")
+p_non_ann_tpr <- ggplot(
+  non_annotation_df,
+  aes(x = .data$method_family, y = .data$tpr_fpr05, fill = .data$param_label)
+) +
+  geom_col(position = position_dodge2(width = 0.8, preserve = "single")) +
+  labs(
+    x = "Method family",
+    y = "TPR@FPR=0.05",
+    fill = "Parameter",
+    title = "Non-annotation baseline TPR@FPR=0.05"
+  ) +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
 
-p_tau <- ggplot(tau_sweeps, aes(x = .data$tau_value, y = .data$AUPRC, color = .data$annotation_label)) +
+ggsave(file.path(fig_root, "baseline_performance", "auprc_non_annotation_methods.png"), p_non_ann_auprc, width = 12, height = 6, dpi = 150)
+ggsave(file.path(fig_root, "baseline_performance", "tpr05_non_annotation_methods.png"), p_non_ann_tpr, width = 12, height = 6, dpi = 150)
+```
+
+## 3.4 Annotation response
+
+```{r annotation-response, fig.width=14, fig.height=9}
+annotation_df <- screening_plot_df %>%
+  dplyr::filter(.data$method_family %in% annotation_methods) %>%
+  dplyr::filter(!is.na(.data$annotation_r2), !is.na(.data$inflate_match))
+
+non_annotation_reference <- non_annotation_df %>%
+  dplyr::group_by(.data$method_family) %>%
+  dplyr::summarise(
+    AUPRC = max(.data$AUPRC, na.rm = TRUE),
+    tpr_fpr05 = max(.data$tpr_fpr05, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+make_annotation_response_plot <- function(metric_col, y_label, title) {
+  mu_df <- annotation_df %>%
+    dplyr::filter(.data$method_family == "susine_functional_mu") %>%
+    dplyr::mutate(
+      c_value = as.numeric(.data$c_value),
+      plot_value = .data[[metric_col]],
+      param_label = paste0("mu sigma=", fmt_num(.data$sigma_value, 3))
+    )
+
+  pi_df <- annotation_df %>%
+    dplyr::filter(.data$method_family == "susie_functional_pi") %>%
+    dplyr::mutate(
+      plot_value = .data[[metric_col]],
+      param_label = paste0("pi tau=", fmt_num(.data$tau_value, 3))
+    )
+
+  ref_df <- non_annotation_reference %>%
+    dplyr::mutate(plot_value = .data[[metric_col]])
+
+  ggplot() +
+    geom_hline(
+      data = ref_df,
+      aes(yintercept = .data$plot_value, linetype = .data$method_family),
+      color = "grey45",
+      linewidth = 0.5,
+      alpha = 0.65
+    ) +
+    geom_line(
+      data = mu_df,
+      aes(
+        x = .data$c_value,
+        y = .data$plot_value,
+        color = .data$param_label,
+        group = interaction(.data$param_label, .data$annotation_r2_f, .data$inflate_match_f)
+      ),
+      linewidth = 0.8
+    ) +
+    geom_point(
+      data = mu_df,
+      aes(x = .data$c_value, y = .data$plot_value, color = .data$param_label),
+      size = 1.7
+    ) +
+    geom_hline(
+      data = pi_df,
+      aes(yintercept = .data$plot_value, color = .data$param_label),
+      linewidth = 0.7,
+      alpha = 0.85
+    ) +
+    facet_grid(rows = vars(inflate_match_f), cols = vars(annotation_r2_f)) +
+    labs(
+      x = "c",
+      y = y_label,
+      color = "Functional parameter",
+      linetype = "Non-annotation reference",
+      title = title
+    ) +
+    theme(legend.position = "bottom")
+}
+
+p_ann_auprc <- make_annotation_response_plot(
+  metric_col = "AUPRC",
+  y_label = "Pooled AUPRC",
+  title = "Annotation-consuming baseline AUPRC"
+)
+
+p_ann_tpr <- make_annotation_response_plot(
+  metric_col = "tpr_fpr05",
+  y_label = "TPR@FPR=0.05",
+  title = "Annotation-consuming baseline TPR@FPR=0.05"
+)
+
+ggsave(file.path(fig_root, "baseline_performance", "auprc_by_annotation.png"), p_ann_auprc, width = 14, height = 9, dpi = 150)
+ggsave(file.path(fig_root, "baseline_performance", "tpr05_annotation_consuming.png"), p_ann_tpr, width = 14, height = 9, dpi = 150)
+```
+
+## 3.5 Tau sweep
+
+```{r tau-sweep, fig.width=10, fig.height=6}
+tau_sweeps <- screening_plot_df %>%
+  dplyr::filter(.data$method_family == "susie_functional_pi") %>%
+  dplyr::filter(!is.na(.data$inflate_match))
+
+p_tau <- ggplot(
+  tau_sweeps,
+  aes(x = .data$tau_value, y = .data$AUPRC, color = .data$annotation_r2_f, group = .data$annotation_r2_f)
+) +
   geom_point() +
   geom_line() +
   scale_x_log10() +
-  labs(x = "tau", y = "Pooled AUPRC", color = "Annotation",
-       title = "Tau sweep for susie_functional_pi")
+  facet_wrap(~inflate_match_f) +
+  labs(
+    x = "tau",
+    y = "Pooled AUPRC",
+    color = "annotation_r2",
+    title = "Tau sweep for susie_functional_pi"
+  )
 
-mu_grid <- screening_summary %>%
-  dplyr::filter(.data$method_family == "susine_functional_mu") %>%
-  dplyr::mutate(sigma_value = as.numeric(.data$sigma_0_2_scalar))
-
-p_mu_heat <- ggplot(mu_grid, aes(x = .data$c_value, y = .data$sigma_value, fill = .data$AUPRC)) +
-  geom_tile() +
-  facet_wrap(~annotation_label) +
-  labs(x = "c", y = expression(sigma[0]^2 / var(y)), fill = "Pooled AUPRC",
-       title = "c x sigma screening heatmap for susine_functional_mu")
-
-single_point_families <- screening_summary %>%
-  dplyr::filter(.data$method_family %in% c("susie_eb", "susine_eb_clamped_scale_var_nonneg"))
-
-p_single <- ggplot(single_point_families, aes(x = .data$method_family, y = .data$AUPRC, fill = .data$annotation_label)) +
-  geom_col(position = position_dodge()) +
-  labs(x = "Method family", y = "Pooled AUPRC", fill = "Annotation",
-       title = "Single-point baseline families")
-
-ggsave(file.path(fig_root, "baseline_performance", "sigma_sweeps.png"), p_vanilla_sigma, width = 12, height = 8, dpi = 150)
 ggsave(file.path(fig_root, "baseline_performance", "tau_sweep.png"), p_tau, width = 10, height = 6, dpi = 150)
-ggsave(file.path(fig_root, "baseline_performance", "susine_functional_mu_heatmap.png"), p_mu_heat, width = 12, height = 8, dpi = 150)
-ggsave(file.path(fig_root, "baseline_performance", "single_point_families.png"), p_single, width = 10, height = 6, dpi = 150)
 ```
 
-## 3.4 Top settings table
+## 3.6 Top settings table
 
 ```{r top-settings-table}
 top_table <- screening_summary %>%
