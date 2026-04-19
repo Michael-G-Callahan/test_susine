@@ -96,11 +96,27 @@ test_that("aggregate_staging_outputs preserves filtered and unfiltered effect me
   run_lookup <- tibble::tibble(
     run_id = 1L,
     use_case_id = "susie_vanilla",
+    spec_name = "susie_vanilla_sigma",
     phenotype_seed = 1L,
     dataset_bundle_id = 11L,
     architecture = "sparse",
     refine_step = NA_integer_,
-    run_type = "cold"
+    run_type = "cold",
+    group_key = "base",
+    L = 10L,
+    annotation_r2 = NA_real_,
+    inflate_match = NA_real_,
+    sigma_0_2_scalar = "0.2",
+    c_value = NA_real_,
+    tau_value = NA_real_,
+    matrix_id = 1L,
+    y_noise = 0.8,
+    p_star = 2L,
+    exploration_mode = "separate",
+    exploration_methods = "sigma_0_2_grid",
+    exploration_group = "susie_vanilla_sigma",
+    alpha_concentration = NA_real_,
+    warm_method = NA_character_
   )
   readr::write_csv(run_lookup, file.path(history_dir, "run_table.csv"))
 
@@ -147,4 +163,11 @@ test_that("aggregate_staging_outputs preserves filtered and unfiltered effect me
   expect_equal(nrow(unfiltered_tbl), 1L)
   expect_true("use_case_id" %in% names(filtered_tbl))
   expect_true("use_case_id" %in% names(unfiltered_tbl))
+
+  expected_context <- c(
+    "spec_name", "annotation_r2", "inflate_match",
+    "sigma_0_2_scalar", "c_value", "tau_value"
+  )
+  expect_true(all(expected_context %in% names(filtered_tbl)))
+  expect_true(all(expected_context %in% names(unfiltered_tbl)))
 })

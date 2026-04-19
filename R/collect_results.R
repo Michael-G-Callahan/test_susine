@@ -207,7 +207,9 @@ aggregate_staging_outputs <- function(job_name,
         rss_gb <- as.numeric(rss[1]) / 1024 / 1024
       }
     } else if ("memory.size" %in% ls("package:utils")) {
-      rss_gb <- tryCatch(utils::memory.size() / 1024, error = function(e) NA_real_)
+      rss_gb <- suppressWarnings(
+        tryCatch(utils::memory.size() / 1024, error = function(e) NA_real_)
+      )
     }
     rss_gb
   }
@@ -294,7 +296,7 @@ aggregate_staging_outputs <- function(job_name,
   snp_files <- dplyr::filter(idx, .data$type == "snps")$path
 
   # Column lists for join-enrichment — match the original aggregated schemas.
-  run_enrich_core <- c("use_case_id", "phenotype_seed", "dataset_bundle_id",
+  run_enrich_core <- c("use_case_id", "spec_name", "phenotype_seed", "dataset_bundle_id",
                        "architecture", "refine_step", "run_type")
   run_enrich_full <- c(run_enrich_core, "group_key", "L", "annotation_r2",
                        "inflate_match", "sigma_0_2_scalar", "c_value", "tau_value",
@@ -314,7 +316,7 @@ aggregate_staging_outputs <- function(job_name,
   }
   if (length(effect_files)) {
     effect_tbl <- read_csv_safe(effect_files, idx) %>%
-      enrich_from_run_table(cols = run_enrich_core)
+      enrich_from_run_table(cols = run_enrich_full)
     readr::write_csv(effect_tbl, file.path(output_dir, "effect_metrics.csv"))
     log_progress("Wrote effect_metrics.csv")
     rm(effect_tbl, effect_files)
@@ -322,7 +324,7 @@ aggregate_staging_outputs <- function(job_name,
   }
   if (length(effect_unfiltered_files)) {
     effect_unfiltered_tbl <- read_csv_safe(effect_unfiltered_files, idx) %>%
-      enrich_from_run_table(cols = run_enrich_core)
+      enrich_from_run_table(cols = run_enrich_full)
     readr::write_csv(
       effect_unfiltered_tbl,
       file.path(output_dir, "effect_metrics_unfiltered.csv")
@@ -379,7 +381,7 @@ aggregate_staging_outputs <- function(job_name,
   }
   if (length(tier_cs_files)) {
     tier_cs_tbl <- read_csv_safe(tier_cs_files, idx) %>%
-      enrich_from_run_table(cols = run_enrich_core)
+      enrich_from_run_table(cols = run_enrich_full)
     readr::write_csv(tier_cs_tbl, file.path(output_dir, "tier_cs_metrics.csv"))
     log_progress("Wrote tier_cs_metrics.csv")
     rm(tier_cs_tbl, tier_cs_files)
