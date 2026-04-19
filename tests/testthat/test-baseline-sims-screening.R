@@ -108,7 +108,7 @@ test_that("aggregate_staging_outputs preserves filtered and unfiltered effect me
     inflate_match = NA_real_,
     sigma_0_2_scalar = "0.2",
     c_value = NA_real_,
-    tau_value = NA_real_,
+    tau_value = 0.464,
     matrix_id = 1L,
     y_noise = 0.8,
     p_star = 2L,
@@ -133,6 +133,7 @@ test_that("aggregate_staging_outputs preserves filtered and unfiltered effect me
     tail_inflation_ratio = 1.067,
     tail_inflation_log = 0.1,
     accuracy_ratio = 0.8,
+    tau_value = NA_real_,
     task_id = 1L,
     flush_id = "flush-001"
   )
@@ -170,4 +171,6 @@ test_that("aggregate_staging_outputs preserves filtered and unfiltered effect me
   )
   expect_true(all(expected_context %in% names(filtered_tbl)))
   expect_true(all(expected_context %in% names(unfiltered_tbl)))
+  expect_equal(filtered_tbl$tau_value, 0.464, tolerance = 1e-12)
+  expect_equal(unfiltered_tbl$tau_value, 0.464, tolerance = 1e-12)
 })

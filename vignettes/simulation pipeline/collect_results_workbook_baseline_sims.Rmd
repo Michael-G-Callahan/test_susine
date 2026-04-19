@@ -36,7 +36,7 @@ library(knitr)
 
 ```{r locate}
 job_name <- "baseline_sims_screen"
-parent_job_id <- "REPLACE_ME"
+parent_job_id <- "51509956"
 output_root <- here("output")
 
 job_dir <- file.path(output_root, "slurm_output", job_name, parent_job_id)

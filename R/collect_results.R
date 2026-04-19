@@ -243,13 +243,14 @@ aggregate_staging_outputs <- function(job_name,
   }
 
   # Helper: enrich a data frame by joining dimension columns that were
-  # stripped from flush files. Only adds columns specified by `cols`;
-  # skips columns already present in df.
+  # stripped from flush files. For requested run-table columns, the run table
+  # is authoritative; stale or partially populated flush columns are replaced.
   enrich_from_run_table <- function(df, cols = NULL) {
     if (is.null(run_lookup) || !"run_id" %in% names(df)) return(df)
-    available <- setdiff(names(run_lookup), c("run_id", names(df)))
+    available <- setdiff(names(run_lookup), "run_id")
     if (!is.null(cols)) available <- intersect(available, cols)
     if (!length(available)) return(df)
+    df <- dplyr::select(df, -dplyr::any_of(available))
     lookup_slim <- dplyr::select(run_lookup, dplyr::all_of(c("run_id", available)))
     dplyr::left_join(df, lookup_slim, by = "run_id")
   }
