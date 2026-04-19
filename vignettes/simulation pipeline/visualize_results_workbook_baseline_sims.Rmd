@@ -270,7 +270,11 @@ obsolete_baseline_plots <- c(
 )
 unlink(file.path(fig_root, "baseline_performance", obsolete_baseline_plots))
 
-annotation_methods <- c("susine_functional_mu", "susie_functional_pi")
+functional_pi_methods <- intersect(
+  c("susie_functional_pi", "susine_functional_pi"),
+  unique(screening_summary$method_family)
+)
+annotation_methods <- c("susine_functional_mu", functional_pi_methods)
 confirmation_methods <- c("susie_vanilla", "susine_vanilla")
 non_annotation_methods <- intersect(
   c("susie_vanilla", "susie_inf", "susie_ash_fixed", "susie_eb"),
@@ -392,7 +396,7 @@ make_annotation_response_plot <- function(metric_col, y_label, title) {
     )
 
   pi_df <- annotation_df %>%
-    dplyr::filter(.data$method_family == "susie_functional_pi") %>%
+    dplyr::filter(.data$method_family %in% functional_pi_methods) %>%
     dplyr::filter(is.na(.data$tau_value) | .data$tau_value >= 0.01) %>%
     dplyr::mutate(
       plot_value = .data[[metric_col]],
@@ -454,9 +458,13 @@ make_annotation_response_plot <- function(metric_col, y_label, title) {
     ) +
     guides(
       color = guide_legend(nrow = 3, byrow = TRUE),
-      linetype = guide_legend(nrow = 1)
+      linetype = guide_legend(ncol = 2, byrow = TRUE)
     ) +
-    theme(legend.position = "bottom")
+    theme(
+      legend.position = "bottom",
+      legend.box = "vertical",
+      legend.justification = "center"
+    )
 
   if (length(color_values)) {
     p <- p + scale_color_manual(values = color_values)
@@ -476,15 +484,15 @@ p_ann_tpr <- make_annotation_response_plot(
   title = "Annotation-consuming baseline TPR@FPR=0.05"
 )
 
-ggsave(file.path(fig_root, "baseline_performance", "auprc_by_annotation.png"), p_ann_auprc, width = 14, height = 9, dpi = 150)
-ggsave(file.path(fig_root, "baseline_performance", "tpr05_annotation_consuming.png"), p_ann_tpr, width = 14, height = 9, dpi = 150)
+ggsave(file.path(fig_root, "baseline_performance", "auprc_by_annotation.png"), p_ann_auprc, width = 14, height = 11, dpi = 150)
+ggsave(file.path(fig_root, "baseline_performance", "tpr05_annotation_consuming.png"), p_ann_tpr, width = 14, height = 11, dpi = 150)
 ```
 
 ## 3.5 Tau sweep
 
 ```{r tau-sweep, fig.width=10, fig.height=6}
 tau_sweeps <- screening_plot_df %>%
-  dplyr::filter(.data$method_family == "susie_functional_pi") %>%
+  dplyr::filter(.data$method_family %in% functional_pi_methods) %>%
   dplyr::filter(!is.na(.data$inflate_match)) %>%
   dplyr::filter(is.na(.data$tau_value) | .data$tau_value >= 0.01)
 
@@ -646,6 +654,11 @@ if (!is.null(effect_metrics_unfiltered) && nrow(effect_metrics_unfiltered)) {
   best_annotation_settings <- screening_plot_df %>%
     dplyr::filter(.data$method_family %in% annotation_methods) %>%
     dplyr::filter(!is.na(.data$annotation_r2), !is.na(.data$inflate_match)) %>%
+    dplyr::filter(
+      !(.data$method_family %in% functional_pi_methods) |
+        is.na(.data$tau_value) |
+        .data$tau_value >= 0.01
+    ) %>%
     dplyr::group_by(.data$method_family, .data$annotation_r2, .data$inflate_match) %>%
     dplyr::slice_max(.data$AUPRC, n = 1L, with_ties = FALSE) %>%
     dplyr::ungroup() %>%
@@ -688,15 +701,24 @@ if (!is.null(effect_metrics_unfiltered) && nrow(effect_metrics_unfiltered)) {
     dplyr::mutate(
       density_label = factor(
         .data$density_label,
-        levels = c("susie_vanilla", "susine_functional_mu", "susie_functional_pi")
+        levels = c("susie_vanilla", "susine_functional_mu", functional_pi_methods)
       )
     )
 
   density_colors <- c(
     susie_vanilla = "black",
     susine_functional_mu = "#2c7fb8",
-    susie_functional_pi = "#d73027"
+    stats::setNames(rep("#d73027", length(functional_pi_methods)), functional_pi_methods)
   )
+
+  density_selection_counts <- effect_density_df %>%
+    dplyr::count(.data$annotation_r2_f, .data$inflate_match_f, .data$density_label, name = "n_effect_rows")
+
+  readr::write_csv(
+    density_selection_counts,
+    file.path(fig_root, "effect_diagnostics", "effect_density_selection_counts.csv")
+  )
+  kable(density_selection_counts, caption = "Effect-density rows selected by facet and model")
 
   p_accuracy_density <- ggplot(
     effect_density_df,
