@@ -749,10 +749,11 @@ p_tau <- ggplot() +
   ) +
   guides(color = guide_legend(order = 1)) +
   labs(
-    x = expression(tau),
+    x = expression(paste("Functional-", pi, " temperature   ", tau)),
     y = "Pooled AUPRC",
     title = NULL
-  )
+  ) +
+  theme(axis.title.x = element_text(margin = margin(t = 2, b = 0)))
 
 ggsave(file.path(fig_root, "baseline_performance", "tau_sweep.png"),
        p_tau, width = 10, height = 5, dpi = 200)
@@ -778,16 +779,17 @@ if (requireNamespace("patchwork", quietly = TRUE)) {
   p_a <- p_non_ann_auprc +
     ggtitle("(a) Non-annotation methods") +
     combined_theme +
+    coord_cartesian(ylim = c(0, 0.34)) +
     theme(
-      legend.position    = c(0.98, 0.98),
+      legend.position      = c(0.98, 0.98),
       legend.justification = c(1, 1),
-      legend.background  = element_rect(fill = scales::alpha("white", 0.85),
-                                        color = "grey70", linewidth = 0.3),
-      legend.margin      = margin(2, 4, 2, 4),
-      legend.key.size    = grid::unit(0.45, "cm"),
-      legend.title       = element_text(size = 9),
-      legend.text        = element_text(size = 9),
-      legend.direction   = "vertical"
+      legend.background    = element_rect(fill = scales::alpha("white", 0.85),
+                                          color = "grey70", linewidth = 0.3),
+      legend.margin        = margin(2, 4, 2, 4),
+      legend.key.size      = grid::unit(0.45, "cm"),
+      legend.title         = element_text(size = 9),
+      legend.text          = element_text(size = 9),
+      legend.direction     = "vertical"
     ) +
     guides(fill = guide_legend(ncol = 1, title = "Parameter"))
   p_b <- p_tau +
