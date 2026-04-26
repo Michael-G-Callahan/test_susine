@@ -629,8 +629,14 @@ make_annotation_response_plot <- function(metric_col, y_label, title = NULL) {
       rows = vars(.data$inflate_match_f),
       cols = vars(.data$annotation_r2_f),
       labeller = labeller(
-        annotation_r2_f = function(x) parse(text = paste0("phi[a]==", x)),
-        inflate_match_f = function(x) parse(text = paste0("nu[a]==", x))
+        annotation_r2_f = as_labeller(
+          function(x) paste0("paste(\"Annotation accuracy   \", phi[a], \" = \", \"", x, "\")"),
+          default = label_parsed
+        ),
+        inflate_match_f = as_labeller(
+          function(x) paste0("paste(\"Non-causal inflation   \", nu[a], \" = \", \"", x, "\")"),
+          default = label_parsed
+        )
       )
     ) +
     labs(
@@ -720,7 +726,8 @@ p_tau <- ggplot() +
     size = 1.8
   ) +
   scale_x_log10() +
-  scale_color_manual(values = r2_palette, name = expression(phi[a])) +
+  scale_color_manual(values = r2_palette,
+                     name = expression(paste("Annotation accuracy   ", phi[a]))) +
   scale_linetype_manual(
     name = "Reference",
     values = c(
@@ -735,7 +742,10 @@ p_tau <- ggplot() +
   ) +
   facet_wrap(
     ~inflate_match_f,
-    labeller = labeller(inflate_match_f = function(x) parse(text = paste0("nu[a]==", x)))
+    labeller = labeller(inflate_match_f = as_labeller(
+      function(x) paste0("paste(\"Non-causal inflation   \", nu[a], \" = \", \"", x, "\")"),
+      default = label_parsed
+    ))
   ) +
   guides(color = guide_legend(order = 1)) +
   labs(
@@ -767,7 +777,19 @@ if (requireNamespace("patchwork", quietly = TRUE)) {
 
   p_a <- p_non_ann_auprc +
     ggtitle("(a) Non-annotation methods") +
-    combined_theme
+    combined_theme +
+    theme(
+      legend.position    = c(0.98, 0.98),
+      legend.justification = c(1, 1),
+      legend.background  = element_rect(fill = scales::alpha("white", 0.85),
+                                        color = "grey70", linewidth = 0.3),
+      legend.margin      = margin(2, 4, 2, 4),
+      legend.key.size    = grid::unit(0.45, "cm"),
+      legend.title       = element_text(size = 9),
+      legend.text        = element_text(size = 9),
+      legend.direction   = "vertical"
+    ) +
+    guides(fill = guide_legend(ncol = 1, title = "Parameter"))
   p_b <- p_tau +
     ggtitle(expression(bold("(b) SuSiE functional-"*pi*" temperature sweep"))) +
     combined_theme
