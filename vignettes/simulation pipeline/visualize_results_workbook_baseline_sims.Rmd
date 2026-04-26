@@ -31,7 +31,6 @@ library(dplyr)
 library(readr)
 library(tidyr)
 library(ggplot2)
-library(ggnewscale)
 library(knitr)
 
 paper_theme <- theme_bw(base_size = 11) +
@@ -545,6 +544,37 @@ make_annotation_response_plot <- function(metric_col, y_label, title = NULL) {
   vanilla_df$ref_label <- factor(vanilla_df$ref_label, levels = ref_levels)
 
   ggplot() +
+    geom_hline(
+      data = vanilla_df,
+      aes(yintercept = .data$plot_value, linetype = .data$ref_label),
+      color = ref_palette[["SuSiE vanilla (best sigma^2)"]],
+      linewidth = 0.55
+    ) +
+    geom_hline(
+      data = dplyr::filter(facet_refs, .data$ref_label == "SuSiE functional pi (best tau)"),
+      aes(yintercept = .data$plot_value, linetype = .data$ref_label),
+      color = ref_palette[["SuSiE functional pi (best tau)"]],
+      linewidth = 0.7
+    ) +
+    geom_hline(
+      data = dplyr::filter(facet_refs, .data$ref_label == "SuSiNE-EB (mu, sigma^2 estimated)"),
+      aes(yintercept = .data$plot_value, linetype = .data$ref_label),
+      color = ref_palette[["SuSiNE-EB (mu, sigma^2 estimated)"]],
+      linewidth = 0.7
+    ) +
+    scale_linetype_manual(
+      name = "Reference",
+      values = c(
+        "SuSiE vanilla (best sigma^2)" = "solid",
+        "SuSiE functional pi (best tau)" = "dashed",
+        "SuSiNE-EB (mu, sigma^2 estimated)" = "dotted"
+      ),
+      breaks = ref_levels,
+      guide = guide_legend(
+        order = 2, nrow = 1,
+        override.aes = list(color = unname(ref_palette[ref_levels]))
+      )
+    ) +
     geom_line(
       data = mu_df,
       aes(x = .data$c_value, y = .data$plot_value,
@@ -561,26 +591,6 @@ make_annotation_response_plot <- function(metric_col, y_label, title = NULL) {
       values = mu_palette,
       name = "SuSiNE functional mu prior variance",
       guide = guide_legend(order = 1, nrow = 1)
-    ) +
-    ggnewscale::new_scale_color() +
-    geom_hline(
-      data = vanilla_df,
-      aes(yintercept = .data$plot_value, color = .data$ref_label),
-      linetype = "solid", linewidth = 0.55
-    ) +
-    geom_hline(
-      data = facet_refs,
-      aes(yintercept = .data$plot_value, color = .data$ref_label),
-      linetype = "dashed", linewidth = 0.7
-    ) +
-    scale_color_manual(
-      values = ref_palette,
-      name = "Reference",
-      drop = FALSE,
-      guide = guide_legend(
-        order = 2, nrow = 1,
-        override.aes = list(linetype = c("solid", "dashed", "dashed"))
-      )
     ) +
     facet_grid(
       rows = vars(.data$inflate_match_f),
