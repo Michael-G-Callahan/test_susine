@@ -119,10 +119,33 @@ fmt_num <- function(x, digits = 3) {
   format(signif(as.numeric(x), digits), trim = TRUE, scientific = FALSE)
 }
 
-top_settings_by_family <- screening_summary %>%
+# Global top-3 by family — used by ROC / CS-power plots (§2) for picking a
+# small number of representative high-AUPRC settings to overlay.
+top_settings_by_family_global <- screening_summary %>%
   dplyr::group_by(.data$method_family) %>%
   dplyr::slice_max(.data$AUPRC, n = 3L, with_ties = FALSE) %>%
   dplyr::ungroup()
+top_settings_by_family <- top_settings_by_family_global
+
+# Best setting per (method_family x annotation_label) for annotation-consuming
+# families, and per method_family for annotation-agnostic families. This is
+# what the paper text quotes — we want one row per (family, annotation regime)
+# rather than the global top 3, so low-quality annotation regimes are not
+# silently dropped from the SuSiNE / functional-pi summaries.
+annotation_consuming <- c(
+  "susine_functional_mu", "susine_eb_clamped_scale_var_nonneg",
+  "susie_functional_pi",  "susine_functional_pi"
+)
+top_settings_by_family_annotation <- screening_summary %>%
+  dplyr::mutate(group_label = dplyr::if_else(
+    .data$method_family %in% annotation_consuming,
+    paste(.data$method_family, .data$annotation_label, sep = " | "),
+    .data$method_family
+  )) %>%
+  dplyr::group_by(.data$group_label) %>%
+  dplyr::slice_max(.data$AUPRC, n = 1L, with_ties = FALSE) %>%
+  dplyr::ungroup() %>%
+  dplyr::select(-.data$group_label)
 
 best_settings_by_family <- screening_summary %>%
   dplyr::group_by(.data$method_family) %>%
@@ -277,7 +300,7 @@ p_cal <- ggplot(cal_df, aes(x = .data$pip_bin + 0.05, y = .data$mean_frac)) +
     x = "Mean PIP bin midpoint",
     y = "Observed fraction causal",
     title = NULL,
-    caption = "Annotation-consuming methods at R^2(a, beta) = 0.3, sign match = 0.9 (best AUPRC). SuSiE at sigma^2 = 0.2."
+    caption = expression(paste("Annotation-consuming methods at ", phi[a], " = 0.3, ", nu[a], " = 0.9 (best AUPRC). SuSiE at ", sigma^2, " = 0.2."))
   ) +
   theme(legend.position = "none",
         plot.caption = element_text(size = 8, color = "grey30", hjust = 0))
@@ -425,9 +448,21 @@ non_annotation_plot_df <- non_annotation_df %>%
     )
   )
 
-non_ann_palette <- grDevices::colorRampPalette(
-  c("#08306b", "#2171b5", "#6baed6", "#bdd7e7")
-)(length(unique(non_annotation_plot_df$param_label)))
+non_ann_param_levels <- sort(unique(non_annotation_plot_df$param_label))
+non_ann_named_palette <- c(
+  "default"     = "#999999",
+  "sigma=0.10"  = "#0072B2",
+  "sigma=0.20"  = "#56B4E9",
+  "sigma=0.40"  = "#009E73"
+)
+non_ann_palette <- if (all(non_ann_param_levels %in% names(non_ann_named_palette))) {
+  non_ann_named_palette[non_ann_param_levels]
+} else {
+  stats::setNames(
+    viridisLite::viridis(length(non_ann_param_levels), option = "D", end = 0.9),
+    non_ann_param_levels
+  )
+}
 
 p_non_ann_auprc <- ggplot(
   non_annotation_plot_df,
@@ -497,9 +532,7 @@ make_annotation_response_plot <- function(metric_col, y_label, title = NULL) {
       sigma_label = factor(sigma_label_fn(.data$sigma_value),
                            levels = sigma_label_fn(sigma_levels))
     )
-  mu_palette <- grDevices::colorRampPalette(
-    c("#08306b", "#2171b5", "#6baed6", "#74c476", "#238b45")
-  )(length(sigma_levels))
+  mu_palette <- viridisLite::viridis(length(sigma_levels), option = "D", end = 0.9)
   names(mu_palette) <- sigma_label_fn(sigma_levels)
 
   pi_best <- annotation_df %>%
@@ -596,8 +629,8 @@ make_annotation_response_plot <- function(metric_col, y_label, title = NULL) {
       rows = vars(.data$inflate_match_f),
       cols = vars(.data$annotation_r2_f),
       labeller = labeller(
-        annotation_r2_f = function(x) paste0("R^2(a, beta) = ", x),
-        inflate_match_f = function(x) paste0("Sign match = ", x)
+        annotation_r2_f = function(x) parse(text = paste0("phi[a]==", x)),
+        inflate_match_f = function(x) parse(text = paste0("nu[a]==", x))
       )
     ) +
     labs(
@@ -645,7 +678,7 @@ vanilla_auprc_value <- screening_plot_df %>%
 
 r2_levels <- sort(unique(tau_sweeps$annotation_r2_f))
 r2_palette <- stats::setNames(
-  grDevices::colorRampPalette(c("#d94801", "#54278f"))(length(r2_levels)),
+  viridisLite::viridis(length(r2_levels), option = "C", end = 0.85),
   r2_levels
 )
 
@@ -687,7 +720,7 @@ p_tau <- ggplot() +
     size = 1.8
   ) +
   scale_x_log10() +
-  scale_color_manual(values = r2_palette, name = expression(R^2 * "(a, " * beta * ")")) +
+  scale_color_manual(values = r2_palette, name = expression(phi[a])) +
   scale_linetype_manual(
     name = "Reference",
     values = c(
@@ -702,7 +735,7 @@ p_tau <- ggplot() +
   ) +
   facet_wrap(
     ~inflate_match_f,
-    labeller = labeller(inflate_match_f = function(x) paste0("Sign match = ", x))
+    labeller = labeller(inflate_match_f = function(x) parse(text = paste0("nu[a]==", x)))
   ) +
   guides(color = guide_legend(order = 1)) +
   labs(
@@ -715,10 +748,52 @@ ggsave(file.path(fig_root, "baseline_performance", "tau_sweep.png"),
        p_tau, width = 10, height = 5, dpi = 200)
 ```
 
-## 3.6 Top settings table
+## 3.6 Combined baseline figure (paper-ready)
+
+```{r compose-baseline-figure, fig.width=12, fig.height=16}
+if (requireNamespace("patchwork", quietly = TRUE)) {
+  library(patchwork)
+  p_a <- p_non_ann_auprc +
+    ggtitle("(a) Non-annotation methods") +
+    theme(plot.title = element_text(face = "bold"))
+  p_b <- p_tau +
+    ggtitle(expression(bold("(b) SuSiE functional-"*pi*" temperature sweep"))) +
+    theme(plot.title = element_text(face = "bold"))
+  p_c <- p_ann_auprc +
+    ggtitle(expression(bold("(c) SuSiNE functional-"*mu*" vs. reference methods"))) +
+    theme(plot.title = element_text(face = "bold"))
+
+  fig_baseline <- p_a / p_b / p_c +
+    patchwork::plot_layout(heights = c(0.9, 1.0, 1.6))
+
+  ggsave(
+    file.path(fig_root, "baseline_performance", "fig_baseline_combined.png"),
+    fig_baseline, width = 12, height = 16, dpi = 220
+  )
+}
+```
+
+## 3.7 Top settings table
 
 ```{r top-settings-table}
-top_table <- screening_summary %>%
+# Best setting per (method_family, annotation_label) for annotation-consuming
+# families and per method_family for annotation-agnostic families. This
+# replaces the prior global-top-N which silently dropped low-quality
+# annotation regimes from the SuSiNE / functional-pi rows.
+top_table <- top_settings_by_family_annotation %>%
+  dplyr::select(
+    .data$method_family,
+    .data$annotation_label,
+    .data$setting_label,
+    .data$AUPRC,
+    .data$tpr_fpr05
+  ) %>%
+  dplyr::arrange(.data$method_family, .data$annotation_label)
+
+readr::write_csv(top_table, file.path(fig_root, "baseline_performance", "top_settings_by_family.csv"))
+
+# Auxiliary global top-5 per family for sanity checks.
+top_table_global <- screening_summary %>%
   dplyr::group_by(.data$method_family) %>%
   dplyr::slice_max(.data$AUPRC, n = 5L, with_ties = FALSE) %>%
   dplyr::ungroup() %>%
@@ -729,9 +804,9 @@ top_table <- screening_summary %>%
     .data$AUPRC,
     .data$tpr_fpr05
   )
+readr::write_csv(top_table_global, file.path(fig_root, "baseline_performance", "top_settings_global_top5.csv"))
 
-readr::write_csv(top_table, file.path(fig_root, "baseline_performance", "top_settings_by_family.csv"))
-kable(top_table, digits = 4, caption = "Top pooled settings by method family")
+kable(top_table, digits = 4, caption = "Best pooled setting per method-family and annotation regime")
 ```
 
 # 4. Dataset Difficulty
