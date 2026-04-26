@@ -1,0 +1,597 @@
+---
+title: "Effect Matching Refit Export (3-arm)"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+Standalone one-off workbook for the fitted-y effect-matching study,
+extended to a third arm. This recreates the same 150 matrix x 4 seed
+baseline-sims dataset grid, then fits exactly:
+
+- `susie_vanilla`
+- `susine_functional_mu` with `annotation_r2 = 0.5`,
+  `inflate_match = 0.9`, `c = 0.6`, `sigma_0_2 = 0.01`
+- `susie_functional_pi` with `annotation_r2 = 0.5`,
+  `inflate_match = 0.9`, `tau = 0.464`, `sigma_0_2 = 0.01`
+
+Annotations are harmonized across the two treatment arms (same `a` vector,
+same `r2`, same `inflate_match`); only the prior mechanism differs (mean-shift
+vs functional inclusion weights). Output goes to a fresh study directory so
+the existing 2-arm outputs remain a separate snapshot.
+
+```{r setup, message=FALSE}
+here::i_am("vignettes/one_off_validations/effect_matching_refit_export_3arm.Rmd")
+library(here)
+library(devtools)
+
+susine_path <- here("..", "susine")
+if (file.exists(file.path(susine_path, "DESCRIPTION"))) {
+  options(test_susine.local_susine_path = normalizePath(susine_path, winslash = "/", mustWork = TRUE))
+  devtools::load_all(susine_path)
+}
+devtools::load_all(".")
+
+library(dplyr)
+library(readr)
+library(tidyr)
+library(purrr)
+library(knitr)
+```
+
+# 1. User Parameters
+
+```{r user-parameters}
+study_name <- "baseline_sims_3arm_effect_matching"
+output_root <- here("output")
+study_dir <- file.path(output_root, "effect_matching_study", study_name)
+dir.create(study_dir, recursive = TRUE, showWarnings = FALSE)
+
+# Set to a small integer, e.g. 5L, for a local smoke run.
+max_datasets <- Inf
+force_refit <- FALSE
+checkpoint_every <- 25L
+
+# Baseline-sims dataset recipe (must match the original 2-arm refit so dataset
+# bundle ids align across studies for downstream comparison).
+n_matrices_target <- 150L
+seeds <- 1:4
+L_value <- 10L
+y_noise_value <- NA_real_
+p_star_value <- NA_integer_
+architecture_value <- "susie2_oligogenic"
+data_scenario <- "scenario_1"
+
+# Matching-study model settings (harmonized annotations across both treatment
+# arms; only the prior mechanism differs).
+annotation_r2_value <- 0.5
+inflate_match_value <- 0.9
+c_value_mu <- 0.6
+tau_value_pi <- 0.464
+sigma_0_2_value <- 0.01
+max_iter <- 100L
+credible_set_rho <- 0.95
+purity_threshold <- 0.50
+
+method_levels <- c("susie_vanilla", "susine_functional_mu", "susie_functional_pi")
+n_methods_expected <- length(method_levels)
+
+records_rds <- file.path(study_dir, "effect_refit_records.rds")
+metadata_csv <- file.path(study_dir, "effect_refit_metadata.csv")
+selected_runs_csv <- file.path(study_dir, "selected_run_rows.csv")
+dataset_bundles_csv <- file.path(study_dir, "dataset_bundles.csv")
+progress_csv <- file.path(study_dir, "refit_progress_log.csv")
+
+cat("Study dir:", study_dir, "\n")
+cat("Methods:", paste(method_levels, collapse = ", "), "\n")
+```
+
+# 2. Helpers
+
+```{r helpers}
+`%||%` <- function(x, y) if (is.null(x)) y else x
+
+format_duration <- function(seconds) {
+  seconds <- as.numeric(seconds)
+  if (!is.finite(seconds)) {
+    return("unknown")
+  }
+  h <- floor(seconds / 3600)
+  m <- floor((seconds %% 3600) / 60)
+  s <- round(seconds %% 60)
+  sprintf("%02d:%02d:%02d", h, m, s)
+}
+
+save_checkpoint <- function(records, progress_rows) {
+  saveRDS(records, records_rds)
+
+  metadata <- records
+  if ("indices" %in% names(metadata)) {
+    metadata <- metadata %>%
+      dplyr::mutate(
+        cs_indices = vapply(
+          .data$indices,
+          function(idx) paste(as.integer(idx), collapse = ";"),
+          character(1)
+        )
+      )
+  }
+  metadata <- metadata %>%
+    dplyr::select(-dplyr::where(is.list))
+  readr::write_csv(metadata, metadata_csv)
+
+  if (length(progress_rows)) {
+    readr::write_csv(dplyr::bind_rows(progress_rows), progress_csv)
+  }
+}
+
+first_existing_numeric <- function(df, cols, default = NA_real_) {
+  for (nm in cols) {
+    if (nm %in% names(df)) {
+      val <- suppressWarnings(as.numeric(df[[nm]][[1]]))
+      if (length(val)) {
+        return(val)
+      }
+    }
+  }
+  default
+}
+
+effect_coef_matrix <- function(fit, X) {
+  alpha <- fit$effect_fits$alpha
+  if (is.list(alpha)) {
+    alpha <- do.call(rbind, alpha)
+  }
+  alpha <- as.matrix(alpha)
+  L <- nrow(alpha)
+  p <- ncol(X)
+
+  b_hat <- fit$effect_fits$b_hat %||% NULL
+  if (!is.null(b_hat)) {
+    b_hat <- as.matrix(b_hat)
+    if (nrow(b_hat) == p && ncol(b_hat) == L) {
+      b_hat <- t(b_hat)
+    }
+    if (nrow(b_hat) == L && ncol(b_hat) == p) {
+      return(b_hat)
+    }
+  }
+
+  mu <- fit$effect_fits$mu %||% fit$raw$mu %||% NULL
+  if (!is.null(mu)) {
+    mu <- as.matrix(mu)
+    if (nrow(mu) == p && ncol(mu) == L) {
+      mu <- t(mu)
+    }
+    if (nrow(mu) == L && ncol(mu) == p) {
+      return(alpha * mu)
+    }
+  }
+
+  stop("Could not recover an L x p per-effect coefficient matrix from the fit.")
+}
+
+extract_effect_records <- function(fit, eval_res, data_bundle, run_row, model_method, fit_meta) {
+  X <- data_bundle$X
+  y <- as.numeric(data_bundle$y)
+  b_hat <- effect_coef_matrix(fit, X)
+  fitted_y_mat <- X %*% t(b_hat)
+  L <- ncol(fitted_y_mat)
+  var_y <- stats::var(y)
+
+  effect_tbl <- eval_res$effects_unfiltered %>%
+    tibble::as_tibble() %>%
+    dplyr::mutate(effect = as.integer(.data$effect))
+
+  tibble::tibble(effect = seq_len(L)) %>%
+    dplyr::left_join(effect_tbl, by = "effect") %>%
+    dplyr::mutate(
+      fitted_y_effect = lapply(seq_len(L), function(l) as.numeric(fitted_y_mat[, l])),
+      var_y_explained_frac = vapply(
+        .data$fitted_y_effect,
+        function(fy) {
+          val <- stats::var(fy) / var_y
+          ifelse(is.finite(val), val, NA_real_)
+        },
+        numeric(1)
+      ),
+      var_y_explained_pct = 100 * .data$var_y_explained_frac,
+      dataset_bundle_id = as.character(run_row$dataset_bundle_id[[1]]),
+      run_id = as.integer(run_row$run_id[[1]]),
+      model_method = model_method,
+      use_case_id = as.character(run_row$use_case_id[[1]]),
+      spec_name = as.character(run_row$spec_name[[1]]),
+      setting_label = as.character(run_row$setting_label[[1]]),
+      annotation_label = as.character(run_row$annotation_label[[1]]),
+      annotation_r2 = as.numeric(run_row$annotation_r2[[1]]),
+      inflate_match = as.numeric(run_row$inflate_match[[1]]),
+      c_value = as.numeric(run_row$c_value[[1]]),
+      tau_value = as.numeric(run_row$tau_value[[1]]),
+      sigma_0_2_scalar = as.character(run_row$sigma_0_2_scalar[[1]]),
+      phenotype_seed = as.integer(run_row$phenotype_seed[[1]]),
+      matrix_id = as.character(run_row$matrix_id[[1]]),
+      architecture = as.character(run_row$architecture[[1]]),
+      p_star = as.integer(run_row$p_star[[1]]),
+      y_noise = as.numeric(run_row$y_noise[[1]]),
+      fit_wall_time_sec = as.numeric(fit_meta$wall_time_sec %||% NA_real_),
+      model_AUPRC = as.numeric(eval_res$model_unfiltered$AUPRC[[1]]),
+      model_tpr_fpr05 = first_existing_numeric(
+        eval_res$model_unfiltered,
+        c("tpr_fpr05", "tpr_at_fpr_05")
+      )
+    ) %>%
+    dplyr::relocate(
+      dplyr::all_of(c(
+        "dataset_bundle_id", "model_method", "run_id",
+        "effect", "setting_label", "annotation_label"
+      ))
+    )
+}
+
+fit_one_method <- function(run_row, data_bundle, job_config) {
+  run_row <- tibble::as_tibble(run_row)
+  use_case <- test_susine:::lookup_use_case(job_config, run_row$use_case_id[[1]])
+  if (!nrow(use_case)) {
+    stop("Unknown use case: ", run_row$use_case_id[[1]])
+  }
+
+  model_result <- test_susine:::run_use_case(
+    use_case = use_case,
+    run_row = run_row,
+    data_bundle = data_bundle,
+    job_config = job_config
+  )
+  fit <- model_result$fits[[1]]
+  fit_meta <- model_result$fit_meta[[1]] %||% list()
+
+  eval_res <- test_susine:::evaluate_model(
+    fit = fit,
+    X = data_bundle$X,
+    y = data_bundle$y,
+    causal_idx = data_bundle$causal_idx,
+    rho = job_config$job$credible_set_rho %||% credible_set_rho,
+    purity_threshold = job_config$job$purity_threshold %||% purity_threshold,
+    compute_curves = FALSE
+  )
+
+  extract_effect_records(
+    fit = fit,
+    eval_res = eval_res,
+    data_bundle = data_bundle,
+    run_row = run_row,
+    model_method = run_row$method_family[[1]],
+    fit_meta = fit_meta
+  )
+}
+```
+
+# 3. Build Standalone Baseline Dataset Grid
+
+```{r build-standalone-config}
+data_matrix_catalog_full <- test_susine:::build_data_matrix_catalog(
+  requested_scenarios = data_scenario,
+  repo_root = here(),
+  summary_path = here(
+    "data", "sampled_simulated_genotypes", "scenario_sampling_summary.csv"
+  )
+)
+
+m1_summary_path <- here(
+  "data", "sampled_simulated_genotypes", "scenario_sampling_summary_with_m1.csv"
+)
+if (file.exists(m1_summary_path)) {
+  catalog_with_m1 <- readr::read_csv(m1_summary_path, show_col_types = FALSE)
+} else {
+  m1_tbl <- test_susine::build_x_metrics_table(
+    matrix_paths_df = data_matrix_catalog_full %>%
+      dplyr::select(.data$matrix_id, .data$matrix_path),
+    base_dir = here()
+  ) %>%
+    dplyr::select(.data$matrix_id, .data$M1)
+  catalog_with_m1 <- data_matrix_catalog_full %>%
+    dplyr::left_join(m1_tbl, by = "matrix_id")
+  readr::write_csv(catalog_with_m1, m1_summary_path)
+}
+
+if (!"matrix_id" %in% names(catalog_with_m1)) {
+  if ("gene" %in% names(catalog_with_m1)) {
+    catalog_with_m1 <- dplyr::rename(catalog_with_m1, dataset_label = .data$gene)
+  }
+  join_col <- intersect(c("dataset_label", "matrix_path"), names(catalog_with_m1))[[1L]]
+  catalog_with_m1 <- catalog_with_m1 %>%
+    dplyr::left_join(
+      data_matrix_catalog_full %>%
+        dplyr::select(.data$matrix_id, dplyr::all_of(join_col)),
+      by = join_col
+    )
+}
+
+catalog_with_m1 <- catalog_with_m1 %>%
+  dplyr::filter(!is.na(.data$M1)) %>%
+  dplyr::arrange(.data$M1)
+
+n_target <- min(n_matrices_target, nrow(catalog_with_m1))
+idx <- unique(round(seq(1, nrow(catalog_with_m1), length.out = n_target)))
+selected_matrices <- catalog_with_m1[idx, , drop = FALSE]
+
+data_matrix_catalog <- data_matrix_catalog_full %>%
+  dplyr::semi_join(
+    selected_matrices %>% dplyr::select(.data$matrix_id),
+    by = "matrix_id"
+  )
+
+spec_susie_vanilla <- list(
+  name = "effect_match_susie_vanilla",
+  use_case_ids = "susie_vanilla",
+  exploration_methods = "sigma_0_2_grid",
+  exploration_mode = "separate",
+  K = 1L,
+  sigma_0_2_grid_values = sigma_0_2_value
+)
+
+spec_susine_functional_mu <- list(
+  name = "effect_match_susine_functional_mu",
+  use_case_ids = "susine_functional_mu",
+  exploration_methods = c("c_grid", "sigma_0_2_grid"),
+  exploration_mode = "intersect",
+  K = 1L,
+  c_grid_values = c_value_mu,
+  sigma_0_2_grid_values = sigma_0_2_value
+)
+
+spec_susie_functional_pi <- list(
+  name = "effect_match_susie_functional_pi",
+  use_case_ids = "susie_functional_pi",
+  exploration_methods = c("tau_grid", "sigma_0_2_grid"),
+  exploration_mode = "intersect",
+  K = 1L,
+  tau_grid_values = tau_value_pi,
+  sigma_0_2_grid_values = sigma_0_2_value
+)
+
+cfg <- test_susine::make_job_config(
+  job_name = study_name,
+  HPC = FALSE,
+  time = "02:00:00",
+  mem = "8G",
+  output_root = output_root,
+  grid_mode = "full",
+  use_case_ids = method_levels,
+  exploration_specs = list(
+    spec_susie_vanilla,
+    spec_susine_functional_mu,
+    spec_susie_functional_pi
+  ),
+  L_grid = L_value,
+  y_noise_grid = y_noise_value,
+  p_star_grid = p_star_value,
+  architecture_grid = architecture_value,
+  seeds = seeds,
+  prior_quality = tibble::tibble(
+    annotation_r2 = annotation_r2_value,
+    inflate_match = inflate_match_value
+  ),
+  sigma_0_2_scalars = sigma_0_2_value,
+  data_scenarios = data_scenario,
+  repo_root = here(),
+  data_matrix_catalog = data_matrix_catalog,
+  sampled_scenario_summary = here(
+    "data", "sampled_simulated_genotypes", "scenario_sampling_summary.csv"
+  ),
+  task_unit = "dataset",
+  bundles_per_task = 1L,
+  task_assignment_seed = 42L,
+  max_iter = max_iter,
+  aggregation_methods = character(0),
+  include_overall_pool = FALSE,
+  credible_set_rho = credible_set_rho,
+  purity_threshold = purity_threshold,
+  verbose_file_output = FALSE,
+  write_snps_parquet = FALSE,
+  write_confusion_bins = FALSE,
+  write_tier_cs_metrics = TRUE,
+  write_scaling_confusion_bins = FALSE,
+  metrics_settings = list(
+    z_top_k = 10L,
+    jsd_threshold = 0.15
+  )
+)
+
+run_table <- cfg$tables$runs %>%
+  tibble::as_tibble() %>%
+  dplyr::mutate(
+    method_family = .data$use_case_id,
+    annotation_label = dplyr::if_else(
+      is.na(.data$annotation_r2) | is.na(.data$inflate_match),
+      "no_annotation",
+      paste0("r2=", .data$annotation_r2, " | inflate=", .data$inflate_match)
+    ),
+    setting_label = dplyr::case_when(
+      .data$use_case_id == "susie_vanilla" ~
+        paste0("susie_vanilla | sigma=", .data$sigma_0_2_scalar),
+      .data$use_case_id == "susine_functional_mu" ~
+        paste0(
+          "susine_functional_mu | c=", .data$c_value,
+          " | sigma=", .data$sigma_0_2_scalar
+        ),
+      .data$use_case_id == "susie_functional_pi" ~
+        paste0(
+          "susie_functional_pi | tau=", .data$tau_value,
+          " | sigma=", .data$sigma_0_2_scalar
+        ),
+      TRUE ~ .data$use_case_id
+    )
+  )
+cfg$tables$runs <- run_table
+
+selected_runs <- run_table %>%
+  dplyr::filter(.data$use_case_id %in% method_levels) %>%
+  dplyr::arrange(.data$dataset_bundle_id, .data$use_case_id)
+
+readr::write_csv(selected_runs, selected_runs_csv)
+readr::write_csv(cfg$tables$dataset_bundles, dataset_bundles_csv)
+
+cat("Matrices selected:", nrow(data_matrix_catalog), "\n")
+cat("Dataset bundles:", nrow(cfg$tables$dataset_bundles), "\n")
+cat("Selected run rows:", nrow(selected_runs), "\n")
+cat("Methods:", paste(sort(unique(selected_runs$use_case_id)), collapse = ", "), "\n")
+cat("Annotation r2:", annotation_r2_value, "\n")
+cat("Annotation inflate_match:", inflate_match_value, "\n")
+cat("Functional-mu c:", c_value_mu, "\n")
+cat("Functional-pi tau:", tau_value_pi, "\n")
+cat("Sigma_0_2 scalar:", sigma_0_2_value, "\n")
+
+stopifnot(nrow(cfg$tables$dataset_bundles) == n_matrices_target * length(seeds))
+stopifnot(nrow(selected_runs) == n_methods_expected * nrow(cfg$tables$dataset_bundles))
+```
+
+# 4. Refit And Export
+
+```{r refit-export}
+dataset_ids <- sort(as.character(unique(selected_runs$dataset_bundle_id)))
+if (is.finite(max_datasets)) {
+  dataset_ids <- head(dataset_ids, as.integer(max_datasets))
+}
+
+existing_records <- tibble::tibble()
+if (!force_refit && file.exists(records_rds)) {
+  existing_records <- readRDS(records_rds)
+  cat("Loaded existing records:", nrow(existing_records), "\n")
+}
+
+completed_ids <- character(0)
+if (nrow(existing_records)) {
+  completed_ids <- existing_records %>%
+    dplyr::count(.data$dataset_bundle_id, .data$model_method, name = "n_effects") %>%
+    dplyr::filter(.data$n_effects > 0L) %>%
+    dplyr::count(.data$dataset_bundle_id, name = "n_methods") %>%
+    dplyr::filter(.data$n_methods == n_methods_expected) %>%
+    dplyr::pull(.data$dataset_bundle_id)
+}
+
+todo_ids <- setdiff(dataset_ids, completed_ids)
+cat("Datasets queued:", length(dataset_ids), "\n")
+cat("Already completed datasets:", length(intersect(dataset_ids, completed_ids)), "\n")
+cat("Datasets remaining:", length(todo_ids), "\n")
+
+records <- existing_records
+progress_rows <- list()
+if (file.exists(progress_csv)) {
+  old_progress <- readr::read_csv(progress_csv, show_col_types = FALSE) %>%
+    dplyr::mutate(
+      dataset_bundle_id = as.character(.data$dataset_bundle_id),
+      timestamp = as.character(.data$timestamp)
+    )
+  progress_rows <- split(old_progress, seq_len(nrow(old_progress)))
+}
+
+started <- proc.time()[["elapsed"]]
+total_to_run <- length(todo_ids)
+
+for (i in seq_along(todo_ids)) {
+  dataset_id <- todo_ids[[i]]
+  dataset_started <- proc.time()[["elapsed"]]
+
+  bundle_row <- cfg$tables$dataset_bundles %>%
+    tibble::as_tibble() %>%
+    dplyr::filter(as.character(.data$dataset_bundle_id) == !!dataset_id)
+  if (nrow(bundle_row) != 1L) {
+    stop("Expected one dataset bundle row for dataset_bundle_id=", dataset_id, "; found ", nrow(bundle_row), ".")
+  }
+
+  data_bundle <- test_susine:::generate_data_for_bundle(bundle_row, cfg)
+
+  dataset_run_rows <- selected_runs %>%
+    dplyr::filter(as.character(.data$dataset_bundle_id) == !!dataset_id) %>%
+    dplyr::arrange(factor(.data$method_family, levels = method_levels))
+
+  dataset_records <- purrr::map_dfr(
+    seq_len(nrow(dataset_run_rows)),
+    function(j) {
+      fit_one_method(dataset_run_rows[j, , drop = FALSE], data_bundle, cfg)
+    }
+  )
+
+  records <- dplyr::bind_rows(records, dataset_records)
+
+  elapsed <- proc.time()[["elapsed"]] - started
+  avg_sec <- elapsed / i
+  eta <- avg_sec * (total_to_run - i)
+  dataset_elapsed <- proc.time()[["elapsed"]] - dataset_started
+
+  progress_row <- tibble::tibble(
+    completed_this_session = i,
+    total_this_session = total_to_run,
+    completed_overall = length(intersect(dataset_ids, completed_ids)) + i,
+    total_overall = length(dataset_ids),
+    dataset_bundle_id = dataset_id,
+    dataset_elapsed_sec = dataset_elapsed,
+    elapsed_sec = elapsed,
+    eta_sec = eta,
+    timestamp = as.character(Sys.time())
+  )
+  progress_rows[[length(progress_rows) + 1L]] <- progress_row
+
+  cat(sprintf(
+    "%d/%d datasets fitted | elapsed: %s | avg: %.1f sec/dataset | ETA: %s | dataset_id: %s\n",
+    length(intersect(dataset_ids, completed_ids)) + i,
+    length(dataset_ids),
+    format_duration(elapsed),
+    avg_sec,
+    format_duration(eta),
+    dataset_id
+  ))
+
+  if (i %% checkpoint_every == 0L || i == total_to_run) {
+    save_checkpoint(records, progress_rows)
+    cat("Checkpoint saved:", records_rds, "\n")
+  }
+}
+
+if (!length(todo_ids)) {
+  save_checkpoint(records, progress_rows)
+}
+
+cat("Final record rows:", nrow(records), "\n")
+cat("Final datasets:", dplyr::n_distinct(records$dataset_bundle_id), "\n")
+cat("Records RDS:", records_rds, "\n")
+cat("Metadata CSV:", metadata_csv, "\n")
+```
+
+# 5. Sanity Checks
+
+```{r sanity}
+records_check <- readRDS(records_rds)
+
+summary_counts <- records_check %>%
+  dplyr::count(.data$dataset_bundle_id, .data$model_method, name = "n_effects") %>%
+  dplyr::count(.data$model_method, .data$n_effects, name = "n_datasets")
+
+kable(summary_counts)
+
+vector_lengths <- records_check %>%
+  dplyr::mutate(fitted_y_length = vapply(.data$fitted_y_effect, length, integer(1))) %>%
+  dplyr::count(.data$model_method, .data$fitted_y_length, name = "n_effect_rows")
+
+kable(vector_lengths)
+
+if (any(vector_lengths$fitted_y_length <= 0L)) {
+  stop("At least one fitted_y_effect vector is empty.")
+}
+
+methods_present <- sort(unique(records_check$model_method))
+cat("Distinct model_method values in records:", paste(methods_present, collapse = ", "), "\n")
+if (!setequal(methods_present, method_levels)) {
+  warning(
+    "Records do not contain exactly the expected three methods. Expected: ",
+    paste(method_levels, collapse = ", "),
+    ". Got: ",
+    paste(methods_present, collapse = ", ")
+  )
+}
+```

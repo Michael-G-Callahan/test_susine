@@ -1,0 +1,581 @@
+---
+title: "Effect Matching Threshold Application (3-arm, same-X null, fixed threshold)"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+Applies the operating threshold (`corr_min = 0.99`, `margin_min = 0`,
+`var_min = 0`) — pre-validated in
+`effect_matching_threshold_calibration_same_X.Rmd` — to two pairwise matchings
+in the 3-arm refit:
+
+- `susie_vanilla` <-> `susine_functional_mu`
+- `susie_vanilla` <-> `susie_functional_pi`
+
+Mu<->pi matching is intentionally skipped for this iteration. The same-X
+within-matrix derangement supplies the null. No grid sweep is performed; the
+threshold is fixed. A real-vs-null correlation diagnostic per arm verifies
+that the fixed threshold still cleanly separates the distributions.
+
+```{r setup, message=FALSE}
+here::i_am("vignettes/one_off_validations/effect_matching_threshold_calibration_3arm.Rmd")
+library(here)
+library(dplyr)
+library(readr)
+library(tidyr)
+library(purrr)
+library(ggplot2)
+library(knitr)
+
+theme_set(theme_bw(base_size = 12))
+```
+
+# 1. Inputs
+
+```{r inputs}
+output_root <- here("output")
+
+study_name <- "baseline_sims_3arm_effect_matching"
+study_dir <- file.path(output_root, "effect_matching_study", study_name)
+records_rds <- file.path(study_dir, "effect_refit_records.rds")
+
+baseline_method <- "susie_vanilla"
+treatment_methods <- c("susine_functional_mu", "susie_functional_pi")
+treatment_short <- c(
+  susine_functional_mu = "mu",
+  susie_functional_pi = "pi"
+)
+
+# Operating threshold (locked from the same-X 2-arm calibration).
+fixed_corr_min <- 0.99
+fixed_margin_min <- 0
+fixed_var_min <- 0
+
+near_zero_sd <- 1e-12
+
+# Per-treatment output filenames are built inside the per-arm loop using
+# treatment_short[[treatment]].
+
+cat("Study dir:", study_dir, "\n")
+cat("Records RDS:", records_rds, "\n")
+cat("Baseline method:", baseline_method, "\n")
+cat("Treatment methods:", paste(treatment_methods, collapse = ", "), "\n")
+cat(sprintf(
+  "Fixed threshold: corr_min = %.3f | margin_min = %.3f | var_min = %.4f\n",
+  fixed_corr_min, fixed_margin_min, fixed_var_min
+))
+```
+
+# 2. Helpers
+
+```{r helpers}
+format_duration <- function(seconds) {
+  seconds <- as.numeric(seconds)
+  if (!is.finite(seconds)) {
+    return("unknown")
+  }
+  h <- floor(seconds / 3600)
+  m <- floor((seconds %% 3600) / 60)
+  s <- round(seconds %% 60)
+  sprintf("%02d:%02d:%02d", h, m, s)
+}
+
+records_to_matrix <- function(rows) {
+  rows <- rows %>% dplyr::arrange(.data$effect)
+  mat <- do.call(cbind, rows$fitted_y_effect)
+  storage.mode(mat) <- "double"
+  colnames(mat) <- as.character(rows$effect)
+  mat
+}
+
+safe_cor_matrix <- function(vanilla_mat, mu_mat, sd_eps = near_zero_sd) {
+  if (nrow(vanilla_mat) != nrow(mu_mat)) {
+    stop(
+      "Mismatched n between baseline and treatment fitted-y matrices: ",
+      nrow(vanilla_mat), " vs ", nrow(mu_mat),
+      ". Same-X null assumes shared sample dimension."
+    )
+  }
+
+  v_sd <- apply(vanilla_mat, 2L, stats::sd)
+  m_sd <- apply(mu_mat, 2L, stats::sd)
+  active_v <- is.finite(v_sd) & v_sd > sd_eps
+  active_m <- is.finite(m_sd) & m_sd > sd_eps
+
+  cor_mat <- matrix(
+    0,
+    nrow = ncol(vanilla_mat),
+    ncol = ncol(mu_mat),
+    dimnames = list(colnames(vanilla_mat), colnames(mu_mat))
+  )
+
+  if (any(active_v) && any(active_m)) {
+    sub_cor <- suppressWarnings(stats::cor(
+      vanilla_mat[, active_v, drop = FALSE],
+      mu_mat[, active_m, drop = FALSE],
+      use = "pairwise.complete.obs"
+    ))
+    sub_cor[!is.finite(sub_cor)] <- 0
+    cor_mat[active_v, active_m] <- sub_cor
+  }
+
+  list(cor = cor_mat, active_vanilla = active_v, active_mu = active_m)
+}
+
+second_best_margin <- function(values, chosen_idx) {
+  if (length(values) <= 1L) {
+    return(Inf)
+  }
+  alternatives <- values[-chosen_idx]
+  best_alt <- max(alternatives, na.rm = TRUE)
+  values[[chosen_idx]] - best_alt
+}
+
+safe_min_numeric <- function(...) {
+  x <- c(...)
+  x <- x[is.finite(x)]
+  if (!length(x)) {
+    return(NA_real_)
+  }
+  min(x)
+}
+
+effect_metric_cols <- c(
+  "size", "purity", "coverage",
+  "effect_pip_entropy", "effect_pip_entropy_core95",
+  "effect_k_eff_signal", "effect_k_eff_signal_core95",
+  "tail_inflation_ratio", "tail_inflation_log",
+  "accuracy_ratio", "var_y_explained_frac", "var_y_explained_pct"
+)
+
+add_effect_metric_columns <- function(out, vanilla_rows, mu_rows, vanilla_idx, mu_idx) {
+  available <- intersect(effect_metric_cols, intersect(names(vanilla_rows), names(mu_rows)))
+  for (nm in available) {
+    out[[paste0(nm, "_vanilla")]] <- vanilla_rows[[nm]][vanilla_idx]
+    out[[paste0(nm, "_mu")]] <- mu_rows[[nm]][mu_idx]
+    out[[paste0(nm, "_delta_mu_minus_vanilla")]] <-
+      mu_rows[[nm]][mu_idx] - vanilla_rows[[nm]][vanilla_idx]
+  }
+  out
+}
+
+compare_dataset_pair <- function(vanilla_rows,
+                                 mu_rows,
+                                 vanilla_dataset_id,
+                                 mu_dataset_id,
+                                 comparison_type,
+                                 comparison_id,
+                                 matrix_id = NA_character_,
+                                 include_effect_metrics = FALSE) {
+  vanilla_rows <- vanilla_rows %>% dplyr::arrange(.data$effect)
+  mu_rows <- mu_rows %>% dplyr::arrange(.data$effect)
+
+  vanilla_mat <- records_to_matrix(vanilla_rows)
+  mu_mat <- records_to_matrix(mu_rows)
+  cor_info <- safe_cor_matrix(vanilla_mat, mu_mat)
+  cor_mat <- cor_info$cor
+
+  row_best <- max.col(cor_mat, ties.method = "first")
+  col_best <- max.col(t(cor_mat), ties.method = "first")
+
+  candidate_rows <- vector("list", nrow(cor_mat))
+  n_candidates <- 0L
+
+  for (i in seq_len(nrow(cor_mat))) {
+    j <- row_best[[i]]
+    if (col_best[[j]] != i) {
+      next
+    }
+
+    n_candidates <- n_candidates + 1L
+    row_margin <- second_best_margin(cor_mat[i, ], j)
+    col_margin <- second_best_margin(cor_mat[, j], i)
+
+    out <- tibble::tibble(
+      comparison_type = comparison_type,
+      comparison_id = comparison_id,
+      matrix_id = as.character(matrix_id),
+      vanilla_dataset_bundle_id = vanilla_dataset_id,
+      mu_dataset_bundle_id = mu_dataset_id,
+      vanilla_effect = as.integer(rownames(cor_mat)[[i]]),
+      mu_effect = as.integer(colnames(cor_mat)[[j]]),
+      corr = as.numeric(cor_mat[i, j]),
+      row_margin = as.numeric(row_margin),
+      col_margin = as.numeric(col_margin),
+      margin = min(row_margin, col_margin),
+      var_y_explained_frac_vanilla = as.numeric(vanilla_rows$var_y_explained_frac[[i]]),
+      var_y_explained_frac_mu = as.numeric(mu_rows$var_y_explained_frac[[j]]),
+      pair_var_explained_frac = safe_min_numeric(
+        as.numeric(vanilla_rows$var_y_explained_frac[[i]]),
+        as.numeric(mu_rows$var_y_explained_frac[[j]])
+      ),
+      active_vanilla = as.logical(cor_info$active_vanilla[[i]]),
+      active_mu = as.logical(cor_info$active_mu[[j]]),
+      mutual_best = TRUE
+    )
+
+    if (include_effect_metrics) {
+      out <- add_effect_metric_columns(out, vanilla_rows, mu_rows, i, j)
+    }
+
+    candidate_rows[[n_candidates]] <- out
+  }
+
+  if (!n_candidates) {
+    return(tibble::tibble())
+  }
+
+  dplyr::bind_rows(candidate_rows[seq_len(n_candidates)])
+}
+
+run_pairwise_matching <- function(records,
+                                  baseline_method,
+                                  treatment_method,
+                                  short_label) {
+  needed_methods <- c(baseline_method, treatment_method)
+  pair_records <- records %>%
+    dplyr::filter(.data$model_method %in% needed_methods)
+
+  method_counts <- pair_records %>%
+    dplyr::count(.data$dataset_bundle_id, .data$model_method, name = "n_effects")
+
+  complete_ids <- method_counts %>%
+    dplyr::filter(.data$n_effects > 0L) %>%
+    dplyr::count(.data$dataset_bundle_id, name = "n_methods") %>%
+    dplyr::filter(.data$n_methods == length(needed_methods)) %>%
+    dplyr::pull(.data$dataset_bundle_id) %>%
+    sort()
+
+  if (length(complete_ids) < 2L) {
+    stop(
+      "Need at least two complete datasets for ", treatment_method,
+      "; found ", length(complete_ids), "."
+    )
+  }
+
+  pair_records <- pair_records %>%
+    dplyr::filter(.data$dataset_bundle_id %in% complete_ids)
+
+  vanilla_by_dataset <- pair_records %>%
+    dplyr::filter(.data$model_method == baseline_method) %>%
+    split(.$dataset_bundle_id)
+
+  treatment_by_dataset <- pair_records %>%
+    dplyr::filter(.data$model_method == treatment_method) %>%
+    split(.$dataset_bundle_id)
+
+  dataset_to_matrix <- pair_records %>%
+    dplyr::distinct(.data$dataset_bundle_id, .data$matrix_id) %>%
+    dplyr::filter(.data$dataset_bundle_id %in% complete_ids)
+
+  cat("\n--- Treatment arm:", treatment_method, "---\n")
+  cat("Complete datasets:", length(complete_ids), "\n")
+  cat("Distinct matrices:", dplyr::n_distinct(dataset_to_matrix$matrix_id), "\n")
+
+  # Real candidates -------------------------------------------------------
+  real_started <- proc.time()[["elapsed"]]
+  real_candidates <- purrr::map_dfr(
+    seq_along(complete_ids),
+    function(i) {
+      dataset_id <- complete_ids[[i]]
+      matrix_id_i <- dataset_to_matrix$matrix_id[
+        match(dataset_id, dataset_to_matrix$dataset_bundle_id)
+      ]
+      out <- compare_dataset_pair(
+        vanilla_rows = vanilla_by_dataset[[dataset_id]],
+        mu_rows = treatment_by_dataset[[dataset_id]],
+        vanilla_dataset_id = dataset_id,
+        mu_dataset_id = dataset_id,
+        comparison_type = "real",
+        comparison_id = paste0("real_", dataset_id),
+        matrix_id = matrix_id_i,
+        include_effect_metrics = TRUE
+      )
+
+      if (i %% 100L == 0L || i == length(complete_ids)) {
+        elapsed <- proc.time()[["elapsed"]] - real_started
+        eta <- elapsed / i * (length(complete_ids) - i)
+        cat(sprintf(
+          "[%s] Real candidates %d/%d | elapsed: %s | ETA: %s\n",
+          short_label, i, length(complete_ids),
+          format_duration(elapsed), format_duration(eta)
+        ))
+      }
+      out
+    }
+  )
+
+  # Null candidates: enumerated within-matrix mismatched pairs ------------
+  null_pair_index <- dataset_to_matrix %>%
+    dplyr::inner_join(
+      dataset_to_matrix %>%
+        dplyr::rename(mu_dataset_bundle_id = .data$dataset_bundle_id),
+      by = "matrix_id",
+      relationship = "many-to-many"
+    ) %>%
+    dplyr::filter(.data$dataset_bundle_id != .data$mu_dataset_bundle_id) %>%
+    dplyr::transmute(
+      matrix_id = .data$matrix_id,
+      vanilla_dataset_bundle_id = as.character(.data$dataset_bundle_id),
+      mu_dataset_bundle_id = as.character(.data$mu_dataset_bundle_id),
+      pair_index = dplyr::row_number()
+    )
+
+  if (!nrow(null_pair_index)) {
+    stop(
+      "No within-matrix mismatched pairs available for ", treatment_method,
+      "; either all matrices have one seed or matrix_id is missing."
+    )
+  }
+
+  cat(sprintf("[%s] Within-matrix null pairs: %d\n",
+              short_label, nrow(null_pair_index)))
+
+  null_started <- proc.time()[["elapsed"]]
+  null_candidate_chunks <- vector("list", nrow(null_pair_index))
+  for (i in seq_len(nrow(null_pair_index))) {
+    vanilla_id <- null_pair_index$vanilla_dataset_bundle_id[[i]]
+    mu_id <- null_pair_index$mu_dataset_bundle_id[[i]]
+    matrix_i <- null_pair_index$matrix_id[[i]]
+
+    null_candidate_chunks[[i]] <- compare_dataset_pair(
+      vanilla_rows = vanilla_by_dataset[[vanilla_id]],
+      mu_rows = treatment_by_dataset[[mu_id]],
+      vanilla_dataset_id = vanilla_id,
+      mu_dataset_id = mu_id,
+      comparison_type = "null",
+      comparison_id = paste0("null_", matrix_i, "_", vanilla_id, "_", mu_id),
+      matrix_id = matrix_i,
+      include_effect_metrics = FALSE
+    )
+
+    if (i %% 200L == 0L || i == nrow(null_pair_index)) {
+      elapsed <- proc.time()[["elapsed"]] - null_started
+      eta <- elapsed / i * (nrow(null_pair_index) - i)
+      cat(sprintf(
+        "[%s] Null pairs %d/%d | elapsed: %s | ETA: %s\n",
+        short_label, i, nrow(null_pair_index),
+        format_duration(elapsed), format_duration(eta)
+      ))
+    }
+  }
+
+  null_candidates <- dplyr::bind_rows(null_candidate_chunks)
+  n_fixed <- sum(
+    null_candidates$vanilla_dataset_bundle_id == null_candidates$mu_dataset_bundle_id
+  )
+  if (n_fixed > 0L) {
+    stop(n_fixed, " null candidate rows have vanilla_dataset == mu_dataset.")
+  }
+
+  list(
+    real_candidates = real_candidates,
+    null_candidates = null_candidates,
+    null_pair_index = null_pair_index,
+    n_complete = length(complete_ids)
+  )
+}
+
+apply_fixed_threshold <- function(candidates, total_comparisons,
+                                  corr_min, margin_min, var_min) {
+  if (!nrow(candidates)) {
+    return(list(
+      n_matches = 0L,
+      matches_per_pair = 0,
+      any_match_rate = 0,
+      filtered = candidates
+    ))
+  }
+  keep <- candidates$corr >= corr_min &
+    candidates$margin >= margin_min &
+    candidates$pair_var_explained_frac >= var_min
+  keep[is.na(keep)] <- FALSE
+  filtered <- candidates[keep, , drop = FALSE]
+  any_rate <- if (nrow(filtered) > 0L) {
+    length(unique(filtered$comparison_id)) / total_comparisons
+  } else {
+    0
+  }
+  list(
+    n_matches = nrow(filtered),
+    matches_per_pair = nrow(filtered) / total_comparisons,
+    any_match_rate = any_rate,
+    filtered = filtered
+  )
+}
+```
+
+# 3. Load Records
+
+```{r load-records}
+stopifnot(file.exists(records_rds))
+
+records <- readRDS(records_rds) %>%
+  dplyr::mutate(
+    dataset_bundle_id = as.character(.data$dataset_bundle_id),
+    matrix_id = as.character(.data$matrix_id)
+  )
+
+methods_present <- sort(unique(records$model_method))
+cat("Methods present in records:", paste(methods_present, collapse = ", "), "\n")
+
+required_methods <- c(baseline_method, treatment_methods)
+missing_methods <- setdiff(required_methods, methods_present)
+if (length(missing_methods)) {
+  stop(
+    "Records are missing the following expected methods: ",
+    paste(missing_methods, collapse = ", "),
+    ". Re-run effect_matching_refit_export_3arm.Rmd first."
+  )
+}
+```
+
+# 4. Per-Treatment Matching, Threshold Application, And Diagnostics
+
+```{r per-treatment-matching, fig.width=9, fig.height=4.5}
+arm_summaries <- vector("list", length(treatment_methods))
+
+for (k in seq_along(treatment_methods)) {
+  treatment <- treatment_methods[[k]]
+  short_label <- treatment_short[[treatment]]
+
+  result <- run_pairwise_matching(
+    records = records,
+    baseline_method = baseline_method,
+    treatment_method = treatment,
+    short_label = short_label
+  )
+
+  real_candidates_csv <- file.path(
+    study_dir,
+    sprintf("real_match_candidates_vanilla_%s_same_X.csv", short_label)
+  )
+  null_candidates_csv <- file.path(
+    study_dir,
+    sprintf("null_match_candidates_vanilla_%s_same_X.csv", short_label)
+  )
+  null_pair_index_csv <- file.path(
+    study_dir,
+    sprintf("null_pair_index_vanilla_%s_same_X.csv", short_label)
+  )
+  accepted_real_csv <- file.path(
+    study_dir,
+    sprintf("accepted_real_matches_vanilla_%s_fixed_threshold.csv", short_label)
+  )
+  diagnostic_png <- file.path(
+    study_dir,
+    sprintf("frontier_real_vs_null_vanilla_%s_same_X_fixed.png", short_label)
+  )
+
+  readr::write_csv(result$real_candidates, real_candidates_csv)
+  readr::write_csv(result$null_candidates, null_candidates_csv)
+  readr::write_csv(result$null_pair_index, null_pair_index_csv)
+
+  # Apply the fixed threshold to both real and null candidates so we can
+  # report the operational match rates and (for null) the implied FDR.
+  real_apply <- apply_fixed_threshold(
+    result$real_candidates,
+    total_comparisons = result$n_complete,
+    corr_min = fixed_corr_min,
+    margin_min = fixed_margin_min,
+    var_min = fixed_var_min
+  )
+  null_apply <- apply_fixed_threshold(
+    result$null_candidates,
+    total_comparisons = nrow(result$null_pair_index),
+    corr_min = fixed_corr_min,
+    margin_min = fixed_margin_min,
+    var_min = fixed_var_min
+  )
+
+  readr::write_csv(real_apply$filtered, accepted_real_csv)
+
+  implied_fdr <- if (real_apply$n_matches > 0L) {
+    null_apply$matches_per_pair * result$n_complete / real_apply$n_matches
+  } else {
+    NA_real_
+  }
+
+  arm_summaries[[k]] <- tibble::tibble(
+    treatment = treatment,
+    short_label = short_label,
+    n_complete_datasets = result$n_complete,
+    n_null_pairs = nrow(result$null_pair_index),
+    n_real_candidates = nrow(result$real_candidates),
+    n_null_candidates = nrow(result$null_candidates),
+    n_real_accepted = real_apply$n_matches,
+    real_matches_per_dataset = real_apply$matches_per_pair,
+    null_matches_per_pair = null_apply$matches_per_pair,
+    implied_fdr = implied_fdr
+  )
+
+  cat(sprintf(
+    "[%s] Real candidates: %d | Null candidates: %d\n",
+    short_label, nrow(result$real_candidates), nrow(result$null_candidates)
+  ))
+  cat(sprintf(
+    "[%s] @ threshold (%.2f / %.2f / %.4f): real accepted = %d (%.3f per dataset) | null accepted/pair = %.4f | implied FDR = %.4f\n",
+    short_label,
+    fixed_corr_min, fixed_margin_min, fixed_var_min,
+    real_apply$n_matches, real_apply$matches_per_pair,
+    null_apply$matches_per_pair, implied_fdr
+  ))
+
+  # Diagnostic: real vs null correlation distribution (mutual-best candidates)
+  corr_compare <- dplyr::bind_rows(
+    result$real_candidates %>%
+      dplyr::transmute(corr = .data$corr, comparison_type = "real"),
+    result$null_candidates %>%
+      dplyr::transmute(corr = .data$corr, comparison_type = "null")
+  )
+
+  p_corr <- ggplot(corr_compare, aes(x = .data$corr, fill = .data$comparison_type)) +
+    geom_histogram(
+      aes(y = after_stat(density)),
+      position = "identity",
+      bins = 60,
+      alpha = 0.55
+    ) +
+    geom_vline(xintercept = fixed_corr_min, color = "black", linetype = "dashed") +
+    scale_fill_manual(values = c(real = "#2b8cbe", null = "#c53030")) +
+    labs(
+      x = "Mutual-best fitted-y correlation",
+      y = "Density",
+      fill = "Comparison",
+      title = sprintf(
+        "vanilla vs %s: real vs same-X null correlations (mutual-best)",
+        treatment
+      ),
+      subtitle = sprintf(
+        "Fixed threshold corr_min = %.2f shown as dashed line",
+        fixed_corr_min
+      )
+    ) +
+    theme(legend.position = "bottom")
+
+  ggsave(diagnostic_png, p_corr, width = 9, height = 4.5, dpi = 150)
+  print(p_corr)
+}
+
+arm_summary <- dplyr::bind_rows(arm_summaries)
+arm_summary_csv <- file.path(study_dir, "fixed_threshold_arm_summary.csv")
+readr::write_csv(arm_summary, arm_summary_csv)
+```
+
+# 5. Cross-Arm Summary
+
+```{r cross-arm-summary}
+cat("Per-arm matching summary at fixed threshold:\n")
+print(arm_summary)
+
+kable(arm_summary, digits = 4)
+
+cat("Saved per-arm CSVs and diagnostic plots to:", study_dir, "\n")
+cat("Summary CSV:", arm_summary_csv, "\n")
+```

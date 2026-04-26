@@ -1,0 +1,1168 @@
+---
+title: "Effect Matching Diagnostic Plots (3-arm)"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+3-arm extension of `effect_matching_diagnostic_plots.Rmd`. Reads:
+
+- `effect_refit_records.rds` from the 3-arm refit study
+- `real_match_candidates_vanilla_mu_same_X.csv` (vanilla<->mu pairing)
+- `real_match_candidates_vanilla_pi_same_X.csv` (vanilla<->pi pairing)
+
+and produces three categories of plots:
+
+- **Global 3-arm overlays** (scatter, univariate histograms): all three
+  arms shown together to characterize the marginal effect distributions.
+- **Per-pairing plots** (differential density, flow, delta density): the
+  same vanilla<->treatment plots as the 2-arm notebook, generated twice
+  (once per treatment arm).
+- **Cross-arm AUPRC attribution and confound diagnostics**: each plot
+  faceted by treatment arm so mu and pi can be compared side-by-side.
+
+```{r setup, message=FALSE}
+here::i_am("vignettes/one_off_validations/effect_matching_diagnostic_plots_3arm.Rmd")
+library(here)
+library(dplyr)
+library(readr)
+library(tidyr)
+library(purrr)
+library(ggplot2)
+library(knitr)
+
+theme_set(theme_bw(base_size = 12))
+```
+
+# 1. User Parameters
+
+```{r user-parameters}
+output_root <- here("output")
+
+study_name <- "baseline_sims_3arm_effect_matching"
+study_dir <- file.path(output_root, "effect_matching_study", study_name)
+records_rds <- file.path(study_dir, "effect_refit_records.rds")
+
+baseline_method <- "susie_vanilla"
+treatment_methods <- c("susine_functional_mu", "susie_functional_pi")
+treatment_short <- c(
+  susine_functional_mu = "mu",
+  susie_functional_pi = "pi"
+)
+treatment_color <- c(
+  susie_vanilla = "black",
+  susine_functional_mu = "#2b8cbe",
+  susie_functional_pi = "#74c476"
+)
+
+real_candidates_csv <- c(
+  mu = file.path(study_dir, "real_match_candidates_vanilla_mu_same_X.csv"),
+  pi = file.path(study_dir, "real_match_candidates_vanilla_pi_same_X.csv")
+)
+
+# Operating threshold (locked from the 2-arm same-X calibration; reused here).
+manual_corr_min <- 0.99
+manual_margin_min <- 0
+manual_var_min <- 0
+
+plot_dir <- file.path(study_dir, "diagnostic_plots")
+dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
+
+# Joint diagnostic axes.
+x_metric <- "effect_pip_entropy_core95"
+y_metric <- "accuracy_ratio"
+x_label <- "Core-95 effective k (= exp(entropy))"
+y_label <- "Accuracy ratio"
+x_keff_breaks <- c(1, 2, 5, 10, 20, 50, 100, 200, 500, 1000)
+delta_keff_ratio_breaks <- c(1/16, 1/8, 1/4, 1/2, 1, 2, 4, 8, 16)
+delta_keff_ratio_labels <- c("1/16", "1/8", "1/4", "1/2", "1", "2", "4", "8", "16")
+
+x_limits <- NULL
+y_limits <- c(0, 1)
+
+density_grid_n <- 160L
+density_bandwidth <- c(0.45, 0.10)
+density_trim_quantile <- c(0.005, 0.995)
+density_fill_limit <- NULL
+density_fill_quantile <- 0.95
+
+hist_bins <- 60L
+
+delta_density_contour_breaks <- c(
+  0, 0.005, 0.015, 0.04, 0.08, 0.15, 0.25, 0.4, 0.6, 0.8, 1.0
+)
+
+max_arrows_to_plot <- Inf
+arrow_alpha <- 0.40
+arrow_linewidth <- 0.25
+arrow_head_length_inches <- 0.055
+label_top_discrepancies <- 25L
+
+# Output filenames. Per-pairing plots get a `_vs_<short>` suffix.
+scatter_all_png <- file.path(plot_dir, "effect_diagnostic_scatter_all_effects_3arm.png")
+hist_diffuseness_png <- file.path(plot_dir, "effect_diagnostic_univariate_hist_diffuseness_3arm.png")
+hist_accuracy_png <- file.path(plot_dir, "effect_diagnostic_univariate_hist_accuracy_3arm.png")
+auprc_delta_hist_png <- file.path(plot_dir, "effect_diagnostic_auprc_delta_hist_3arm.png")
+match_count_hist_png <- file.path(plot_dir, "effect_diagnostic_match_count_hist_3arm.png")
+auprc_match_scatter_png <- file.path(plot_dir, "effect_diagnostic_auprc_vs_match_scatter_3arm.png")
+baseline_vs_treatment_png <- file.path(plot_dir, "effect_diagnostic_baseline_vs_treatment_scatter_3arm.png")
+scatter_stratified_png <- file.path(plot_dir, "effect_diagnostic_auprc_vs_match_stratified_3arm.png")
+confound_check_png <- file.path(plot_dir, "effect_diagnostic_vanilla_auprc_vs_match_3arm.png")
+per_dataset_summary_csv <- file.path(plot_dir, "per_dataset_auprc_match_summary_3arm.csv")
+
+per_pair_filename <- function(stem, short_label, ext = "png") {
+  file.path(plot_dir, sprintf("%s_vs_%s.%s", stem, short_label, ext))
+}
+
+cat("Study dir:", study_dir, "\n")
+cat("Plot dir:", plot_dir, "\n")
+cat("Treatment arms:", paste(treatment_methods, collapse = ", "), "\n")
+```
+
+# 2. Helpers
+
+```{r helpers}
+`%||%` <- function(x, y) if (is.null(x)) y else x
+
+resolve_limits <- function(values, user_limits, trim = density_trim_quantile) {
+  if (!is.null(user_limits)) {
+    return(user_limits)
+  }
+  values <- values[is.finite(values)]
+  if (!length(values)) {
+    stop("Cannot infer limits from an empty/non-finite vector.")
+  }
+  stats::quantile(values, probs = trim, na.rm = TRUE, names = FALSE)
+}
+
+require_metric <- function(df, metric) {
+  if (!metric %in% names(df)) {
+    stop("Metric column not found: ", metric)
+  }
+}
+
+keff_x_scale <- function(breaks = x_keff_breaks, xlim = NULL) {
+  finite_breaks <- breaks[breaks > 0]
+  scale_x_continuous(
+    breaks = log(finite_breaks),
+    labels = formatC(finite_breaks, format = "fg", big.mark = ","),
+    limits = xlim
+  )
+}
+
+keff_ratio_x_scale <- function(breaks = delta_keff_ratio_breaks,
+                               labels = delta_keff_ratio_labels,
+                               xlim = NULL) {
+  scale_x_continuous(
+    breaks = log(breaks),
+    labels = labels,
+    limits = xlim
+  )
+}
+
+kde2d_df <- function(df, x_col, y_col, group_col, group_values, xlim, ylim, n, h) {
+  if (!requireNamespace("MASS", quietly = TRUE)) {
+    stop("Package MASS is required for kde2d density plots.")
+  }
+  if (length(group_values) != 2L) {
+    stop("kde2d_df expects exactly two group values; got ", length(group_values))
+  }
+
+  dens <- lapply(group_values, function(g) {
+    sub <- df %>%
+      dplyr::filter(.data[[group_col]] == g) %>%
+      dplyr::filter(
+        is.finite(.data[[x_col]]),
+        is.finite(.data[[y_col]]),
+        .data[[x_col]] >= xlim[[1]],
+        .data[[x_col]] <= xlim[[2]],
+        .data[[y_col]] >= ylim[[1]],
+        .data[[y_col]] <= ylim[[2]]
+      )
+
+    if (nrow(sub) < 3L) {
+      stop("Not enough rows for density group ", g, ": ", nrow(sub))
+    }
+
+    kde <- MASS::kde2d(
+      x = sub[[x_col]],
+      y = sub[[y_col]],
+      n = n,
+      lims = c(xlim, ylim),
+      h = h
+    )
+    list(group = g, kde = kde, n_rows = nrow(sub))
+  })
+
+  base <- dens[[1]]$kde
+  z1 <- dens[[1]]$kde$z
+  z2 <- dens[[2]]$kde$z
+
+  tidyr::expand_grid(x = base$x, y = base$y) %>%
+    dplyr::mutate(
+      density_baseline = as.vector(t(z1)),
+      density_treatment = as.vector(t(z2)),
+      density_diff = .data$density_treatment - .data$density_baseline,
+      group_baseline = dens[[1]]$group,
+      group_treatment = dens[[2]]$group,
+      n_baseline = dens[[1]]$n_rows,
+      n_treatment = dens[[2]]$n_rows
+    )
+}
+
+plot_density_diff <- function(density_df, title, subtitle, out_path,
+                              xlim_resolved, ylim_resolved) {
+  abs_diff <- abs(density_df$density_diff)
+  abs_diff <- abs_diff[is.finite(abs_diff)]
+
+  fill_lim <- density_fill_limit
+  if (is.null(fill_lim)) {
+    if (length(abs_diff)) {
+      fill_lim <- as.numeric(stats::quantile(
+        abs_diff, probs = density_fill_quantile, na.rm = TRUE
+      ))
+      max_abs <- max(abs_diff, na.rm = TRUE)
+    } else {
+      fill_lim <- 1
+      max_abs <- 1
+    }
+    if (!is.finite(fill_lim) || fill_lim <= 0) {
+      fill_lim <- max(max_abs, .Machine$double.eps)
+    }
+  }
+
+  fill_legend_title <- sprintf(
+    "treatment - baseline\ndensity\n(clipped at\n+/-%s of max)",
+    if (is.null(density_fill_limit)) {
+      paste0(round(100 * density_fill_quantile), "%-tile")
+    } else {
+      "manual"
+    }
+  )
+
+  p <- ggplot(density_df, aes(x = .data$x, y = .data$y, fill = .data$density_diff)) +
+    geom_raster(interpolate = TRUE) +
+    geom_contour(aes(z = .data$density_diff), color = "grey20", alpha = 0.45, linewidth = 0.2) +
+    scale_fill_gradient2(
+      low = "#2b6cb0", mid = "white", high = "#c53030",
+      midpoint = 0, limits = c(-fill_lim, fill_lim),
+      oob = scales::squish
+    ) +
+    keff_x_scale(xlim = xlim_resolved) +
+    coord_cartesian(xlim = xlim_resolved, ylim = ylim_resolved, expand = FALSE) +
+    labs(
+      x = x_label, y = y_label,
+      fill = fill_legend_title,
+      title = title, subtitle = subtitle
+    ) +
+    theme(legend.position = "right")
+
+  ggsave(out_path, p, width = 9, height = 6, dpi = 150)
+  p
+}
+
+plot_scatter_3arm <- function(df, title, out_path,
+                              xlim_resolved, ylim_resolved,
+                              palette = treatment_color) {
+  p <- ggplot(
+    df,
+    aes(x = .data[[x_metric]], y = .data[[y_metric]], color = .data$model_method)
+  ) +
+    geom_point(alpha = 0.32, size = 0.85) +
+    scale_color_manual(
+      values = palette,
+      breaks = names(palette)
+    ) +
+    keff_x_scale(xlim = xlim_resolved) +
+    coord_cartesian(xlim = xlim_resolved, ylim = ylim_resolved) +
+    labs(
+      x = x_label, y = y_label,
+      color = "Model",
+      title = title
+    ) +
+    theme(legend.position = "bottom")
+
+  ggsave(out_path, p, width = 10, height = 7, dpi = 150)
+  p
+}
+
+plot_univariate_hist_3arm <- function(df, metric, xlab_text, out_path, title,
+                                      bins = hist_bins, use_keff_x = FALSE,
+                                      xlim = NULL, palette = treatment_color) {
+  df_clean <- df %>%
+    dplyr::filter(is.finite(.data[[metric]]))
+  if (!is.null(xlim)) {
+    df_clean <- df_clean %>%
+      dplyr::filter(.data[[metric]] >= xlim[[1]], .data[[metric]] <= xlim[[2]])
+  }
+
+  panel_counts <- df_clean %>%
+    dplyr::count(.data$model_method, name = "n_effects")
+  cat(title, "panel counts:\n")
+  print(panel_counts)
+
+  p <- ggplot(df_clean, aes(x = .data[[metric]], fill = .data$model_method)) +
+    geom_histogram(
+      aes(y = after_stat(density)),
+      position = "identity", bins = bins, alpha = 0.45, color = NA
+    ) +
+    scale_fill_manual(
+      values = palette,
+      breaks = names(palette)
+    ) +
+    labs(
+      x = xlab_text, y = "Density",
+      fill = "Model", title = title
+    ) +
+    theme(legend.position = "bottom")
+
+  if (use_keff_x) {
+    p <- p + keff_x_scale(xlim = xlim)
+  } else if (!is.null(xlim)) {
+    p <- p + coord_cartesian(xlim = xlim)
+  }
+
+  ggsave(out_path, p, width = 10, height = 5, dpi = 150)
+  p
+}
+
+# Per-treatment match label helpers.
+treatment_label <- function(treatment) {
+  switch(
+    treatment,
+    susine_functional_mu = "susine functional-mu",
+    susie_functional_pi = "susie functional-pi",
+    treatment
+  )
+}
+```
+
+# 3. Load And Classify Effects
+
+```{r load-classify}
+stopifnot(file.exists(records_rds))
+for (treatment in treatment_methods) {
+  short <- treatment_short[[treatment]]
+  csv_path <- real_candidates_csv[[short]]
+  if (!file.exists(csv_path)) {
+    stop(
+      "Missing real candidates CSV for ", treatment, " at ", csv_path,
+      ". Run effect_matching_threshold_calibration_3arm.Rmd first."
+    )
+  }
+}
+
+records <- readRDS(records_rds) %>%
+  dplyr::mutate(
+    dataset_bundle_id = as.character(.data$dataset_bundle_id),
+    matrix_id = as.character(.data$matrix_id),
+    effect = as.integer(.data$effect)
+  )
+
+require_metric(records, x_metric)
+require_metric(records, y_metric)
+
+methods_present <- sort(unique(records$model_method))
+cat("Methods in records:", paste(methods_present, collapse = ", "), "\n")
+required_methods <- c(baseline_method, treatment_methods)
+missing_methods <- setdiff(required_methods, methods_present)
+if (length(missing_methods)) {
+  stop("Missing methods in records: ", paste(missing_methods, collapse = ", "))
+}
+
+# Load both candidate CSVs and apply the manual threshold to each.
+load_accepted <- function(short) {
+  readr::read_csv(real_candidates_csv[[short]], show_col_types = FALSE) %>%
+    dplyr::mutate(
+      vanilla_dataset_bundle_id = as.character(.data$vanilla_dataset_bundle_id),
+      mu_dataset_bundle_id = as.character(.data$mu_dataset_bundle_id),
+      vanilla_effect = as.integer(.data$vanilla_effect),
+      mu_effect = as.integer(.data$mu_effect)
+    ) %>%
+    dplyr::filter(
+      .data$corr >= manual_corr_min,
+      .data$margin >= manual_margin_min,
+      .data$pair_var_explained_frac >= manual_var_min
+    ) %>%
+    dplyr::arrange(.data$vanilla_dataset_bundle_id, dplyr::desc(.data$corr))
+}
+
+accepted_by_arm <- list(
+  mu = load_accepted("mu"),
+  pi = load_accepted("pi")
+)
+
+cat("Accepted matched pairs per arm:\n")
+for (short in names(accepted_by_arm)) {
+  cat(sprintf("  %s: %d\n", short, nrow(accepted_by_arm[[short]])))
+}
+
+# Build per-arm match-status keys for the records table. For each row in
+# records, we tag whether it participates in an accepted match for its
+# corresponding pairing. Vanilla rows can be matched in mu and/or pi pairings;
+# treatment rows only in their own pairing.
+build_match_keys <- function(accepted_pair, treatment_method, treatment_short) {
+  vanilla_keys <- accepted_pair %>%
+    dplyr::transmute(
+      dataset_bundle_id = .data$vanilla_dataset_bundle_id,
+      effect = .data$vanilla_effect,
+      model_method = baseline_method,
+      match_id = paste0(
+        treatment_short, "_",
+        .data$vanilla_dataset_bundle_id, "_",
+        .data$vanilla_effect, "_", .data$mu_effect
+      )
+    )
+  treatment_keys <- accepted_pair %>%
+    dplyr::transmute(
+      dataset_bundle_id = .data$mu_dataset_bundle_id,
+      effect = .data$mu_effect,
+      model_method = treatment_method,
+      match_id = paste0(
+        treatment_short, "_",
+        .data$vanilla_dataset_bundle_id, "_",
+        .data$vanilla_effect, "_", .data$mu_effect
+      )
+    )
+  dplyr::bind_rows(vanilla_keys, treatment_keys)
+}
+
+match_keys_by_arm <- lapply(treatment_methods, function(treatment) {
+  short <- treatment_short[[treatment]]
+  build_match_keys(accepted_by_arm[[short]], treatment, short)
+})
+names(match_keys_by_arm) <- treatment_short[treatment_methods]
+
+# For each treatment, attach a `matched_<short>` boolean to records: TRUE if
+# this (dataset, model_method, effect) participates in any accepted pair
+# for that pairing.
+records_labeled <- records
+for (short in names(match_keys_by_arm)) {
+  keys <- match_keys_by_arm[[short]] %>%
+    dplyr::distinct(.data$dataset_bundle_id, .data$model_method, .data$effect) %>%
+    dplyr::mutate("matched_{short}" := TRUE)
+  records_labeled <- records_labeled %>%
+    dplyr::left_join(
+      keys,
+      by = c("dataset_bundle_id", "model_method", "effect")
+    ) %>%
+    dplyr::mutate(
+      "matched_{short}" := tidyr::replace_na(.data[[paste0("matched_", short)]], FALSE)
+    )
+}
+
+x_limits_resolved <- resolve_limits(records_labeled[[x_metric]], x_limits)
+y_limits_resolved <- resolve_limits(records_labeled[[y_metric]], y_limits)
+
+cat("Records labeled rows:", nrow(records_labeled), "\n")
+cat("Per-arm matched effect counts (records_labeled):\n")
+for (short in names(match_keys_by_arm)) {
+  col <- paste0("matched_", short)
+  print(
+    records_labeled %>%
+      dplyr::count(.data$model_method, .data[[col]], name = "n_effects")
+  )
+}
+cat("Resolved x limits:", paste(x_limits_resolved, collapse = ", "), "\n")
+cat("Resolved y limits:", paste(y_limits_resolved, collapse = ", "), "\n")
+```
+
+# 4. Global 3-Arm Scatter
+
+```{r global-scatter, fig.width=10, fig.height=7}
+p_scatter_all <- plot_scatter_3arm(
+  records_labeled,
+  title = "Effect diagnostic scatter: all 3 arms (all effects)",
+  out_path = scatter_all_png,
+  xlim_resolved = x_limits_resolved,
+  ylim_resolved = y_limits_resolved
+)
+print(p_scatter_all)
+cat("Saved:", scatter_all_png, "\n")
+```
+
+# 5. Univariate Histograms (3-arm overlay)
+
+```{r univariate-histograms, fig.width=10, fig.height=5}
+p_hist_diff <- plot_univariate_hist_3arm(
+  records_labeled,
+  metric = x_metric,
+  xlab_text = x_label,
+  out_path = hist_diffuseness_png,
+  title = "Effect diffuseness: Core-95 effective k by model arm",
+  use_keff_x = TRUE,
+  xlim = x_limits_resolved
+)
+print(p_hist_diff)
+
+p_hist_acc <- plot_univariate_hist_3arm(
+  records_labeled,
+  metric = y_metric,
+  xlab_text = y_label,
+  out_path = hist_accuracy_png,
+  title = "Effect accuracy ratio by model arm",
+  use_keff_x = FALSE,
+  xlim = y_limits_resolved
+)
+print(p_hist_acc)
+
+cat("Saved:", hist_diffuseness_png, "\n")
+cat("Saved:", hist_accuracy_png, "\n")
+```
+
+# 6. Per-Pairing Plots (Differential Density, Flow, Delta Density)
+
+```{r per-pair-helper}
+make_pair_plots <- function(treatment_method, accepted_pair) {
+  short <- treatment_short[[treatment_method]]
+  treatment_pretty <- treatment_label(treatment_method)
+  pair_methods <- c(baseline_method, treatment_method)
+  matched_col <- paste0("matched_", short)
+
+  pair_records <- records_labeled %>%
+    dplyr::filter(.data$model_method %in% pair_methods) %>%
+    dplyr::mutate(
+      match_status = dplyr::if_else(.data[[matched_col]], "matched", "unmatched")
+    )
+
+  # File paths
+  density_all_png <- per_pair_filename("effect_diagnostic_density_diff_all_effects", short)
+  density_matched_png <- per_pair_filename("effect_diagnostic_density_diff_matched_effects", short)
+  density_unmatched_png <- per_pair_filename("effect_diagnostic_density_diff_unmatched_effects", short)
+  flow_png <- per_pair_filename("effect_diagnostic_matched_flow", short)
+  delta_density_png <- per_pair_filename("effect_diagnostic_matched_delta_density", short)
+  matched_pairs_csv <- per_pair_filename("accepted_matched_pairs_for_plots", short, "csv")
+  matched_delta_csv <- per_pair_filename("accepted_matched_pair_deltas_for_plots", short, "csv")
+
+  # Differential 2D densities
+  density_all_df <- kde2d_df(
+    pair_records, x_col = x_metric, y_col = y_metric,
+    group_col = "model_method", group_values = pair_methods,
+    xlim = x_limits_resolved, ylim = y_limits_resolved,
+    n = density_grid_n, h = density_bandwidth
+  )
+  p_density_all <- plot_density_diff(
+    density_all_df,
+    title = sprintf("Differential joint density: %s vs vanilla, all effects", treatment_pretty),
+    subtitle = sprintf("Red: higher %s density; blue: higher vanilla density", treatment_pretty),
+    out_path = density_all_png,
+    xlim_resolved = x_limits_resolved,
+    ylim_resolved = y_limits_resolved
+  )
+  print(p_density_all)
+
+  for (status in c("matched", "unmatched")) {
+    sub <- pair_records %>% dplyr::filter(.data$match_status == status)
+    if (dplyr::n_distinct(sub$model_method) < 2L || nrow(sub) < 6L) {
+      cat("Skipping density for status", status, "(", short, ") - not enough rows.\n")
+      next
+    }
+    dens <- kde2d_df(
+      sub, x_col = x_metric, y_col = y_metric,
+      group_col = "model_method", group_values = pair_methods,
+      xlim = x_limits_resolved, ylim = y_limits_resolved,
+      n = density_grid_n, h = density_bandwidth
+    )
+    out_path <- if (status == "matched") density_matched_png else density_unmatched_png
+    p <- plot_density_diff(
+      dens,
+      title = sprintf("Differential joint density: %s vs vanilla, %s effects",
+                      treatment_pretty, status),
+      subtitle = sprintf("Red: higher %s density; blue: higher vanilla density",
+                         treatment_pretty),
+      out_path = out_path,
+      xlim_resolved = x_limits_resolved,
+      ylim_resolved = y_limits_resolved
+    )
+    print(p)
+  }
+
+  # Flow plot --- requires matched pairs
+  matched_vanilla <- pair_records %>%
+    dplyr::filter(.data$model_method == baseline_method, .data$match_status == "matched") %>%
+    dplyr::transmute(
+      dataset_bundle_id_left = .data$dataset_bundle_id,
+      effect_left = .data$effect,
+      vanilla_x = .data[[x_metric]],
+      vanilla_y = .data[[y_metric]]
+    )
+  matched_treatment <- pair_records %>%
+    dplyr::filter(.data$model_method == treatment_method, .data$match_status == "matched") %>%
+    dplyr::transmute(
+      dataset_bundle_id_right = .data$dataset_bundle_id,
+      effect_right = .data$effect,
+      mu_x = .data[[x_metric]],
+      mu_y = .data[[y_metric]]
+    )
+
+  flow_df <- accepted_pair %>%
+    dplyr::transmute(
+      vanilla_dataset_bundle_id = .data$vanilla_dataset_bundle_id,
+      mu_dataset_bundle_id = .data$mu_dataset_bundle_id,
+      vanilla_effect = .data$vanilla_effect,
+      mu_effect = .data$mu_effect,
+      corr = .data$corr,
+      margin = .data$margin,
+      pair_var_explained_frac = .data$pair_var_explained_frac
+    ) %>%
+    dplyr::left_join(
+      matched_vanilla,
+      by = c("vanilla_dataset_bundle_id" = "dataset_bundle_id_left",
+             "vanilla_effect" = "effect_left")
+    ) %>%
+    dplyr::left_join(
+      matched_treatment,
+      by = c("mu_dataset_bundle_id" = "dataset_bundle_id_right",
+             "mu_effect" = "effect_right")
+    ) %>%
+    dplyr::mutate(
+      delta_x = .data$mu_x - .data$vanilla_x,
+      delta_y = .data$mu_y - .data$vanilla_y,
+      movement_distance = sqrt(.data$delta_x^2 + .data$delta_y^2),
+      delta_direction = dplyr::case_when(
+        .data$delta_y > 0 & .data$delta_x > 0 ~ "more accurate + more diffuse",
+        .data$delta_y > 0 & .data$delta_x <= 0 ~ "more accurate + less diffuse",
+        .data$delta_y <= 0 & .data$delta_x > 0 ~ "less accurate + more diffuse",
+        TRUE ~ "less accurate + less diffuse"
+      )
+    ) %>%
+    dplyr::arrange(dplyr::desc(.data$movement_distance))
+
+  if (is.finite(max_arrows_to_plot)) {
+    flow_plot_df <- flow_df %>% dplyr::slice_head(n = as.integer(max_arrows_to_plot))
+  } else {
+    flow_plot_df <- flow_df
+  }
+
+  readr::write_csv(accepted_pair, matched_pairs_csv)
+  readr::write_csv(flow_df, matched_delta_csv)
+
+  top_labels <- flow_df %>% dplyr::slice_head(n = label_top_discrepancies)
+
+  p_flow <- ggplot() +
+    geom_point(
+      data = flow_plot_df,
+      aes(x = .data$vanilla_x, y = .data$vanilla_y),
+      color = "black", alpha = 0.35, size = 1.0
+    ) +
+    geom_segment(
+      data = flow_plot_df,
+      aes(x = .data$vanilla_x, y = .data$vanilla_y,
+          xend = .data$mu_x, yend = .data$mu_y,
+          color = .data$delta_direction),
+      alpha = arrow_alpha,
+      linewidth = arrow_linewidth,
+      arrow = grid::arrow(length = grid::unit(arrow_head_length_inches, "inches"), type = "closed")
+    ) +
+    geom_point(
+      data = flow_plot_df,
+      aes(x = .data$mu_x, y = .data$mu_y, color = .data$delta_direction),
+      alpha = 0.55, size = 1.1
+    ) +
+    geom_point(
+      data = top_labels,
+      aes(x = .data$mu_x, y = .data$mu_y),
+      color = "red", size = 1.8, alpha = 0.75
+    ) +
+    keff_x_scale(xlim = x_limits_resolved) +
+    coord_cartesian(xlim = x_limits_resolved, ylim = y_limits_resolved) +
+    labs(
+      x = x_label, y = y_label,
+      color = "Movement",
+      title = sprintf("Matched effect movement: vanilla -> %s", treatment_pretty),
+      subtitle = sprintf("Arrows start at vanilla, end at %s", treatment_pretty)
+    ) +
+    theme(legend.position = "bottom")
+
+  ggsave(flow_png, p_flow, width = 10, height = 8, dpi = 150)
+  print(p_flow)
+
+  # Matched delta density
+  if (nrow(flow_df)) {
+    p_delta <- ggplot(flow_df, aes(x = .data$delta_x, y = .data$delta_y)) +
+      geom_hline(yintercept = 0, color = "grey45", linetype = "dashed") +
+      geom_vline(xintercept = 0, color = "grey45", linetype = "dashed") +
+      geom_density_2d_filled(
+        alpha = 0.75, contour_var = "ndensity",
+        breaks = delta_density_contour_breaks
+      ) +
+      geom_point(alpha = 0.25, size = 0.8, color = "black") +
+      keff_ratio_x_scale() +
+      labs(
+        x = "Core-95 effective k ratio (treatment / vanilla)",
+        y = paste0("Delta ", y_label, " (treatment - vanilla)"),
+        fill = "Relative\ndensity",
+        title = sprintf("Matched displacement density: vanilla -> %s", treatment_pretty)
+      ) +
+      theme(legend.position = "right")
+
+    ggsave(delta_density_png, p_delta, width = 10, height = 6, dpi = 150)
+    print(p_delta)
+  }
+
+  list(
+    treatment = treatment_method,
+    short = short,
+    flow_df = flow_df,
+    accepted_pair = accepted_pair,
+    files = list(
+      density_all = density_all_png,
+      density_matched = density_matched_png,
+      density_unmatched = density_unmatched_png,
+      flow = flow_png,
+      delta_density = delta_density_png,
+      matched_pairs_csv = matched_pairs_csv,
+      matched_delta_csv = matched_delta_csv
+    )
+  )
+}
+```
+
+```{r per-pair-mu, fig.width=9, fig.height=6}
+pair_results <- list()
+pair_results$mu <- make_pair_plots(
+  treatment_method = "susine_functional_mu",
+  accepted_pair = accepted_by_arm$mu
+)
+```
+
+```{r per-pair-pi, fig.width=9, fig.height=6}
+pair_results$pi <- make_pair_plots(
+  treatment_method = "susie_functional_pi",
+  accepted_pair = accepted_by_arm$pi
+)
+```
+
+# 7. Per-Dataset Summary
+
+```{r per-dataset-summary}
+per_dataset_auprc <- records_labeled %>%
+  dplyr::distinct(.data$dataset_bundle_id, .data$model_method, .data$model_AUPRC) %>%
+  tidyr::pivot_wider(
+    names_from = .data$model_method,
+    values_from = .data$model_AUPRC,
+    names_prefix = "auprc_"
+  ) %>%
+  dplyr::mutate(
+    auprc_delta_mu = .data$auprc_susine_functional_mu - .data$auprc_susie_vanilla,
+    auprc_delta_pi = .data$auprc_susie_functional_pi - .data$auprc_susie_vanilla
+  )
+
+build_per_arm_summary <- function(short, accepted_pair, flow_df) {
+  matched_per_dataset <- accepted_pair %>%
+    dplyr::count(.data$vanilla_dataset_bundle_id, name = paste0("n_matched_pairs_", short)) %>%
+    dplyr::rename(dataset_bundle_id = .data$vanilla_dataset_bundle_id)
+
+  movement_per_match <- flow_df %>%
+    dplyr::transmute(
+      dataset_bundle_id = .data$vanilla_dataset_bundle_id,
+      vanilla_effect = .data$vanilla_effect,
+      mu_effect = .data$mu_effect,
+      movement_distance = .data$movement_distance
+    )
+
+  movement_per_dataset <- movement_per_match %>%
+    dplyr::group_by(.data$dataset_bundle_id) %>%
+    dplyr::summarise(
+      "mean_movement_distance_{short}" := mean(.data$movement_distance, na.rm = TRUE),
+      "median_movement_distance_{short}" := stats::median(.data$movement_distance, na.rm = TRUE),
+      .groups = "drop"
+    )
+
+  matched_per_dataset %>%
+    dplyr::full_join(movement_per_dataset, by = "dataset_bundle_id")
+}
+
+per_dataset_summary <- per_dataset_auprc
+for (short in names(pair_results)) {
+  arm_summary <- build_per_arm_summary(
+    short = short,
+    accepted_pair = pair_results[[short]]$accepted_pair,
+    flow_df = pair_results[[short]]$flow_df
+  )
+  per_dataset_summary <- per_dataset_summary %>%
+    dplyr::left_join(arm_summary, by = "dataset_bundle_id") %>%
+    dplyr::mutate(
+      "n_matched_pairs_{short}" := tidyr::replace_na(
+        .data[[paste0("n_matched_pairs_", short)]], 0L
+      )
+    )
+}
+
+readr::write_csv(per_dataset_summary, per_dataset_summary_csv)
+cat("Saved per-dataset summary:", per_dataset_summary_csv, "\n")
+
+# Long-format for downstream faceting.
+per_dataset_long <- per_dataset_summary %>%
+  dplyr::select(
+    .data$dataset_bundle_id,
+    .data$auprc_susie_vanilla,
+    .data$auprc_susine_functional_mu,
+    .data$auprc_susie_functional_pi,
+    .data$auprc_delta_mu, .data$auprc_delta_pi,
+    .data$n_matched_pairs_mu, .data$n_matched_pairs_pi,
+    .data$mean_movement_distance_mu, .data$mean_movement_distance_pi
+  ) %>%
+  tidyr::pivot_longer(
+    cols = c(
+      "auprc_delta_mu", "auprc_delta_pi",
+      "n_matched_pairs_mu", "n_matched_pairs_pi",
+      "mean_movement_distance_mu", "mean_movement_distance_pi"
+    ),
+    names_to = c(".value", "treatment_short"),
+    names_pattern = "(.+)_(mu|pi)$"
+  ) %>%
+  dplyr::mutate(
+    treatment_method = dplyr::recode(
+      .data$treatment_short,
+      mu = "susine_functional_mu",
+      pi = "susie_functional_pi"
+    ),
+    auprc_treatment = dplyr::if_else(
+      .data$treatment_short == "mu",
+      .data$auprc_susine_functional_mu,
+      .data$auprc_susie_functional_pi
+    )
+  )
+```
+
+# 8. AUPRC Attribution
+
+```{r auprc-delta-hist, fig.width=10, fig.height=5}
+delta_summary <- per_dataset_long %>%
+  dplyr::group_by(.data$treatment_method) %>%
+  dplyr::summarise(
+    n = sum(is.finite(.data$auprc_delta)),
+    n_pos = sum(.data$auprc_delta > 0, na.rm = TRUE),
+    n_neg = sum(.data$auprc_delta < 0, na.rm = TRUE),
+    median_delta = stats::median(.data$auprc_delta, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  dplyr::mutate(
+    label = sprintf(
+      "%s: %d gains, %d losses, median = %.4f",
+      .data$treatment_method, .data$n_pos, .data$n_neg, .data$median_delta
+    )
+  )
+cat("AUPRC delta summary by treatment:\n")
+print(delta_summary)
+
+p_auprc_delta <- ggplot(per_dataset_long, aes(x = .data$auprc_delta,
+                                              fill = .data$treatment_method)) +
+  geom_vline(xintercept = 0, color = "grey45", linetype = "dashed") +
+  geom_histogram(
+    aes(y = after_stat(density)),
+    position = "identity", bins = hist_bins, alpha = 0.45, color = NA
+  ) +
+  scale_fill_manual(
+    values = treatment_color[treatment_methods],
+    breaks = treatment_methods
+  ) +
+  labs(
+    x = "AUPRC delta (treatment - vanilla)",
+    y = "Density",
+    fill = "Treatment",
+    title = "Per-dataset AUPRC improvement by treatment arm",
+    subtitle = paste(delta_summary$label, collapse = " | ")
+  ) +
+  theme(legend.position = "bottom")
+
+ggsave(auprc_delta_hist_png, p_auprc_delta, width = 10, height = 5, dpi = 150)
+print(p_auprc_delta)
+```
+
+```{r match-count-hist, fig.width=10, fig.height=5}
+p_match_count <- ggplot(per_dataset_long, aes(x = .data$n_matched_pairs)) +
+  geom_histogram(binwidth = 1, fill = "#2b8cbe", alpha = 0.7, color = NA) +
+  scale_x_continuous(breaks = 0:10) +
+  facet_wrap(~ treatment_method) +
+  labs(
+    x = "Number of accepted matched pairs per dataset (out of L = 10)",
+    y = "Number of datasets",
+    title = "Per-dataset matched-pair count by treatment arm"
+  )
+
+ggsave(match_count_hist_png, p_match_count, width = 10, height = 5, dpi = 150)
+print(p_match_count)
+```
+
+```{r auprc-vs-match-scatter, fig.width=11, fig.height=5}
+arm_rho <- per_dataset_long %>%
+  dplyr::group_by(.data$treatment_method) %>%
+  dplyr::summarise(
+    rho = suppressWarnings(stats::cor(
+      .data$n_matched_pairs, .data$auprc_delta,
+      method = "spearman", use = "pairwise.complete.obs"
+    )),
+    n = dplyr::n(),
+    label = sprintf("rho = %.3f (n=%d)", .data$rho, .data$n),
+    .groups = "drop"
+  )
+cat("Per-arm match-count vs AUPRC-delta Spearman rho:\n")
+print(arm_rho)
+
+p_auprc_match_scatter <- ggplot(
+  per_dataset_long,
+  aes(x = .data$n_matched_pairs, y = .data$auprc_delta,
+      color = .data$mean_movement_distance)
+) +
+  geom_hline(yintercept = 0, color = "grey45", linetype = "dashed") +
+  geom_jitter(width = 0.25, height = 0, alpha = 0.55, size = 1.3) +
+  geom_smooth(
+    method = "loess", formula = y ~ x, se = FALSE,
+    color = "black", linetype = "dashed", linewidth = 0.6
+  ) +
+  geom_text(
+    data = arm_rho,
+    aes(x = -Inf, y = Inf, label = .data$label),
+    hjust = -0.05, vjust = 1.4, size = 3.5,
+    inherit.aes = FALSE
+  ) +
+  facet_wrap(~ treatment_method, scales = "free_y") +
+  scale_x_continuous(breaks = 0:10) +
+  scale_color_viridis_c(option = "C", na.value = "grey60") +
+  labs(
+    x = "Number of accepted matched pairs per dataset",
+    y = "AUPRC delta (treatment - vanilla)",
+    color = "Mean matched\npair movement",
+    title = "Per-dataset: matching density vs AUPRC improvement, by treatment"
+  )
+
+ggsave(auprc_match_scatter_png, p_auprc_match_scatter, width = 11, height = 5, dpi = 150)
+print(p_auprc_match_scatter)
+```
+
+# 9. Confound Diagnostics
+
+```{r baseline-vs-treatment, fig.width=11, fig.height=6}
+n_above_diag <- per_dataset_long %>%
+  dplyr::group_by(.data$treatment_method) %>%
+  dplyr::summarise(
+    n = sum(is.finite(.data$auprc_delta)),
+    n_above = sum(.data$auprc_delta > 0, na.rm = TRUE),
+    pearson_r = suppressWarnings(stats::cor(
+      .data$auprc_susie_vanilla, .data$auprc_treatment,
+      use = "pairwise.complete.obs"
+    )),
+    label = sprintf(
+      "Pearson r = %.3f | %d/%d above y=x",
+      .data$pearson_r, .data$n_above, .data$n
+    ),
+    .groups = "drop"
+  )
+cat("Baseline vs treatment AUPRC summary:\n")
+print(n_above_diag)
+
+p_baseline_vs_treatment <- ggplot(
+  per_dataset_long,
+  aes(x = .data$auprc_susie_vanilla, y = .data$auprc_treatment,
+      color = .data$n_matched_pairs)
+) +
+  geom_abline(slope = 1, intercept = 0, color = "grey45", linetype = "dashed") +
+  geom_point(alpha = 0.6, size = 1.3) +
+  geom_smooth(
+    method = "lm", formula = y ~ x, se = FALSE,
+    color = "black", linetype = "dashed", linewidth = 0.5
+  ) +
+  geom_text(
+    data = n_above_diag,
+    aes(x = -Inf, y = Inf, label = .data$label),
+    hjust = -0.05, vjust = 1.4, size = 3.5,
+    inherit.aes = FALSE
+  ) +
+  facet_wrap(~ treatment_method) +
+  scale_color_viridis_c(option = "C") +
+  coord_fixed() +
+  labs(
+    x = "Vanilla SuSiE AUPRC",
+    y = "Treatment AUPRC",
+    color = "Matched pairs",
+    title = "Per-dataset AUPRC: vanilla vs treatment (per arm)"
+  )
+
+ggsave(baseline_vs_treatment_png, p_baseline_vs_treatment, width = 11, height = 6, dpi = 150)
+print(p_baseline_vs_treatment)
+```
+
+```{r stratified-confound, fig.width=12, fig.height=10}
+quart_breaks <- stats::quantile(
+  per_dataset_summary$auprc_susie_vanilla,
+  probs = c(0, 0.25, 0.5, 0.75, 1.0),
+  na.rm = TRUE, names = FALSE
+)
+quart_breaks <- unique(quart_breaks)
+
+if (length(quart_breaks) >= 3L) {
+  per_dataset_long_strat <- per_dataset_long %>%
+    dplyr::mutate(
+      vanilla_auprc_quartile = cut(
+        .data$auprc_susie_vanilla,
+        breaks = quart_breaks,
+        include.lowest = TRUE
+      )
+    ) %>%
+    dplyr::filter(!is.na(.data$vanilla_auprc_quartile))
+
+  quartile_rho <- per_dataset_long_strat %>%
+    dplyr::group_by(.data$treatment_method, .data$vanilla_auprc_quartile) %>%
+    dplyr::summarise(
+      n = dplyr::n(),
+      rho = suppressWarnings(stats::cor(
+        .data$n_matched_pairs, .data$auprc_delta,
+        method = "spearman", use = "pairwise.complete.obs"
+      )),
+      label = sprintf("rho = %.3f (n=%d)", .data$rho, .data$n),
+      .groups = "drop"
+    )
+
+  cat("Per-(treatment, quartile) Spearman rho:\n")
+  print(quartile_rho)
+
+  p_strat <- ggplot(
+    per_dataset_long_strat,
+    aes(x = .data$n_matched_pairs, y = .data$auprc_delta,
+        color = .data$mean_movement_distance)
+  ) +
+    geom_hline(yintercept = 0, color = "grey45", linetype = "dashed") +
+    geom_jitter(width = 0.25, height = 0, alpha = 0.55, size = 1.1) +
+    geom_smooth(
+      method = "loess", formula = y ~ x, se = FALSE,
+      color = "black", linetype = "dashed", linewidth = 0.5
+    ) +
+    geom_text(
+      data = quartile_rho,
+      aes(x = -Inf, y = Inf, label = .data$label),
+      hjust = -0.05, vjust = 1.4, size = 3,
+      inherit.aes = FALSE
+    ) +
+    facet_grid(treatment_method ~ vanilla_auprc_quartile, scales = "free_y") +
+    scale_x_continuous(breaks = 0:10) +
+    scale_color_viridis_c(option = "C", na.value = "grey60") +
+    labs(
+      x = "Number of accepted matched pairs per dataset",
+      y = "AUPRC delta (treatment - vanilla)",
+      color = "Mean matched\npair movement",
+      title = "Match count vs AUPRC delta by treatment x vanilla AUPRC quartile",
+      subtitle = "Lower quartiles = harder datasets; persistent negative rho within panels => trend is real, not confounded"
+    )
+
+  ggsave(scatter_stratified_png, p_strat, width = 12, height = 10, dpi = 150)
+  print(p_strat)
+} else {
+  cat("Not enough distinct vanilla AUPRC values to form quartiles; skipping.\n")
+}
+```
+
+```{r confound-check, fig.width=11, fig.height=5}
+confound_rho <- per_dataset_long %>%
+  dplyr::group_by(.data$treatment_method) %>%
+  dplyr::summarise(
+    rho = suppressWarnings(stats::cor(
+      .data$auprc_susie_vanilla, .data$n_matched_pairs,
+      method = "spearman", use = "pairwise.complete.obs"
+    )),
+    label = sprintf("rho = %.3f", .data$rho),
+    .groups = "drop"
+  )
+cat("Per-arm vanilla AUPRC vs match count Spearman rho:\n")
+print(confound_rho)
+
+p_confound <- ggplot(
+  per_dataset_long,
+  aes(x = .data$auprc_susie_vanilla, y = .data$n_matched_pairs,
+      color = .data$auprc_delta)
+) +
+  geom_jitter(width = 0, height = 0.25, alpha = 0.6, size = 1.3) +
+  geom_smooth(
+    method = "loess", formula = y ~ x, se = FALSE,
+    color = "black", linetype = "dashed", linewidth = 0.6
+  ) +
+  geom_text(
+    data = confound_rho,
+    aes(x = -Inf, y = Inf, label = .data$label),
+    hjust = -0.05, vjust = 1.4, size = 3.5,
+    inherit.aes = FALSE
+  ) +
+  scale_color_gradient2(
+    low = "#2b6cb0", mid = "white", high = "#c53030", midpoint = 0
+  ) +
+  scale_y_continuous(breaks = 0:10) +
+  facet_wrap(~ treatment_method) +
+  labs(
+    x = "Vanilla AUPRC (low = hard, high = easy)",
+    y = "Number of accepted matched pairs",
+    color = "AUPRC delta\n(treatment - vanilla)",
+    title = "Confound check: vanilla AUPRC vs match count, by treatment"
+  )
+
+ggsave(confound_check_png, p_confound, width = 11, height = 5, dpi = 150)
+print(p_confound)
+```
+
+# 10. Output Index
+
+```{r output-index}
+per_pair_files <- function(short) {
+  paths <- pair_results[[short]]$files
+  tibble::tibble(
+    artifact = paste0(c(
+      "all-effect differential density",
+      "matched differential density",
+      "unmatched differential density",
+      "matched flow plot",
+      "matched delta density",
+      "accepted matched pairs",
+      "matched pair deltas"
+    ), " (vs ", short, ")"),
+    path = c(
+      paths$density_all,
+      paths$density_matched,
+      paths$density_unmatched,
+      paths$flow,
+      paths$delta_density,
+      paths$matched_pairs_csv,
+      paths$matched_delta_csv
+    )
+  )
+}
+
+global_outputs <- tibble::tibble(
+  artifact = c(
+    "3-arm scatter (all effects)",
+    "3-arm univariate diffuseness histogram",
+    "3-arm univariate accuracy histogram",
+    "AUPRC delta histogram (overlay)",
+    "match count histogram (faceted)",
+    "AUPRC delta vs match count scatter (faceted)",
+    "baseline vs treatment AUPRC scatter (faceted)",
+    "AUPRC delta vs match count stratified by vanilla AUPRC quartile",
+    "vanilla AUPRC vs match count (confound check, faceted)",
+    "per-dataset AUPRC and match summary"
+  ),
+  path = c(
+    scatter_all_png,
+    hist_diffuseness_png,
+    hist_accuracy_png,
+    auprc_delta_hist_png,
+    match_count_hist_png,
+    auprc_match_scatter_png,
+    baseline_vs_treatment_png,
+    scatter_stratified_png,
+    confound_check_png,
+    per_dataset_summary_csv
+  )
+)
+
+outputs <- dplyr::bind_rows(
+  global_outputs,
+  per_pair_files("mu"),
+  per_pair_files("pi")
+)
+
+kable(outputs)
+```

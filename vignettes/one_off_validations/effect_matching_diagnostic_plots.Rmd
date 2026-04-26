@@ -1,0 +1,1121 @@
+---
+title: "Effect Matching Diagnostic Plots"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+One-off plotting workbook for the fitted-y effect matching study. It
+uses the refit export plus the real match candidates from threshold
+calibration to visualize joint effect diagnostics before and after
+matching.
+
+```{r setup, message=FALSE}
+here::i_am("vignettes/one_off_validations/effect_matching_diagnostic_plots.Rmd")
+library(here)
+library(dplyr)
+library(readr)
+library(tidyr)
+library(purrr)
+library(ggplot2)
+library(knitr)
+
+theme_set(theme_bw(base_size = 12))
+```
+
+# 1. User Parameters
+
+```{r user-parameters}
+output_root <- here("output")
+
+study_name <- "baseline_sims_standalone_effect_matching"
+study_dir <- file.path(output_root, "effect_matching_study", study_name)
+records_rds <- file.path(study_dir, "effect_refit_records.rds")
+real_candidates_csv <- file.path(study_dir, "real_match_candidates_same_X.csv")
+winner_csv <- file.path(study_dir, "winner_threshold_same_X.csv")
+
+plot_dir <- file.path(study_dir, "diagnostic_plots")
+dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
+
+# Threshold source.
+#
+# Manual thresholds are locked to a Pareto-frontier point from the same-X
+# null calibration (see effect_matching_threshold_calibration_same_X.Rmd):
+# corr_min = 0.99, margin_min = 0, var_min = 0. At this point the calibration
+# returned 1934 real matches with null rate 2.22% per dataset pair, giving
+# implied FDR ~0.7%. The auto-winner at the 5% null cutoff was looser
+# (corr=0.95) with more matches but FDR ~1.4%; we trade ~10% of matches for
+# ~2x cleaner pairs because false pairs would add isotropic noise to the
+# joint-density plots and we already have plenty of real pairs.
+use_winner_threshold <- FALSE
+manual_corr_min <- 0.99
+manual_margin_min <- 0
+manual_var_min <- 0
+
+# Joint diagnostic axes. The diffuseness axis stays in entropy units (cleanly
+# behaved for KDE / arrows), but its tick labels are rendered as the
+# corresponding effective k = exp(entropy), which is more interpretable.
+x_metric <- "effect_pip_entropy_core95"
+y_metric <- "accuracy_ratio"
+x_label <- "Core-95 effective k (= exp(entropy))"
+y_label <- "Accuracy ratio"
+x_keff_breaks <- c(1, 2, 5, 10, 20, 50, 100, 200, 500, 1000)
+delta_keff_ratio_breaks <- c(1/16, 1/8, 1/4, 1/2, 1, 2, 4, 8, 16)
+delta_keff_ratio_labels <- c("1/16", "1/8", "1/4", "1/2", "1", "2", "4", "8", "16")
+
+# Axis limits. Set either to NULL for automatic limits from the data.
+x_limits <- NULL
+y_limits <- c(0, 1)
+
+# 2D kernel density controls.
+#  - density_bandwidth: half-widths for kde2d. Bumped relative to the original
+#    (0.30, 0.06) -> (0.45, 0.10) for less granular speckling on the dense
+#    regions while keeping enough resolution to see local mu-vs-vanilla shifts.
+#  - density_fill_quantile: instead of letting the color scale span the full
+#    range of |density_diff| (which lets one extreme outlier dominate and washes
+#    everything else to white), clip the scale at this quantile of |density_diff|.
+#    Anything beyond is squished to the saturation extremes.
+density_grid_n <- 160L
+density_bandwidth <- c(0.45, 0.10)
+density_trim_quantile <- c(0.005, 0.995)
+density_fill_limit <- NULL
+density_fill_quantile <- 0.95
+
+# Univariate histogram controls.
+hist_bins <- 60L
+
+# Matched-delta 2D density contour breaks. Default geom_density_2d_filled uses
+# 10 evenly-spaced bins on [0, 1], which makes the lowest band dominate by area.
+# These uneven breaks give more resolution in the low-density tail so the
+# off-peak structure becomes visible without changing the underlying KDE.
+delta_density_contour_breaks <- c(
+  0, 0.005, 0.015, 0.04, 0.08, 0.15, 0.25, 0.4, 0.6, 0.8, 1.0
+)
+
+# Arrow/flow plot controls for matched effects.
+max_arrows_to_plot <- Inf
+arrow_alpha <- 0.40
+arrow_linewidth <- 0.25
+arrow_head_length_inches <- 0.055
+label_top_discrepancies <- 25L
+
+# Output filenames.
+scatter_all_png <- file.path(plot_dir, "effect_diagnostic_scatter_all_effects.png")
+scatter_matched_unmatched_png <- file.path(plot_dir, "effect_diagnostic_scatter_matched_unmatched.png")
+density_all_png <- file.path(plot_dir, "effect_diagnostic_density_diff_all_effects.png")
+density_matched_png <- file.path(plot_dir, "effect_diagnostic_density_diff_matched_effects.png")
+density_unmatched_png <- file.path(plot_dir, "effect_diagnostic_density_diff_unmatched_effects.png")
+flow_png <- file.path(plot_dir, "effect_diagnostic_matched_flow.png")
+delta_density_png <- file.path(plot_dir, "effect_diagnostic_matched_delta_density.png")
+hist_diffuseness_png <- file.path(plot_dir, "effect_diagnostic_univariate_hist_diffuseness.png")
+hist_accuracy_png <- file.path(plot_dir, "effect_diagnostic_univariate_hist_accuracy.png")
+auprc_delta_hist_png <- file.path(plot_dir, "effect_diagnostic_auprc_delta_hist.png")
+match_count_hist_png <- file.path(plot_dir, "effect_diagnostic_match_count_hist.png")
+auprc_match_scatter_png <- file.path(plot_dir, "effect_diagnostic_auprc_vs_match_scatter.png")
+scatter_stratified_png <- file.path(plot_dir, "effect_diagnostic_auprc_vs_match_stratified.png")
+confound_check_png <- file.path(plot_dir, "effect_diagnostic_vanilla_auprc_vs_match.png")
+baseline_vs_susine_png <- file.path(plot_dir, "effect_diagnostic_baseline_auprc_vs_susine_auprc.png")
+matched_pairs_csv <- file.path(plot_dir, "accepted_matched_pairs_for_plots.csv")
+matched_delta_csv <- file.path(plot_dir, "accepted_matched_pair_deltas_for_plots.csv")
+per_dataset_summary_csv <- file.path(plot_dir, "per_dataset_auprc_match_summary.csv")
+
+cat("Study dir:", study_dir, "\n")
+cat("Plot dir:", plot_dir, "\n")
+```
+
+# 2. Helpers
+
+```{r helpers}
+metric_label <- function(metric) {
+  labels <- c(
+    effect_pip_entropy = "PIP entropy",
+    effect_pip_entropy_core95 = "Core-95 PIP entropy",
+    effect_k_eff_signal = "k-eff signal",
+    effect_k_eff_signal_core95 = "Core-95 k-eff signal",
+    accuracy_ratio = "Accuracy ratio",
+    size = "CS size",
+    purity = "CS purity",
+    coverage = "CS coverage",
+    var_y_explained_pct = "% var(y) explained",
+    var_y_explained_frac = "Fraction var(y) explained"
+  )
+  labels[[metric]] %||% metric
+}
+
+`%||%` <- function(x, y) if (is.null(x)) y else x
+
+read_thresholds <- function() {
+  if (use_winner_threshold && file.exists(winner_csv)) {
+    winner <- readr::read_csv(winner_csv, show_col_types = FALSE)
+    if (nrow(winner) != 1L) {
+      stop("Expected one row in winner_threshold.csv; found ", nrow(winner), ".")
+    }
+    return(tibble::tibble(
+      corr_min = winner$corr_min[[1]],
+      margin_min = winner$margin_min[[1]],
+      var_min = winner$var_min[[1]],
+      source = "winner_threshold.csv"
+    ))
+  }
+
+  tibble::tibble(
+    corr_min = manual_corr_min,
+    margin_min = manual_margin_min,
+    var_min = manual_var_min,
+    source = "manual"
+  )
+}
+
+resolve_limits <- function(values, user_limits, trim = density_trim_quantile) {
+  if (!is.null(user_limits)) {
+    return(user_limits)
+  }
+  values <- values[is.finite(values)]
+  if (!length(values)) {
+    stop("Cannot infer limits from an empty/non-finite vector.")
+  }
+  stats::quantile(values, probs = trim, na.rm = TRUE, names = FALSE)
+}
+
+require_metric <- function(df, metric) {
+  if (!metric %in% names(df)) {
+    stop("Metric column not found: ", metric)
+  }
+}
+
+kde2d_df <- function(df, x_col, y_col, group_col, xlim, ylim, n, h) {
+  if (!requireNamespace("MASS", quietly = TRUE)) {
+    stop("Package MASS is required for kde2d density plots.")
+  }
+
+  preferred_groups <- c("susie_vanilla", "susine_functional_mu")
+  groups <- intersect(preferred_groups, unique(df[[group_col]]))
+  if (length(groups) < 2L) {
+    groups <- sort(unique(df[[group_col]]))
+  }
+  if (length(groups) != 2L) {
+    stop("Expected exactly two density groups; found: ", paste(groups, collapse = ", "))
+  }
+
+  dens <- lapply(groups, function(g) {
+    sub <- df %>%
+      dplyr::filter(.data[[group_col]] == g) %>%
+      dplyr::filter(
+        is.finite(.data[[x_col]]),
+        is.finite(.data[[y_col]]),
+        .data[[x_col]] >= xlim[[1]],
+        .data[[x_col]] <= xlim[[2]],
+        .data[[y_col]] >= ylim[[1]],
+        .data[[y_col]] <= ylim[[2]]
+      )
+
+    if (nrow(sub) < 3L) {
+      stop("Not enough rows for density group ", g, ": ", nrow(sub))
+    }
+
+    kde <- MASS::kde2d(
+      x = sub[[x_col]],
+      y = sub[[y_col]],
+      n = n,
+      lims = c(xlim, ylim),
+      h = h
+    )
+
+    list(group = g, kde = kde, n_rows = nrow(sub))
+  })
+
+  base <- dens[[1]]$kde
+  z1 <- dens[[1]]$kde$z
+  z2 <- dens[[2]]$kde$z
+
+  tidyr::expand_grid(
+    x = base$x,
+    y = base$y
+  ) %>%
+    dplyr::mutate(
+      density_group_1 = as.vector(t(z1)),
+      density_group_2 = as.vector(t(z2)),
+      density_diff = .data$density_group_2 - .data$density_group_1,
+      group_1 = dens[[1]]$group,
+      group_2 = dens[[2]]$group,
+      n_group_1 = dens[[1]]$n_rows,
+      n_group_2 = dens[[2]]$n_rows
+    )
+}
+
+keff_x_scale <- function(breaks = x_keff_breaks, xlim = NULL) {
+  finite_breaks <- breaks[breaks > 0]
+  scale_x_continuous(
+    breaks = log(finite_breaks),
+    labels = formatC(finite_breaks, format = "fg", big.mark = ","),
+    limits = xlim
+  )
+}
+
+keff_ratio_x_scale <- function(breaks = delta_keff_ratio_breaks,
+                               labels = delta_keff_ratio_labels,
+                               xlim = NULL) {
+  scale_x_continuous(
+    breaks = log(breaks),
+    labels = labels,
+    limits = xlim
+  )
+}
+
+plot_density_diff <- function(density_df, title, subtitle, out_path) {
+  abs_diff <- abs(density_df$density_diff)
+  abs_diff <- abs_diff[is.finite(abs_diff)]
+
+  fill_lim <- density_fill_limit
+  if (is.null(fill_lim)) {
+    if (length(abs_diff)) {
+      fill_lim <- as.numeric(stats::quantile(
+        abs_diff,
+        probs = density_fill_quantile,
+        na.rm = TRUE
+      ))
+      max_abs <- max(abs_diff, na.rm = TRUE)
+    } else {
+      fill_lim <- 1
+      max_abs <- 1
+    }
+    if (!is.finite(fill_lim) || fill_lim <= 0) {
+      fill_lim <- max(max_abs, .Machine$double.eps)
+    }
+  }
+
+  fill_legend_title <- sprintf(
+    "mu - vanilla\ndensity\n(clipped at\n+/-%s of max)",
+    if (is.null(density_fill_limit)) {
+      paste0(round(100 * density_fill_quantile), "%-tile")
+    } else {
+      "manual"
+    }
+  )
+
+  p <- ggplot(density_df, aes(x = .data$x, y = .data$y, fill = .data$density_diff)) +
+    geom_raster(interpolate = TRUE) +
+    geom_contour(aes(z = .data$density_diff), color = "grey20", alpha = 0.45, linewidth = 0.2) +
+    scale_fill_gradient2(
+      low = "#2b6cb0",
+      mid = "white",
+      high = "#c53030",
+      midpoint = 0,
+      limits = c(-fill_lim, fill_lim),
+      oob = scales::squish
+    ) +
+    keff_x_scale(xlim = x_limits_resolved) +
+    coord_cartesian(xlim = x_limits_resolved, ylim = y_limits_resolved, expand = FALSE) +
+    labs(
+      x = x_label,
+      y = y_label,
+      fill = fill_legend_title,
+      title = title,
+      subtitle = subtitle
+    ) +
+    theme(legend.position = "right")
+
+  ggsave(out_path, p, width = 9, height = 6, dpi = 150)
+  p
+}
+
+plot_scatter <- function(df, title, out_path, facet_var = NULL) {
+  p <- ggplot(
+    df,
+    aes(x = .data[[x_metric]], y = .data[[y_metric]], color = .data$model_method)
+  ) +
+    geom_point(alpha = 0.35, size = 0.9) +
+    scale_color_manual(
+      values = c(susie_vanilla = "black", susine_functional_mu = "#2b8cbe"),
+      breaks = c("susie_vanilla", "susine_functional_mu")
+    ) +
+    keff_x_scale(xlim = x_limits_resolved) +
+    coord_cartesian(xlim = x_limits_resolved, ylim = y_limits_resolved) +
+    labs(
+      x = x_label,
+      y = y_label,
+      color = "Model",
+      title = title
+    ) +
+    theme(legend.position = "bottom")
+
+  if (!is.null(facet_var)) {
+    p <- p + facet_wrap(stats::as.formula(paste("~", facet_var)))
+  }
+
+  ggsave(out_path, p, width = 10, height = 7, dpi = 150)
+  p
+}
+
+plot_univariate_hist <- function(df,
+                                 metric,
+                                 xlab_text,
+                                 out_path,
+                                 title,
+                                 bins = hist_bins,
+                                 use_keff_x = FALSE,
+                                 xlim = NULL) {
+  panel_levels <- c("All effects", "Matched", "Unmatched")
+  df_panels <- dplyr::bind_rows(
+    df %>% dplyr::mutate(panel = "All effects"),
+    df %>% dplyr::filter(.data$match_status == "matched") %>%
+      dplyr::mutate(panel = "Matched"),
+    df %>% dplyr::filter(.data$match_status == "unmatched") %>%
+      dplyr::mutate(panel = "Unmatched")
+  ) %>%
+    dplyr::filter(is.finite(.data[[metric]])) %>%
+    dplyr::mutate(panel = factor(.data$panel, levels = panel_levels))
+
+  if (!is.null(xlim)) {
+    df_panels <- df_panels %>%
+      dplyr::filter(
+        .data[[metric]] >= xlim[[1]],
+        .data[[metric]] <= xlim[[2]]
+      )
+  }
+
+  panel_counts <- df_panels %>%
+    dplyr::count(.data$panel, .data$model_method, name = "n_effects")
+  cat(title, "panel counts:\n")
+  print(panel_counts)
+
+  p <- ggplot(df_panels, aes(x = .data[[metric]], fill = .data$model_method)) +
+    geom_histogram(
+      aes(y = after_stat(density)),
+      position = "identity",
+      bins = bins,
+      alpha = 0.45,
+      color = NA
+    ) +
+    facet_wrap(~ panel, ncol = 3, scales = "free_y") +
+    scale_fill_manual(
+      values = c(susie_vanilla = "black", susine_functional_mu = "#2b8cbe"),
+      breaks = c("susie_vanilla", "susine_functional_mu")
+    ) +
+    labs(
+      x = xlab_text,
+      y = "Density",
+      fill = "Model",
+      title = title
+    ) +
+    theme(legend.position = "bottom")
+
+  if (use_keff_x) {
+    p <- p + keff_x_scale(xlim = xlim)
+  } else if (!is.null(xlim)) {
+    p <- p + coord_cartesian(xlim = xlim)
+  }
+
+  ggsave(out_path, p, width = 11, height = 5, dpi = 150)
+  p
+}
+```
+
+# 3. Load And Classify Effects
+
+```{r load-classify}
+stopifnot(file.exists(records_rds))
+stopifnot(file.exists(real_candidates_csv))
+
+records <- readRDS(records_rds) %>%
+  dplyr::mutate(
+    dataset_bundle_id = as.character(.data$dataset_bundle_id),
+    effect = as.integer(.data$effect)
+  )
+
+require_metric(records, x_metric)
+require_metric(records, y_metric)
+
+thresholds <- read_thresholds()
+cat("Matching thresholds:\n")
+print(thresholds)
+
+real_candidates <- readr::read_csv(real_candidates_csv, show_col_types = FALSE) %>%
+  dplyr::mutate(
+    vanilla_dataset_bundle_id = as.character(.data$vanilla_dataset_bundle_id),
+    mu_dataset_bundle_id = as.character(.data$mu_dataset_bundle_id),
+    vanilla_effect = as.integer(.data$vanilla_effect),
+    mu_effect = as.integer(.data$mu_effect)
+  )
+
+accepted_matches <- real_candidates %>%
+  dplyr::filter(
+    .data$corr >= thresholds$corr_min[[1]],
+    .data$margin >= thresholds$margin_min[[1]],
+    .data$pair_var_explained_frac >= thresholds$var_min[[1]]
+  ) %>%
+  dplyr::arrange(.data$vanilla_dataset_bundle_id, dplyr::desc(.data$corr))
+
+vanilla_match_keys <- accepted_matches %>%
+  dplyr::transmute(
+    dataset_bundle_id = .data$vanilla_dataset_bundle_id,
+    effect = .data$vanilla_effect,
+    match_id = paste0(.data$vanilla_dataset_bundle_id, "_", .data$vanilla_effect, "_", .data$mu_effect)
+  )
+
+mu_match_keys <- accepted_matches %>%
+  dplyr::transmute(
+    dataset_bundle_id = .data$mu_dataset_bundle_id,
+    effect = .data$mu_effect,
+    match_id = paste0(.data$vanilla_dataset_bundle_id, "_", .data$vanilla_effect, "_", .data$mu_effect)
+  )
+
+records_labeled <- records %>%
+  dplyr::left_join(
+    vanilla_match_keys %>% dplyr::mutate(model_method = "susie_vanilla"),
+    by = c("dataset_bundle_id", "effect", "model_method")
+  ) %>%
+  dplyr::left_join(
+    mu_match_keys %>% dplyr::mutate(model_method = "susine_functional_mu"),
+    by = c("dataset_bundle_id", "effect", "model_method"),
+    suffix = c("_vanilla_key", "_mu_key")
+  ) %>%
+  dplyr::mutate(
+    match_id = dplyr::coalesce(.data$match_id_vanilla_key, .data$match_id_mu_key),
+    match_status = dplyr::if_else(is.na(.data$match_id), "unmatched", "matched")
+  ) %>%
+  dplyr::select(-dplyr::any_of(c("match_id_vanilla_key", "match_id_mu_key")))
+
+x_limits_resolved <- resolve_limits(records_labeled[[x_metric]], x_limits)
+y_limits_resolved <- resolve_limits(records_labeled[[y_metric]], y_limits)
+
+readr::write_csv(accepted_matches, matched_pairs_csv)
+
+cat("Accepted matches:", nrow(accepted_matches), "\n")
+cat("Effect rows by model/status:\n")
+print(records_labeled %>% dplyr::count(.data$model_method, .data$match_status), n = Inf)
+cat("Resolved x limits:", paste(x_limits_resolved, collapse = ", "), "\n")
+cat("Resolved y limits:", paste(y_limits_resolved, collapse = ", "), "\n")
+```
+
+# 4. 2D Scatter Plots
+
+```{r scatter-plots, fig.width=10, fig.height=7}
+p_scatter_all <- plot_scatter(
+  records_labeled,
+  title = "Effect diagnostic scatter: all refit effects",
+  out_path = scatter_all_png
+)
+print(p_scatter_all)
+
+p_scatter_status <- plot_scatter(
+  records_labeled,
+  title = "Effect diagnostic scatter split by accepted matching status",
+  out_path = scatter_matched_unmatched_png,
+  facet_var = "match_status"
+)
+print(p_scatter_status)
+
+cat("Saved:", scatter_all_png, "\n")
+cat("Saved:", scatter_matched_unmatched_png, "\n")
+```
+
+# 5. Differential 2D Density
+
+```{r differential-density, fig.width=9, fig.height=6}
+density_all_df <- kde2d_df(
+  records_labeled,
+  x_col = x_metric,
+  y_col = y_metric,
+  group_col = "model_method",
+  xlim = x_limits_resolved,
+  ylim = y_limits_resolved,
+  n = density_grid_n,
+  h = density_bandwidth
+)
+
+p_density_all <- plot_density_diff(
+  density_all_df,
+  title = "Differential joint density: all effects",
+  subtitle = "Red: higher susine functional-mu density; blue: higher susie vanilla density",
+  out_path = density_all_png
+)
+print(p_density_all)
+
+for (status in c("matched", "unmatched")) {
+  sub <- records_labeled %>% dplyr::filter(.data$match_status == status)
+  if (dplyr::n_distinct(sub$model_method) < 2L || nrow(sub) < 6L) {
+    cat("Skipping density for status", status, "- not enough rows.\n")
+    next
+  }
+
+  dens <- kde2d_df(
+    sub,
+    x_col = x_metric,
+    y_col = y_metric,
+    group_col = "model_method",
+    xlim = x_limits_resolved,
+    ylim = y_limits_resolved,
+    n = density_grid_n,
+    h = density_bandwidth
+  )
+
+  p <- plot_density_diff(
+    dens,
+    title = paste("Differential joint density:", status, "effects"),
+    subtitle = "Red: higher susine functional-mu density; blue: higher susie vanilla density",
+    out_path = if (status == "matched") density_matched_png else density_unmatched_png
+  )
+  print(p)
+}
+
+cat("Saved:", density_all_png, "\n")
+cat("Saved:", density_matched_png, "\n")
+cat("Saved:", density_unmatched_png, "\n")
+```
+
+# 6. Matched Effect Flow Plot
+
+```{r matched-flow, fig.width=10, fig.height=8}
+matched_vanilla <- records_labeled %>%
+  dplyr::filter(.data$model_method == "susie_vanilla", .data$match_status == "matched") %>%
+  dplyr::transmute(
+    match_id = .data$match_id,
+    vanilla_dataset_bundle_id = .data$dataset_bundle_id,
+    vanilla_effect = .data$effect,
+    vanilla_x = .data[[x_metric]],
+    vanilla_y = .data[[y_metric]]
+  )
+
+matched_mu <- records_labeled %>%
+  dplyr::filter(.data$model_method == "susine_functional_mu", .data$match_status == "matched") %>%
+  dplyr::transmute(
+    match_id = .data$match_id,
+    mu_dataset_bundle_id = .data$dataset_bundle_id,
+    mu_effect = .data$effect,
+    mu_x = .data[[x_metric]],
+    mu_y = .data[[y_metric]]
+  )
+
+flow_df <- accepted_matches %>%
+  dplyr::mutate(
+    match_id = paste0(.data$vanilla_dataset_bundle_id, "_", .data$vanilla_effect, "_", .data$mu_effect)
+  ) %>%
+  dplyr::left_join(matched_vanilla, by = "match_id") %>%
+  dplyr::left_join(matched_mu, by = "match_id") %>%
+  dplyr::mutate(
+    delta_x = .data$mu_x - .data$vanilla_x,
+    delta_y = .data$mu_y - .data$vanilla_y,
+    movement_distance = sqrt(.data$delta_x^2 + .data$delta_y^2),
+    delta_direction = dplyr::case_when(
+      .data$delta_y > 0 & .data$delta_x > 0 ~ "more accurate + more diffuse",
+      .data$delta_y > 0 & .data$delta_x <= 0 ~ "more accurate + less diffuse",
+      .data$delta_y <= 0 & .data$delta_x > 0 ~ "less accurate + more diffuse",
+      TRUE ~ "less accurate + less diffuse"
+    )
+  ) %>%
+  dplyr::arrange(dplyr::desc(.data$movement_distance))
+
+if (is.finite(max_arrows_to_plot)) {
+  flow_plot_df <- flow_df %>% dplyr::slice_head(n = as.integer(max_arrows_to_plot))
+} else {
+  flow_plot_df <- flow_df
+}
+
+readr::write_csv(flow_df, matched_delta_csv)
+
+top_labels <- flow_df %>%
+  dplyr::slice_head(n = label_top_discrepancies)
+
+p_flow <- ggplot() +
+  geom_point(
+    data = flow_plot_df,
+    aes(x = .data$vanilla_x, y = .data$vanilla_y),
+    color = "black",
+    alpha = 0.35,
+    size = 1.0
+  ) +
+  geom_segment(
+    data = flow_plot_df,
+    aes(
+      x = .data$vanilla_x,
+      y = .data$vanilla_y,
+      xend = .data$mu_x,
+      yend = .data$mu_y,
+      color = .data$delta_direction
+    ),
+    alpha = arrow_alpha,
+    linewidth = arrow_linewidth,
+    arrow = grid::arrow(length = grid::unit(arrow_head_length_inches, "inches"), type = "closed")
+  ) +
+  geom_point(
+    data = flow_plot_df,
+    aes(x = .data$mu_x, y = .data$mu_y, color = .data$delta_direction),
+    alpha = 0.55,
+    size = 1.1
+  ) +
+  geom_point(
+    data = top_labels,
+    aes(x = .data$mu_x, y = .data$mu_y),
+    color = "red",
+    size = 1.8,
+    alpha = 0.75
+  ) +
+  keff_x_scale(xlim = x_limits_resolved) +
+  coord_cartesian(xlim = x_limits_resolved, ylim = y_limits_resolved) +
+  labs(
+    x = x_label,
+    y = y_label,
+    color = "Movement",
+    title = "Matched effect diagnostic movement",
+    subtitle = "Arrows start at susie vanilla and end at susine functional-mu"
+  ) +
+  theme(legend.position = "bottom")
+
+ggsave(flow_png, p_flow, width = 10, height = 8, dpi = 150)
+print(p_flow)
+
+cat("Saved:", flow_png, "\n")
+cat("Saved matched deltas:", matched_delta_csv, "\n")
+```
+
+# 7. Matched Delta Density
+
+```{r matched-delta-density, fig.width=10, fig.height=6}
+if (nrow(flow_df)) {
+  p_delta <- ggplot(flow_df, aes(x = .data$delta_x, y = .data$delta_y)) +
+    geom_hline(yintercept = 0, color = "grey45", linetype = "dashed") +
+    geom_vline(xintercept = 0, color = "grey45", linetype = "dashed") +
+    geom_density_2d_filled(
+      alpha = 0.75,
+      contour_var = "ndensity",
+      breaks = delta_density_contour_breaks
+    ) +
+    geom_point(alpha = 0.25, size = 0.8, color = "black") +
+    keff_ratio_x_scale() +
+    labs(
+      x = "Core-95 effective k ratio (mu / vanilla)",
+      y = paste0("Delta ", y_label, " (mu - vanilla)"),
+      fill = "Relative\ndensity",
+      title = "Matched effect diagnostic displacement density"
+    ) +
+    theme(legend.position = "right")
+
+  ggsave(delta_density_png, p_delta, width = 10, height = 6, dpi = 150)
+  print(p_delta)
+
+  delta_summary <- flow_df %>%
+    dplyr::summarise(
+      n = dplyr::n(),
+      median_delta_x = stats::median(.data$delta_x, na.rm = TRUE),
+      q05_delta_x = as.numeric(stats::quantile(.data$delta_x, 0.05, na.rm = TRUE)),
+      q95_delta_x = as.numeric(stats::quantile(.data$delta_x, 0.95, na.rm = TRUE)),
+      median_delta_y = stats::median(.data$delta_y, na.rm = TRUE),
+      q05_delta_y = as.numeric(stats::quantile(.data$delta_y, 0.05, na.rm = TRUE)),
+      q95_delta_y = as.numeric(stats::quantile(.data$delta_y, 0.95, na.rm = TRUE)),
+      median_corr = stats::median(.data$corr, na.rm = TRUE),
+      median_margin = stats::median(.data$margin, na.rm = TRUE),
+      median_pair_var_pct = 100 * stats::median(.data$pair_var_explained_frac, na.rm = TRUE)
+    )
+
+  cat("Matched displacement summary:\n")
+  print(delta_summary)
+  cat("Saved:", delta_density_png, "\n")
+}
+```
+
+# 8. Univariate Histograms
+
+```{r univariate-histograms, fig.width=11, fig.height=5}
+p_hist_diff <- plot_univariate_hist(
+  records_labeled,
+  metric = x_metric,
+  xlab_text = x_label,
+  out_path = hist_diffuseness_png,
+  title = "Effect diffuseness: Core-95 effective k by match status",
+  use_keff_x = TRUE,
+  xlim = x_limits_resolved
+)
+print(p_hist_diff)
+
+p_hist_acc <- plot_univariate_hist(
+  records_labeled,
+  metric = y_metric,
+  xlab_text = y_label,
+  out_path = hist_accuracy_png,
+  title = "Effect accuracy ratio by match status",
+  use_keff_x = FALSE,
+  xlim = y_limits_resolved
+)
+print(p_hist_acc)
+
+cat("Saved:", hist_diffuseness_png, "\n")
+cat("Saved:", hist_accuracy_png, "\n")
+```
+
+# 9. AUPRC Attribution
+
+Three per-dataset views that probe whether susine functional-mu is *refining*
+existing model fits (high match counts, modest AUPRC gains, displacement
+density tight around zero) or *unlocking* substantively different fits (low
+match counts, large AUPRC swings, sparse / outlier displacements).
+
+```{r auprc-attribution, fig.width=10, fig.height=6}
+per_dataset_auprc <- records_labeled %>%
+  dplyr::distinct(.data$dataset_bundle_id, .data$model_method, .data$model_AUPRC) %>%
+  tidyr::pivot_wider(
+    names_from = .data$model_method,
+    values_from = .data$model_AUPRC,
+    names_prefix = "auprc_"
+  ) %>%
+  dplyr::mutate(
+    auprc_delta = .data$auprc_susine_functional_mu - .data$auprc_susie_vanilla
+  )
+
+matched_per_dataset <- accepted_matches %>%
+  dplyr::count(.data$vanilla_dataset_bundle_id, name = "n_matched_pairs") %>%
+  dplyr::rename(dataset_bundle_id = .data$vanilla_dataset_bundle_id)
+
+# flow_df comes from joining accepted_matches with matched_vanilla / matched_mu,
+# both of which redefine vanilla_dataset_bundle_id; dplyr suffixes the dupes
+# to .x / .y, so the bare column name no longer exists. Pull movement_distance
+# back to (clean) accepted_matches via match_id and aggregate from there.
+movement_per_match <- flow_df %>%
+  dplyr::select(.data$match_id, .data$movement_distance)
+
+movement_per_dataset <- accepted_matches %>%
+  dplyr::mutate(
+    match_id = paste0(
+      .data$vanilla_dataset_bundle_id, "_",
+      .data$vanilla_effect, "_",
+      .data$mu_effect
+    )
+  ) %>%
+  dplyr::left_join(movement_per_match, by = "match_id") %>%
+  dplyr::group_by(.data$vanilla_dataset_bundle_id) %>%
+  dplyr::summarise(
+    mean_movement_distance = mean(.data$movement_distance, na.rm = TRUE),
+    median_movement_distance = stats::median(.data$movement_distance, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  dplyr::rename(dataset_bundle_id = .data$vanilla_dataset_bundle_id)
+
+per_dataset_summary <- per_dataset_auprc %>%
+  dplyr::left_join(matched_per_dataset, by = "dataset_bundle_id") %>%
+  dplyr::mutate(n_matched_pairs = tidyr::replace_na(.data$n_matched_pairs, 0L)) %>%
+  dplyr::left_join(movement_per_dataset, by = "dataset_bundle_id")
+
+readr::write_csv(per_dataset_summary, per_dataset_summary_csv)
+
+n_total <- sum(is.finite(per_dataset_summary$auprc_delta))
+n_pos <- sum(per_dataset_summary$auprc_delta > 0, na.rm = TRUE)
+n_neg <- sum(per_dataset_summary$auprc_delta < 0, na.rm = TRUE)
+n_zero <- sum(per_dataset_summary$auprc_delta == 0, na.rm = TRUE)
+median_delta <- stats::median(per_dataset_summary$auprc_delta, na.rm = TRUE)
+
+cat("Per-dataset AUPRC delta summary:\n")
+cat(sprintf(
+  "  total datasets: %d | gains: %d | losses: %d | ties: %d | median delta: %.4f\n",
+  n_total, n_pos, n_neg, n_zero, median_delta
+))
+
+p_auprc_delta <- ggplot(per_dataset_summary, aes(x = .data$auprc_delta)) +
+  geom_vline(xintercept = 0, color = "grey45", linetype = "dashed") +
+  geom_histogram(bins = hist_bins, fill = "#2b8cbe", alpha = 0.7, color = NA) +
+  labs(
+    x = "AUPRC delta (mu - vanilla)",
+    y = "Number of datasets",
+    title = "Per-dataset AUPRC improvement from susine functional-mu",
+    subtitle = sprintf(
+      "n = %d datasets | %d gains, %d losses, %d ties | median delta = %.4f",
+      n_total, n_pos, n_neg, n_zero, median_delta
+    )
+  )
+
+ggsave(auprc_delta_hist_png, p_auprc_delta, width = 9, height = 5, dpi = 150)
+print(p_auprc_delta)
+
+p_match_count <- ggplot(per_dataset_summary, aes(x = .data$n_matched_pairs)) +
+  geom_histogram(binwidth = 1, fill = "#2b8cbe", alpha = 0.7, color = NA) +
+  scale_x_continuous(breaks = 0:10) +
+  labs(
+    x = "Number of accepted matched pairs per dataset (out of L = 10)",
+    y = "Number of datasets",
+    title = "Per-dataset matched-pair count distribution"
+  )
+
+ggsave(match_count_hist_png, p_match_count, width = 9, height = 5, dpi = 150)
+print(p_match_count)
+
+scatter_corr <- with(
+  per_dataset_summary,
+  suppressWarnings(stats::cor(
+    n_matched_pairs,
+    auprc_delta,
+    use = "pairwise.complete.obs",
+    method = "spearman"
+  ))
+)
+
+p_auprc_match_scatter <- ggplot(
+  per_dataset_summary,
+  aes(
+    x = .data$n_matched_pairs,
+    y = .data$auprc_delta,
+    color = .data$mean_movement_distance
+  )
+) +
+  geom_hline(yintercept = 0, color = "grey45", linetype = "dashed") +
+  geom_jitter(width = 0.25, height = 0, alpha = 0.6, size = 1.5) +
+  geom_smooth(
+    method = "loess",
+    formula = y ~ x,
+    se = FALSE,
+    color = "black",
+    linetype = "dashed",
+    linewidth = 0.6
+  ) +
+  scale_x_continuous(breaks = 0:10) +
+  scale_color_viridis_c(option = "C", na.value = "grey60") +
+  labs(
+    x = "Number of accepted matched pairs per dataset",
+    y = "AUPRC delta (mu - vanilla)",
+    color = "Mean matched\npair movement",
+    title = "Per-dataset: matching density vs AUPRC improvement",
+    subtitle = sprintf(
+      "Spearman rho = %.3f. A predicts upper-right concentration; B predicts upper-left.",
+      scatter_corr
+    )
+  )
+
+ggsave(auprc_match_scatter_png, p_auprc_match_scatter, width = 10, height = 6, dpi = 150)
+print(p_auprc_match_scatter)
+
+cat("Saved:", auprc_delta_hist_png, "\n")
+cat("Saved:", match_count_hist_png, "\n")
+cat("Saved:", auprc_match_scatter_png, "\n")
+cat("Saved:", per_dataset_summary_csv, "\n")
+```
+
+# 10. Confound Diagnostics
+
+The negative match-count vs AUPRC-delta trend in section 9 could be driven by
+dataset difficulty: hard datasets have low vanilla AUPRC (more headroom for
+delta) and diffuse effects (fewer matched pairs), creating a spurious
+negative correlation even if susine functional-mu were doing pure refinement
+everywhere. The first plot below is the most direct view (per-dataset
+baseline AUPRC vs susine AUPRC, with the y=x reference line); the next two
+disentangle the match-count signal from the difficulty confound.
+
+```{r baseline-vs-susine, fig.width=8, fig.height=8}
+n_above_diag <- sum(per_dataset_summary$auprc_delta > 0, na.rm = TRUE)
+n_below_diag <- sum(per_dataset_summary$auprc_delta < 0, na.rm = TRUE)
+n_total_compared <- n_above_diag + n_below_diag
+
+baseline_vs_susine_pearson <- with(
+  per_dataset_summary,
+  suppressWarnings(stats::cor(
+    auprc_susie_vanilla,
+    auprc_susine_functional_mu,
+    method = "pearson",
+    use = "pairwise.complete.obs"
+  ))
+)
+
+p_baseline_vs_susine <- ggplot(
+  per_dataset_summary,
+  aes(
+    x = .data$auprc_susie_vanilla,
+    y = .data$auprc_susine_functional_mu,
+    color = .data$n_matched_pairs
+  )
+) +
+  geom_abline(slope = 1, intercept = 0, color = "grey45", linetype = "dashed") +
+  geom_point(alpha = 0.65, size = 1.4) +
+  geom_smooth(
+    method = "lm", formula = y ~ x, se = FALSE,
+    color = "black", linetype = "dashed", linewidth = 0.5
+  ) +
+  scale_color_viridis_c(option = "C") +
+  coord_fixed() +
+  labs(
+    x = "Vanilla SuSiE AUPRC",
+    y = "SuSiNE functional-mu AUPRC",
+    color = "Matched pairs",
+    title = "Per-dataset AUPRC: vanilla vs susine functional-mu",
+    subtitle = sprintf(
+      "Pearson r = %.3f | %d / %d datasets above the y=x line (susine wins)",
+      baseline_vs_susine_pearson,
+      n_above_diag,
+      n_total_compared
+    )
+  )
+
+ggsave(baseline_vs_susine_png, p_baseline_vs_susine, width = 8, height = 8, dpi = 150)
+print(p_baseline_vs_susine)
+
+cat("Saved:", baseline_vs_susine_png, "\n")
+```
+
+```{r confound-diagnostics, fig.width=11, fig.height=8}
+quart_breaks <- stats::quantile(
+  per_dataset_summary$auprc_susie_vanilla,
+  probs = c(0, 0.25, 0.5, 0.75, 1.0),
+  na.rm = TRUE,
+  names = FALSE
+)
+quart_breaks <- unique(quart_breaks)
+
+if (length(quart_breaks) >= 3L) {
+  per_dataset_summary <- per_dataset_summary %>%
+    dplyr::mutate(
+      vanilla_auprc_quartile = cut(
+        .data$auprc_susie_vanilla,
+        breaks = quart_breaks,
+        include.lowest = TRUE
+      )
+    )
+
+  quartile_rho <- per_dataset_summary %>%
+    dplyr::filter(!is.na(.data$vanilla_auprc_quartile)) %>%
+    dplyr::group_by(.data$vanilla_auprc_quartile) %>%
+    dplyr::summarise(
+      n = dplyr::n(),
+      rho = suppressWarnings(stats::cor(
+        .data$n_matched_pairs,
+        .data$auprc_delta,
+        method = "spearman",
+        use = "pairwise.complete.obs"
+      )),
+      label = sprintf("rho = %.3f (n=%d)", .data$rho, .data$n),
+      .groups = "drop"
+    )
+
+  cat("Per-quartile match-count vs AUPRC-delta Spearman rho:\n")
+  print(quartile_rho)
+
+  p_strat <- ggplot(
+    per_dataset_summary %>% dplyr::filter(!is.na(.data$vanilla_auprc_quartile)),
+    aes(
+      x = .data$n_matched_pairs,
+      y = .data$auprc_delta,
+      color = .data$mean_movement_distance
+    )
+  ) +
+    geom_hline(yintercept = 0, color = "grey45", linetype = "dashed") +
+    geom_jitter(width = 0.25, height = 0, alpha = 0.6, size = 1.3) +
+    geom_smooth(
+      method = "loess", formula = y ~ x, se = FALSE,
+      color = "black", linetype = "dashed", linewidth = 0.6
+    ) +
+    geom_text(
+      data = quartile_rho,
+      aes(x = -Inf, y = Inf, label = .data$label),
+      hjust = -0.05, vjust = 1.4, size = 3.5,
+      inherit.aes = FALSE
+    ) +
+    facet_wrap(~ vanilla_auprc_quartile, ncol = 2, scales = "free_y") +
+    scale_x_continuous(breaks = 0:10) +
+    scale_color_viridis_c(option = "C", na.value = "grey60") +
+    labs(
+      x = "Number of accepted matched pairs per dataset",
+      y = "AUPRC delta (mu - vanilla)",
+      color = "Mean matched\npair movement",
+      title = "Match count vs AUPRC delta, stratified by vanilla AUPRC quartile",
+      subtitle = "Lower quartiles = harder datasets; if rho stays negative within panels, the original trend is real"
+    )
+
+  ggsave(scatter_stratified_png, p_strat, width = 11, height = 8, dpi = 150)
+  print(p_strat)
+} else {
+  cat("Not enough distinct vanilla AUPRC values to form quartiles; skipping.\n")
+}
+
+confound_rho <- with(
+  per_dataset_summary,
+  suppressWarnings(stats::cor(
+    auprc_susie_vanilla,
+    n_matched_pairs,
+    method = "spearman",
+    use = "pairwise.complete.obs"
+  ))
+)
+
+p_confound <- ggplot(
+  per_dataset_summary,
+  aes(
+    x = .data$auprc_susie_vanilla,
+    y = .data$n_matched_pairs,
+    color = .data$auprc_delta
+  )
+) +
+  geom_jitter(width = 0, height = 0.25, alpha = 0.6, size = 1.3) +
+  geom_smooth(
+    method = "loess", formula = y ~ x, se = FALSE,
+    color = "black", linetype = "dashed", linewidth = 0.6
+  ) +
+  scale_color_gradient2(
+    low = "#2b6cb0", mid = "white", high = "#c53030", midpoint = 0
+  ) +
+  scale_y_continuous(breaks = 0:10) +
+  labs(
+    x = "Vanilla AUPRC (low = hard, high = easy)",
+    y = "Number of accepted matched pairs",
+    color = "AUPRC delta\n(mu - vanilla)",
+    title = "Confound check: vanilla AUPRC vs match count",
+    subtitle = sprintf(
+      "Spearman rho = %.3f. Strong positive => confound chain is real.",
+      confound_rho
+    )
+  )
+
+ggsave(confound_check_png, p_confound, width = 10, height = 5, dpi = 150)
+print(p_confound)
+
+cat("Saved:", scatter_stratified_png, "\n")
+cat("Saved:", confound_check_png, "\n")
+```
+
+# 11. Output Index
+
+```{r output-index}
+outputs <- tibble::tibble(
+  artifact = c(
+    "all effect scatter",
+    "matched/unmatched scatter",
+    "all effect differential density",
+    "matched differential density",
+    "unmatched differential density",
+    "matched flow plot",
+    "matched delta density",
+    "univariate diffuseness histogram",
+    "univariate accuracy histogram",
+    "AUPRC delta histogram",
+    "match count histogram",
+    "AUPRC delta vs match count scatter",
+    "AUPRC delta vs match count stratified by vanilla AUPRC",
+    "vanilla AUPRC vs match count (confound check)",
+    "baseline vs susine AUPRC scatter",
+    "accepted matched pairs",
+    "matched pair deltas",
+    "per-dataset AUPRC and match summary"
+  ),
+  path = c(
+    scatter_all_png,
+    scatter_matched_unmatched_png,
+    density_all_png,
+    density_matched_png,
+    density_unmatched_png,
+    flow_png,
+    delta_density_png,
+    hist_diffuseness_png,
+    hist_accuracy_png,
+    auprc_delta_hist_png,
+    match_count_hist_png,
+    auprc_match_scatter_png,
+    scatter_stratified_png,
+    confound_check_png,
+    baseline_vs_susine_png,
+    matched_pairs_csv,
+    matched_delta_csv,
+    per_dataset_summary_csv
+  )
+)
+
+kable(outputs)
+```

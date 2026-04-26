@@ -1,0 +1,722 @@
+---
+title: "Effect Matching Threshold Calibration (same-X null)"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+Variant of `effect_matching_threshold_calibration.Rmd` that uses a stricter
+null. Instead of pairing `susie_vanilla` and `susine_functional_mu` effects
+across datasets with completely different X matrices (in which case fitted-y
+correlations are ~ N(0, 1/sqrt(n)) and any threshold above ~0.2 is trivially
+significant), this workbook pairs across datasets that **share the same
+genotype matrix but use a different phenotype seed**. That keeps the
+fitted-y vectors in the same column space of X, so any spurious matches
+must come from LD-driven proxy alignment rather than from random vectors
+being uncorrelated by construction.
+
+```{r setup, message=FALSE}
+here::i_am("vignettes/one_off_validations/effect_matching_threshold_calibration_same_X.Rmd")
+library(here)
+library(dplyr)
+library(readr)
+library(tidyr)
+library(purrr)
+library(ggplot2)
+library(knitr)
+
+theme_set(theme_bw(base_size = 12))
+```
+
+# 1. Inputs
+
+```{r inputs}
+output_root <- here("output")
+
+study_name <- "baseline_sims_standalone_effect_matching"
+study_dir <- file.path(output_root, "effect_matching_study", study_name)
+records_rds <- file.path(study_dir, "effect_refit_records.rds")
+
+# Same-X null is enumerated rather than sampled: for every (matrix_id) group
+# we use all ordered (vanilla_seed, mu_seed) pairs with vanilla_seed != mu_seed.
+# This setting only controls the random seed for the within-matrix mutual-best
+# tiebreaks (cor() handles ties deterministically, so the seed is mostly cosmetic
+# but kept for reproducibility of any downstream sampling).
+null_seed <- 20260422L
+
+corr_min_grid <- seq(0.90, 0.99, by = 0.01)
+margin_min_grid <- c(0, 0.005, 0.01, 0.02, 0.03, 0.04, 0.05,
+                     0.075, 0.10)
+var_min_grid <- c(0, 0.0005, 0.001, 0.002, 0.0035, 0.005,
+                  0.0075, 0.01, 0.015)
+
+near_zero_sd <- 1e-12
+null_rate_cutoff <- 0.05
+
+real_candidates_csv <- file.path(study_dir, "real_match_candidates_same_X.csv")
+null_candidates_csv <- file.path(study_dir, "null_match_candidates_same_X.csv")
+null_pairs_csv <- file.path(study_dir, "null_pair_index_same_X.csv")
+threshold_grid_csv <- file.path(study_dir, "threshold_grid_results_same_X.csv")
+frontier_csv <- file.path(study_dir, "frontier_1pct_null_same_X.csv")
+winner_csv <- file.path(study_dir, "winner_threshold_same_X.csv")
+accepted_real_csv <- file.path(study_dir, "accepted_real_matches_at_winner_same_X.csv")
+accepted_delta_csv <- file.path(study_dir, "accepted_real_match_delta_summary_same_X.csv")
+frontier_plot_png <- file.path(study_dir, "frontier_real_vs_null_same_X.png")
+
+cat("Study dir:", study_dir, "\n")
+cat("Records RDS:", records_rds, "\n")
+cat("Null mode: enumerated within-matrix seed mismatches\n")
+```
+
+# 2. Helpers
+
+```{r helpers}
+format_duration <- function(seconds) {
+  seconds <- as.numeric(seconds)
+  if (!is.finite(seconds)) {
+    return("unknown")
+  }
+  h <- floor(seconds / 3600)
+  m <- floor((seconds %% 3600) / 60)
+  s <- round(seconds %% 60)
+  sprintf("%02d:%02d:%02d", h, m, s)
+}
+
+records_to_matrix <- function(rows) {
+  rows <- rows %>% dplyr::arrange(.data$effect)
+  mat <- do.call(cbind, rows$fitted_y_effect)
+  storage.mode(mat) <- "double"
+  colnames(mat) <- as.character(rows$effect)
+  mat
+}
+
+safe_cor_matrix <- function(vanilla_mat, mu_mat, sd_eps = near_zero_sd) {
+  if (nrow(vanilla_mat) != nrow(mu_mat)) {
+    stop(
+      "Mismatched n between vanilla and mu fitted-y matrices: ",
+      nrow(vanilla_mat), " vs ", nrow(mu_mat),
+      ". Same-X null assumes shared sample dimension; check upstream pairing."
+    )
+  }
+
+  v_sd <- apply(vanilla_mat, 2L, stats::sd)
+  m_sd <- apply(mu_mat, 2L, stats::sd)
+  active_v <- is.finite(v_sd) & v_sd > sd_eps
+  active_m <- is.finite(m_sd) & m_sd > sd_eps
+
+  cor_mat <- matrix(
+    0,
+    nrow = ncol(vanilla_mat),
+    ncol = ncol(mu_mat),
+    dimnames = list(colnames(vanilla_mat), colnames(mu_mat))
+  )
+
+  if (any(active_v) && any(active_m)) {
+    sub_cor <- suppressWarnings(stats::cor(
+      vanilla_mat[, active_v, drop = FALSE],
+      mu_mat[, active_m, drop = FALSE],
+      use = "pairwise.complete.obs"
+    ))
+    sub_cor[!is.finite(sub_cor)] <- 0
+    cor_mat[active_v, active_m] <- sub_cor
+  }
+
+  list(cor = cor_mat, active_vanilla = active_v, active_mu = active_m)
+}
+
+second_best_margin <- function(values, chosen_idx) {
+  if (length(values) <= 1L) {
+    return(Inf)
+  }
+  alternatives <- values[-chosen_idx]
+  best_alt <- max(alternatives, na.rm = TRUE)
+  values[[chosen_idx]] - best_alt
+}
+
+safe_min_numeric <- function(...) {
+  x <- c(...)
+  x <- x[is.finite(x)]
+  if (!length(x)) {
+    return(NA_real_)
+  }
+  min(x)
+}
+
+effect_metric_cols <- c(
+  "size", "purity", "coverage",
+  "effect_pip_entropy", "effect_pip_entropy_core95",
+  "effect_k_eff_signal", "effect_k_eff_signal_core95",
+  "tail_inflation_ratio", "tail_inflation_log",
+  "accuracy_ratio", "var_y_explained_frac", "var_y_explained_pct"
+)
+
+add_effect_metric_columns <- function(out, vanilla_rows, mu_rows, vanilla_idx, mu_idx) {
+  available <- intersect(effect_metric_cols, intersect(names(vanilla_rows), names(mu_rows)))
+  for (nm in available) {
+    out[[paste0(nm, "_vanilla")]] <- vanilla_rows[[nm]][vanilla_idx]
+    out[[paste0(nm, "_mu")]] <- mu_rows[[nm]][mu_idx]
+    out[[paste0(nm, "_delta_mu_minus_vanilla")]] <-
+      mu_rows[[nm]][mu_idx] - vanilla_rows[[nm]][vanilla_idx]
+  }
+  out
+}
+
+compare_dataset_pair <- function(vanilla_rows,
+                                 mu_rows,
+                                 vanilla_dataset_id,
+                                 mu_dataset_id,
+                                 comparison_type,
+                                 comparison_id,
+                                 matrix_id = NA_character_,
+                                 include_effect_metrics = FALSE) {
+  vanilla_rows <- vanilla_rows %>% dplyr::arrange(.data$effect)
+  mu_rows <- mu_rows %>% dplyr::arrange(.data$effect)
+
+  vanilla_mat <- records_to_matrix(vanilla_rows)
+  mu_mat <- records_to_matrix(mu_rows)
+  cor_info <- safe_cor_matrix(vanilla_mat, mu_mat)
+  cor_mat <- cor_info$cor
+
+  row_best <- max.col(cor_mat, ties.method = "first")
+  col_best <- max.col(t(cor_mat), ties.method = "first")
+
+  candidate_rows <- vector("list", nrow(cor_mat))
+  n_candidates <- 0L
+
+  for (i in seq_len(nrow(cor_mat))) {
+    j <- row_best[[i]]
+    if (col_best[[j]] != i) {
+      next
+    }
+
+    n_candidates <- n_candidates + 1L
+    row_margin <- second_best_margin(cor_mat[i, ], j)
+    col_margin <- second_best_margin(cor_mat[, j], i)
+
+    out <- tibble::tibble(
+      comparison_type = comparison_type,
+      comparison_id = comparison_id,
+      matrix_id = as.character(matrix_id),
+      vanilla_dataset_bundle_id = vanilla_dataset_id,
+      mu_dataset_bundle_id = mu_dataset_id,
+      vanilla_effect = as.integer(rownames(cor_mat)[[i]]),
+      mu_effect = as.integer(colnames(cor_mat)[[j]]),
+      corr = as.numeric(cor_mat[i, j]),
+      row_margin = as.numeric(row_margin),
+      col_margin = as.numeric(col_margin),
+      margin = min(row_margin, col_margin),
+      var_y_explained_frac_vanilla = as.numeric(vanilla_rows$var_y_explained_frac[[i]]),
+      var_y_explained_frac_mu = as.numeric(mu_rows$var_y_explained_frac[[j]]),
+      pair_var_explained_frac = safe_min_numeric(
+        as.numeric(vanilla_rows$var_y_explained_frac[[i]]),
+        as.numeric(mu_rows$var_y_explained_frac[[j]])
+      ),
+      active_vanilla = as.logical(cor_info$active_vanilla[[i]]),
+      active_mu = as.logical(cor_info$active_mu[[j]]),
+      mutual_best = TRUE
+    )
+
+    if (include_effect_metrics) {
+      out <- add_effect_metric_columns(out, vanilla_rows, mu_rows, i, j)
+    }
+
+    candidate_rows[[n_candidates]] <- out
+  }
+
+  if (!n_candidates) {
+    return(tibble::tibble())
+  }
+
+  dplyr::bind_rows(candidate_rows[seq_len(n_candidates)])
+}
+
+score_threshold_grid <- function(candidates, total_comparisons, grid, label) {
+  if (!nrow(candidates)) {
+    return(grid %>%
+      dplyr::mutate(
+        "{label}_matches_total" := 0L,
+        "{label}_matches_per_dataset_pair" := 0,
+        "{label}_any_match_rate" := 0
+      ))
+  }
+
+  corr <- candidates$corr
+  margin <- candidates$margin
+  var_frac <- candidates$pair_var_explained_frac
+  comparison_id <- candidates$comparison_id
+
+  started <- proc.time()[["elapsed"]]
+  rows <- vector("list", nrow(grid))
+
+  for (i in seq_len(nrow(grid))) {
+    keep <- corr >= grid$corr_min[[i]] &
+      margin >= grid$margin_min[[i]] &
+      var_frac >= grid$var_min[[i]]
+    keep[is.na(keep)] <- FALSE
+
+    n_matches <- sum(keep, na.rm = TRUE)
+    any_rate <- if (n_matches > 0L) {
+      length(unique(comparison_id[keep])) / total_comparisons
+    } else {
+      0
+    }
+
+    rows[[i]] <- tibble::tibble(
+      corr_min = grid$corr_min[[i]],
+      margin_min = grid$margin_min[[i]],
+      var_min = grid$var_min[[i]],
+      matches_total = n_matches,
+      matches_per_dataset_pair = n_matches / total_comparisons,
+      any_match_rate = any_rate
+    )
+
+    if (i %% 100L == 0L || i == nrow(grid)) {
+      elapsed <- proc.time()[["elapsed"]] - started
+      eta <- elapsed / i * (nrow(grid) - i)
+      cat(sprintf(
+        "%s threshold scoring %d/%d | elapsed: %s | ETA: %s\n",
+        label,
+        i,
+        nrow(grid),
+        format_duration(elapsed),
+        format_duration(eta)
+      ))
+    }
+  }
+
+  dplyr::bind_rows(rows) %>%
+    dplyr::rename_with(
+      .fn = ~ paste0(label, "_", .x),
+      .cols = c("matches_total", "matches_per_dataset_pair", "any_match_rate")
+    )
+}
+```
+
+# 3. Load Records
+
+```{r load-records}
+stopifnot(file.exists(records_rds))
+
+records <- readRDS(records_rds) %>%
+  dplyr::mutate(
+    dataset_bundle_id = as.character(.data$dataset_bundle_id),
+    matrix_id = as.character(.data$matrix_id)
+  )
+
+needed_methods <- c("susie_vanilla", "susine_functional_mu")
+method_counts <- records %>%
+  dplyr::filter(.data$model_method %in% needed_methods) %>%
+  dplyr::count(.data$dataset_bundle_id, .data$model_method, name = "n_effects")
+
+complete_ids <- method_counts %>%
+  dplyr::filter(.data$n_effects > 0L) %>%
+  dplyr::count(.data$dataset_bundle_id, name = "n_methods") %>%
+  dplyr::filter(.data$n_methods == length(needed_methods)) %>%
+  dplyr::pull(.data$dataset_bundle_id) %>%
+  sort()
+
+if (length(complete_ids) < 2L) {
+  stop("Need at least two complete datasets for real/null matching; found ", length(complete_ids), ".")
+}
+
+records <- records %>%
+  dplyr::filter(.data$dataset_bundle_id %in% complete_ids, .data$model_method %in% needed_methods)
+
+vanilla_by_dataset <- records %>%
+  dplyr::filter(.data$model_method == "susie_vanilla") %>%
+  split(.$dataset_bundle_id)
+
+mu_by_dataset <- records %>%
+  dplyr::filter(.data$model_method == "susine_functional_mu") %>%
+  split(.$dataset_bundle_id)
+
+dataset_to_matrix <- records %>%
+  dplyr::distinct(.data$dataset_bundle_id, .data$matrix_id) %>%
+  dplyr::filter(.data$dataset_bundle_id %in% complete_ids)
+
+cat("Complete datasets:", length(complete_ids), "\n")
+cat("Distinct matrices:", dplyr::n_distinct(dataset_to_matrix$matrix_id), "\n")
+
+matrix_size_summary <- dataset_to_matrix %>%
+  dplyr::count(.data$matrix_id, name = "n_seeds_per_matrix") %>%
+  dplyr::count(.data$n_seeds_per_matrix, name = "n_matrices") %>%
+  dplyr::arrange(.data$n_seeds_per_matrix)
+
+cat("Distribution of seeds per matrix:\n")
+print(matrix_size_summary)
+
+kable(method_counts %>% dplyr::count(.data$model_method, .data$n_effects, name = "n_datasets"))
+```
+
+# 4. Real Match Candidates
+
+```{r real-candidates}
+real_started <- proc.time()[["elapsed"]]
+
+real_candidates <- purrr::map_dfr(
+  seq_along(complete_ids),
+  function(i) {
+    dataset_id <- complete_ids[[i]]
+    matrix_id_i <- dataset_to_matrix$matrix_id[
+      match(dataset_id, dataset_to_matrix$dataset_bundle_id)
+    ]
+    out <- compare_dataset_pair(
+      vanilla_rows = vanilla_by_dataset[[dataset_id]],
+      mu_rows = mu_by_dataset[[dataset_id]],
+      vanilla_dataset_id = dataset_id,
+      mu_dataset_id = dataset_id,
+      comparison_type = "real",
+      comparison_id = paste0("real_", dataset_id),
+      matrix_id = matrix_id_i,
+      include_effect_metrics = TRUE
+    )
+
+    if (i %% 50L == 0L || i == length(complete_ids)) {
+      elapsed <- proc.time()[["elapsed"]] - real_started
+      eta <- elapsed / i * (length(complete_ids) - i)
+      cat(sprintf(
+        "Real candidates %d/%d | elapsed: %s | ETA: %s\n",
+        i,
+        length(complete_ids),
+        format_duration(elapsed),
+        format_duration(eta)
+      ))
+    }
+
+    out
+  }
+)
+
+readr::write_csv(real_candidates, real_candidates_csv)
+
+cat("Real candidate rows:", nrow(real_candidates), "\n")
+cat("Real comparisons:", length(complete_ids), "\n")
+cat("Saved:", real_candidates_csv, "\n")
+```
+
+# 5. Null Match Candidates (within-matrix, different seed)
+
+We enumerate every ordered (vanilla_dataset, mu_dataset) pair that shares a
+`matrix_id` but uses a different `phenotype_seed`. Because cross-matrix
+pairs are excluded by construction, fitted-y vectors live in the same
+column space of `X`, so any spurious matches reflect genuine LD-driven
+proxy alignment rather than the trivial fact that random length-`n`
+vectors decorrelate.
+
+```{r null-candidates}
+set.seed(null_seed)
+
+null_pair_index <- dataset_to_matrix %>%
+  dplyr::inner_join(
+    dataset_to_matrix %>%
+      dplyr::rename(mu_dataset_bundle_id = .data$dataset_bundle_id),
+    by = "matrix_id",
+    relationship = "many-to-many"
+  ) %>%
+  dplyr::filter(.data$dataset_bundle_id != .data$mu_dataset_bundle_id) %>%
+  dplyr::transmute(
+    matrix_id = .data$matrix_id,
+    vanilla_dataset_bundle_id = as.character(.data$dataset_bundle_id),
+    mu_dataset_bundle_id = as.character(.data$mu_dataset_bundle_id),
+    pair_index = dplyr::row_number()
+  )
+
+if (!nrow(null_pair_index)) {
+  stop(
+    "No within-matrix mismatched pairs available; either all matrices have one ",
+    "seed or matrix_id is missing from the records."
+  )
+}
+
+cat("Within-matrix null pairs:", nrow(null_pair_index), "\n")
+print(
+  null_pair_index %>%
+    dplyr::count(.data$matrix_id, name = "n_pairs") %>%
+    dplyr::count(.data$n_pairs, name = "n_matrices") %>%
+    dplyr::arrange(.data$n_pairs)
+)
+
+readr::write_csv(null_pair_index, null_pairs_csv)
+
+null_started <- proc.time()[["elapsed"]]
+null_candidate_chunks <- vector("list", nrow(null_pair_index))
+
+for (i in seq_len(nrow(null_pair_index))) {
+  vanilla_id <- null_pair_index$vanilla_dataset_bundle_id[[i]]
+  mu_id <- null_pair_index$mu_dataset_bundle_id[[i]]
+  matrix_i <- null_pair_index$matrix_id[[i]]
+
+  null_candidate_chunks[[i]] <- compare_dataset_pair(
+    vanilla_rows = vanilla_by_dataset[[vanilla_id]],
+    mu_rows = mu_by_dataset[[mu_id]],
+    vanilla_dataset_id = vanilla_id,
+    mu_dataset_id = mu_id,
+    comparison_type = "null",
+    comparison_id = paste0("null_", matrix_i, "_", vanilla_id, "_", mu_id),
+    matrix_id = matrix_i,
+    include_effect_metrics = FALSE
+  )
+
+  if (i %% 200L == 0L || i == nrow(null_pair_index)) {
+    elapsed <- proc.time()[["elapsed"]] - null_started
+    eta <- elapsed / i * (nrow(null_pair_index) - i)
+    cat(sprintf(
+      "Null pairs %d/%d | elapsed: %s | ETA: %s | candidate rows so far: %d\n",
+      i,
+      nrow(null_pair_index),
+      format_duration(elapsed),
+      format_duration(eta),
+      sum(vapply(null_candidate_chunks[seq_len(i)], nrow, integer(1)))
+    ))
+  }
+}
+
+null_candidates <- dplyr::bind_rows(null_candidate_chunks)
+
+# Sanity check: no fixed-point (vanilla == mu) pairs.
+n_fixed <- sum(
+  null_candidates$vanilla_dataset_bundle_id == null_candidates$mu_dataset_bundle_id
+)
+if (n_fixed > 0L) {
+  stop(n_fixed, " null candidate rows have vanilla_dataset == mu_dataset.")
+}
+
+readr::write_csv(null_candidates, null_candidates_csv)
+
+cat("Null candidate rows:", nrow(null_candidates), "\n")
+cat("Null comparisons:", nrow(null_pair_index), "\n")
+cat("Saved:", null_candidates_csv, "\n")
+```
+
+# 6. Threshold Grid
+
+```{r threshold-grid}
+threshold_grid <- tidyr::expand_grid(
+  corr_min = corr_min_grid,
+  margin_min = margin_min_grid,
+  var_min = var_min_grid
+)
+
+real_scores <- score_threshold_grid(
+  candidates = real_candidates,
+  total_comparisons = length(complete_ids),
+  grid = threshold_grid,
+  label = "real"
+)
+
+null_scores <- score_threshold_grid(
+  candidates = null_candidates,
+  total_comparisons = nrow(null_pair_index),
+  grid = threshold_grid,
+  label = "null"
+)
+
+null_cutoff_label <- paste0("<=", round(null_rate_cutoff * 100, 2), "% null")
+
+threshold_results <- threshold_grid %>%
+  dplyr::left_join(real_scores, by = c("corr_min", "margin_min", "var_min")) %>%
+  dplyr::left_join(null_scores, by = c("corr_min", "margin_min", "var_min")) %>%
+  dplyr::mutate(
+    passes_null_cutoff = .data$null_matches_per_dataset_pair <= null_rate_cutoff
+  ) %>%
+  dplyr::arrange(
+    .data$passes_null_cutoff,
+    dplyr::desc(.data$real_matches_total),
+    .data$null_matches_per_dataset_pair,
+    dplyr::desc(.data$corr_min),
+    dplyr::desc(.data$margin_min),
+    .by_group = FALSE
+  )
+
+frontier <- threshold_results %>%
+  dplyr::filter(.data$passes_null_cutoff) %>%
+  dplyr::arrange(
+    dplyr::desc(.data$real_matches_total),
+    .data$null_matches_per_dataset_pair,
+    dplyr::desc(.data$corr_min),
+    dplyr::desc(.data$margin_min)
+  )
+
+if (!nrow(frontier)) {
+  stop(
+    "No threshold tuple satisfied the ", null_cutoff_label,
+    " match criterion. Consider extending corr_min_grid upward or ",
+    "loosening null_rate_cutoff."
+  )
+}
+
+winner <- frontier %>%
+  dplyr::slice(1L)
+
+readr::write_csv(threshold_results, threshold_grid_csv)
+readr::write_csv(frontier, frontier_csv)
+readr::write_csv(winner, winner_csv)
+
+cat("Threshold grid rows:", nrow(threshold_results), "\n")
+cat(null_cutoff_label, "frontier rows:", nrow(frontier), "\n")
+cat("Winner:\n")
+print(winner)
+```
+
+# 7. Accepted Real Matches At Winner
+
+```{r winner-matches}
+accepted_real <- real_candidates %>%
+  dplyr::filter(
+    .data$corr >= winner$corr_min[[1]],
+    .data$margin >= winner$margin_min[[1]],
+    .data$pair_var_explained_frac >= winner$var_min[[1]]
+  ) %>%
+  dplyr::arrange(.data$vanilla_dataset_bundle_id, dplyr::desc(.data$corr))
+
+readr::write_csv(accepted_real, accepted_real_csv)
+
+cat("Selected threshold tuple:\n")
+cat("  corr_min:", winner$corr_min[[1]], "\n")
+cat("  margin_min:", winner$margin_min[[1]], "\n")
+cat("  var_min:", winner$var_min[[1]], "\n")
+cat("  null matches per dataset pair:", winner$null_matches_per_dataset_pair[[1]], "\n")
+cat("  null any-match rate:", winner$null_any_match_rate[[1]], "\n")
+cat("  real matches:", winner$real_matches_total[[1]], "\n")
+cat("  real matches per dataset pair:", winner$real_matches_per_dataset_pair[[1]], "\n")
+
+matches_per_dataset <- accepted_real %>%
+  dplyr::count(.data$vanilla_dataset_bundle_id, name = "n_matches")
+
+cat("\nReal matches per dataset summary:\n")
+print(summary(matches_per_dataset$n_matches))
+
+diagnostic_delta_cols <- grep("_delta_mu_minus_vanilla$", names(accepted_real), value = TRUE)
+delta_summary <- purrr::map_dfr(
+  diagnostic_delta_cols,
+  function(nm) {
+    x <- accepted_real[[nm]]
+    tibble::tibble(
+      metric = sub("_delta_mu_minus_vanilla$", "", nm),
+      n = sum(is.finite(x)),
+      median_delta = stats::median(x, na.rm = TRUE),
+      q05_delta = as.numeric(stats::quantile(x, 0.05, na.rm = TRUE)),
+      q25_delta = as.numeric(stats::quantile(x, 0.25, na.rm = TRUE)),
+      q75_delta = as.numeric(stats::quantile(x, 0.75, na.rm = TRUE)),
+      q95_delta = as.numeric(stats::quantile(x, 0.95, na.rm = TRUE))
+    )
+  }
+)
+
+corr_summary <- accepted_real %>%
+  dplyr::summarise(
+    n = dplyr::n(),
+    median_corr = stats::median(.data$corr, na.rm = TRUE),
+    q05_corr = as.numeric(stats::quantile(.data$corr, 0.05, na.rm = TRUE)),
+    q25_corr = as.numeric(stats::quantile(.data$corr, 0.25, na.rm = TRUE)),
+    q75_corr = as.numeric(stats::quantile(.data$corr, 0.75, na.rm = TRUE)),
+    q95_corr = as.numeric(stats::quantile(.data$corr, 0.95, na.rm = TRUE)),
+    median_margin = stats::median(.data$margin, na.rm = TRUE),
+    median_pair_var_pct = 100 * stats::median(.data$pair_var_explained_frac, na.rm = TRUE)
+  )
+
+readr::write_csv(delta_summary, accepted_delta_csv)
+
+cat("\nAccepted match correlation summary:\n")
+print(corr_summary)
+cat("\nAccepted paired diagnostic deltas:\n")
+print(delta_summary, n = Inf)
+
+kable(head(accepted_real, 20), digits = 4)
+```
+
+# 8. Frontier Plot
+
+```{r frontier-plot, fig.width=9, fig.height=6}
+frontier_plot_max_null <- max(2 * null_rate_cutoff, 0.10)
+
+frontier_plot <- threshold_results %>%
+  dplyr::filter(.data$null_matches_per_dataset_pair <= frontier_plot_max_null)
+
+p <- ggplot(
+  frontier_plot,
+  aes(
+    x = .data$null_matches_per_dataset_pair,
+    y = .data$real_matches_total,
+    color = .data$var_min,
+    shape = .data$passes_null_cutoff
+  )
+) +
+  geom_point(alpha = 0.75, size = 2) +
+  geom_vline(xintercept = null_rate_cutoff, linetype = "dashed", color = "black") +
+  geom_point(
+    data = winner,
+    aes(
+      x = .data$null_matches_per_dataset_pair,
+      y = .data$real_matches_total
+    ),
+    inherit.aes = FALSE,
+    color = "red",
+    size = 4
+  ) +
+  scale_x_continuous(labels = scales::percent_format(accuracy = 0.1)) +
+  labs(
+    x = "Null matches per dataset pair (within-matrix, different seed)",
+    y = "Real accepted matches",
+    color = "Minimum var(y) explained",
+    shape = null_cutoff_label,
+    title = "Effect matching threshold frontier (same-X null)"
+  ) +
+  theme(legend.position = "bottom")
+
+ggsave(frontier_plot_png, p, width = 9, height = 6, dpi = 150)
+print(p)
+
+cat("Frontier plot:", frontier_plot_png, "\n")
+```
+
+# 9. Null Correlation Diagnostic
+
+A short companion summary so it's obvious whether the within-matrix null
+actually has discriminative power. If null correlations cluster well below
+the corr_min grid, the same problem as the cross-dataset null is back; if
+they overlap with the real distribution, the threshold sweep is meaningful.
+
+```{r null-corr-diagnostic, fig.width=9, fig.height=5}
+null_corr_summary <- null_candidates %>%
+  dplyr::summarise(
+    n = dplyr::n(),
+    mean_corr = mean(.data$corr, na.rm = TRUE),
+    median_corr = stats::median(.data$corr, na.rm = TRUE),
+    q90_corr = as.numeric(stats::quantile(.data$corr, 0.90, na.rm = TRUE)),
+    q95_corr = as.numeric(stats::quantile(.data$corr, 0.95, na.rm = TRUE)),
+    q99_corr = as.numeric(stats::quantile(.data$corr, 0.99, na.rm = TRUE)),
+    max_corr = max(.data$corr, na.rm = TRUE)
+  )
+
+cat("Null correlation summary (mutual-best candidates only):\n")
+print(null_corr_summary)
+
+corr_compare <- dplyr::bind_rows(
+  real_candidates %>% dplyr::transmute(corr = .data$corr, comparison_type = "real"),
+  null_candidates %>% dplyr::transmute(corr = .data$corr, comparison_type = "null")
+)
+
+p_corr <- ggplot(corr_compare, aes(x = .data$corr, fill = .data$comparison_type)) +
+  geom_histogram(
+    aes(y = after_stat(density)),
+    position = "identity",
+    bins = 60,
+    alpha = 0.55
+  ) +
+  scale_fill_manual(values = c(real = "#2b8cbe", null = "#c53030")) +
+  labs(
+    x = "Mutual-best fitted-y correlation",
+    y = "Density",
+    fill = "Comparison",
+    title = "Real vs same-X null correlations (mutual-best candidates)"
+  ) +
+  theme(legend.position = "bottom")
+
+print(p_corr)
+```

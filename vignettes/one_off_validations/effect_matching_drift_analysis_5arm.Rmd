@@ -1,0 +1,762 @@
+---
+title: "Effect Drift Analysis (5-arm: cold + warm refits)"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+Reads the 5-arm refit records and computes per-dataset **effect drift**
+between every interesting arm pair, plus an AUPRC trajectory across the
+two refit chains:
+
+```
+mu chain:                              pi chain:
+  vanilla -> mu                          vanilla -> pi
+  mu -> vanilla_warm_from_mu             pi -> vanilla_warm_from_pi
+  vanilla -> vanilla_warm_from_mu        vanilla -> vanilla_warm_from_pi
+```
+
+**Effect drift** between two fits A and B is computed by:
+
+1. Build the `L x L` correlation matrix of `fitted_y_effect` vectors
+   (inactive effects with sd=0 contribute correlation 0).
+2. Solve the max-weight 1-1 assignment via `clue::solve_LSAP(cor_mat,
+   maximum = TRUE)`.
+3. Record all `L` assignment correlations.
+4. Derive per-pair summaries: `mean_corr`, `min_corr`, `n_below_0p9`
+   (count of assignment edges with correlation < 0.9), and
+   `weighted_drift` (1 - assignment correlations weighted by
+   `min(var_y_explained_A_i, var_y_explained_B_j)` so inactive pairs
+   contribute little).
+
+This drift framework + AUPRC trajectory operationalizes the
+**refinement-vs-exploration test**:
+
+| D(vanilla, treatment) | D(vanilla, vanilla_warm) | dAUPRC(treatment) | dAUPRC(vanilla_warm) | Mechanism |
+|---|---|---|---|---|
+| Low | Low | + | + | Within-basin PIP weighting; basin unchanged |
+| Low | Low | + | ~0 | PIP-weighting only; reverts when prior removed |
+| High | High | + | + | **Exploration win**: new basin, vanilla holds it |
+| High | Low | + | ~0 | New basin but unstable; vanilla snaps back |
+
+```{r setup, message=FALSE}
+here::i_am("vignettes/one_off_validations/effect_matching_drift_analysis_5arm.Rmd")
+library(here)
+library(dplyr)
+library(readr)
+library(tidyr)
+library(purrr)
+library(ggplot2)
+library(knitr)
+library(clue)         # solve_LSAP for max-weight 1-1 assignment
+
+theme_set(theme_bw(base_size = 12))
+```
+
+# 1. User Parameters
+
+```{r user-parameters}
+output_root <- here("output")
+study_name <- "baseline_sims_5arm_effect_matching"
+study_dir <- file.path(output_root, "effect_matching_study", study_name)
+records_rds <- file.path(study_dir, "effect_refit_records.rds")
+
+baseline_method <- "susie_vanilla"
+mu_method <- "susine_functional_mu"
+pi_method <- "susie_functional_pi"
+warm_mu_method <- "susie_vanilla_warm_from_mu"
+warm_pi_method <- "susie_vanilla_warm_from_pi"
+
+# Pretty labels for plotting.
+method_labels <- c(
+  susie_vanilla = "vanilla (cold)",
+  susine_functional_mu = "mu (cold)",
+  susie_vanilla_warm_from_mu = "vanilla (warm-from-mu)",
+  susie_functional_pi = "pi (cold)",
+  susie_vanilla_warm_from_pi = "vanilla (warm-from-pi)"
+)
+method_color <- c(
+  susie_vanilla = "black",
+  susine_functional_mu = "#2b8cbe",
+  susie_vanilla_warm_from_mu = "#9ecae1",
+  susie_functional_pi = "#74c476",
+  susie_vanilla_warm_from_pi = "#bae4b3"
+)
+
+# Drift threshold (the user's "unpaired" cutoff).
+drift_corr_cutoff <- 0.9
+
+# Active-effect threshold for the weighted/filtered drift summaries.
+active_var_threshold <- 0.005
+
+# Plot output directory.
+plot_dir <- file.path(study_dir, "drift_analysis_plots")
+dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
+
+# Output filenames.
+drift_assignments_csv <- file.path(study_dir, "drift_assignments_5arm.csv")
+drift_summary_csv <- file.path(study_dir, "drift_summary_5arm.csv")
+auprc_per_dataset_csv <- file.path(study_dir, "auprc_per_dataset_5arm.csv")
+
+drift_profile_hist_png <- file.path(plot_dir, "drift_profile_histograms.png")
+chain_trajectory_png <- file.path(plot_dir, "chain_auprc_trajectory.png")
+headline_scatter_png <- file.path(plot_dir, "headline_drift_vs_warm_auprc.png")
+unpaired_vs_delta_png <- file.path(plot_dir, "unpaired_count_vs_auprc_delta.png")
+mu_vs_pi_drift_png <- file.path(plot_dir, "mu_vs_pi_drift_comparison.png")
+
+cat("Study dir:", study_dir, "\n")
+cat("Plot dir:", plot_dir, "\n")
+cat("Drift threshold for `n_below_<cut>`:", drift_corr_cutoff, "\n")
+cat("Active-effect var-explained threshold:", active_var_threshold, "\n")
+```
+
+# 2. Helpers
+
+```{r helpers}
+`%||%` <- function(x, y) if (is.null(x)) y else x
+
+format_duration <- function(seconds) {
+  seconds <- as.numeric(seconds)
+  if (!is.finite(seconds)) return("unknown")
+  h <- floor(seconds / 3600)
+  m <- floor((seconds %% 3600) / 60)
+  s <- round(seconds %% 60)
+  sprintf("%02d:%02d:%02d", h, m, s)
+}
+
+# Stack effect rows for one (dataset, model) into an n x L matrix of
+# fitted_y_effect vectors, in effect order.
+records_to_fitted_y_matrix <- function(rows) {
+  rows <- rows %>% dplyr::arrange(.data$effect)
+  mat <- do.call(cbind, rows$fitted_y_effect)
+  storage.mode(mat) <- "double"
+  colnames(mat) <- as.character(rows$effect)
+  mat
+}
+
+# Correlation matrix robust to inactive (sd=0) effects.
+safe_cor_matrix <- function(mat_a, mat_b, sd_eps = 1e-12) {
+  if (nrow(mat_a) != nrow(mat_b)) {
+    stop("Mismatched n (", nrow(mat_a), " vs ", nrow(mat_b), ").")
+  }
+  sd_a <- apply(mat_a, 2L, stats::sd)
+  sd_b <- apply(mat_b, 2L, stats::sd)
+  active_a <- is.finite(sd_a) & sd_a > sd_eps
+  active_b <- is.finite(sd_b) & sd_b > sd_eps
+
+  cor_mat <- matrix(0, nrow = ncol(mat_a), ncol = ncol(mat_b),
+                    dimnames = list(colnames(mat_a), colnames(mat_b)))
+  if (any(active_a) && any(active_b)) {
+    sub <- suppressWarnings(stats::cor(
+      mat_a[, active_a, drop = FALSE],
+      mat_b[, active_b, drop = FALSE],
+      use = "pairwise.complete.obs"
+    ))
+    sub[!is.finite(sub)] <- 0
+    cor_mat[active_a, active_b] <- sub
+  }
+  list(cor = cor_mat, active_a = active_a, active_b = active_b)
+}
+
+# For one (dataset, A, B) pair, run Hungarian on the L x L correlation
+# matrix and return per-edge data.
+compute_drift_pair <- function(rows_a, rows_b,
+                               method_a, method_b,
+                               dataset_bundle_id, matrix_id) {
+  rows_a <- rows_a %>% dplyr::arrange(.data$effect)
+  rows_b <- rows_b %>% dplyr::arrange(.data$effect)
+
+  mat_a <- records_to_fitted_y_matrix(rows_a)
+  mat_b <- records_to_fitted_y_matrix(rows_b)
+  cor_info <- safe_cor_matrix(mat_a, mat_b)
+  cor_mat <- cor_info$cor
+
+  # clue::solve_LSAP() requires nonnegative entries even with
+  # maximum = TRUE. Shift the full matrix if needed; adding a constant
+  # to every edge preserves the optimal 1-1 assignment.
+  assignment_weights <- cor_mat
+  min_weight <- suppressWarnings(min(assignment_weights, na.rm = TRUE))
+  if (!is.finite(min_weight)) {
+    min_weight <- 0
+  }
+  if (min_weight < 0) {
+    assignment_weights <- assignment_weights - min_weight
+  }
+  assignment <- as.integer(clue::solve_LSAP(
+    assignment_weights,
+    maximum = TRUE
+  ))
+  L <- ncol(mat_a)
+
+  effect_a_ids <- as.integer(rows_a$effect)
+  effect_b_ids <- as.integer(rows_b$effect)
+  var_y_a <- as.numeric(rows_a$var_y_explained_frac)
+  var_y_b <- as.numeric(rows_b$var_y_explained_frac)
+
+  tibble::tibble(
+    dataset_bundle_id = dataset_bundle_id,
+    matrix_id = matrix_id,
+    method_a = method_a,
+    method_b = method_b,
+    edge = seq_len(L),
+    effect_a = effect_a_ids,
+    effect_b = effect_b_ids[assignment],
+    corr = cor_mat[cbind(seq_len(L), assignment)],
+    var_y_explained_a = var_y_a,
+    var_y_explained_b = var_y_b[assignment],
+    active_a = cor_info$active_a,
+    active_b = cor_info$active_b[assignment]
+  )
+}
+
+# Summarize per (dataset, A, B) from the per-edge assignment table.
+summarize_drift <- function(edges_df, drift_corr_cutoff, active_var_threshold) {
+  edges_df %>%
+    dplyr::group_by(
+      .data$dataset_bundle_id, .data$matrix_id,
+      .data$method_a, .data$method_b
+    ) %>%
+    dplyr::summarise(
+      n_edges = dplyr::n(),
+      mean_corr = mean(.data$corr, na.rm = TRUE),
+      median_corr = stats::median(.data$corr, na.rm = TRUE),
+      min_corr = suppressWarnings(min(.data$corr, na.rm = TRUE)),
+      n_below_cutoff = sum(.data$corr < drift_corr_cutoff, na.rm = TRUE),
+      n_active_pairs = sum(
+        .data$var_y_explained_a > active_var_threshold &
+          .data$var_y_explained_b > active_var_threshold,
+        na.rm = TRUE
+      ),
+      n_active_below_cutoff = sum(
+        .data$corr < drift_corr_cutoff &
+          .data$var_y_explained_a > active_var_threshold &
+          .data$var_y_explained_b > active_var_threshold,
+        na.rm = TRUE
+      ),
+      mean_corr_active = {
+        keep <- .data$var_y_explained_a > active_var_threshold &
+                  .data$var_y_explained_b > active_var_threshold
+        if (any(keep)) mean(.data$corr[keep], na.rm = TRUE) else NA_real_
+      },
+      weighted_drift = {
+        w <- pmin(
+          tidyr::replace_na(.data$var_y_explained_a, 0),
+          tidyr::replace_na(.data$var_y_explained_b, 0)
+        )
+        if (sum(w) > 0) {
+          # 1 - weighted-mean correlation, so larger = more drift
+          1 - sum(w * .data$corr, na.rm = TRUE) / sum(w)
+        } else {
+          NA_real_
+        }
+      },
+      .groups = "drop"
+    )
+}
+```
+
+# 3. Load Records
+
+```{r load-records}
+stopifnot(file.exists(records_rds))
+records <- readRDS(records_rds) %>%
+  dplyr::mutate(
+    dataset_bundle_id = as.character(.data$dataset_bundle_id),
+    matrix_id = as.character(.data$matrix_id),
+    effect = as.integer(.data$effect)
+  )
+
+methods_present <- sort(unique(records$model_method))
+cat("Methods in records:", paste(methods_present, collapse = ", "), "\n")
+
+required_methods <- c(baseline_method, mu_method, warm_mu_method,
+                      pi_method, warm_pi_method)
+missing_methods <- setdiff(required_methods, methods_present)
+if (length(missing_methods)) {
+  stop("Missing methods in records: ", paste(missing_methods, collapse = ", "),
+       ". Re-run effect_matching_refit_export_5arm.Rmd first.")
+}
+
+records <- records %>% dplyr::filter(.data$model_method %in% required_methods)
+
+# Index records by (dataset, model_method) for fast pair access.
+records_by_dataset_method <- records %>% split(list(.$dataset_bundle_id, .$model_method))
+```
+
+# 4. Pairwise Drift
+
+```{r compute-drift}
+# Pairs we want (label, method_a, method_b).
+pair_specs <- tibble::tribble(
+  ~pair_id,                        ~chain, ~method_a,         ~method_b,
+  "vanilla__mu",                   "mu",   baseline_method,   mu_method,
+  "mu__vanilla_warm_from_mu",      "mu",   mu_method,         warm_mu_method,
+  "vanilla__vanilla_warm_from_mu", "mu",   baseline_method,   warm_mu_method,
+  "vanilla__pi",                   "pi",   baseline_method,   pi_method,
+  "pi__vanilla_warm_from_pi",      "pi",   pi_method,         warm_pi_method,
+  "vanilla__vanilla_warm_from_pi", "pi",   baseline_method,   warm_pi_method
+)
+print(pair_specs)
+
+# Datasets with all 5 arms present.
+datasets_complete <- records %>%
+  dplyr::count(.data$dataset_bundle_id, .data$model_method) %>%
+  dplyr::count(.data$dataset_bundle_id, name = "n_methods") %>%
+  dplyr::filter(.data$n_methods == length(required_methods)) %>%
+  dplyr::pull(.data$dataset_bundle_id)
+cat("Datasets with all 5 arms present:", length(datasets_complete), "\n")
+
+dataset_meta <- records %>%
+  dplyr::distinct(.data$dataset_bundle_id, .data$matrix_id) %>%
+  dplyr::filter(.data$dataset_bundle_id %in% datasets_complete)
+
+started <- proc.time()[["elapsed"]]
+edge_chunks <- list()
+n_total <- length(datasets_complete) * nrow(pair_specs)
+counter <- 0L
+
+for (ds_idx in seq_along(datasets_complete)) {
+  ds_id <- datasets_complete[[ds_idx]]
+  matrix_id_i <- dataset_meta$matrix_id[
+    match(ds_id, dataset_meta$dataset_bundle_id)
+  ]
+  for (pi_idx in seq_len(nrow(pair_specs))) {
+    counter <- counter + 1L
+    spec <- pair_specs[pi_idx, ]
+    rows_a <- records_by_dataset_method[[paste(ds_id, spec$method_a, sep = ".")]]
+    rows_b <- records_by_dataset_method[[paste(ds_id, spec$method_b, sep = ".")]]
+    if (is.null(rows_a) || is.null(rows_b)) {
+      next
+    }
+    edge_chunks[[length(edge_chunks) + 1L]] <- compute_drift_pair(
+      rows_a = rows_a, rows_b = rows_b,
+      method_a = spec$method_a, method_b = spec$method_b,
+      dataset_bundle_id = ds_id,
+      matrix_id = matrix_id_i
+    ) %>% dplyr::mutate(pair_id = spec$pair_id, chain = spec$chain)
+  }
+  if (ds_idx %% 100L == 0L || ds_idx == length(datasets_complete)) {
+    elapsed <- proc.time()[["elapsed"]] - started
+    eta <- elapsed / counter * (n_total - counter)
+    cat(sprintf(
+      "Drift %d/%d datasets (%d/%d pairs) | elapsed %s | ETA %s\n",
+      ds_idx, length(datasets_complete), counter, n_total,
+      format_duration(elapsed), format_duration(eta)
+    ))
+  }
+}
+
+drift_assignments <- dplyr::bind_rows(edge_chunks)
+readr::write_csv(drift_assignments, drift_assignments_csv)
+cat("Drift assignment rows:", nrow(drift_assignments), "\n")
+
+drift_summary <- summarize_drift(drift_assignments, drift_corr_cutoff, active_var_threshold) %>%
+  dplyr::left_join(pair_specs, by = c("method_a", "method_b"))
+readr::write_csv(drift_summary, drift_summary_csv)
+cat("Drift summary rows:", nrow(drift_summary), "\n")
+```
+
+# 5. Drift Sanity (D(arm, arm) == 0)
+
+```{r drift-sanity, fig.width=8, fig.height=4}
+# As a self-test, compute drift of vanilla against itself for a small subset.
+# All correlations should be 1, mean_corr ~ 1, n_below_0p9 == 0.
+sanity_ids <- head(datasets_complete, 10L)
+sanity_rows <- list()
+for (ds_id in sanity_ids) {
+  rows_v <- records_by_dataset_method[[paste(ds_id, baseline_method, sep = ".")]]
+  if (is.null(rows_v)) next
+  matrix_id_i <- dataset_meta$matrix_id[match(ds_id, dataset_meta$dataset_bundle_id)]
+  sanity_rows[[length(sanity_rows) + 1L]] <- compute_drift_pair(
+    rows_a = rows_v, rows_b = rows_v,
+    method_a = baseline_method, method_b = baseline_method,
+    dataset_bundle_id = ds_id, matrix_id = matrix_id_i
+  )
+}
+sanity_edges <- dplyr::bind_rows(sanity_rows)
+sanity_summary <- summarize_drift(sanity_edges, drift_corr_cutoff, active_var_threshold)
+cat("Self-drift sanity (vanilla vs vanilla):\n")
+print(sanity_summary %>%
+        dplyr::summarise(
+          mean_of_mean_corr = mean(.data$mean_corr, na.rm = TRUE),
+          mean_n_below_cutoff = mean(.data$n_below_cutoff),
+          max_n_below_cutoff = max(.data$n_below_cutoff)
+        ))
+# Note: inactive (sd=0) effects against themselves give correlation 0 by
+# construction, so n_below_cutoff > 0 is expected. mean_corr_active should
+# be close to 1.
+cat("Self-drift mean corr (active-only):", mean(sanity_summary$mean_corr_active, na.rm = TRUE), "\n")
+```
+
+# 6. Per-Dataset AUPRC Trajectory
+
+```{r per-dataset-auprc}
+auprc_per_dataset <- records %>%
+  dplyr::distinct(.data$dataset_bundle_id, .data$model_method, .data$model_AUPRC) %>%
+  tidyr::pivot_wider(
+    names_from = .data$model_method,
+    values_from = .data$model_AUPRC,
+    names_prefix = "auprc_"
+  ) %>%
+  dplyr::mutate(
+    auprc_delta_mu = .data$auprc_susine_functional_mu - .data$auprc_susie_vanilla,
+    auprc_delta_pi = .data$auprc_susie_functional_pi - .data$auprc_susie_vanilla,
+    auprc_delta_warm_mu_vs_vanilla =
+      .data$auprc_susie_vanilla_warm_from_mu - .data$auprc_susie_vanilla,
+    auprc_delta_warm_pi_vs_vanilla =
+      .data$auprc_susie_vanilla_warm_from_pi - .data$auprc_susie_vanilla,
+    auprc_round_trip_mu =
+      .data$auprc_susie_vanilla_warm_from_mu - .data$auprc_susine_functional_mu,
+    auprc_round_trip_pi =
+      .data$auprc_susie_vanilla_warm_from_pi - .data$auprc_susie_functional_pi
+  )
+readr::write_csv(auprc_per_dataset, auprc_per_dataset_csv)
+cat("Per-dataset AUPRC rows:", nrow(auprc_per_dataset), "\n")
+
+# Long format for spaghetti / facet plots.
+auprc_long <- auprc_per_dataset %>%
+  tidyr::pivot_longer(
+    cols = dplyr::starts_with("auprc_"),
+    names_to = "metric",
+    values_to = "value"
+  )
+```
+
+# 7. Drift Profile Histograms
+
+```{r drift-profile-hists, fig.width=12, fig.height=7}
+drift_assignments_for_plot <- drift_assignments %>%
+  dplyr::mutate(
+    pair_id = factor(.data$pair_id, levels = pair_specs$pair_id)
+  )
+
+p_drift_hists <- ggplot(drift_assignments_for_plot,
+                        aes(x = .data$corr, fill = .data$chain)) +
+  geom_histogram(
+    aes(y = after_stat(density)),
+    bins = 60, position = "identity", alpha = 0.55, color = NA
+  ) +
+  geom_vline(xintercept = drift_corr_cutoff, linetype = "dashed", color = "grey25") +
+  facet_wrap(~ pair_id, ncol = 3) +
+  scale_fill_manual(values = c(mu = "#2b8cbe", pi = "#74c476")) +
+  coord_cartesian(xlim = c(-0.05, 1.0)) +
+  labs(
+    x = "Hungarian-assigned fitted_y correlation per effect",
+    y = "Density",
+    fill = "Chain",
+    title = "Distribution of per-effect assignment correlations across all pairs",
+    subtitle = sprintf(
+      "Dashed line = drift_corr_cutoff (%.2f). All 10 effects per (dataset, pair) included.",
+      drift_corr_cutoff
+    )
+  ) +
+  theme(legend.position = "bottom")
+
+ggsave(drift_profile_hist_png, p_drift_hists, width = 12, height = 7, dpi = 150)
+print(p_drift_hists)
+```
+
+# 8. Chain AUPRC Trajectory
+
+```{r chain-trajectory, fig.width=11, fig.height=5}
+chain_long <- dplyr::bind_rows(
+  auprc_per_dataset %>%
+    dplyr::transmute(
+      dataset_bundle_id = .data$dataset_bundle_id,
+      chain = "mu",
+      step1 = .data$auprc_susie_vanilla,
+      step2 = .data$auprc_susine_functional_mu,
+      step3 = .data$auprc_susie_vanilla_warm_from_mu
+    ),
+  auprc_per_dataset %>%
+    dplyr::transmute(
+      dataset_bundle_id = .data$dataset_bundle_id,
+      chain = "pi",
+      step1 = .data$auprc_susie_vanilla,
+      step2 = .data$auprc_susie_functional_pi,
+      step3 = .data$auprc_susie_vanilla_warm_from_pi
+    )
+) %>%
+  tidyr::pivot_longer(
+    cols = c("step1", "step2", "step3"),
+    names_to = "step",
+    values_to = "auprc"
+  ) %>%
+  dplyr::mutate(
+    step_label = dplyr::case_when(
+      step == "step1" ~ "vanilla (cold)",
+      step == "step2" & chain == "mu" ~ "mu",
+      step == "step2" & chain == "pi" ~ "pi",
+      step == "step3" ~ "vanilla (warm)",
+      TRUE ~ step
+    ),
+    step_label = factor(step_label,
+                        levels = c("vanilla (cold)", "mu", "pi", "vanilla (warm)"))
+  )
+
+p_chain <- ggplot(chain_long, aes(x = .data$step_label, y = .data$auprc)) +
+  geom_line(aes(group = .data$dataset_bundle_id), alpha = 0.06) +
+  geom_violin(aes(fill = .data$chain), alpha = 0.55, color = NA, scale = "width") +
+  geom_boxplot(width = 0.15, outlier.shape = NA, alpha = 0.7) +
+  facet_wrap(~ chain, scales = "free_x") +
+  scale_fill_manual(values = c(mu = "#2b8cbe", pi = "#74c476")) +
+  labs(
+    x = NULL, y = "AUPRC",
+    fill = "Chain",
+    title = "Per-dataset AUPRC trajectory along each refit chain",
+    subtitle = "Each thin line = one dataset; violin / box = marginal distribution per step."
+  ) +
+  theme(legend.position = "bottom")
+
+ggsave(chain_trajectory_png, p_chain, width = 11, height = 5, dpi = 150)
+print(p_chain)
+```
+
+# 9. Headline 4-Quadrant Test
+
+```{r headline-scatter, fig.width=12, fig.height=5.5}
+# Join drift(vanilla, vanilla_warm) with AUPRC delta(vanilla_warm - vanilla)
+headline_df_mu <- drift_summary %>%
+  dplyr::filter(.data$pair_id == "vanilla__vanilla_warm_from_mu") %>%
+  dplyr::transmute(
+    dataset_bundle_id = .data$dataset_bundle_id,
+    chain = "mu",
+    drift_mean_corr = .data$mean_corr,
+    drift_mean_corr_active = .data$mean_corr_active,
+    n_below_cutoff = .data$n_below_cutoff
+  ) %>%
+  dplyr::left_join(
+    auprc_per_dataset %>%
+      dplyr::transmute(
+        dataset_bundle_id = .data$dataset_bundle_id,
+        auprc_delta_warm_vs_vanilla = .data$auprc_delta_warm_mu_vs_vanilla,
+        auprc_delta_treatment = .data$auprc_delta_mu
+      ),
+    by = "dataset_bundle_id"
+  )
+
+headline_df_pi <- drift_summary %>%
+  dplyr::filter(.data$pair_id == "vanilla__vanilla_warm_from_pi") %>%
+  dplyr::transmute(
+    dataset_bundle_id = .data$dataset_bundle_id,
+    chain = "pi",
+    drift_mean_corr = .data$mean_corr,
+    drift_mean_corr_active = .data$mean_corr_active,
+    n_below_cutoff = .data$n_below_cutoff
+  ) %>%
+  dplyr::left_join(
+    auprc_per_dataset %>%
+      dplyr::transmute(
+        dataset_bundle_id = .data$dataset_bundle_id,
+        auprc_delta_warm_vs_vanilla = .data$auprc_delta_warm_pi_vs_vanilla,
+        auprc_delta_treatment = .data$auprc_delta_pi
+      ),
+    by = "dataset_bundle_id"
+  )
+
+headline_df <- dplyr::bind_rows(headline_df_mu, headline_df_pi)
+
+p_headline <- ggplot(
+  headline_df,
+  aes(x = .data$drift_mean_corr_active,
+      y = .data$auprc_delta_warm_vs_vanilla,
+      color = .data$auprc_delta_treatment)
+) +
+  geom_hline(yintercept = 0, color = "grey45", linetype = "dashed") +
+  geom_vline(xintercept = drift_corr_cutoff, color = "grey45", linetype = "dotted") +
+  geom_point(alpha = 0.55, size = 1.4) +
+  scale_color_gradient2(
+    low = "#2b6cb0", mid = "white", high = "#c53030", midpoint = 0
+  ) +
+  facet_wrap(~ chain, labeller = labeller(chain = c(mu = "mu chain", pi = "pi chain"))) +
+  scale_x_continuous(limits = c(0, 1)) +
+  labs(
+    x = "Mean active-effect drift D(vanilla, vanilla_warm) (1 = identical)",
+    y = "AUPRC(vanilla_warm) - AUPRC(vanilla_cold)",
+    color = "AUPRC(treatment)\n- AUPRC(vanilla)",
+    title = "Headline: refinement vs exploration — does the warm vanilla refit retain treatment basin?",
+    subtitle = "Top-right quadrant (high drift + high warm-vanilla ΔAUPRC) = exploration win. Top-left = pure within-basin PIP weighting."
+  )
+
+ggsave(headline_scatter_png, p_headline, width = 12, height = 5.5, dpi = 150)
+print(p_headline)
+```
+
+# 10. Unpaired Count vs AUPRC Delta (User's Plot)
+
+```{r unpaired-vs-delta, fig.width=12, fig.height=8}
+# Build a long table: per (dataset, chain, step_label), report n_below_cutoff
+# (drift) and the relevant AUPRC delta for that step.
+step_drift_delta <- dplyr::bind_rows(
+  drift_summary %>%
+    dplyr::filter(.data$pair_id == "vanilla__mu") %>%
+    dplyr::transmute(
+      dataset_bundle_id = .data$dataset_bundle_id,
+      chain = "mu",
+      step_label = "step 1: vanilla -> mu",
+      n_below_cutoff = .data$n_below_cutoff,
+      mean_corr = .data$mean_corr_active
+    ) %>%
+    dplyr::left_join(
+      auprc_per_dataset %>%
+        dplyr::transmute(.data$dataset_bundle_id,
+                         auprc_delta = .data$auprc_delta_mu),
+      by = "dataset_bundle_id"
+    ),
+  drift_summary %>%
+    dplyr::filter(.data$pair_id == "mu__vanilla_warm_from_mu") %>%
+    dplyr::transmute(
+      dataset_bundle_id = .data$dataset_bundle_id,
+      chain = "mu",
+      step_label = "step 2: mu -> vanilla_warm",
+      n_below_cutoff = .data$n_below_cutoff,
+      mean_corr = .data$mean_corr_active
+    ) %>%
+    dplyr::left_join(
+      auprc_per_dataset %>%
+        dplyr::transmute(.data$dataset_bundle_id,
+                         auprc_delta = .data$auprc_round_trip_mu),
+      by = "dataset_bundle_id"
+    ),
+  drift_summary %>%
+    dplyr::filter(.data$pair_id == "vanilla__pi") %>%
+    dplyr::transmute(
+      dataset_bundle_id = .data$dataset_bundle_id,
+      chain = "pi",
+      step_label = "step 1: vanilla -> pi",
+      n_below_cutoff = .data$n_below_cutoff,
+      mean_corr = .data$mean_corr_active
+    ) %>%
+    dplyr::left_join(
+      auprc_per_dataset %>%
+        dplyr::transmute(.data$dataset_bundle_id,
+                         auprc_delta = .data$auprc_delta_pi),
+      by = "dataset_bundle_id"
+    ),
+  drift_summary %>%
+    dplyr::filter(.data$pair_id == "pi__vanilla_warm_from_pi") %>%
+    dplyr::transmute(
+      dataset_bundle_id = .data$dataset_bundle_id,
+      chain = "pi",
+      step_label = "step 2: pi -> vanilla_warm",
+      n_below_cutoff = .data$n_below_cutoff,
+      mean_corr = .data$mean_corr_active
+    ) %>%
+    dplyr::left_join(
+      auprc_per_dataset %>%
+        dplyr::transmute(.data$dataset_bundle_id,
+                         auprc_delta = .data$auprc_round_trip_pi),
+      by = "dataset_bundle_id"
+    )
+)
+
+step_rho <- step_drift_delta %>%
+  dplyr::group_by(.data$chain, .data$step_label) %>%
+  dplyr::summarise(
+    n = dplyr::n(),
+    rho = suppressWarnings(stats::cor(
+      .data$n_below_cutoff, .data$auprc_delta,
+      method = "spearman", use = "pairwise.complete.obs"
+    )),
+    label = sprintf("rho = %.3f (n=%d)", .data$rho, .data$n),
+    .groups = "drop"
+  )
+
+p_unpaired <- ggplot(
+  step_drift_delta,
+  aes(x = .data$n_below_cutoff, y = .data$auprc_delta)
+) +
+  geom_hline(yintercept = 0, color = "grey45", linetype = "dashed") +
+  geom_jitter(width = 0.25, height = 0, alpha = 0.45, size = 1.1,
+              aes(color = .data$mean_corr)) +
+  geom_smooth(method = "loess", formula = y ~ x, se = FALSE,
+              color = "black", linetype = "dashed", linewidth = 0.5) +
+  geom_text(
+    data = step_rho,
+    aes(x = -Inf, y = Inf, label = .data$label),
+    hjust = -0.05, vjust = 1.4, size = 3.3, inherit.aes = FALSE
+  ) +
+  facet_grid(chain ~ step_label) +
+  scale_x_continuous(breaks = 0:10) +
+  scale_color_viridis_c(option = "C") +
+  labs(
+    x = sprintf("# unpaired effects (assignment corr < %.2f)", drift_corr_cutoff),
+    y = "AUPRC delta for this step",
+    color = "Mean active\nassignment corr",
+    title = sprintf(
+      "User's hypothesis test: does # of unpaired effects (cutoff %.2f) predict AUPRC change at each step?",
+      drift_corr_cutoff
+    ),
+    subtitle = "Step 1: cold->treatment (positive y => treatment wins). Step 2: treatment->vanilla_warm (positive y => warm refit IMPROVES on treatment, rare; negative => snaps back to vanilla)."
+  )
+
+ggsave(unpaired_vs_delta_png, p_unpaired, width = 12, height = 8, dpi = 150)
+print(p_unpaired)
+```
+
+# 11. Mu vs Pi Drift Comparison
+
+```{r mu-vs-pi-drift, fig.width=11, fig.height=5}
+# Side-by-side: drift(vanilla, treatment) for mu vs pi, per dataset.
+mu_vs_pi_join <- drift_summary %>%
+  dplyr::filter(.data$pair_id %in% c("vanilla__mu", "vanilla__pi")) %>%
+  dplyr::select(.data$dataset_bundle_id, .data$pair_id,
+                .data$mean_corr_active, .data$n_below_cutoff,
+                .data$weighted_drift) %>%
+  tidyr::pivot_wider(
+    id_cols = .data$dataset_bundle_id,
+    names_from = .data$pair_id,
+    values_from = c("mean_corr_active", "n_below_cutoff", "weighted_drift")
+  )
+
+p_mupi <- ggplot(
+  mu_vs_pi_join,
+  aes(x = .data$mean_corr_active_vanilla__mu,
+      y = .data$mean_corr_active_vanilla__pi)
+) +
+  geom_abline(slope = 1, intercept = 0, color = "grey45", linetype = "dashed") +
+  geom_point(alpha = 0.5, size = 1.2) +
+  coord_fixed(xlim = c(0, 1), ylim = c(0, 1)) +
+  labs(
+    x = "Mean active-effect drift: vanilla -> mu",
+    y = "Mean active-effect drift: vanilla -> pi",
+    title = "How much does each annotation mechanism move the model?",
+    subtitle = "y=x line: equal drift. Below diagonal: pi explores less than mu. Above: pi explores more."
+  )
+
+ggsave(mu_vs_pi_drift_png, p_mupi, width = 11, height = 5, dpi = 150)
+print(p_mupi)
+```
+
+# 12. Outputs
+
+```{r output-index}
+outputs <- tibble::tibble(
+  artifact = c(
+    "per-effect drift assignments",
+    "per-(dataset, pair) drift summary",
+    "per-dataset AUPRC trajectory",
+    "drift profile histograms",
+    "chain AUPRC trajectory",
+    "headline 4-quadrant scatter",
+    "unpaired-count vs AUPRC delta scatter",
+    "mu vs pi drift comparison"
+  ),
+  path = c(
+    drift_assignments_csv,
+    drift_summary_csv,
+    auprc_per_dataset_csv,
+    drift_profile_hist_png,
+    chain_trajectory_png,
+    headline_scatter_png,
+    unpaired_vs_delta_png,
+    mu_vs_pi_drift_png
+  )
+)
+kable(outputs)
+```

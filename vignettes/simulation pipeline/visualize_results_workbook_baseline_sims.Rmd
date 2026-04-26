@@ -31,9 +31,35 @@ library(dplyr)
 library(readr)
 library(tidyr)
 library(ggplot2)
+library(ggnewscale)
 library(knitr)
 
-theme_set(theme_bw(base_size = 12))
+paper_theme <- theme_bw(base_size = 11) +
+  theme(
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(color = "grey92"),
+    strip.background = element_rect(fill = "grey95", color = NA),
+    strip.text = element_text(face = "bold", size = 10),
+    legend.position = "bottom",
+    legend.box = "vertical",
+    legend.key = element_rect(fill = NA, color = NA),
+    legend.title = element_text(size = 9),
+    legend.text = element_text(size = 9),
+    plot.title = element_text(size = 11, face = "bold")
+  )
+theme_set(paper_theme)
+
+method_pretty <- c(
+  susie_vanilla                       = "SuSiE",
+  susine_vanilla                      = "SuSiNE (mu=0)",
+  susie_inf                           = "SuSiE-inf",
+  susie_ash_fixed                     = "SuSiE-ash",
+  susie_eb                            = "SuSiE (EB sigma^2)",
+  susie_functional_pi                 = "SuSiE (functional pi)",
+  susine_functional_pi                = "SuSiNE (functional pi)",
+  susine_functional_mu                = "SuSiNE (functional mu)",
+  susine_eb_clamped_scale_var_nonneg  = "SuSiNE-EB"
+)
 ```
 
 # 1. Load Consolidated Data
@@ -160,9 +186,50 @@ ggsave(
 
 ## 2.2 PIP Calibration
 
-```{r pip-calibration, fig.width=12, fig.height=8}
+```{r pip-calibration, fig.width=11, fig.height=7}
+calib_screening <- screening_summary %>%
+  dplyr::mutate(sigma_value = as.numeric(.data$sigma_0_2_scalar))
+
+calib_annotation_settings <- calib_screening %>%
+  dplyr::filter(.data$method_family %in% c(
+    "susine_functional_mu",
+    "susie_functional_pi",
+    "susine_functional_pi",
+    "susine_eb_clamped_scale_var_nonneg"
+  )) %>%
+  dplyr::filter(!is.na(.data$annotation_r2), !is.na(.data$inflate_match)) %>%
+  dplyr::filter(abs(.data$annotation_r2 - 0.3) < 1e-6,
+                abs(.data$inflate_match - 0.9) < 1e-6) %>%
+  dplyr::group_by(.data$method_family) %>%
+  dplyr::slice_max(.data$AUPRC, n = 1L, with_ties = FALSE) %>%
+  dplyr::ungroup()
+
+calib_nonann_settings <- calib_screening %>%
+  dplyr::filter(.data$method_family %in% c("susie_inf", "susie_ash_fixed", "susie_eb")) %>%
+  dplyr::group_by(.data$method_family) %>%
+  dplyr::slice_max(.data$AUPRC, n = 1L, with_ties = FALSE) %>%
+  dplyr::ungroup()
+
+calib_vanilla_setting <- calib_screening %>%
+  dplyr::filter(.data$method_family == "susie_vanilla",
+                !is.na(.data$sigma_value),
+                abs(.data$sigma_value - 0.2) < 1e-6) %>%
+  dplyr::slice(1L)
+
+calib_settings <- dplyr::bind_rows(
+  calib_annotation_settings,
+  calib_nonann_settings,
+  calib_vanilla_setting
+) %>%
+  dplyr::select(.data$method_family, .data$setting_label, .data$annotation_label)
+
+calib_join_keys <- intersect(
+  c("method_family", "setting_label", "annotation_label"),
+  names(confusion_bins)
+)
+
 cal_df <- confusion_bins %>%
-  dplyr::semi_join(plot_settings, by = c("setting_label", "annotation_label")) %>%
+  dplyr::semi_join(calib_settings, by = calib_join_keys) %>%
   dplyr::mutate(pip_bin = floor(.data$pip_threshold / 0.10) * 0.10) %>%
   dplyr::group_by(
     .data$method_family,
@@ -188,30 +255,40 @@ cal_df <- confusion_bins %>%
   ) %>%
   dplyr::mutate(
     ci_lo = pmax(0, .data$mean_frac - 1.96 * .data$se_frac),
-    ci_hi = pmin(1, .data$mean_frac + 1.96 * .data$se_frac)
+    ci_hi = pmin(1, .data$mean_frac + 1.96 * .data$se_frac),
+    method_family = factor(.data$method_family,
+      levels = c("susie_vanilla", "susie_eb", "susie_inf", "susie_ash_fixed",
+                 "susie_functional_pi", "susine_functional_pi",
+                 "susine_eb_clamped_scale_var_nonneg",
+                 "susine_functional_mu"))
   )
 
-p_cal <- ggplot(cal_df, aes(x = .data$pip_bin + 0.05, y = .data$mean_frac, color = .data$setting_label)) +
-  geom_errorbar(aes(ymin = .data$ci_lo, ymax = .data$ci_hi), width = 0.02, alpha = 0.5) +
-  geom_point(size = 1.8) +
-  geom_line() +
-  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey50") +
-  facet_wrap(~method_family) +
+p_cal <- ggplot(cal_df, aes(x = .data$pip_bin + 0.05, y = .data$mean_frac)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey60") +
+  geom_errorbar(aes(ymin = .data$ci_lo, ymax = .data$ci_hi),
+                width = 0.025, color = "grey35", alpha = 0.75) +
+  geom_line(color = "#08519c", linewidth = 0.7) +
+  geom_point(color = "#08519c", size = 1.7) +
+  facet_wrap(~method_family, ncol = 4,
+             labeller = labeller(method_family = method_pretty)) +
+  scale_x_continuous(breaks = seq(0, 1, 0.25)) +
+  scale_y_continuous(breaks = seq(0, 1, 0.25)) +
+  coord_cartesian(xlim = c(0, 1), ylim = c(0, 1)) +
   labs(
     x = "Mean PIP bin midpoint",
     y = "Observed fraction causal",
-    color = "Setting",
-    title = "PIP calibration for top baseline settings"
+    title = NULL,
+    caption = "Annotation-consuming methods at R^2(a, beta) = 0.3, sign match = 0.9 (best AUPRC). SuSiE at sigma^2 = 0.2."
   ) +
-  coord_cartesian(xlim = c(0, 1), ylim = c(0, 1)) +
-  theme(legend.position = "bottom")
+  theme(legend.position = "none",
+        plot.caption = element_text(size = 8, color = "grey30", hjust = 0))
 
 ggsave(
   file.path(fig_root, "susie2_plots", "pip_calibration_top_settings.png"),
   p_cal,
-  width = 12,
-  height = 8,
-  dpi = 150
+  width = 11,
+  height = 6.5,
+  dpi = 200
 )
 ```
 
@@ -341,34 +418,52 @@ ggsave(file.path(fig_root, "baseline_performance", "confirmation", "susie_vs_sus
 non_annotation_df <- screening_plot_df %>%
   dplyr::filter(.data$method_family %in% non_annotation_methods)
 
+non_annotation_plot_df <- non_annotation_df %>%
+  dplyr::mutate(
+    method_label = factor(
+      unname(method_pretty[.data$method_family]),
+      levels = unname(method_pretty[intersect(names(method_pretty), non_annotation_methods)])
+    )
+  )
+
+non_ann_palette <- grDevices::colorRampPalette(
+  c("#08306b", "#2171b5", "#6baed6", "#bdd7e7")
+)(length(unique(non_annotation_plot_df$param_label)))
+
 p_non_ann_auprc <- ggplot(
-  non_annotation_df,
-  aes(x = .data$method_family, y = .data$AUPRC, fill = .data$param_label)
+  non_annotation_plot_df,
+  aes(x = .data$method_label, y = .data$AUPRC, fill = .data$param_label)
 ) +
-  geom_col(position = position_dodge2(width = 0.8, preserve = "single")) +
+  geom_col(position = position_dodge2(width = 0.8, preserve = "single"),
+           color = "grey20", linewidth = 0.2) +
+  scale_fill_manual(values = non_ann_palette) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
   labs(
-    x = "Method family",
+    x = NULL,
     y = "Pooled AUPRC",
     fill = "Parameter",
-    title = "Non-annotation baseline AUPRC"
+    title = NULL
   ) +
-  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+  theme(axis.text.x = element_text(angle = 25, hjust = 1))
 
 p_non_ann_tpr <- ggplot(
-  non_annotation_df,
-  aes(x = .data$method_family, y = .data$tpr_fpr05, fill = .data$param_label)
+  non_annotation_plot_df,
+  aes(x = .data$method_label, y = .data$tpr_fpr05, fill = .data$param_label)
 ) +
-  geom_col(position = position_dodge2(width = 0.8, preserve = "single")) +
+  geom_col(position = position_dodge2(width = 0.8, preserve = "single"),
+           color = "grey20", linewidth = 0.2) +
+  scale_fill_manual(values = non_ann_palette) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
   labs(
-    x = "Method family",
-    y = "TPR@FPR=0.05",
+    x = NULL,
+    y = expression("TPR @ FPR = 0.05"),
     fill = "Parameter",
-    title = "Non-annotation baseline TPR@FPR=0.05"
+    title = NULL
   ) +
-  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+  theme(axis.text.x = element_text(angle = 25, hjust = 1))
 
-ggsave(file.path(fig_root, "baseline_performance", "auprc_non_annotation_methods.png"), p_non_ann_auprc, width = 12, height = 6, dpi = 150)
-ggsave(file.path(fig_root, "baseline_performance", "tpr05_non_annotation_methods.png"), p_non_ann_tpr, width = 12, height = 6, dpi = 150)
+ggsave(file.path(fig_root, "baseline_performance", "auprc_non_annotation_methods.png"), p_non_ann_auprc, width = 7, height = 5, dpi = 200)
+ggsave(file.path(fig_root, "baseline_performance", "tpr05_non_annotation_methods.png"), p_non_ann_tpr, width = 7, height = 5, dpi = 200)
 ```
 
 ## 3.4 Annotation response
@@ -386,132 +481,212 @@ non_annotation_reference <- non_annotation_df %>%
     .groups = "drop"
   )
 
-make_annotation_response_plot <- function(metric_col, y_label, title) {
+make_annotation_response_plot <- function(metric_col, y_label, title = NULL) {
   mu_df <- annotation_df %>%
     dplyr::filter(.data$method_family == "susine_functional_mu") %>%
     dplyr::mutate(
       c_value = as.numeric(.data$c_value),
-      plot_value = .data[[metric_col]],
-      param_label = paste0("mu sigma=", fmt_num(.data$sigma_value, 3))
+      plot_value = .data[[metric_col]]
     )
 
-  pi_df <- annotation_df %>%
+  sigma_levels <- sort(unique(mu_df$sigma_value))
+  sigma_label_fn <- function(s) {
+    paste0("sigma^2 = ", formatC(s, format = "fg", digits = 2))
+  }
+  mu_df <- mu_df %>%
+    dplyr::mutate(
+      sigma_label = factor(sigma_label_fn(.data$sigma_value),
+                           levels = sigma_label_fn(sigma_levels))
+    )
+  mu_palette <- grDevices::colorRampPalette(
+    c("#08306b", "#2171b5", "#6baed6", "#74c476", "#238b45")
+  )(length(sigma_levels))
+  names(mu_palette) <- sigma_label_fn(sigma_levels)
+
+  pi_best <- annotation_df %>%
     dplyr::filter(.data$method_family %in% functional_pi_methods) %>%
     dplyr::filter(is.na(.data$tau_value) | .data$tau_value >= 0.01) %>%
-    dplyr::mutate(
-      plot_value = .data[[metric_col]],
-      param_label = paste0("pi tau=", fmt_num(.data$tau_value, 3))
-    )
+    dplyr::mutate(plot_value = .data[[metric_col]]) %>%
+    dplyr::group_by(.data$annotation_r2_f, .data$inflate_match_f) %>%
+    dplyr::slice_max(.data$plot_value, n = 1L, with_ties = FALSE) %>%
+    dplyr::ungroup() %>%
+    dplyr::transmute(.data$annotation_r2_f, .data$inflate_match_f,
+                     plot_value = .data$plot_value,
+                     ref_label = "SuSiE functional pi (best tau)")
 
-  ref_df <- non_annotation_reference %>%
-    dplyr::mutate(plot_value = .data[[metric_col]])
+  susine_eb_df <- screening_plot_df %>%
+    dplyr::filter(.data$method_family == "susine_eb_clamped_scale_var_nonneg") %>%
+    dplyr::filter(!is.na(.data$annotation_r2), !is.na(.data$inflate_match)) %>%
+    dplyr::mutate(plot_value = .data[[metric_col]]) %>%
+    dplyr::group_by(.data$annotation_r2_f, .data$inflate_match_f) %>%
+    dplyr::summarise(plot_value = max(.data$plot_value, na.rm = TRUE),
+                     .groups = "drop") %>%
+    dplyr::mutate(ref_label = "SuSiNE-EB (mu, sigma^2 estimated)")
 
-  mu_labels <- mu_df %>%
-    dplyr::arrange(.data$sigma_value) %>%
-    dplyr::distinct(.data$param_label) %>%
-    dplyr::pull(.data$param_label)
-  pi_labels <- pi_df %>%
-    dplyr::arrange(.data$tau_value) %>%
-    dplyr::distinct(.data$param_label) %>%
-    dplyr::pull(.data$param_label)
-  color_values <- c(
-    stats::setNames(grDevices::colorRampPalette(c("#2c7fb8", "#41ab5d"))(length(mu_labels)), mu_labels),
-    stats::setNames(grDevices::colorRampPalette(c("#d73027", "#fee08b"))(length(pi_labels)), pi_labels)
+  vanilla_value <- non_annotation_df %>%
+    dplyr::filter(.data$method_family == "susie_vanilla") %>%
+    dplyr::summarise(v = max(.data[[metric_col]], na.rm = TRUE)) %>%
+    dplyr::pull(v)
+
+  facet_refs <- dplyr::bind_rows(pi_best, susine_eb_df)
+  vanilla_df <- tibble::tibble(plot_value = vanilla_value,
+                               ref_label = "SuSiE vanilla (best sigma^2)")
+
+  ref_levels <- c(
+    "SuSiE vanilla (best sigma^2)",
+    "SuSiE functional pi (best tau)",
+    "SuSiNE-EB (mu, sigma^2 estimated)"
   )
+  ref_palette <- stats::setNames(
+    c("grey25", "#d94801", "#54278f"),
+    ref_levels
+  )
+  facet_refs$ref_label <- factor(facet_refs$ref_label, levels = ref_levels)
+  vanilla_df$ref_label <- factor(vanilla_df$ref_label, levels = ref_levels)
 
-  p <- ggplot() +
-    geom_hline(
-      data = ref_df,
-      aes(yintercept = .data$plot_value, linetype = .data$method_family),
-      color = "black",
-      linewidth = 0.6,
-      alpha = 0.8
-    ) +
+  ggplot() +
     geom_line(
       data = mu_df,
-      aes(
-        x = .data$c_value,
-        y = .data$plot_value,
-        color = .data$param_label,
-        group = interaction(.data$param_label, .data$annotation_r2_f, .data$inflate_match_f)
-      ),
+      aes(x = .data$c_value, y = .data$plot_value,
+          color = .data$sigma_label,
+          group = interaction(.data$sigma_label, .data$annotation_r2_f, .data$inflate_match_f)),
       linewidth = 0.8
     ) +
     geom_point(
       data = mu_df,
-      aes(x = .data$c_value, y = .data$plot_value, color = .data$param_label),
-      size = 1.7
+      aes(x = .data$c_value, y = .data$plot_value, color = .data$sigma_label),
+      size = 1.5
+    ) +
+    scale_color_manual(
+      values = mu_palette,
+      name = "SuSiNE functional mu prior variance",
+      guide = guide_legend(order = 1, nrow = 1)
+    ) +
+    ggnewscale::new_scale_color() +
+    geom_hline(
+      data = vanilla_df,
+      aes(yintercept = .data$plot_value, color = .data$ref_label),
+      linetype = "solid", linewidth = 0.55
     ) +
     geom_hline(
-      data = pi_df,
-      aes(yintercept = .data$plot_value, color = .data$param_label),
-      linewidth = 0.7,
-      alpha = 0.85
+      data = facet_refs,
+      aes(yintercept = .data$plot_value, color = .data$ref_label),
+      linetype = "dashed", linewidth = 0.7
     ) +
-    facet_grid(rows = vars(inflate_match_f), cols = vars(annotation_r2_f)) +
+    scale_color_manual(
+      values = ref_palette,
+      name = "Reference",
+      drop = FALSE,
+      guide = guide_legend(
+        order = 2, nrow = 1,
+        override.aes = list(linetype = c("solid", "dashed", "dashed"))
+      )
+    ) +
+    facet_grid(
+      rows = vars(.data$inflate_match_f),
+      cols = vars(.data$annotation_r2_f),
+      labeller = labeller(
+        annotation_r2_f = function(x) paste0("R^2(a, beta) = ", x),
+        inflate_match_f = function(x) paste0("Sign match = ", x)
+      )
+    ) +
     labs(
-      x = "c",
+      x = expression("Annotation scale " * c),
       y = y_label,
-      color = "Functional parameter",
-      linetype = "Non-annotation reference",
       title = title
     ) +
-    guides(
-      color = guide_legend(nrow = 3, byrow = TRUE),
-      linetype = guide_legend(ncol = 2, byrow = TRUE)
-    ) +
-    theme(
-      legend.position = "bottom",
-      legend.box = "vertical",
-      legend.justification = "center"
-    )
-
-  if (length(color_values)) {
-    p <- p + scale_color_manual(values = color_values)
-  }
-  p
+    theme(legend.justification = "center")
 }
 
 p_ann_auprc <- make_annotation_response_plot(
   metric_col = "AUPRC",
-  y_label = "Pooled AUPRC",
-  title = "Annotation-consuming baseline AUPRC"
+  y_label = "Pooled AUPRC"
 )
 
 p_ann_tpr <- make_annotation_response_plot(
   metric_col = "tpr_fpr05",
-  y_label = "TPR@FPR=0.05",
-  title = "Annotation-consuming baseline TPR@FPR=0.05"
+  y_label = "TPR @ FPR = 0.05"
 )
 
-ggsave(file.path(fig_root, "baseline_performance", "auprc_by_annotation.png"), p_ann_auprc, width = 14, height = 11, dpi = 150)
-ggsave(file.path(fig_root, "baseline_performance", "tpr05_annotation_consuming.png"), p_ann_tpr, width = 14, height = 11, dpi = 150)
+ggsave(file.path(fig_root, "baseline_performance", "auprc_by_annotation.png"), p_ann_auprc, width = 12, height = 9, dpi = 200)
+ggsave(file.path(fig_root, "baseline_performance", "tpr05_annotation_consuming.png"), p_ann_tpr, width = 12, height = 9, dpi = 200)
 ```
 
 ## 3.5 Tau sweep
 
-```{r tau-sweep, fig.width=10, fig.height=6}
+```{r tau-sweep, fig.width=10, fig.height=5}
 tau_sweeps <- screening_plot_df %>%
   dplyr::filter(.data$method_family %in% functional_pi_methods) %>%
   dplyr::filter(!is.na(.data$inflate_match)) %>%
-  dplyr::filter(is.na(.data$tau_value) | .data$tau_value >= 0.01)
+  dplyr::filter(is.na(.data$tau_value) | .data$tau_value >= 0.01) %>%
+  dplyr::filter(!is.na(.data$annotation_r2))
 
-p_tau <- ggplot(
-  tau_sweeps,
-  aes(x = .data$tau_value, y = .data$AUPRC, color = .data$annotation_r2_f, group = .data$annotation_r2_f)
-) +
-  geom_point() +
-  geom_line() +
+mu_best_per_facet <- screening_plot_df %>%
+  dplyr::filter(.data$method_family == "susine_functional_mu") %>%
+  dplyr::filter(!is.na(.data$annotation_r2), !is.na(.data$inflate_match)) %>%
+  dplyr::group_by(.data$annotation_r2_f, .data$inflate_match_f) %>%
+  dplyr::slice_max(.data$AUPRC, n = 1L, with_ties = FALSE) %>%
+  dplyr::ungroup()
+
+vanilla_auprc <- screening_plot_df %>%
+  dplyr::filter(.data$method_family == "susie_vanilla") %>%
+  dplyr::summarise(AUPRC = max(.data$AUPRC, na.rm = TRUE)) %>%
+  dplyr::pull(.data$AUPRC)
+
+r2_levels <- sort(unique(tau_sweeps$annotation_r2_f))
+r2_palette <- stats::setNames(
+  grDevices::colorRampPalette(c("#d94801", "#54278f"))(length(r2_levels)),
+  r2_levels
+)
+
+p_tau <- ggplot() +
+  geom_hline(
+    aes(yintercept = vanilla_auprc, linetype = "SuSiE vanilla (best sigma^2)"),
+    color = "grey25", linewidth = 0.55
+  ) +
+  geom_hline(
+    data = mu_best_per_facet,
+    aes(yintercept = .data$AUPRC, color = .data$annotation_r2_f,
+        linetype = "SuSiNE functional mu (best c, sigma^2)"),
+    linewidth = 0.6
+  ) +
+  geom_line(
+    data = tau_sweeps,
+    aes(x = .data$tau_value, y = .data$AUPRC,
+        color = .data$annotation_r2_f, group = .data$annotation_r2_f),
+    linewidth = 0.7
+  ) +
+  geom_point(
+    data = tau_sweeps,
+    aes(x = .data$tau_value, y = .data$AUPRC, color = .data$annotation_r2_f),
+    size = 1.8
+  ) +
   scale_x_log10() +
-  facet_wrap(~inflate_match_f) +
+  scale_color_manual(values = r2_palette, name = expression(R^2 * "(a, " * beta * ")")) +
+  scale_linetype_manual(
+    name = "Reference",
+    values = c(
+      "SuSiE vanilla (best sigma^2)" = "solid",
+      "SuSiNE functional mu (best c, sigma^2)" = "dashed"
+    )
+  ) +
+  facet_wrap(
+    ~inflate_match_f,
+    labeller = labeller(inflate_match_f = function(x) paste0("Sign match = ", x))
+  ) +
+  guides(
+    color = guide_legend(order = 1),
+    linetype = guide_legend(order = 2,
+                            override.aes = list(color = c("grey25", "grey25")))
+  ) +
   labs(
-    x = "tau",
+    x = expression(tau),
     y = "Pooled AUPRC",
-    color = "annotation_r2",
-    title = "Tau sweep for susie_functional_pi"
+    title = NULL
   )
 
-ggsave(file.path(fig_root, "baseline_performance", "tau_sweep.png"), p_tau, width = 10, height = 6, dpi = 150)
+ggsave(file.path(fig_root, "baseline_performance", "tau_sweep.png"),
+       p_tau, width = 10, height = 5, dpi = 200)
 ```
 
 ## 3.6 Top settings table
