@@ -638,7 +638,7 @@ mu_best_per_facet <- screening_plot_df %>%
   dplyr::slice_max(.data$AUPRC, n = 1L, with_ties = FALSE) %>%
   dplyr::ungroup()
 
-vanilla_auprc <- screening_plot_df %>%
+vanilla_auprc_value <- screening_plot_df %>%
   dplyr::filter(.data$method_family == "susie_vanilla") %>%
   dplyr::summarise(AUPRC = max(.data$AUPRC, na.rm = TRUE)) %>%
   dplyr::pull(.data$AUPRC)
@@ -649,15 +649,30 @@ r2_palette <- stats::setNames(
   r2_levels
 )
 
+vanilla_ref_df <- tibble::tibble(
+  AUPRC = vanilla_auprc_value,
+  ref_label = "SuSiE vanilla (best sigma^2)"
+)
+
+mu_ref_df <- mu_best_per_facet %>%
+  dplyr::mutate(ref_label = "SuSiNE functional mu (best c, sigma^2)")
+
+ref_levels_tau <- c(
+  "SuSiE vanilla (best sigma^2)",
+  "SuSiNE functional mu (best c, sigma^2)"
+)
+
 p_tau <- ggplot() +
   geom_hline(
-    aes(yintercept = vanilla_auprc, linetype = "SuSiE vanilla (best sigma^2)"),
+    data = vanilla_ref_df,
+    aes(yintercept = .data$AUPRC, linetype = .data$ref_label),
     color = "grey25", linewidth = 0.55
   ) +
   geom_hline(
-    data = mu_best_per_facet,
-    aes(yintercept = .data$AUPRC, color = .data$annotation_r2_f,
-        linetype = "SuSiNE functional mu (best c, sigma^2)"),
+    data = mu_ref_df,
+    aes(yintercept = .data$AUPRC,
+        color = .data$annotation_r2_f,
+        linetype = .data$ref_label),
     linewidth = 0.6
   ) +
   geom_line(
@@ -678,17 +693,18 @@ p_tau <- ggplot() +
     values = c(
       "SuSiE vanilla (best sigma^2)" = "solid",
       "SuSiNE functional mu (best c, sigma^2)" = "dashed"
+    ),
+    breaks = ref_levels_tau,
+    guide = guide_legend(
+      order = 2,
+      override.aes = list(color = c("grey25", "grey25"))
     )
   ) +
   facet_wrap(
     ~inflate_match_f,
     labeller = labeller(inflate_match_f = function(x) paste0("Sign match = ", x))
   ) +
-  guides(
-    color = guide_legend(order = 1),
-    linetype = guide_legend(order = 2,
-                            override.aes = list(color = c("grey25", "grey25")))
-  ) +
+  guides(color = guide_legend(order = 1)) +
   labs(
     x = expression(tau),
     y = "Pooled AUPRC",
