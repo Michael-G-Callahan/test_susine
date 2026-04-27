@@ -57,7 +57,7 @@ dir.create(study_dir, recursive = TRUE, showWarnings = FALSE)
 
 # Set to a small integer, e.g. 5L, for a local smoke run.
 max_datasets <- Inf
-force_refit <- FALSE
+force_refit <- TRUE
 checkpoint_every <- 25L
 
 # Baseline-sims dataset recipe (must match the 3-arm refit so dataset bundle
@@ -95,6 +95,7 @@ metadata_csv <- file.path(study_dir, "effect_refit_metadata.csv")
 selected_runs_csv <- file.path(study_dir, "selected_run_rows.csv")
 dataset_bundles_csv <- file.path(study_dir, "dataset_bundles.csv")
 progress_csv <- file.path(study_dir, "refit_progress_log.csv")
+pip_records_rds <- file.path(study_dir, "pip_records_5arm.rds")
 
 cat("Study dir:", study_dir, "\n")
 cat("Methods (in fit order):", paste(all_method_levels, collapse = ", "), "\n")
@@ -116,7 +117,7 @@ format_duration <- function(seconds) {
   sprintf("%02d:%02d:%02d", h, m, s)
 }
 
-save_checkpoint <- function(records, progress_rows) {
+save_checkpoint <- function(records, progress_rows, pip_records = NULL) {
   saveRDS(records, records_rds)
 
   metadata <- records
@@ -137,6 +138,32 @@ save_checkpoint <- function(records, progress_rows) {
   if (length(progress_rows)) {
     readr::write_csv(dplyr::bind_rows(progress_rows), progress_csv)
   }
+
+  if (!is.null(pip_records) && nrow(pip_records)) {
+    saveRDS(pip_records, pip_records_rds)
+  }
+}
+
+# Model-wide PIP from a fit's L x p alpha matrix:
+#   PIP_j = 1 - prod_l (1 - alpha_lj).
+# Works uniformly for susine fits (effect_fits$alpha) and harness-wrapped
+# susieR fits (raw$alpha). Returns a length-p numeric in [0, 1].
+fit_to_pip_vec <- function(fit) {
+  alpha <- NULL
+  if (!is.null(fit$effect_fits) && !is.null(fit$effect_fits$alpha)) {
+    alpha <- fit$effect_fits$alpha
+  } else if (!is.null(fit$raw) && !is.null(fit$raw$alpha)) {
+    alpha <- fit$raw$alpha
+  } else if (!is.null(fit$alpha)) {
+    alpha <- fit$alpha
+  }
+  if (is.null(alpha)) {
+    stop("fit_to_pip_vec: no alpha slot found (checked effect_fits, raw, top-level).")
+  }
+  if (is.list(alpha) && !is.data.frame(alpha)) alpha <- do.call(rbind, alpha)
+  alpha <- as.matrix(alpha)
+  pip <- 1 - apply(1 - alpha, 2L, prod)
+  pmin(pmax(as.numeric(pip), 0), 1)
 }
 
 first_existing_numeric <- function(df, cols, default = NA_real_) {
@@ -615,6 +642,11 @@ cat("Already completed datasets:", length(intersect(dataset_ids, completed_ids))
 cat("Datasets remaining:", length(todo_ids), "\n")
 
 records <- existing_records
+pip_records <- tibble::tibble()
+if (!force_refit && file.exists(pip_records_rds)) {
+  pip_records <- readRDS(pip_records_rds)
+  cat("Loaded existing pip_records:", nrow(pip_records), "\n")
+}
 progress_rows <- list()
 if (file.exists(progress_csv)) {
   old_progress <- readr::read_csv(progress_csv, show_col_types = FALSE) %>%
@@ -689,6 +721,20 @@ for (i in seq_along(todo_ids)) {
 
   records <- dplyr::bind_rows(records, dataset_records)
 
+  dataset_pip_records <- tibble::tibble(
+    dataset_bundle_id = as.character(dataset_id),
+    matrix_id = as.character(bundle_row$matrix_id[[1]]),
+    model_method = all_method_levels,
+    pip = list(
+      fit_to_pip_vec(vanilla_res$fit),
+      fit_to_pip_vec(mu_res$fit),
+      fit_to_pip_vec(warm_mu_res$fit),
+      fit_to_pip_vec(pi_res$fit),
+      fit_to_pip_vec(warm_pi_res$fit)
+    )
+  )
+  pip_records <- dplyr::bind_rows(pip_records, dataset_pip_records)
+
   elapsed <- proc.time()[["elapsed"]] - started
   avg_sec <- elapsed / i
   eta <- avg_sec * (total_to_run - i)
@@ -718,13 +764,14 @@ for (i in seq_along(todo_ids)) {
   ))
 
   if (i %% checkpoint_every == 0L || i == total_to_run) {
-    save_checkpoint(records, progress_rows)
+    save_checkpoint(records, progress_rows, pip_records = pip_records)
     cat("Checkpoint saved:", records_rds, "\n")
+    cat("PIP sidecar saved:", pip_records_rds, "\n")
   }
 }
 
 if (!length(todo_ids)) {
-  save_checkpoint(records, progress_rows)
+  save_checkpoint(records, progress_rows, pip_records = pip_records)
 }
 
 cat("Final record rows:", nrow(records), "\n")

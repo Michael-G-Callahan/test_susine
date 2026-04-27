@@ -108,6 +108,9 @@ chain_trajectory_png <- file.path(plot_dir, "chain_auprc_trajectory.png")
 headline_scatter_png <- file.path(plot_dir, "headline_drift_vs_warm_auprc.png")
 unpaired_vs_delta_png <- file.path(plot_dir, "unpaired_count_vs_auprc_delta.png")
 mu_vs_pi_drift_png <- file.path(plot_dir, "mu_vs_pi_drift_comparison.png")
+basin_pip_drift_png <- file.path(plot_dir, "basin_and_pip_drift_summary.png")
+pip_records_rds <- file.path(study_dir, "pip_records_5arm.rds")
+pip_drift_summary_csv <- file.path(study_dir, "pip_drift_summary_5arm.csv")
 
 cat("Study dir:", study_dir, "\n")
 cat("Plot dir:", plot_dir, "\n")
@@ -733,7 +736,188 @@ ggsave(mu_vs_pi_drift_png, p_mupi, width = 11, height = 5, dpi = 150)
 print(p_mupi)
 ```
 
-# 12. Outputs
+# 12. Per-Dataset PIP JSD
+
+Loads the per-fit model-wide PIP sidecar (`pip_records_5arm.rds`, written by
+`effect_matching_refit_export_5arm.Rmd`) and computes Jensen-Shannon
+divergence between matched (vanilla, treatment) and (vanilla, vanilla_warm)
+PIP vectors for each dataset. JSD definition mirrors
+`R/run_model.R::js_distance`: a categorical JSD on raw model-wide PIP
+vectors with an additive epsilon, summed (not averaged) across SNPs. See
+the study plan note "JSD ... currently computed on raw model-wide PIPs".
+
+```{r pip-jsd}
+# Inline copy of test_susine:::js_distance (R/run_model.R:2021) so the Rmd
+# does not depend on devtools::load_all() for the package.
+js_distance <- function(p, q, eps = 1e-12) {
+  p <- as.numeric(p); q <- as.numeric(q)
+  p <- p + eps; q <- q + eps
+  m <- 0.5 * (p + q)
+  kl <- function(a, b) sum(a * log(a / b))
+  0.5 * kl(p, m) + 0.5 * kl(q, m)
+}
+
+stopifnot(file.exists(pip_records_rds))
+pip_records <- readRDS(pip_records_rds) %>%
+  dplyr::mutate(dataset_bundle_id = as.character(.data$dataset_bundle_id))
+
+cat("PIP records rows:", nrow(pip_records), "\n")
+cat("Datasets in PIP records:", dplyr::n_distinct(pip_records$dataset_bundle_id), "\n")
+
+pip_by_dataset_method <- pip_records %>%
+  dplyr::select(.data$dataset_bundle_id, .data$model_method, .data$pip)
+
+# Sanity: self-JSD (vanilla vs vanilla) should be exactly 0.
+self_check_ids <- head(unique(pip_records$dataset_bundle_id), 5L)
+self_jsd <- vapply(self_check_ids, function(ds_id) {
+  v <- pip_by_dataset_method %>%
+    dplyr::filter(.data$dataset_bundle_id == ds_id,
+                  .data$model_method == baseline_method) %>%
+    dplyr::pull(.data$pip) %>% .[[1]]
+  js_distance(v, v)
+}, numeric(1))
+cat("Self-JSD (vanilla vs vanilla) on first 5 datasets:",
+    paste(sprintf("%.3e", self_jsd), collapse = ", "), "\n")
+
+# Pairs we want for the master figure: (chain, pair_kind) -> (method_a, method_b)
+pip_pair_specs <- tibble::tribble(
+  ~chain, ~pair_kind,             ~method_a,         ~method_b,
+  "mu",   "vanilla_to_treatment", baseline_method,   mu_method,
+  "mu",   "vanilla_to_warm",      baseline_method,   warm_mu_method,
+  "pi",   "vanilla_to_treatment", baseline_method,   pi_method,
+  "pi",   "vanilla_to_warm",      baseline_method,   warm_pi_method
+)
+
+# Index PIPs by (dataset, method) for fast lookup.
+pip_lookup <- pip_records %>%
+  dplyr::group_by(.data$dataset_bundle_id, .data$model_method) %>%
+  dplyr::summarise(pip = list(.data$pip[[1L]]), .groups = "drop")
+pip_index <- setNames(
+  pip_lookup$pip,
+  paste(pip_lookup$dataset_bundle_id, pip_lookup$model_method, sep = "||")
+)
+
+datasets_with_all_pips <- pip_records %>%
+  dplyr::count(.data$dataset_bundle_id, .data$model_method) %>%
+  dplyr::count(.data$dataset_bundle_id, name = "n_methods") %>%
+  dplyr::filter(.data$n_methods == length(required_methods)) %>%
+  dplyr::pull(.data$dataset_bundle_id)
+
+pip_jsd_rows <- list()
+for (ds_id in datasets_with_all_pips) {
+  for (k in seq_len(nrow(pip_pair_specs))) {
+    spec <- pip_pair_specs[k, ]
+    pa <- pip_index[[paste(ds_id, spec$method_a, sep = "||")]]
+    pb <- pip_index[[paste(ds_id, spec$method_b, sep = "||")]]
+    if (is.null(pa) || is.null(pb) || length(pa) != length(pb)) next
+    pip_jsd_rows[[length(pip_jsd_rows) + 1L]] <- tibble::tibble(
+      dataset_bundle_id = ds_id,
+      chain = spec$chain,
+      pair_kind = spec$pair_kind,
+      pip_jsd = js_distance(pa, pb)
+    )
+  }
+}
+pip_drift_summary <- dplyr::bind_rows(pip_jsd_rows)
+readr::write_csv(pip_drift_summary, pip_drift_summary_csv)
+cat("PIP drift summary rows:", nrow(pip_drift_summary), "\n")
+
+# Sanity: rho between basin weighted_drift and pip_jsd on matched (dataset,
+# pair). Both metrics measure "how much did the model move", so a strongly
+# positive rank correlation is expected.
+basin_for_join <- drift_summary %>%
+  dplyr::filter(.data$pair_id %in% c(
+    "vanilla__mu", "vanilla__vanilla_warm_from_mu",
+    "vanilla__pi", "vanilla__vanilla_warm_from_pi"
+  )) %>%
+  dplyr::transmute(
+    .data$dataset_bundle_id,
+    chain = dplyr::if_else(grepl("mu", .data$pair_id), "mu", "pi"),
+    pair_kind = dplyr::if_else(grepl("warm", .data$pair_id),
+                               "vanilla_to_warm", "vanilla_to_treatment"),
+    weighted_drift = .data$weighted_drift
+  )
+
+basin_pip_join <- basin_for_join %>%
+  dplyr::inner_join(
+    pip_drift_summary,
+    by = c("dataset_bundle_id", "chain", "pair_kind")
+  )
+
+rho_check <- basin_pip_join %>%
+  dplyr::group_by(.data$chain, .data$pair_kind) %>%
+  dplyr::summarise(
+    n = dplyr::n(),
+    rho = suppressWarnings(stats::cor(
+      .data$weighted_drift, .data$pip_jsd,
+      method = "spearman", use = "pairwise.complete.obs"
+    )),
+    .groups = "drop"
+  )
+print(rho_check)
+```
+
+# 13. Master 4-Panel Drift Summary Figure
+
+Two metrics x two pair kinds. mu and pi overlaid in each subplot.
+
+```{r master-drift-figure, fig.width=11, fig.height=7}
+basin_long <- basin_for_join %>%
+  dplyr::transmute(
+    .data$dataset_bundle_id, .data$chain, .data$pair_kind,
+    metric = "basin_drift",
+    value = .data$weighted_drift
+  )
+
+pip_long <- pip_drift_summary %>%
+  dplyr::transmute(
+    .data$dataset_bundle_id, .data$chain, .data$pair_kind,
+    metric = "pip_drift",
+    value = .data$pip_jsd
+  )
+
+combined <- dplyr::bind_rows(basin_long, pip_long) %>%
+  dplyr::mutate(
+    metric = factor(.data$metric, levels = c("basin_drift", "pip_drift")),
+    pair_kind = factor(
+      .data$pair_kind,
+      levels = c("vanilla_to_treatment", "vanilla_to_warm")
+    ),
+    chain = factor(.data$chain, levels = c("mu", "pi"))
+  )
+
+p_master <- ggplot(combined, aes(x = .data$value, fill = .data$chain)) +
+  geom_histogram(
+    aes(y = after_stat(density)),
+    bins = 50, position = "identity", alpha = 0.55, color = NA
+  ) +
+  facet_grid(
+    metric ~ pair_kind,
+    scales = "free",
+    labeller = labeller(
+      metric = c(
+        basin_drift = "Basin drift (1 - weighted corr)",
+        pip_drift   = "PIP drift (JSD)"
+      ),
+      pair_kind = c(
+        vanilla_to_treatment = "vanilla -> annotated",
+        vanilla_to_warm      = "vanilla -> vanilla_warm"
+      )
+    )
+  ) +
+  scale_fill_manual(values = c(mu = "#2b8cbe", pi = "#74c476")) +
+  labs(
+    x = "Drift metric value", y = "Density", fill = "Chain",
+    title = "Basin and PIP drift along the 5-arm refit chain",
+    subtitle = "One observation per dataset per chain. Top row: effect-level basin drift (weighted_drift). Bottom row: model-wide PIP-vector JSD."
+  ) +
+  theme(legend.position = "bottom")
+
+ggsave(basin_pip_drift_png, p_master, width = 11, height = 7, dpi = 150)
+print(p_master)
+```
+
+# 14. Outputs
 
 ```{r output-index}
 outputs <- tibble::tibble(
@@ -745,7 +929,9 @@ outputs <- tibble::tibble(
     "chain AUPRC trajectory",
     "headline 4-quadrant scatter",
     "unpaired-count vs AUPRC delta scatter",
-    "mu vs pi drift comparison"
+    "mu vs pi drift comparison",
+    "per-dataset PIP JSD summary",
+    "master basin + PIP drift figure"
   ),
   path = c(
     drift_assignments_csv,
@@ -755,7 +941,9 @@ outputs <- tibble::tibble(
     chain_trajectory_png,
     headline_scatter_png,
     unpaired_vs_delta_png,
-    mu_vs_pi_drift_png
+    mu_vs_pi_drift_png,
+    pip_drift_summary_csv,
+    basin_pip_drift_png
   )
 )
 kable(outputs)
