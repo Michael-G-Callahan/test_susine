@@ -634,7 +634,7 @@ make_annotation_response_plot <- function(metric_col, y_label, title = NULL) {
           default = label_parsed
         ),
         inflate_match_f = as_labeller(
-          function(x) paste0("paste(\"Non-causal inflation   \", nu[a], \" = \", \"", x, "\")"),
+          function(x) paste0("paste(nu[a], \" = \", \"", x, "\")"),
           default = label_parsed
         )
       )
@@ -753,7 +753,14 @@ p_tau <- ggplot() +
     y = "Pooled AUPRC",
     title = NULL
   ) +
-  theme(axis.title.x = element_text(margin = margin(t = 2, b = 0)))
+  theme(
+    axis.title.x       = element_text(margin = margin(t = 0, b = 0)),
+    axis.text.x        = element_text(margin = margin(t = 1, b = 0)),
+    legend.box.spacing = grid::unit(0.10, "cm"),
+    legend.spacing.y   = grid::unit(0.05, "cm"),
+    legend.margin      = margin(0, 0, 0, 0),
+    panel.spacing.x    = grid::unit(0.6, "cm")
+  )
 
 ggsave(file.path(fig_root, "baseline_performance", "tau_sweep.png"),
        p_tau, width = 10, height = 5, dpi = 200)
@@ -779,19 +786,17 @@ if (requireNamespace("patchwork", quietly = TRUE)) {
   p_a <- p_non_ann_auprc +
     ggtitle("(a) Non-annotation methods") +
     combined_theme +
-    coord_cartesian(ylim = c(0, 0.34)) +
     theme(
-      legend.position      = c(0.98, 0.98),
-      legend.justification = c(1, 1),
-      legend.background    = element_rect(fill = scales::alpha("white", 0.85),
-                                          color = "grey70", linewidth = 0.3),
-      legend.margin        = margin(2, 4, 2, 4),
-      legend.key.size      = grid::unit(0.45, "cm"),
-      legend.title         = element_text(size = 9),
-      legend.text          = element_text(size = 9),
-      legend.direction     = "vertical"
+      legend.position    = "bottom",
+      legend.direction   = "horizontal",
+      legend.box         = "horizontal",
+      legend.margin      = margin(2, 0, 0, 0),
+      legend.box.spacing = grid::unit(0.15, "cm"),
+      legend.key.size    = grid::unit(0.45, "cm"),
+      legend.title       = element_text(size = 10),
+      legend.text        = element_text(size = 10)
     ) +
-    guides(fill = guide_legend(ncol = 1, title = "Parameter"))
+    guides(fill = guide_legend(title = "Parameter", nrow = 2, byrow = TRUE))
   p_b <- p_tau +
     ggtitle(expression(bold("(b) SuSiE functional-"*pi*" temperature sweep"))) +
     combined_theme
@@ -799,8 +804,19 @@ if (requireNamespace("patchwork", quietly = TRUE)) {
     ggtitle(expression(bold("(c) SuSiNE functional-"*mu*" vs. reference methods"))) +
     combined_theme
 
+  # Rotated side label running along the right edge of panel (c). The per-row
+  # facet strips themselves now show only "nu_a = 0.8/0.9/1.0", so this side
+  # label carries the variable's name once for the whole panel.
+  side_text_c <- grid::textGrob(
+    expression(paste("Non-causal inflation   ", nu[a])),
+    rot = 270,
+    gp  = grid::gpar(fontface = "bold", fontsize = 13)
+  )
+  p_c_full <- (p_c | patchwork::wrap_elements(full = side_text_c)) +
+              patchwork::plot_layout(widths = c(60, 1))
+
   fig_baseline <- ((p_a | p_b) + patchwork::plot_layout(widths = c(1, 3))) /
-                  p_c +
+                  p_c_full +
                   patchwork::plot_layout(heights = c(1.0, 1.6))
 
   ggsave(
