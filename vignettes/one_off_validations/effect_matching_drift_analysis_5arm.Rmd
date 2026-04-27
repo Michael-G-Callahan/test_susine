@@ -29,10 +29,11 @@ mu chain:                              pi chain:
    maximum = TRUE)`.
 3. Record all `L` assignment correlations.
 4. Derive per-pair summaries: `mean_corr`, `min_corr`, `n_below_0p9`
-   (count of assignment edges with correlation < 0.9), and
-   `weighted_drift` (1 - assignment correlations weighted by
-   `min(var_y_explained_A_i, var_y_explained_B_j)` so inactive pairs
-   contribute little).
+   (count of assignment edges with correlation < 0.9), legacy
+   `weighted_drift` (`1 - corr`), and the main basin-drift metric
+   `weighted_chord_drift` (`sqrt(2 * (1 - corr))`), with both weighted
+   by `min(var_y_explained_A_i, var_y_explained_B_j)` so inactive pairs
+   contribute little.
 
 This drift framework + AUPRC trajectory operationalizes the
 **refinement-vs-exploration test**:
@@ -94,6 +95,24 @@ drift_corr_cutoff <- 0.9
 # Active-effect threshold for the weighted/filtered drift summaries.
 active_var_threshold <- 0.005
 
+# Effect-pair threshold used for matched/unmatched diagnostic density plots.
+effect_match_corr_min <- 0.99
+
+# Joint effect-quality axes. `effect_pip_entropy_core95` is log effective k;
+# axis labels are shown on the effective-k scale.
+x_metric <- "effect_pip_entropy_core95"
+y_metric <- "accuracy_ratio"
+x_label <- "Core-95 effective k (= exp(entropy))"
+y_label <- "Accuracy ratio"
+x_keff_breaks <- c(1, 2, 5, 10, 20, 50, 100, 200, 500, 1000)
+x_limits <- NULL
+y_limits <- c(0, 1)
+
+density_grid_n <- 140L
+density_bandwidth <- c(0.45, 0.10)
+density_trim_quantile <- c(0.005, 0.995)
+density_fill_quantile <- 0.95
+
 # Plot output directory.
 plot_dir <- file.path(study_dir, "drift_analysis_plots")
 dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
@@ -109,6 +128,15 @@ headline_scatter_png <- file.path(plot_dir, "headline_drift_vs_warm_auprc.png")
 unpaired_vs_delta_png <- file.path(plot_dir, "unpaired_count_vs_auprc_delta.png")
 mu_vs_pi_drift_png <- file.path(plot_dir, "mu_vs_pi_drift_comparison.png")
 basin_pip_drift_png <- file.path(plot_dir, "basin_and_pip_drift_summary.png")
+effect_quality_density_mu_png <- file.path(
+  plot_dir, "effect_quality_density_matched_unmatched_mu_5arm.png"
+)
+effect_quality_density_pi_png <- file.path(
+  plot_dir, "effect_quality_density_matched_unmatched_pi_5arm.png"
+)
+effect_quality_pair_rows_csv <- file.path(
+  study_dir, "effect_quality_pair_rows_5arm.csv"
+)
 pip_records_rds <- file.path(study_dir, "pip_records_5arm.rds")
 pip_drift_summary_csv <- file.path(study_dir, "pip_drift_summary_5arm.csv")
 
@@ -116,6 +144,7 @@ cat("Study dir:", study_dir, "\n")
 cat("Plot dir:", plot_dir, "\n")
 cat("Drift threshold for `n_below_<cut>`:", drift_corr_cutoff, "\n")
 cat("Active-effect var-explained threshold:", active_var_threshold, "\n")
+cat("Effect-quality matched threshold:", effect_match_corr_min, "\n")
 ```
 
 # 2. Helpers
@@ -130,6 +159,40 @@ format_duration <- function(seconds) {
   m <- floor((seconds %% 3600) / 60)
   s <- round(seconds %% 60)
   sprintf("%02d:%02d:%02d", h, m, s)
+}
+
+require_metric <- function(df, metric) {
+  if (!metric %in% names(df)) {
+    stop("Metric column not found: ", metric)
+  }
+}
+
+resolve_limits <- function(values, user_limits, trim = density_trim_quantile) {
+  if (!is.null(user_limits)) {
+    return(user_limits)
+  }
+  values <- values[is.finite(values)]
+  if (!length(values)) {
+    stop("Cannot infer limits from an empty/non-finite vector.")
+  }
+  stats::quantile(values, probs = trim, na.rm = TRUE, names = FALSE)
+}
+
+keff_x_scale <- function(breaks = x_keff_breaks, xlim = NULL) {
+  finite_breaks <- breaks[breaks > 0]
+  scale_x_continuous(
+    breaks = log(finite_breaks),
+    labels = formatC(finite_breaks, format = "fg", big.mark = ","),
+    limits = xlim
+  )
+}
+
+safe_corr <- function(x) {
+  pmax(-1, pmin(1, x))
+}
+
+chord_distance <- function(corr) {
+  sqrt(pmax(0, 2 * (1 - safe_corr(corr))))
 }
 
 # Stack effect rows for one (dataset, model) into an n x L matrix of
@@ -258,6 +321,17 @@ summarize_drift <- function(edges_df, drift_corr_cutoff, active_var_threshold) {
           NA_real_
         }
       },
+      weighted_chord_drift = {
+        w <- pmin(
+          tidyr::replace_na(.data$var_y_explained_a, 0),
+          tidyr::replace_na(.data$var_y_explained_b, 0)
+        )
+        if (sum(w) > 0) {
+          sum(w * chord_distance(.data$corr), na.rm = TRUE) / sum(w)
+        } else {
+          NA_real_
+        }
+      },
       .groups = "drop"
     )
 }
@@ -286,6 +360,8 @@ if (length(missing_methods)) {
 }
 
 records <- records %>% dplyr::filter(.data$model_method %in% required_methods)
+require_metric(records, x_metric)
+require_metric(records, y_metric)
 
 # Index records by (dataset, model_method) for fast pair access.
 records_by_dataset_method <- records %>% split(list(.$dataset_bundle_id, .$model_method))
@@ -710,24 +786,33 @@ mu_vs_pi_join <- drift_summary %>%
   dplyr::filter(.data$pair_id %in% c("vanilla__mu", "vanilla__pi")) %>%
   dplyr::select(.data$dataset_bundle_id, .data$pair_id,
                 .data$mean_corr_active, .data$n_below_cutoff,
-                .data$weighted_drift) %>%
+                .data$weighted_drift, .data$weighted_chord_drift) %>%
   tidyr::pivot_wider(
     id_cols = .data$dataset_bundle_id,
     names_from = .data$pair_id,
-    values_from = c("mean_corr_active", "n_below_cutoff", "weighted_drift")
+    values_from = c("mean_corr_active", "n_below_cutoff",
+                    "weighted_drift", "weighted_chord_drift")
   )
+
+max_mupi_chord <- max(
+  mu_vs_pi_join$weighted_chord_drift_vanilla__mu,
+  mu_vs_pi_join$weighted_chord_drift_vanilla__pi,
+  na.rm = TRUE
+)
+max_mupi_chord <- max(0.05, max_mupi_chord)
 
 p_mupi <- ggplot(
   mu_vs_pi_join,
-  aes(x = .data$mean_corr_active_vanilla__mu,
-      y = .data$mean_corr_active_vanilla__pi)
+  aes(x = .data$weighted_chord_drift_vanilla__mu,
+      y = .data$weighted_chord_drift_vanilla__pi)
 ) +
   geom_abline(slope = 1, intercept = 0, color = "grey45", linetype = "dashed") +
   geom_point(alpha = 0.5, size = 1.2) +
-  coord_fixed(xlim = c(0, 1), ylim = c(0, 1)) +
+  coord_fixed(xlim = c(0, max_mupi_chord),
+              ylim = c(0, max_mupi_chord)) +
   labs(
-    x = "Mean active-effect drift: vanilla -> mu",
-    y = "Mean active-effect drift: vanilla -> pi",
+    x = "Weighted chord basin drift: vanilla -> mu",
+    y = "Weighted chord basin drift: vanilla -> pi",
     title = "How much does each annotation mechanism move the model?",
     subtitle = "y=x line: equal drift. Below diagonal: pi explores less than mu. Above: pi explores more."
   )
@@ -757,85 +842,108 @@ js_distance <- function(p, q, eps = 1e-12) {
   0.5 * kl(p, m) + 0.5 * kl(q, m)
 }
 
-stopifnot(file.exists(pip_records_rds))
-pip_records <- readRDS(pip_records_rds) %>%
-  dplyr::mutate(dataset_bundle_id = as.character(.data$dataset_bundle_id))
-
-cat("PIP records rows:", nrow(pip_records), "\n")
-cat("Datasets in PIP records:", dplyr::n_distinct(pip_records$dataset_bundle_id), "\n")
-
-pip_by_dataset_method <- pip_records %>%
-  dplyr::select(.data$dataset_bundle_id, .data$model_method, .data$pip)
-
-# Sanity: self-JSD (vanilla vs vanilla) should be exactly 0.
-self_check_ids <- head(unique(pip_records$dataset_bundle_id), 5L)
-self_jsd <- vapply(self_check_ids, function(ds_id) {
-  v <- pip_by_dataset_method %>%
-    dplyr::filter(.data$dataset_bundle_id == ds_id,
-                  .data$model_method == baseline_method) %>%
-    dplyr::pull(.data$pip) %>% .[[1]]
-  js_distance(v, v)
-}, numeric(1))
-cat("Self-JSD (vanilla vs vanilla) on first 5 datasets:",
-    paste(sprintf("%.3e", self_jsd), collapse = ", "), "\n")
-
 # Pairs we want for the master figure: (chain, pair_kind) -> (method_a, method_b)
 pip_pair_specs <- tibble::tribble(
   ~chain, ~pair_kind,             ~method_a,         ~method_b,
   "mu",   "vanilla_to_treatment", baseline_method,   mu_method,
+  "mu",   "treatment_to_warm",    mu_method,         warm_mu_method,
   "mu",   "vanilla_to_warm",      baseline_method,   warm_mu_method,
   "pi",   "vanilla_to_treatment", baseline_method,   pi_method,
+  "pi",   "treatment_to_warm",    pi_method,         warm_pi_method,
   "pi",   "vanilla_to_warm",      baseline_method,   warm_pi_method
 )
 
-# Index PIPs by (dataset, method) for fast lookup.
-pip_lookup <- pip_records %>%
-  dplyr::group_by(.data$dataset_bundle_id, .data$model_method) %>%
-  dplyr::summarise(pip = list(.data$pip[[1L]]), .groups = "drop")
-pip_index <- setNames(
-  pip_lookup$pip,
-  paste(pip_lookup$dataset_bundle_id, pip_lookup$model_method, sep = "||")
-)
+if (file.exists(pip_records_rds)) {
+  pip_records <- readRDS(pip_records_rds) %>%
+    dplyr::mutate(dataset_bundle_id = as.character(.data$dataset_bundle_id))
 
-datasets_with_all_pips <- pip_records %>%
-  dplyr::count(.data$dataset_bundle_id, .data$model_method) %>%
-  dplyr::count(.data$dataset_bundle_id, name = "n_methods") %>%
-  dplyr::filter(.data$n_methods == length(required_methods)) %>%
-  dplyr::pull(.data$dataset_bundle_id)
+  cat("PIP records rows:", nrow(pip_records), "\n")
+  cat("Datasets in PIP records:",
+      dplyr::n_distinct(pip_records$dataset_bundle_id), "\n")
 
-pip_jsd_rows <- list()
-for (ds_id in datasets_with_all_pips) {
-  for (k in seq_len(nrow(pip_pair_specs))) {
-    spec <- pip_pair_specs[k, ]
-    pa <- pip_index[[paste(ds_id, spec$method_a, sep = "||")]]
-    pb <- pip_index[[paste(ds_id, spec$method_b, sep = "||")]]
-    if (is.null(pa) || is.null(pb) || length(pa) != length(pb)) next
-    pip_jsd_rows[[length(pip_jsd_rows) + 1L]] <- tibble::tibble(
-      dataset_bundle_id = ds_id,
-      chain = spec$chain,
-      pair_kind = spec$pair_kind,
-      pip_jsd = js_distance(pa, pb)
-    )
+  pip_by_dataset_method <- pip_records %>%
+    dplyr::select(.data$dataset_bundle_id, .data$model_method, .data$pip)
+
+  # Sanity: self-JSD (vanilla vs vanilla) should be exactly 0.
+  self_check_ids <- head(unique(pip_records$dataset_bundle_id), 5L)
+  self_jsd <- vapply(self_check_ids, function(ds_id) {
+    v <- pip_by_dataset_method %>%
+      dplyr::filter(.data$dataset_bundle_id == ds_id,
+                    .data$model_method == baseline_method) %>%
+      dplyr::pull(.data$pip) %>% .[[1]]
+    js_distance(v, v)
+  }, numeric(1))
+  cat("Self-JSD (vanilla vs vanilla) on first 5 datasets:",
+      paste(sprintf("%.3e", self_jsd), collapse = ", "), "\n")
+
+  # Index PIPs by (dataset, method) for fast lookup.
+  pip_lookup <- pip_records %>%
+    dplyr::group_by(.data$dataset_bundle_id, .data$model_method) %>%
+    dplyr::summarise(pip = list(.data$pip[[1L]]), .groups = "drop")
+  pip_index <- setNames(
+    pip_lookup$pip,
+    paste(pip_lookup$dataset_bundle_id, pip_lookup$model_method, sep = "||")
+  )
+
+  datasets_with_all_pips <- pip_records %>%
+    dplyr::count(.data$dataset_bundle_id, .data$model_method) %>%
+    dplyr::count(.data$dataset_bundle_id, name = "n_methods") %>%
+    dplyr::filter(.data$n_methods == length(required_methods)) %>%
+    dplyr::pull(.data$dataset_bundle_id)
+
+  pip_jsd_rows <- list()
+  for (ds_id in datasets_with_all_pips) {
+    for (k in seq_len(nrow(pip_pair_specs))) {
+      spec <- pip_pair_specs[k, ]
+      pa <- pip_index[[paste(ds_id, spec$method_a, sep = "||")]]
+      pb <- pip_index[[paste(ds_id, spec$method_b, sep = "||")]]
+      if (is.null(pa) || is.null(pb) || length(pa) != length(pb)) next
+      pip_jsd_rows[[length(pip_jsd_rows) + 1L]] <- tibble::tibble(
+        dataset_bundle_id = ds_id,
+        chain = spec$chain,
+        pair_kind = spec$pair_kind,
+        pip_jsd = js_distance(pa, pb)
+      )
+    }
   }
+  pip_drift_summary <- dplyr::bind_rows(pip_jsd_rows)
+} else {
+  warning(
+    "Missing ", pip_records_rds,
+    "; PIP JSD panels will be empty. Re-run ",
+    "effect_matching_refit_export_5arm.Rmd to generate the PIP sidecar."
+  )
+  pip_drift_summary <- tidyr::expand_grid(
+    dataset_bundle_id = datasets_complete,
+    pip_pair_specs %>% dplyr::select(.data$chain, .data$pair_kind)
+  ) %>%
+    dplyr::mutate(pip_jsd = NA_real_)
 }
-pip_drift_summary <- dplyr::bind_rows(pip_jsd_rows)
 readr::write_csv(pip_drift_summary, pip_drift_summary_csv)
 cat("PIP drift summary rows:", nrow(pip_drift_summary), "\n")
 
-# Sanity: rho between basin weighted_drift and pip_jsd on matched (dataset,
+# Sanity: rho between basin weighted_chord_drift and pip_jsd on matched (dataset,
 # pair). Both metrics measure "how much did the model move", so a strongly
 # positive rank correlation is expected.
 basin_for_join <- drift_summary %>%
   dplyr::filter(.data$pair_id %in% c(
-    "vanilla__mu", "vanilla__vanilla_warm_from_mu",
-    "vanilla__pi", "vanilla__vanilla_warm_from_pi"
+    "vanilla__mu", "mu__vanilla_warm_from_mu",
+    "vanilla__vanilla_warm_from_mu",
+    "vanilla__pi", "pi__vanilla_warm_from_pi",
+    "vanilla__vanilla_warm_from_pi"
   )) %>%
   dplyr::transmute(
     .data$dataset_bundle_id,
     chain = dplyr::if_else(grepl("mu", .data$pair_id), "mu", "pi"),
-    pair_kind = dplyr::if_else(grepl("warm", .data$pair_id),
-                               "vanilla_to_warm", "vanilla_to_treatment"),
-    weighted_drift = .data$weighted_drift
+    pair_kind = dplyr::case_when(
+      .data$pair_id %in% c("vanilla__mu", "vanilla__pi") ~
+        "vanilla_to_treatment",
+      .data$pair_id %in% c("mu__vanilla_warm_from_mu",
+                           "pi__vanilla_warm_from_pi") ~
+        "treatment_to_warm",
+      TRUE ~ "vanilla_to_warm"
+    ),
+    weighted_chord_drift = .data$weighted_chord_drift
   )
 
 basin_pip_join <- basin_for_join %>%
@@ -849,7 +957,7 @@ rho_check <- basin_pip_join %>%
   dplyr::summarise(
     n = dplyr::n(),
     rho = suppressWarnings(stats::cor(
-      .data$weighted_drift, .data$pip_jsd,
+      .data$weighted_chord_drift, .data$pip_jsd,
       method = "spearman", use = "pairwise.complete.obs"
     )),
     .groups = "drop"
@@ -857,16 +965,16 @@ rho_check <- basin_pip_join %>%
 print(rho_check)
 ```
 
-# 13. Master 4-Panel Drift Summary Figure
+# 13. Master Drift, PIP, and AUPRC Summary Figure
 
-Two metrics x two pair kinds. mu and pi overlaid in each subplot.
+Three metrics x three comparisons. mu and pi are overlaid in each subplot.
 
-```{r master-drift-figure, fig.width=11, fig.height=7}
+```{r master-drift-figure, fig.width=13, fig.height=8.5}
 basin_long <- basin_for_join %>%
   dplyr::transmute(
     .data$dataset_bundle_id, .data$chain, .data$pair_kind,
     metric = "basin_drift",
-    value = .data$weighted_drift
+    value = .data$weighted_chord_drift
   )
 
 pip_long <- pip_drift_summary %>%
@@ -876,12 +984,68 @@ pip_long <- pip_drift_summary %>%
     value = .data$pip_jsd
   )
 
-combined <- dplyr::bind_rows(basin_long, pip_long) %>%
+auprc_delta_long <- dplyr::bind_rows(
+  auprc_per_dataset %>%
+    dplyr::transmute(
+      .data$dataset_bundle_id,
+      chain = "mu",
+      pair_kind = "vanilla_to_treatment",
+      metric = "auprc_delta",
+      value = .data$auprc_delta_mu
+    ),
+  auprc_per_dataset %>%
+    dplyr::transmute(
+      .data$dataset_bundle_id,
+      chain = "mu",
+      pair_kind = "treatment_to_warm",
+      metric = "auprc_delta",
+      value = .data$auprc_round_trip_mu
+    ),
+  auprc_per_dataset %>%
+    dplyr::transmute(
+      .data$dataset_bundle_id,
+      chain = "mu",
+      pair_kind = "vanilla_to_warm",
+      metric = "auprc_delta",
+      value = .data$auprc_delta_warm_mu_vs_vanilla
+    ),
+  auprc_per_dataset %>%
+    dplyr::transmute(
+      .data$dataset_bundle_id,
+      chain = "pi",
+      pair_kind = "vanilla_to_treatment",
+      metric = "auprc_delta",
+      value = .data$auprc_delta_pi
+    ),
+  auprc_per_dataset %>%
+    dplyr::transmute(
+      .data$dataset_bundle_id,
+      chain = "pi",
+      pair_kind = "treatment_to_warm",
+      metric = "auprc_delta",
+      value = .data$auprc_round_trip_pi
+    ),
+  auprc_per_dataset %>%
+    dplyr::transmute(
+      .data$dataset_bundle_id,
+      chain = "pi",
+      pair_kind = "vanilla_to_warm",
+      metric = "auprc_delta",
+      value = .data$auprc_delta_warm_pi_vs_vanilla
+    )
+)
+
+combined <- dplyr::bind_rows(basin_long, pip_long, auprc_delta_long) %>%
   dplyr::mutate(
-    metric = factor(.data$metric, levels = c("basin_drift", "pip_drift")),
+    metric = factor(
+      .data$metric,
+      levels = c("basin_drift", "pip_drift", "auprc_delta")
+    ),
     pair_kind = factor(
       .data$pair_kind,
-      levels = c("vanilla_to_treatment", "vanilla_to_warm")
+      levels = c("vanilla_to_treatment",
+                 "treatment_to_warm",
+                 "vanilla_to_warm")
     ),
     chain = factor(.data$chain, levels = c("mu", "pi"))
   )
@@ -892,32 +1056,297 @@ p_master <- ggplot(combined, aes(x = .data$value, fill = .data$chain)) +
     bins = 50, position = "identity", alpha = 0.55, color = NA
   ) +
   facet_grid(
-    metric ~ pair_kind,
-    scales = "free",
+    pair_kind ~ metric,
+    scales = "free_x",
     labeller = labeller(
       metric = c(
-        basin_drift = "Basin drift (1 - weighted corr)",
-        pip_drift   = "PIP drift (JSD)"
+        basin_drift = "Basin drift\n(weighted chord)",
+        pip_drift   = "PIP drift\n(JSD)",
+        auprc_delta = "AUPRC delta"
       ),
       pair_kind = c(
         vanilla_to_treatment = "vanilla -> annotated",
+        treatment_to_warm    = "annotated -> vanilla_warm",
         vanilla_to_warm      = "vanilla -> vanilla_warm"
       )
     )
   ) +
   scale_fill_manual(values = c(mu = "#2b8cbe", pi = "#74c476")) +
   labs(
-    x = "Drift metric value", y = "Density", fill = "Chain",
-    title = "Basin and PIP drift along the 5-arm refit chain",
-    subtitle = "One observation per dataset per chain. Top row: effect-level basin drift (weighted_drift). Bottom row: model-wide PIP-vector JSD."
+    x = NULL, y = "Density", fill = "Chain",
+    title = "Basin, PIP, and AUPRC movement along the 5-arm refit chain",
+    subtitle = "Basin drift uses Hungarian-matched fitted-y weighted chord distance; PIP drift is model-wide PIP-vector JSD."
   ) +
   theme(legend.position = "bottom")
 
-ggsave(basin_pip_drift_png, p_master, width = 11, height = 7, dpi = 150)
+ggsave(basin_pip_drift_png, p_master, width = 13, height = 8.5, dpi = 150)
 print(p_master)
 ```
 
-# 14. Outputs
+# 14. Matched and Unmatched Effect-Quality Density Shifts
+
+For each chain and comparison, effects are classified as matched if their
+Hungarian-assigned fitted-y correlation is at least `effect_match_corr_min`.
+The KDEs below are weighted by per-effect explained-variance fraction.
+
+```{r effect-quality-density-5arm, fig.width=13, fig.height=7.5}
+effect_metric_rows <- records %>%
+  dplyr::transmute(
+    .data$dataset_bundle_id, .data$model_method, .data$effect,
+    x_value = .data[[x_metric]],
+    y_value = .data[[y_metric]],
+    .data$var_y_explained_frac
+  )
+
+effect_quality_pair_specs <- tibble::tribble(
+  ~pair_id,                        ~chain, ~comparison_kind,        ~source_method,   ~destination_method,
+  "vanilla__mu",                   "mu",   "vanilla_to_treatment",  baseline_method,  mu_method,
+  "mu__vanilla_warm_from_mu",      "mu",   "treatment_to_warm",     mu_method,        warm_mu_method,
+  "vanilla__vanilla_warm_from_mu", "mu",   "vanilla_to_warm",       baseline_method,  warm_mu_method,
+  "vanilla__pi",                   "pi",   "vanilla_to_treatment",  baseline_method,  pi_method,
+  "pi__vanilla_warm_from_pi",      "pi",   "treatment_to_warm",     pi_method,        warm_pi_method,
+  "vanilla__vanilla_warm_from_pi", "pi",   "vanilla_to_warm",       baseline_method,  warm_pi_method
+)
+
+build_effect_quality_rows <- function(spec) {
+  edges <- drift_assignments %>%
+    dplyr::filter(.data$pair_id == spec$pair_id) %>%
+    dplyr::mutate(
+      match_status = dplyr::if_else(
+        .data$corr >= effect_match_corr_min, "matched", "unmatched"
+      )
+    )
+
+  source_rows <- edges %>%
+    dplyr::transmute(
+      .data$dataset_bundle_id,
+      chain = spec$chain,
+      comparison_kind = spec$comparison_kind,
+      match_status = .data$match_status,
+      arm_role = "source",
+      model_method = spec$source_method,
+      effect = .data$effect_a,
+      assigned_corr = .data$corr
+    )
+
+  destination_rows <- edges %>%
+    dplyr::transmute(
+      .data$dataset_bundle_id,
+      chain = spec$chain,
+      comparison_kind = spec$comparison_kind,
+      match_status = .data$match_status,
+      arm_role = "destination",
+      model_method = spec$destination_method,
+      effect = .data$effect_b,
+      assigned_corr = .data$corr
+    )
+
+  dplyr::bind_rows(source_rows, destination_rows) %>%
+    dplyr::left_join(
+      effect_metric_rows,
+      by = c("dataset_bundle_id", "model_method", "effect")
+    ) %>%
+    dplyr::mutate(
+      pve_weight = pmax(tidyr::replace_na(.data$var_y_explained_frac, 0), 0)
+    )
+}
+
+effect_quality_pair_rows <- purrr::map_dfr(
+  seq_len(nrow(effect_quality_pair_specs)),
+  ~ build_effect_quality_rows(effect_quality_pair_specs[.x, ])
+) %>%
+  dplyr::mutate(
+    chain = factor(.data$chain, levels = c("mu", "pi")),
+    match_status = factor(.data$match_status,
+                          levels = c("matched", "unmatched")),
+    arm_role = factor(.data$arm_role,
+                      levels = c("source", "destination")),
+    comparison_kind = factor(
+      .data$comparison_kind,
+      levels = c("vanilla_to_treatment",
+                 "treatment_to_warm",
+                 "vanilla_to_warm")
+    )
+  )
+readr::write_csv(effect_quality_pair_rows, effect_quality_pair_rows_csv)
+
+x_limits_resolved <- resolve_limits(effect_quality_pair_rows$x_value, x_limits)
+y_limits_resolved <- resolve_limits(effect_quality_pair_rows$y_value, y_limits)
+
+weighted_kde2d_df <- function(df, xlim, ylim, n, h) {
+  if (!requireNamespace("MASS", quietly = TRUE)) {
+    stop("Package MASS is required for weighted KDE plots.")
+  }
+  group_values <- c("source", "destination")
+  dens <- lapply(group_values, function(g) {
+    sub <- df %>%
+      dplyr::filter(.data$arm_role == g) %>%
+      dplyr::filter(
+        is.finite(.data$x_value),
+        is.finite(.data$y_value),
+        .data$x_value >= xlim[[1]],
+        .data$x_value <= xlim[[2]],
+        .data$y_value >= ylim[[1]],
+        .data$y_value <= ylim[[2]]
+      )
+
+    if (nrow(sub) < 3L) {
+      return(NULL)
+    }
+
+    w <- pmax(tidyr::replace_na(sub$pve_weight, 0), 0)
+    if (sum(w) <= 0) {
+      w <- rep(1 / nrow(sub), nrow(sub))
+    } else {
+      w <- w / sum(w)
+    }
+
+    x_grid <- seq(xlim[[1]], xlim[[2]], length.out = n)
+    y_grid <- seq(ylim[[1]], ylim[[2]], length.out = n)
+    kx <- outer(x_grid, sub$x_value, function(grid, obs) {
+      stats::dnorm((grid - obs) / h[[1]]) / h[[1]]
+    })
+    ky <- outer(y_grid, sub$y_value, function(grid, obs) {
+      stats::dnorm((grid - obs) / h[[2]]) / h[[2]]
+    })
+    ky <- sweep(ky, 2L, w, `*`)
+    z <- kx %*% t(ky)
+
+    list(group = g, x = x_grid, y = y_grid, z = z, n_rows = nrow(sub),
+         pve_mass = sum(sub$pve_weight, na.rm = TRUE))
+  })
+  names(dens) <- group_values
+
+  if (is.null(dens$source) || is.null(dens$destination)) {
+    return(tibble::tibble())
+  }
+
+  tidyr::expand_grid(x = dens$source$x, y = dens$source$y) %>%
+    dplyr::mutate(
+      density_source = as.vector(t(dens$source$z)),
+      density_destination = as.vector(t(dens$destination$z)),
+      density_diff = .data$density_destination - .data$density_source,
+      n_source = dens$source$n_rows,
+      n_destination = dens$destination$n_rows,
+      pve_source = dens$source$pve_mass,
+      pve_destination = dens$destination$pve_mass
+    )
+}
+
+density_shift_rows <- list()
+for (ch in levels(effect_quality_pair_rows$chain)) {
+  for (cmp in levels(effect_quality_pair_rows$comparison_kind)) {
+    for (status in levels(effect_quality_pair_rows$match_status)) {
+      sub <- effect_quality_pair_rows %>%
+        dplyr::filter(
+          .data$chain == ch,
+          .data$comparison_kind == cmp,
+          .data$match_status == status
+        )
+      dens <- weighted_kde2d_df(
+        sub,
+        xlim = x_limits_resolved,
+        ylim = y_limits_resolved,
+        n = density_grid_n,
+        h = density_bandwidth
+      )
+      if (!nrow(dens)) {
+        next
+      }
+      density_shift_rows[[length(density_shift_rows) + 1L]] <- dens %>%
+        dplyr::mutate(
+          chain = ch,
+          comparison_kind = cmp,
+          match_status = status
+        )
+    }
+  }
+}
+
+density_shift_df <- dplyr::bind_rows(density_shift_rows) %>%
+  dplyr::mutate(
+    chain = factor(.data$chain, levels = c("mu", "pi")),
+    match_status = factor(.data$match_status,
+                          levels = c("matched", "unmatched")),
+    comparison_kind = factor(
+      .data$comparison_kind,
+      levels = c("vanilla_to_treatment",
+                 "treatment_to_warm",
+                 "vanilla_to_warm")
+    )
+  )
+
+plot_density_shift_chain <- function(density_df, chain_value, out_path) {
+  df <- density_df %>% dplyr::filter(.data$chain == chain_value)
+  abs_diff <- abs(df$density_diff)
+  abs_diff <- abs_diff[is.finite(abs_diff)]
+  fill_lim <- stats::quantile(
+    abs_diff, probs = density_fill_quantile, na.rm = TRUE, names = FALSE
+  )
+  if (!is.finite(fill_lim) || fill_lim <= 0) {
+    fill_lim <- max(abs_diff, na.rm = TRUE)
+  }
+  if (!is.finite(fill_lim) || fill_lim <= 0) {
+    fill_lim <- 1
+  }
+
+  p <- ggplot(df, aes(x = .data$x, y = .data$y,
+                      fill = .data$density_diff)) +
+    geom_raster(interpolate = TRUE) +
+    geom_contour(aes(z = .data$density_diff),
+                 color = "grey20", alpha = 0.45, linewidth = 0.18) +
+    facet_grid(
+      match_status ~ comparison_kind,
+      labeller = labeller(
+        match_status = c(
+          matched = "matched effects",
+          unmatched = "unmatched effects"
+        ),
+        comparison_kind = c(
+          vanilla_to_treatment = "vanilla -> annotated",
+          treatment_to_warm = "annotated -> vanilla_warm",
+          vanilla_to_warm = "vanilla -> vanilla_warm"
+        )
+      )
+    ) +
+    scale_fill_gradient2(
+      low = "#2b6cb0", mid = "white", high = "#c53030",
+      midpoint = 0, limits = c(-fill_lim, fill_lim),
+      oob = scales::squish
+    ) +
+    keff_x_scale(xlim = x_limits_resolved) +
+    coord_cartesian(xlim = x_limits_resolved,
+                    ylim = y_limits_resolved,
+                    expand = FALSE) +
+    labs(
+      x = x_label, y = y_label,
+      fill = "destination - source\nPVE-weighted density",
+      title = sprintf(
+        "Effect-quality density shifts along the %s refit chain",
+        chain_value
+      ),
+      subtitle = sprintf(
+        "Red: higher destination density; blue: higher source density. Matched if fitted-y corr >= %.2f.",
+        effect_match_corr_min
+      )
+    ) +
+    theme(legend.position = "right")
+
+  ggsave(out_path, p, width = 13, height = 7.5, dpi = 150)
+  p
+}
+
+p_effect_density_mu <- plot_density_shift_chain(
+  density_shift_df, "mu", effect_quality_density_mu_png
+)
+p_effect_density_pi <- plot_density_shift_chain(
+  density_shift_df, "pi", effect_quality_density_pi_png
+)
+print(p_effect_density_mu)
+print(p_effect_density_pi)
+```
+
+# 15. Outputs
 
 ```{r output-index}
 outputs <- tibble::tibble(
@@ -931,7 +1360,10 @@ outputs <- tibble::tibble(
     "unpaired-count vs AUPRC delta scatter",
     "mu vs pi drift comparison",
     "per-dataset PIP JSD summary",
-    "master basin + PIP drift figure"
+    "master basin + PIP + AUPRC drift figure",
+    "effect-quality matched/unmatched density (mu)",
+    "effect-quality matched/unmatched density (pi)",
+    "effect-quality pair rows"
   ),
   path = c(
     drift_assignments_csv,
@@ -943,7 +1375,10 @@ outputs <- tibble::tibble(
     unpaired_vs_delta_png,
     mu_vs_pi_drift_png,
     pip_drift_summary_csv,
-    basin_pip_drift_png
+    basin_pip_drift_png,
+    effect_quality_density_mu_png,
+    effect_quality_density_pi_png,
+    effect_quality_pair_rows_csv
   )
 )
 kable(outputs)
