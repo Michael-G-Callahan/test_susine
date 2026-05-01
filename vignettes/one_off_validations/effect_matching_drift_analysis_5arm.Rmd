@@ -129,10 +129,10 @@ unpaired_vs_delta_png <- file.path(plot_dir, "unpaired_count_vs_auprc_delta.png"
 mu_vs_pi_drift_png <- file.path(plot_dir, "mu_vs_pi_drift_comparison.png")
 basin_pip_drift_png <- file.path(plot_dir, "basin_and_pip_drift_summary.png")
 effect_quality_density_mu_png <- file.path(
-  plot_dir, "effect_quality_density_matched_unmatched_mu_5arm.png"
+  plot_dir, "effect_quality_density_pooled_mu_5arm.png"
 )
 effect_quality_density_pi_png <- file.path(
-  plot_dir, "effect_quality_density_matched_unmatched_pi_5arm.png"
+  plot_dir, "effect_quality_density_pooled_pi_5arm.png"
 )
 effect_quality_pair_rows_csv <- file.path(
   study_dir, "effect_quality_pair_rows_5arm.csv"
@@ -140,8 +140,16 @@ effect_quality_pair_rows_csv <- file.path(
 pip_records_rds <- file.path(study_dir, "pip_records_5arm.rds")
 pip_drift_summary_csv <- file.path(study_dir, "pip_drift_summary_5arm.csv")
 causal_idx_rds <- file.path(study_dir, "causal_idx_5arm.rds")
-pr_curves_pooled_png <- file.path(plot_dir, "pr_curves_pooled.png")
-pr_curves_pooled_csv <- file.path(study_dir, "pr_curves_pooled_5arm.csv")
+causal_truth_rds <- file.path(study_dir, "causal_truth_5arm.rds")
+pr_curves_pooled_png <- file.path(plot_dir, "pr_curves_pooled_top8.png")
+pr_curves_pooled_csv <- file.path(study_dir, "pr_curves_pooled_top8_5arm.csv")
+paper_figure_png <- file.path(plot_dir, "paper_figure_effect_drift.png")
+
+# Number of causals counted as positives in pooled PR scoring (top-K by
+# |beta| per dataset). This matches the baseline simulation study, which
+# uses the top 8 = 3 sparse + 5 oligogenic tier of the SuSiE 2.0
+# oligogenic architecture.
+pr_top_k <- 8L
 
 cat("Study dir:", study_dir, "\n")
 cat("Plot dir:", plot_dir, "\n")
@@ -602,15 +610,15 @@ print(p_chain)
 # 9. Headline 4-Quadrant Test
 
 ```{r headline-scatter, fig.width=12, fig.height=5.5}
-# Join drift(vanilla, vanilla_warm) with AUPRC delta(vanilla_warm - vanilla)
+# Join drift(vanilla, vanilla_warm) with AUPRC delta(vanilla_warm - vanilla).
+# x-axis is weighted_chord_drift (matches the basin-drift metric used
+# elsewhere in the workbook); higher x = more drift.
 headline_df_mu <- drift_summary %>%
   dplyr::filter(.data$pair_id == "vanilla__vanilla_warm_from_mu") %>%
   dplyr::transmute(
     dataset_bundle_id = .data$dataset_bundle_id,
     chain = "mu",
-    drift_mean_corr = .data$mean_corr,
-    drift_mean_corr_active = .data$mean_corr_active,
-    n_below_cutoff = .data$n_below_cutoff
+    weighted_chord_drift = .data$weighted_chord_drift
   ) %>%
   dplyr::left_join(
     auprc_per_dataset %>%
@@ -627,9 +635,7 @@ headline_df_pi <- drift_summary %>%
   dplyr::transmute(
     dataset_bundle_id = .data$dataset_bundle_id,
     chain = "pi",
-    drift_mean_corr = .data$mean_corr,
-    drift_mean_corr_active = .data$mean_corr_active,
-    n_below_cutoff = .data$n_below_cutoff
+    weighted_chord_drift = .data$weighted_chord_drift
   ) %>%
   dplyr::left_join(
     auprc_per_dataset %>%
@@ -641,28 +647,33 @@ headline_df_pi <- drift_summary %>%
     by = "dataset_bundle_id"
   )
 
-headline_df <- dplyr::bind_rows(headline_df_mu, headline_df_pi)
+headline_df <- dplyr::bind_rows(headline_df_mu, headline_df_pi) %>%
+  dplyr::mutate(chain = factor(.data$chain, levels = c("mu", "pi")))
+
+headline_max_drift <- max(0.05, max(
+  headline_df$weighted_chord_drift, na.rm = TRUE
+))
 
 p_headline <- ggplot(
   headline_df,
-  aes(x = .data$drift_mean_corr_active,
+  aes(x = .data$weighted_chord_drift,
       y = .data$auprc_delta_warm_vs_vanilla,
       color = .data$auprc_delta_treatment)
 ) +
   geom_hline(yintercept = 0, color = "grey45", linetype = "dashed") +
-  geom_vline(xintercept = drift_corr_cutoff, color = "grey45", linetype = "dotted") +
   geom_point(alpha = 0.55, size = 1.4) +
   scale_color_gradient2(
     low = "#2b6cb0", mid = "white", high = "#c53030", midpoint = 0
   ) +
-  facet_wrap(~ chain, labeller = labeller(chain = c(mu = "mu chain", pi = "pi chain"))) +
-  scale_x_continuous(limits = c(0, 1)) +
+  facet_wrap(~ chain,
+             labeller = labeller(chain = c(mu = "mu chain", pi = "pi chain"))) +
+  scale_x_continuous(limits = c(0, headline_max_drift)) +
   labs(
-    x = "Mean active-effect drift D(vanilla, vanilla_warm) (1 = identical)",
+    x = "Weighted chord basin drift D(vanilla, vanilla_warm)",
     y = "AUPRC(vanilla_warm) - AUPRC(vanilla_cold)",
     color = "AUPRC(treatment)\n- AUPRC(vanilla)",
-    title = "Headline: refinement vs exploration — does the warm vanilla refit retain treatment basin?",
-    subtitle = "Top-right quadrant (high drift + high warm-vanilla ΔAUPRC) = exploration win. Top-left = pure within-basin PIP weighting."
+    title = "Headline: does the warm-vanilla refit retain the treatment basin?",
+    subtitle = "Top-right quadrant (high basin drift + high warm-vanilla DAUPRC) = exploration win. y=0 line: warm refit matches cold vanilla."
   )
 
 ggsave(headline_scatter_png, p_headline, width = 12, height = 5.5, dpi = 150)
@@ -1107,11 +1118,20 @@ ggsave(basin_pip_drift_png, p_master, width = 13, height = 8.5, dpi = 150)
 print(p_master)
 ```
 
-# 14. Matched and Unmatched Effect-Quality Density Shifts
+# 14. Pooled Effect-Quality Density Shifts
 
-For each chain and comparison, effects are classified as matched if their
-Hungarian-assigned fitted-y correlation is at least `effect_match_corr_min`.
-The KDEs below are weighted by per-effect explained-variance fraction.
+For each chain and comparison, the joint (effective k, accuracy ratio)
+density of all effects is estimated by a 2D PVE-weighted KDE separately
+for the source arm and the destination arm; the panel shade is the
+destination density minus the source density (red = effects accumulating;
+blue = effects vacating). Effects are pooled across all (dataset, fit)
+pairs without splitting by Hungarian match correlation -- the per-effect
+matched/unmatched split was previously available but turned out not to
+add a useful axis to this plot.
+
+The `match_status` column is still recorded in the CSV
+(`effect_quality_pair_rows_5arm.csv`) for downstream slicing if needed;
+the plotted PNGs no longer split on it.
 
 ```{r effect-quality-density-5arm, fig.width=13, fig.height=7.5}
 effect_metric_rows <- records %>%
@@ -1260,38 +1280,32 @@ weighted_kde2d_df <- function(df, xlim, ylim, n, h) {
 density_shift_rows <- list()
 for (ch in levels(effect_quality_pair_rows$chain)) {
   for (cmp in levels(effect_quality_pair_rows$comparison_kind)) {
-    for (status in levels(effect_quality_pair_rows$match_status)) {
-      sub <- effect_quality_pair_rows %>%
-        dplyr::filter(
-          .data$chain == ch,
-          .data$comparison_kind == cmp,
-          .data$match_status == status
-        )
-      dens <- weighted_kde2d_df(
-        sub,
-        xlim = x_limits_resolved,
-        ylim = y_limits_resolved,
-        n = density_grid_n,
-        h = density_bandwidth
+    sub <- effect_quality_pair_rows %>%
+      dplyr::filter(
+        .data$chain == ch,
+        .data$comparison_kind == cmp
       )
-      if (!nrow(dens)) {
-        next
-      }
-      density_shift_rows[[length(density_shift_rows) + 1L]] <- dens %>%
-        dplyr::mutate(
-          chain = ch,
-          comparison_kind = cmp,
-          match_status = status
-        )
+    dens <- weighted_kde2d_df(
+      sub,
+      xlim = x_limits_resolved,
+      ylim = y_limits_resolved,
+      n = density_grid_n,
+      h = density_bandwidth
+    )
+    if (!nrow(dens)) {
+      next
     }
+    density_shift_rows[[length(density_shift_rows) + 1L]] <- dens %>%
+      dplyr::mutate(
+        chain = ch,
+        comparison_kind = cmp
+      )
   }
 }
 
 density_shift_df <- dplyr::bind_rows(density_shift_rows) %>%
   dplyr::mutate(
     chain = factor(.data$chain, levels = c("mu", "pi")),
-    match_status = factor(.data$match_status,
-                          levels = c("matched", "unmatched")),
     comparison_kind = factor(
       .data$comparison_kind,
       levels = c("vanilla_to_treatment",
@@ -1300,32 +1314,35 @@ density_shift_df <- dplyr::bind_rows(density_shift_rows) %>%
     )
   )
 
-plot_density_shift_chain <- function(density_df, chain_value, out_path) {
+# Use the 95th-percentile |density_diff| from BOTH chains pooled to set a
+# shared symmetric fill scale; that way the two chains' panels are
+# directly comparable in magnitude, which the previous independent-scale
+# version did not allow.
+shared_abs_diff <- abs(density_shift_df$density_diff)
+shared_abs_diff <- shared_abs_diff[is.finite(shared_abs_diff)]
+shared_fill_lim <- stats::quantile(
+  shared_abs_diff, probs = density_fill_quantile, na.rm = TRUE, names = FALSE
+)
+if (!is.finite(shared_fill_lim) || shared_fill_lim <= 0) {
+  shared_fill_lim <- max(shared_abs_diff, na.rm = TRUE)
+}
+if (!is.finite(shared_fill_lim) || shared_fill_lim <= 0) {
+  shared_fill_lim <- 1
+}
+
+plot_density_shift_chain <- function(density_df, chain_value, out_path,
+                                     fill_lim = shared_fill_lim) {
   df <- density_df %>% dplyr::filter(.data$chain == chain_value)
-  abs_diff <- abs(df$density_diff)
-  abs_diff <- abs_diff[is.finite(abs_diff)]
-  fill_lim <- stats::quantile(
-    abs_diff, probs = density_fill_quantile, na.rm = TRUE, names = FALSE
-  )
-  if (!is.finite(fill_lim) || fill_lim <= 0) {
-    fill_lim <- max(abs_diff, na.rm = TRUE)
-  }
-  if (!is.finite(fill_lim) || fill_lim <= 0) {
-    fill_lim <- 1
-  }
 
   p <- ggplot(df, aes(x = .data$x, y = .data$y,
                       fill = .data$density_diff)) +
     geom_raster(interpolate = TRUE) +
     geom_contour(aes(z = .data$density_diff),
                  color = "grey20", alpha = 0.45, linewidth = 0.18) +
-    facet_grid(
-      match_status ~ comparison_kind,
+    facet_wrap(
+      ~ comparison_kind,
+      ncol = 3,
       labeller = labeller(
-        match_status = c(
-          matched = "matched effects",
-          unmatched = "unmatched effects"
-        ),
         comparison_kind = c(
           vanilla_to_treatment = "vanilla -> annotated",
           treatment_to_warm = "annotated -> vanilla_warm",
@@ -1346,17 +1363,14 @@ plot_density_shift_chain <- function(density_df, chain_value, out_path) {
       x = x_label, y = y_label,
       fill = "destination - source\nPVE-weighted density",
       title = sprintf(
-        "Effect-quality density shifts along the %s refit chain",
+        "Effect-quality density shifts along the %s refit chain (pooled effects)",
         chain_value
       ),
-      subtitle = sprintf(
-        "Red: higher destination density; blue: higher source density. Matched if fitted-y corr >= %.2f.",
-        effect_match_corr_min
-      )
+      subtitle = "Red: higher destination density; blue: higher source density. Shared fill scale across mu/pi for cross-chain comparison."
     ) +
     theme(legend.position = "right")
 
-  ggsave(out_path, p, width = 13, height = 7.5, dpi = 150)
+  ggsave(out_path, p, width = 13, height = 4.4, dpi = 150)
   p
 }
 
@@ -1416,10 +1430,10 @@ if (file.exists(file.path(susine_sister_path, "DESCRIPTION"))) {
 
 source(here("vignettes", "one_off_validations", "_5arm_cfg.R"))
 
-if (file.exists(causal_idx_rds)) {
-  causal_idx_lookup <- readRDS(causal_idx_rds)
-  cat("Loaded cached causal_idx for ", length(causal_idx_lookup),
-      " datasets from ", causal_idx_rds, "\n", sep = "")
+if (file.exists(causal_truth_rds)) {
+  causal_truth_lookup <- readRDS(causal_truth_rds)
+  cat("Loaded cached causal_truth for ", length(causal_truth_lookup),
+      " datasets from ", causal_truth_rds, "\n", sep = "")
 } else {
   cfg_bundle <- build_5arm_cfg(
     here_root = here(),
@@ -1431,14 +1445,15 @@ if (file.exists(causal_idx_rds)) {
     dplyr::mutate(dataset_bundle_id = as.character(.data$dataset_bundle_id))
 
   datasets_with_pips <- sort(unique(pip_records_for_idx$dataset_bundle_id))
-  cat("Regenerating causal_idx for ", length(datasets_with_pips),
+  cat("Regenerating causal truth (idx + top-", pr_top_k, " by |beta|) for ",
+      length(datasets_with_pips),
       " datasets (no fits, just data simulation).\n", sep = "")
 
   bundle_rows_all <- cfg_for_pr$tables$dataset_bundles %>%
     tibble::as_tibble() %>%
     dplyr::mutate(dataset_bundle_id = as.character(.data$dataset_bundle_id))
 
-  causal_idx_lookup <- list()
+  causal_truth_lookup <- list()
   started <- proc.time()[["elapsed"]]
   for (i in seq_along(datasets_with_pips)) {
     ds_id <- datasets_with_pips[[i]]
@@ -1450,7 +1465,21 @@ if (file.exists(causal_idx_rds)) {
     data_bundle <- test_susine:::generate_data_for_bundle(
       bundle_row, cfg_for_pr
     )
-    causal_idx_lookup[[ds_id]] <- as.integer(data_bundle$causal_idx)
+    causal <- as.integer(data_bundle$causal_idx)
+    beta <- as.numeric(data_bundle$beta)
+
+    # Rank causal positions by |beta| descending; take top pr_top_k.
+    abs_beta_at_causals <- abs(beta[causal])
+    ord <- order(abs_beta_at_causals, decreasing = TRUE)
+    top_k <- min(pr_top_k, length(causal))
+    top_idx <- causal[ord[seq_len(top_k)]]
+
+    causal_truth_lookup[[ds_id]] <- list(
+      causal_idx = causal,
+      top_idx = as.integer(top_idx),
+      beta_at_causal = beta[causal][ord]
+    )
+
     if (i %% 50L == 0L || i == length(datasets_with_pips)) {
       elapsed <- proc.time()[["elapsed"]] - started
       eta <- elapsed / i * (length(datasets_with_pips) - i)
@@ -1461,34 +1490,48 @@ if (file.exists(causal_idx_rds)) {
       ))
     }
   }
-  saveRDS(causal_idx_lookup, causal_idx_rds)
-  cat("Saved causal_idx lookup to ", causal_idx_rds, "\n", sep = "")
+  saveRDS(causal_truth_lookup, causal_truth_rds)
+  cat("Saved causal truth lookup to ", causal_truth_rds, "\n", sep = "")
 }
+
+# Backward-compatible alias for any downstream code that expected the
+# original causal_idx_lookup (full 23-tier truth).
+causal_idx_lookup <- lapply(causal_truth_lookup, `[[`, "causal_idx")
 ```
 
 ```{r pr-curves-build, eval=have_pip_records, fig.width=9, fig.height=6}
 pip_records_for_pr <- readRDS(pip_records_rds) %>%
   dplyr::mutate(dataset_bundle_id = as.character(.data$dataset_bundle_id))
 
-# Pool PIPs and binary causal labels across all (dataset, variant)
-# observations, separately for each of the 5 methods.
+# Pool PIPs and binary positive labels across all (dataset, variant)
+# observations, separately for each of the 5 methods. Positives are the
+# top pr_top_k causal positions per dataset, ranked by |beta|; the
+# remaining causals are excluded from the negative set so that polygenic
+# background variants are not counted as false positives. (This matches
+# the baseline-sims AUPRC convention.)
 pooled_rows <- list()
 for (i in seq_len(nrow(pip_records_for_pr))) {
   ds_id <- pip_records_for_pr$dataset_bundle_id[[i]]
   method <- pip_records_for_pr$model_method[[i]]
   pip_vec <- pip_records_for_pr$pip[[i]]
-  causal <- causal_idx_lookup[[ds_id]]
-  if (is.null(causal)) {
+  truth <- causal_truth_lookup[[ds_id]]
+  if (is.null(truth)) {
     next
   }
-  is_causal <- integer(length(pip_vec))
-  causal_in_range <- causal[causal >= 1L & causal <= length(pip_vec)]
-  is_causal[causal_in_range] <- 1L
+  p_len <- length(pip_vec)
+  top_idx <- truth$top_idx[truth$top_idx >= 1L & truth$top_idx <= p_len]
+  causal <- truth$causal_idx[truth$causal_idx >= 1L &
+                              truth$causal_idx <= p_len]
+  is_top <- integer(p_len)
+  is_top[top_idx] <- 1L
+  is_other_causal <- integer(p_len)
+  is_other_causal[setdiff(causal, top_idx)] <- 1L
+  keep <- is_other_causal == 0L  # drop polygenic-background causals
   pooled_rows[[length(pooled_rows) + 1L]] <- tibble::tibble(
     dataset_bundle_id = ds_id,
     model_method = method,
-    pip = as.numeric(pip_vec),
-    is_causal = is_causal
+    pip = as.numeric(pip_vec[keep]),
+    is_causal = is_top[keep]
   )
 }
 pooled_df <- dplyr::bind_rows(pooled_rows)
@@ -1569,10 +1612,12 @@ p_pr <- ggplot(pr_curve_df,
   coord_cartesian(xlim = c(0, 1), ylim = c(0, 1)) +
   labs(
     x = "Recall", y = "Precision", color = "Method (pooled AUPRC)",
-    title = "Pooled precision-recall across all 600 datasets, by 5-arm method",
+    title = sprintf(
+      "Pooled precision-recall across all %d datasets (top-%d by |beta|)",
+      length(unique(pooled_df$dataset_bundle_id)), pr_top_k
+    ),
     subtitle = sprintf(
-      "Pooled across %d datasets x %d variants. Dashed line = causal prevalence (%.3f).",
-      length(unique(pooled_df$dataset_bundle_id)),
+      "Polygenic-tier causals excluded from negatives. Pooled across %d (dataset, variant) per method. Prevalence = %.4f.",
       max(table(pooled_df$dataset_bundle_id, pooled_df$model_method)),
       prevalence
     )
@@ -1583,7 +1628,55 @@ ggsave(pr_curves_pooled_png, p_pr, width = 9, height = 6, dpi = 150)
 print(p_pr)
 ```
 
-# 16. Outputs
+# 16. Combined Paper Figure
+
+A single full-width figure that walks the reader from the headline
+performance result (PR curves) down through the drift mechanics and the
+per-effect mechanism. Component plots are stripped of their per-chunk
+titles/subtitles so the paper caption can carry the framing.
+
+```{r paper-figure, eval=have_pip_records, fig.width=14, fig.height=22}
+if (!requireNamespace("patchwork", quietly = TRUE)) {
+  warning(
+    "patchwork not installed; combined paper figure skipped. ",
+    "install.packages('patchwork')."
+  )
+} else {
+  library(patchwork)
+
+  strip_chrome <- function(p) {
+    p + labs(title = NULL, subtitle = NULL) +
+      theme(
+        plot.title = element_blank(),
+        plot.subtitle = element_blank()
+      )
+  }
+
+  panel_A <- strip_chrome(p_pr) +
+    labs(title = "A. Pooled precision-recall (top-8 by |beta|), 5 arms, 600 datasets")
+  panel_B <- strip_chrome(p_mupi) +
+    labs(title = "B. Basin drift: mu vs pi (cold treatment vs warm-vanilla refit)")
+  panel_C <- strip_chrome(p_headline) +
+    labs(title = "C. Refinement vs exploration: warm-vanilla DAUPRC vs basin drift")
+  panel_D <- strip_chrome(p_effect_density_mu) +
+    labs(title = "D. Effect-quality density shifts along the mu refit chain")
+  panel_E <- strip_chrome(p_effect_density_pi) +
+    labs(title = "E. Effect-quality density shifts along the pi refit chain")
+
+  combined_fig <- panel_A / panel_B / panel_C / panel_D / panel_E +
+    plot_layout(heights = c(1.0, 1.05, 1.05, 0.95, 0.95)) &
+    theme(plot.title = element_text(face = "bold", size = 13))
+
+  ggsave(
+    paper_figure_png, combined_fig,
+    width = 14, height = 22, dpi = 130, limitsize = FALSE
+  )
+  cat("Wrote combined paper figure to ", paper_figure_png, "\n", sep = "")
+  print(combined_fig)
+}
+```
+
+# 17. Outputs
 
 ```{r output-index}
 outputs <- tibble::tibble(
@@ -1593,17 +1686,18 @@ outputs <- tibble::tibble(
     "per-dataset AUPRC trajectory",
     "drift profile histograms",
     "chain AUPRC trajectory",
-    "headline 4-quadrant scatter",
+    "headline scatter (basin chord drift)",
     "unpaired-count vs AUPRC delta scatter",
     "mu vs pi drift comparison (cold + warm panels)",
     "per-dataset PIP JSD summary",
     "master basin + PIP + AUPRC drift figure",
-    "effect-quality matched/unmatched density (mu)",
-    "effect-quality matched/unmatched density (pi)",
+    "effect-quality density pooled (mu)",
+    "effect-quality density pooled (pi)",
     "effect-quality pair rows",
-    "pooled PR curves (5 arms)",
+    "pooled PR curves top-K by |beta| (5 arms)",
     "pooled PR curve rows (csv)",
-    "regenerated causal_idx cache"
+    "regenerated causal truth cache (idx + top-K)",
+    "combined paper figure"
   ),
   path = c(
     drift_assignments_csv,
@@ -1621,7 +1715,8 @@ outputs <- tibble::tibble(
     effect_quality_pair_rows_csv,
     pr_curves_pooled_png,
     pr_curves_pooled_csv,
-    causal_idx_rds
+    causal_truth_rds,
+    paper_figure_png
   )
 )
 kable(outputs)
