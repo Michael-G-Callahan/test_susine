@@ -139,6 +139,9 @@ effect_quality_pair_rows_csv <- file.path(
 )
 pip_records_rds <- file.path(study_dir, "pip_records_5arm.rds")
 pip_drift_summary_csv <- file.path(study_dir, "pip_drift_summary_5arm.csv")
+causal_idx_rds <- file.path(study_dir, "causal_idx_5arm.rds")
+pr_curves_pooled_png <- file.path(plot_dir, "pr_curves_pooled.png")
+pr_curves_pooled_csv <- file.path(study_dir, "pr_curves_pooled_5arm.csv")
 
 cat("Study dir:", study_dir, "\n")
 cat("Plot dir:", plot_dir, "\n")
@@ -780,44 +783,65 @@ print(p_unpaired)
 
 # 11. Mu vs Pi Drift Comparison
 
-```{r mu-vs-pi-drift, fig.width=11, fig.height=5}
-# Side-by-side: drift(vanilla, treatment) for mu vs pi, per dataset.
-mu_vs_pi_join <- drift_summary %>%
-  dplyr::filter(.data$pair_id %in% c("vanilla__mu", "vanilla__pi")) %>%
-  dplyr::select(.data$dataset_bundle_id, .data$pair_id,
-                .data$mean_corr_active, .data$n_below_cutoff,
-                .data$weighted_drift, .data$weighted_chord_drift) %>%
+Two panels per dataset: the cold treatment fit (vanilla -> annotated)
+answers "did the prior move the model at all?", and the warm-vanilla refit
+(vanilla -> vanilla_warm) answers "does the new basin survive when the
+prior is removed?". Stacking them side-by-side lets the reader read
+exploration vs basin-retention off a single figure.
+
+```{r mu-vs-pi-drift, fig.width=11, fig.height=5.5}
+mu_vs_pi_long <- drift_summary %>%
+  dplyr::filter(.data$pair_id %in% c(
+    "vanilla__mu", "vanilla__pi",
+    "vanilla__vanilla_warm_from_mu", "vanilla__vanilla_warm_from_pi"
+  )) %>%
+  dplyr::transmute(
+    .data$dataset_bundle_id,
+    chain = dplyr::if_else(grepl("mu", .data$pair_id), "mu", "pi"),
+    pair_kind = dplyr::if_else(
+      .data$pair_id %in% c("vanilla__mu", "vanilla__pi"),
+      "vanilla -> annotated",
+      "vanilla -> vanilla_warm"
+    ),
+    weighted_chord_drift = .data$weighted_chord_drift
+  )
+
+mu_vs_pi_wide <- mu_vs_pi_long %>%
   tidyr::pivot_wider(
-    id_cols = .data$dataset_bundle_id,
-    names_from = .data$pair_id,
-    values_from = c("mean_corr_active", "n_below_cutoff",
-                    "weighted_drift", "weighted_chord_drift")
+    id_cols = c("dataset_bundle_id", "pair_kind"),
+    names_from = "chain",
+    values_from = "weighted_chord_drift"
+  ) %>%
+  dplyr::mutate(
+    pair_kind = factor(
+      .data$pair_kind,
+      levels = c("vanilla -> annotated", "vanilla -> vanilla_warm")
+    )
   )
 
 max_mupi_chord <- max(
-  mu_vs_pi_join$weighted_chord_drift_vanilla__mu,
-  mu_vs_pi_join$weighted_chord_drift_vanilla__pi,
-  na.rm = TRUE
+  mu_vs_pi_wide$mu, mu_vs_pi_wide$pi, na.rm = TRUE
 )
 max_mupi_chord <- max(0.05, max_mupi_chord)
 
 p_mupi <- ggplot(
-  mu_vs_pi_join,
-  aes(x = .data$weighted_chord_drift_vanilla__mu,
-      y = .data$weighted_chord_drift_vanilla__pi)
+  mu_vs_pi_wide,
+  aes(x = .data$mu, y = .data$pi)
 ) +
-  geom_abline(slope = 1, intercept = 0, color = "grey45", linetype = "dashed") +
+  geom_abline(slope = 1, intercept = 0,
+              color = "grey45", linetype = "dashed") +
   geom_point(alpha = 0.5, size = 1.2) +
+  facet_wrap(~ pair_kind, ncol = 2) +
   coord_fixed(xlim = c(0, max_mupi_chord),
               ylim = c(0, max_mupi_chord)) +
   labs(
-    x = "Weighted chord basin drift: vanilla -> mu",
-    y = "Weighted chord basin drift: vanilla -> pi",
-    title = "How much does each annotation mechanism move the model?",
-    subtitle = "y=x line: equal drift. Below diagonal: pi explores less than mu. Above: pi explores more."
+    x = "Weighted chord basin drift: mu chain",
+    y = "Weighted chord basin drift: pi chain",
+    title = "How much does each annotation mechanism move the model? (cold treatment vs warm-vanilla refit)",
+    subtitle = "Left: cold treatment fit (exploration). Right: warm-vanilla refit (basin retention). y=x line marks equal mu/pi drift."
   )
 
-ggsave(mu_vs_pi_drift_png, p_mupi, width = 11, height = 5, dpi = 150)
+ggsave(mu_vs_pi_drift_png, p_mupi, width = 11, height = 5.5, dpi = 150)
 print(p_mupi)
 ```
 
@@ -1346,7 +1370,220 @@ print(p_effect_density_mu)
 print(p_effect_density_pi)
 ```
 
-# 15. Outputs
+# 15. Pooled Precision-Recall Curves
+
+Pooled precision-recall curves across all 600 datasets for the 5 arms
+(vanilla, mu, pi, vanilla_warm_from_mu, vanilla_warm_from_pi). Inputs are
+the model-wide PIP vectors in `pip_records_5arm.rds` and the per-dataset
+causal indices, which are regenerated from `dataset_bundles.csv` via
+`test_susine:::generate_data_for_bundle()` (no fits are re-run; the
+hot loop is the deterministic phenotype simulation).
+
+The shared 5-arm config used here is identical to the one in
+`effect_matching_refit_export_5arm.Rmd` and lives in `_5arm_cfg.R`.
+
+```{r pr-curves-setup, message=FALSE}
+have_pip_records <- file.exists(pip_records_rds)
+if (!have_pip_records) {
+  warning(
+    "Missing ", pip_records_rds,
+    "; PR curves will be skipped. Re-run effect_matching_refit_export_5arm.Rmd ",
+    "(or its PIP-export tail) to regenerate the sidecar."
+  )
+}
+
+if (have_pip_records && !requireNamespace("PRROC", quietly = TRUE)) {
+  warning("PRROC not installed; PR curves chunk skipped. install.packages('PRROC').")
+  have_pip_records <- FALSE
+}
+```
+
+```{r pr-curves-causal-idx, eval=have_pip_records}
+# `here()` resolves to the test_susine package root (set by here::i_am()
+# in section 1). Load the harness via devtools so we can call
+# test_susine:::generate_data_for_bundle().
+suppressMessages(devtools::load_all(here()))
+
+# Optionally load the sister susine package the way refit_export_5arm.Rmd
+# does, so the cfg builder's downstream call sites stay parallel.
+susine_sister_path <- here("..", "susine")
+if (file.exists(file.path(susine_sister_path, "DESCRIPTION"))) {
+  options(test_susine.local_susine_path = normalizePath(
+    susine_sister_path, winslash = "/", mustWork = TRUE
+  ))
+  suppressMessages(devtools::load_all(susine_sister_path))
+}
+
+source(here("vignettes", "one_off_validations", "_5arm_cfg.R"))
+
+if (file.exists(causal_idx_rds)) {
+  causal_idx_lookup <- readRDS(causal_idx_rds)
+  cat("Loaded cached causal_idx for ", length(causal_idx_lookup),
+      " datasets from ", causal_idx_rds, "\n", sep = "")
+} else {
+  cfg_bundle <- build_5arm_cfg(
+    here_root = here(),
+    output_root = output_root
+  )
+  cfg_for_pr <- cfg_bundle$cfg
+
+  pip_records_for_idx <- readRDS(pip_records_rds) %>%
+    dplyr::mutate(dataset_bundle_id = as.character(.data$dataset_bundle_id))
+
+  datasets_with_pips <- sort(unique(pip_records_for_idx$dataset_bundle_id))
+  cat("Regenerating causal_idx for ", length(datasets_with_pips),
+      " datasets (no fits, just data simulation).\n", sep = "")
+
+  bundle_rows_all <- cfg_for_pr$tables$dataset_bundles %>%
+    tibble::as_tibble() %>%
+    dplyr::mutate(dataset_bundle_id = as.character(.data$dataset_bundle_id))
+
+  causal_idx_lookup <- list()
+  started <- proc.time()[["elapsed"]]
+  for (i in seq_along(datasets_with_pips)) {
+    ds_id <- datasets_with_pips[[i]]
+    bundle_row <- bundle_rows_all %>%
+      dplyr::filter(.data$dataset_bundle_id == !!ds_id)
+    if (nrow(bundle_row) != 1L) {
+      stop("Expected one bundle row for ", ds_id, "; got ", nrow(bundle_row))
+    }
+    data_bundle <- test_susine:::generate_data_for_bundle(
+      bundle_row, cfg_for_pr
+    )
+    causal_idx_lookup[[ds_id]] <- as.integer(data_bundle$causal_idx)
+    if (i %% 50L == 0L || i == length(datasets_with_pips)) {
+      elapsed <- proc.time()[["elapsed"]] - started
+      eta <- elapsed / i * (length(datasets_with_pips) - i)
+      cat(sprintf(
+        "Regenerated %d/%d datasets | elapsed %s | ETA %s\n",
+        i, length(datasets_with_pips),
+        format_duration(elapsed), format_duration(eta)
+      ))
+    }
+  }
+  saveRDS(causal_idx_lookup, causal_idx_rds)
+  cat("Saved causal_idx lookup to ", causal_idx_rds, "\n", sep = "")
+}
+```
+
+```{r pr-curves-build, eval=have_pip_records, fig.width=9, fig.height=6}
+pip_records_for_pr <- readRDS(pip_records_rds) %>%
+  dplyr::mutate(dataset_bundle_id = as.character(.data$dataset_bundle_id))
+
+# Pool PIPs and binary causal labels across all (dataset, variant)
+# observations, separately for each of the 5 methods.
+pooled_rows <- list()
+for (i in seq_len(nrow(pip_records_for_pr))) {
+  ds_id <- pip_records_for_pr$dataset_bundle_id[[i]]
+  method <- pip_records_for_pr$model_method[[i]]
+  pip_vec <- pip_records_for_pr$pip[[i]]
+  causal <- causal_idx_lookup[[ds_id]]
+  if (is.null(causal)) {
+    next
+  }
+  is_causal <- integer(length(pip_vec))
+  causal_in_range <- causal[causal >= 1L & causal <= length(pip_vec)]
+  is_causal[causal_in_range] <- 1L
+  pooled_rows[[length(pooled_rows) + 1L]] <- tibble::tibble(
+    dataset_bundle_id = ds_id,
+    model_method = method,
+    pip = as.numeric(pip_vec),
+    is_causal = is_causal
+  )
+}
+pooled_df <- dplyr::bind_rows(pooled_rows)
+
+cat("Pooled rows:", nrow(pooled_df), "\n")
+cat("Per-method counts:\n")
+print(pooled_df %>% dplyr::count(.data$model_method, .data$is_causal))
+
+prevalence <- mean(pooled_df$is_causal)
+cat(sprintf("Overall causal prevalence: %.4f\n", prevalence))
+
+# One PR curve per method.
+methods_in_order <- c(
+  baseline_method, mu_method, warm_mu_method, pi_method, warm_pi_method
+)
+methods_in_order <- intersect(methods_in_order,
+                              unique(pooled_df$model_method))
+
+pr_curve_rows <- list()
+pr_auc_rows <- list()
+for (m in methods_in_order) {
+  sub <- pooled_df %>% dplyr::filter(.data$model_method == m)
+  if (!nrow(sub) || sum(sub$is_causal) == 0L) next
+  pr <- PRROC::pr.curve(
+    scores.class0 = sub$pip,
+    weights.class0 = sub$is_causal,
+    curve = TRUE,
+    sorted = FALSE,
+    rand.compute = FALSE
+  )
+  curve_mat <- pr$curve  # columns: recall, precision, threshold
+  pr_curve_rows[[length(pr_curve_rows) + 1L]] <- tibble::tibble(
+    model_method = m,
+    recall = curve_mat[, 1L],
+    precision = curve_mat[, 2L],
+    threshold = curve_mat[, 3L]
+  )
+  pr_auc_rows[[length(pr_auc_rows) + 1L]] <- tibble::tibble(
+    model_method = m,
+    auprc_integral = as.numeric(pr$auc.integral),
+    auprc_dg = as.numeric(pr$auc.davis.goadrich)
+  )
+}
+pr_curve_df <- dplyr::bind_rows(pr_curve_rows) %>%
+  dplyr::mutate(model_method = factor(.data$model_method,
+                                      levels = methods_in_order))
+pr_auc_df <- dplyr::bind_rows(pr_auc_rows) %>%
+  dplyr::mutate(model_method = factor(.data$model_method,
+                                      levels = methods_in_order))
+
+readr::write_csv(pr_curve_df, pr_curves_pooled_csv)
+cat("Wrote PR curve rows:", nrow(pr_curve_df), "->", pr_curves_pooled_csv, "\n")
+print(pr_auc_df)
+
+method_legend_labels <- vapply(
+  levels(pr_curve_df$model_method),
+  function(m) {
+    auprc_val <- pr_auc_df$auprc_integral[
+      match(m, as.character(pr_auc_df$model_method))
+    ]
+    sprintf("%s (AUPRC = %.3f)",
+            method_labels[[m]] %||% m,
+            auprc_val)
+  },
+  character(1)
+)
+
+p_pr <- ggplot(pr_curve_df,
+               aes(x = .data$recall, y = .data$precision,
+                   color = .data$model_method)) +
+  geom_hline(yintercept = prevalence, color = "grey60",
+             linetype = "dashed", linewidth = 0.4) +
+  geom_step(direction = "vh", linewidth = 0.7) +
+  scale_color_manual(
+    values = method_color[levels(pr_curve_df$model_method)],
+    labels = method_legend_labels
+  ) +
+  coord_cartesian(xlim = c(0, 1), ylim = c(0, 1)) +
+  labs(
+    x = "Recall", y = "Precision", color = "Method (pooled AUPRC)",
+    title = "Pooled precision-recall across all 600 datasets, by 5-arm method",
+    subtitle = sprintf(
+      "Pooled across %d datasets x %d variants. Dashed line = causal prevalence (%.3f).",
+      length(unique(pooled_df$dataset_bundle_id)),
+      max(table(pooled_df$dataset_bundle_id, pooled_df$model_method)),
+      prevalence
+    )
+  ) +
+  theme(legend.position = "right")
+
+ggsave(pr_curves_pooled_png, p_pr, width = 9, height = 6, dpi = 150)
+print(p_pr)
+```
+
+# 16. Outputs
 
 ```{r output-index}
 outputs <- tibble::tibble(
@@ -1358,12 +1595,15 @@ outputs <- tibble::tibble(
     "chain AUPRC trajectory",
     "headline 4-quadrant scatter",
     "unpaired-count vs AUPRC delta scatter",
-    "mu vs pi drift comparison",
+    "mu vs pi drift comparison (cold + warm panels)",
     "per-dataset PIP JSD summary",
     "master basin + PIP + AUPRC drift figure",
     "effect-quality matched/unmatched density (mu)",
     "effect-quality matched/unmatched density (pi)",
-    "effect-quality pair rows"
+    "effect-quality pair rows",
+    "pooled PR curves (5 arms)",
+    "pooled PR curve rows (csv)",
+    "regenerated causal_idx cache"
   ),
   path = c(
     drift_assignments_csv,
@@ -1378,7 +1618,10 @@ outputs <- tibble::tibble(
     basin_pip_drift_png,
     effect_quality_density_mu_png,
     effect_quality_density_pi_png,
-    effect_quality_pair_rows_csv
+    effect_quality_pair_rows_csv,
+    pr_curves_pooled_png,
+    pr_curves_pooled_csv,
+    causal_idx_rds
   )
 )
 kable(outputs)
