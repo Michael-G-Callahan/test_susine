@@ -75,11 +75,11 @@ warm_pi_method <- "susie_vanilla_warm_from_pi"
 
 # Pretty labels for plotting.
 method_labels <- c(
-  susie_vanilla = "vanilla (cold)",
-  susine_functional_mu = "mu (cold)",
-  susie_vanilla_warm_from_mu = "vanilla (warm-from-mu)",
-  susie_functional_pi = "pi (cold)",
-  susie_vanilla_warm_from_pi = "vanilla (warm-from-pi)"
+  susie_vanilla = "SuSiE-vanilla (cold)",
+  susine_functional_mu = "SuSiNE-functional-mu (cold)",
+  susie_vanilla_warm_from_mu = "SuSiE-vanilla (warm from mu)",
+  susie_functional_pi = "SuSiE-functional-pi (cold)",
+  susie_vanilla_warm_from_pi = "SuSiE-vanilla (warm from pi)"
 )
 method_color <- c(
   susie_vanilla = "black",
@@ -102,8 +102,14 @@ effect_match_corr_min <- 0.99
 # axis labels are shown on the effective-k scale.
 x_metric <- "effect_pip_entropy_core95"
 y_metric <- "accuracy_ratio"
-x_label <- "Core-95 effective k (= exp(entropy))"
-y_label <- "Accuracy ratio"
+x_label <- expression(
+  paste("Effect diffuseness: effective top-95% support size  ",
+        K[l], " = exp(", italic(H), "(", alpha[l]^{(95)}, "))")
+)
+y_label <- expression(
+  paste("Effect accuracy: ", A[l],
+        " = max[true causal] PIP / max[any] PIP")
+)
 x_keff_breaks <- c(1, 2, 5, 10, 20, 50, 100, 200, 500, 1000)
 x_limits <- NULL
 y_limits <- c(0, 1)
@@ -610,71 +616,92 @@ print(p_chain)
 # 9. Headline 4-Quadrant Test
 
 ```{r headline-scatter, fig.width=12, fig.height=5.5}
-# Join drift(vanilla, vanilla_warm) with AUPRC delta(vanilla_warm - vanilla).
-# x-axis is weighted_chord_drift (matches the basin-drift metric used
-# elsewhere in the workbook); higher x = more drift.
-headline_df_mu <- drift_summary %>%
-  dplyr::filter(.data$pair_id == "vanilla__vanilla_warm_from_mu") %>%
-  dplyr::transmute(
-    dataset_bundle_id = .data$dataset_bundle_id,
-    chain = "mu",
-    weighted_chord_drift = .data$weighted_chord_drift
+# For each chain, x is the basin chord drift between cold vanilla and the
+# warm-vanilla refit (i.e. how much the basin moved AND survived prior
+# removal). Two facets show two different AUPRC deltas with the same x:
+#   - "vanilla -> annotated":  treatment AUPRC - cold vanilla AUPRC
+#   - "vanilla -> vanilla_warm": warm-vanilla AUPRC - cold vanilla AUPRC
+# Both should track x positively if a non-trivial basin movement is
+# producing genuine fine-mapping improvement.
+headline_long <- dplyr::bind_rows(
+  drift_summary %>%
+    dplyr::filter(.data$pair_id == "vanilla__vanilla_warm_from_mu") %>%
+    dplyr::transmute(
+      dataset_bundle_id = .data$dataset_bundle_id,
+      chain = "mu",
+      basin_drift = .data$weighted_chord_drift
+    ) %>%
+    dplyr::left_join(
+      auprc_per_dataset %>%
+        dplyr::transmute(
+          dataset_bundle_id = .data$dataset_bundle_id,
+          delta_auprc_treatment = .data$auprc_delta_mu,
+          delta_auprc_warm = .data$auprc_delta_warm_mu_vs_vanilla
+        ),
+      by = "dataset_bundle_id"
+    ),
+  drift_summary %>%
+    dplyr::filter(.data$pair_id == "vanilla__vanilla_warm_from_pi") %>%
+    dplyr::transmute(
+      dataset_bundle_id = .data$dataset_bundle_id,
+      chain = "pi",
+      basin_drift = .data$weighted_chord_drift
+    ) %>%
+    dplyr::left_join(
+      auprc_per_dataset %>%
+        dplyr::transmute(
+          dataset_bundle_id = .data$dataset_bundle_id,
+          delta_auprc_treatment = .data$auprc_delta_pi,
+          delta_auprc_warm = .data$auprc_delta_warm_pi_vs_vanilla
+        ),
+      by = "dataset_bundle_id"
+    )
+) %>%
+  tidyr::pivot_longer(
+    cols = c("delta_auprc_treatment", "delta_auprc_warm"),
+    names_to = "delta_kind",
+    values_to = "delta_auprc"
   ) %>%
-  dplyr::left_join(
-    auprc_per_dataset %>%
-      dplyr::transmute(
-        dataset_bundle_id = .data$dataset_bundle_id,
-        auprc_delta_warm_vs_vanilla = .data$auprc_delta_warm_mu_vs_vanilla,
-        auprc_delta_treatment = .data$auprc_delta_mu
-      ),
-    by = "dataset_bundle_id"
+  dplyr::mutate(
+    delta_kind = factor(
+      .data$delta_kind,
+      levels = c("delta_auprc_treatment", "delta_auprc_warm"),
+      labels = c(
+        "DAUPRC(annotated cold) - vanilla",
+        "DAUPRC(vanilla, warm refit) - vanilla"
+      )
+    ),
+    chain = factor(.data$chain, levels = c("mu", "pi"))
   )
 
-headline_df_pi <- drift_summary %>%
-  dplyr::filter(.data$pair_id == "vanilla__vanilla_warm_from_pi") %>%
-  dplyr::transmute(
-    dataset_bundle_id = .data$dataset_bundle_id,
-    chain = "pi",
-    weighted_chord_drift = .data$weighted_chord_drift
-  ) %>%
-  dplyr::left_join(
-    auprc_per_dataset %>%
-      dplyr::transmute(
-        dataset_bundle_id = .data$dataset_bundle_id,
-        auprc_delta_warm_vs_vanilla = .data$auprc_delta_warm_pi_vs_vanilla,
-        auprc_delta_treatment = .data$auprc_delta_pi
-      ),
-    by = "dataset_bundle_id"
-  )
-
-headline_df <- dplyr::bind_rows(headline_df_mu, headline_df_pi) %>%
-  dplyr::mutate(chain = factor(.data$chain, levels = c("mu", "pi")))
-
-headline_max_drift <- max(0.05, max(
-  headline_df$weighted_chord_drift, na.rm = TRUE
-))
+headline_max_drift <- max(0.05,
+                           max(headline_long$basin_drift, na.rm = TRUE))
 
 p_headline <- ggplot(
-  headline_df,
-  aes(x = .data$weighted_chord_drift,
-      y = .data$auprc_delta_warm_vs_vanilla,
-      color = .data$auprc_delta_treatment)
+  headline_long,
+  aes(x = .data$basin_drift, y = .data$delta_auprc, color = .data$chain)
 ) +
   geom_hline(yintercept = 0, color = "grey45", linetype = "dashed") +
-  geom_point(alpha = 0.55, size = 1.4) +
-  scale_color_gradient2(
-    low = "#2b6cb0", mid = "white", high = "#c53030", midpoint = 0
+  geom_point(alpha = 0.5, size = 1.2) +
+  scale_color_manual(
+    values = c(mu = "#2b8cbe", pi = "#74c476"),
+    labels = c(mu = "mu chain (signed mu_0)",
+               pi = "pi chain (unsigned pi)")
   ) +
-  facet_wrap(~ chain,
-             labeller = labeller(chain = c(mu = "mu chain", pi = "pi chain"))) +
+  facet_wrap(~ delta_kind, ncol = 2) +
   scale_x_continuous(limits = c(0, headline_max_drift)) +
   labs(
-    x = "Weighted chord basin drift D(vanilla, vanilla_warm)",
-    y = "AUPRC(vanilla_warm) - AUPRC(vanilla_cold)",
-    color = "AUPRC(treatment)\n- AUPRC(vanilla)",
-    title = "Headline: does the warm-vanilla refit retain the treatment basin?",
-    subtitle = "Top-right quadrant (high basin drift + high warm-vanilla DAUPRC) = exploration win. y=0 line: warm refit matches cold vanilla."
-  )
+    x = expression(
+      paste("Basin chord drift  ",
+            italic(D)["chord"],
+            "(vanilla, vanilla-warm)")
+    ),
+    y = expression(paste(Delta, "AUPRC vs cold vanilla")),
+    color = "Annotation channel",
+    title = "AUPRC change versus basin chord drift, by chain and arm",
+    subtitle = "x in both facets: basin chord drift between cold vanilla and the warm-vanilla refit. Left: AUPRC gain of the cold annotated fit over cold vanilla. Right: AUPRC gain of the warm-vanilla refit over cold vanilla. y=0 line: arm matches cold vanilla."
+  ) +
+  theme(legend.position = "bottom")
 
 ggsave(headline_scatter_png, p_headline, width = 12, height = 5.5, dpi = 150)
 print(p_headline)
@@ -826,7 +853,11 @@ mu_vs_pi_wide <- mu_vs_pi_long %>%
   dplyr::mutate(
     pair_kind = factor(
       .data$pair_kind,
-      levels = c("vanilla -> annotated", "vanilla -> vanilla_warm")
+      levels = c("vanilla -> annotated", "vanilla -> vanilla_warm"),
+      labels = c(
+        "Cold annotated fit (exploration)",
+        "Warm-vanilla refit (basin retention)"
+      )
     )
   )
 
@@ -846,10 +877,14 @@ p_mupi <- ggplot(
   coord_fixed(xlim = c(0, max_mupi_chord),
               ylim = c(0, max_mupi_chord)) +
   labs(
-    x = "Weighted chord basin drift: mu chain",
-    y = "Weighted chord basin drift: pi chain",
-    title = "How much does each annotation mechanism move the model? (cold treatment vs warm-vanilla refit)",
-    subtitle = "Left: cold treatment fit (exploration). Right: warm-vanilla refit (basin retention). y=x line marks equal mu/pi drift."
+    x = expression(paste("Basin chord drift on mu chain  ",
+                          italic(D)["chord"],
+                          "(vanilla, mu_0 arm)")),
+    y = expression(paste("Basin chord drift on pi chain  ",
+                          italic(D)["chord"],
+                          "(vanilla, pi arm)")),
+    title = "Basin movement asymmetry: signed mu_0 vs unsigned pi annotation channels",
+    subtitle = "Each point is one of 600 datasets. Below y=x: pi moved the basin less than mu. Left facet: cold annotated fit (did the prior pull IBSS off vanilla's basin?). Right facet: warm-vanilla refit (did the new basin survive prior removal?)."
   )
 
 ggsave(mu_vs_pi_drift_png, p_mupi, width = 11, height = 5.5, dpi = 150)
@@ -1361,12 +1396,12 @@ plot_density_shift_chain <- function(density_df, chain_value, out_path,
                     expand = FALSE) +
     labs(
       x = x_label, y = y_label,
-      fill = "destination - source\nPVE-weighted density",
+      fill = "destination minus source\n(PVE-weighted density)",
       title = sprintf(
-        "Effect-quality density shifts along the %s refit chain (pooled effects)",
+        "Per-effect quality shifts along the %s refit chain (effects pooled, weighted by PVE)",
         chain_value
       ),
-      subtitle = "Red: higher destination density; blue: higher source density. Shared fill scale across mu/pi for cross-chain comparison."
+      subtitle = "Red: effects accumulating at this (diffuseness, accuracy). Blue: effects vacating it. Top-left = peaked + accurate; bottom-right = diffuse + inaccurate. Shared fill scale across mu and pi panels."
     ) +
     theme(legend.position = "right")
 
@@ -1611,15 +1646,16 @@ p_pr <- ggplot(pr_curve_df,
   ) +
   coord_cartesian(xlim = c(0, 1), ylim = c(0, 1)) +
   labs(
-    x = "Recall", y = "Precision", color = "Method (pooled AUPRC)",
+    x = "Recall",
+    y = "Precision",
+    color = "Method (pooled AUPRC)",
     title = sprintf(
-      "Pooled precision-recall across all %d datasets (top-%d by |beta|)",
-      length(unique(pooled_df$dataset_bundle_id)), pr_top_k
+      "Pooled precision-recall across %d datasets at the AlphaGenome calibration regime",
+      length(unique(pooled_df$dataset_bundle_id))
     ),
     subtitle = sprintf(
-      "Polygenic-tier causals excluded from negatives. Pooled across %d (dataset, variant) per method. Prevalence = %.4f.",
-      max(table(pooled_df$dataset_bundle_id, pooled_df$model_method)),
-      prevalence
+      "Positives = top %d causal SNPs by |beta| per dataset (sparse + oligogenic tiers); polygenic tier excluded from negatives. Prevalence = %.4f. Dashed line = random-classifier baseline.",
+      pr_top_k, prevalence
     )
   ) +
   theme(legend.position = "right")
@@ -1653,15 +1689,18 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
   }
 
   panel_A <- strip_chrome(p_pr) +
-    labs(title = "A. Pooled precision-recall (top-8 by |beta|), 5 arms, 600 datasets")
+    labs(title = paste0(
+      "A. Pooled precision-recall on top-", pr_top_k,
+      " causal SNPs (5 arms, 600 datasets)"
+    ))
   panel_B <- strip_chrome(p_mupi) +
-    labs(title = "B. Basin drift: mu vs pi (cold treatment vs warm-vanilla refit)")
+    labs(title = "B. Per-dataset basin chord drift: mu chain vs pi chain")
   panel_C <- strip_chrome(p_headline) +
-    labs(title = "C. Refinement vs exploration: warm-vanilla DAUPRC vs basin drift")
+    labs(title = "C. AUPRC change vs basin chord drift, by chain and arm")
   panel_D <- strip_chrome(p_effect_density_mu) +
-    labs(title = "D. Effect-quality density shifts along the mu refit chain")
+    labs(title = "D. Per-effect joint-density shifts along the mu refit chain")
   panel_E <- strip_chrome(p_effect_density_pi) +
-    labs(title = "E. Effect-quality density shifts along the pi refit chain")
+    labs(title = "E. Per-effect joint-density shifts along the pi refit chain")
 
   combined_fig <- panel_A / panel_B / panel_C / panel_D / panel_E +
     plot_layout(heights = c(1.0, 1.05, 1.05, 0.95, 0.95)) &
