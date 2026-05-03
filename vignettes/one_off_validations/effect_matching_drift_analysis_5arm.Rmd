@@ -172,6 +172,16 @@ paper_figure_r2_png <- file.path(
   plot_dir, "paper_figure_effect_drift_r2.png"
 )
 
+# Basin-drift-vs-PIP-JSD scatter, one figure per basin metric. Each figure
+# is a 2 x 2 grid: rows = chain (mu/pi), columns = pair_kind (cold->ann /
+# cold->warm). x = basin drift, y = PIP JSD.
+basin_vs_pip_jsd_chord_png <- file.path(
+  plot_dir, "basin_vs_pip_jsd_chord.png"
+)
+basin_vs_pip_jsd_r2_png <- file.path(
+  plot_dir, "basin_vs_pip_jsd_r2.png"
+)
+
 # Number of causals counted as positives in pooled PR scoring (top-K by
 # |beta| per dataset). This matches the baseline simulation study, which
 # uses the top 8 = 3 sparse + 5 oligogenic tier of the SuSiE 2.0
@@ -1272,7 +1282,150 @@ if (requireNamespace("patchwork", quietly = TRUE)) {
 }
 ```
 
-# 13. Master Drift, PIP, and AUPRC Summary Figure
+# 13. Basin Drift vs PIP JSD Scatter
+
+For each (chain, pair_kind) combination, plot per-dataset basin drift on
+the x-axis against PIP JSD on the y-axis. Reveals the joint distribution
+of the explanatory and causal axes: a tight diagonal => fitted-y movement
+and PIP redistribution co-occur; off-diagonal points expose datasets
+where one axis moves without the other. 2 x 2 grid: rows = chain
+(mu top, pi bottom), columns = pair_kind (cold->annotated left,
+cold->warm right). Produced separately for the chord and 1 - r^2
+versions of the basin metric.
+
+```{r basin-vs-pip-jsd-chord, fig.width=11, fig.height=10}
+basin_jsd_data <- basin_pip_join %>%
+  dplyr::filter(.data$pair_kind %in% c("vanilla_to_treatment",
+                                        "vanilla_to_warm")) %>%
+  dplyr::mutate(
+    pair_kind = factor(
+      .data$pair_kind,
+      levels = c("vanilla_to_treatment", "vanilla_to_warm"),
+      labels = c("vanilla -> annotated", "vanilla -> vanilla_warm")
+    ),
+    chain = factor(.data$chain, levels = c("mu", "pi"))
+  )
+
+# Per-axis caps shared across all 4 panels for fair comparison.
+chord_drift_max <- max(0.05,
+  max(basin_jsd_data$weighted_chord_drift, na.rm = TRUE)
+)
+r2_drift_max <- max(0.05,
+  max(basin_jsd_data$weighted_r2_drift, na.rm = TRUE)
+)
+jsd_drift_max <- max(0.05,
+  max(basin_jsd_data$pip_jsd, na.rm = TRUE)
+)
+
+chain_color <- c(mu = "#2b8cbe", pi = "#74c476")
+
+make_basin_jsd_panel <- function(df, chain_val, pair_kind_val, drift_col,
+                                  drift_label, drift_max, jsd_max) {
+  d <- df %>% dplyr::filter(
+    .data$chain == chain_val,
+    .data$pair_kind == pair_kind_val
+  )
+  rho_val <- suppressWarnings(stats::cor(
+    d[[drift_col]], d$pip_jsd,
+    method = "spearman", use = "pairwise.complete.obs"
+  ))
+  rho_label <- sprintf("rho_s = %.3f (n=%d)",
+                       rho_val, sum(is.finite(d[[drift_col]] * d$pip_jsd)))
+  ggplot(d, aes(x = .data[[drift_col]], y = .data$pip_jsd)) +
+    geom_point(alpha = 0.5, size = 1.0, color = chain_color[[chain_val]]) +
+    geom_smooth(method = "loess", formula = y ~ x, se = FALSE,
+                color = "grey25", linetype = "dashed", linewidth = 0.5) +
+    annotate("text", x = -Inf, y = Inf, hjust = -0.05, vjust = 1.4,
+             label = rho_label, size = 3.3) +
+    scale_x_continuous(limits = c(0, drift_max)) +
+    scale_y_continuous(limits = c(0, jsd_max)) +
+    labs(
+      x = drift_label,
+      y = "PIP JSD",
+      title = paste0(chain_val, " chain: ", pair_kind_val)
+    ) +
+    theme(plot.title = element_text(size = 11))
+}
+
+p_bj_mu_cold <- make_basin_jsd_panel(
+  basin_jsd_data, "mu", "vanilla -> annotated",
+  "weighted_chord_drift", "Basin chord drift",
+  chord_drift_max, jsd_drift_max
+)
+p_bj_mu_warm <- make_basin_jsd_panel(
+  basin_jsd_data, "mu", "vanilla -> vanilla_warm",
+  "weighted_chord_drift", "Basin chord drift",
+  chord_drift_max, jsd_drift_max
+)
+p_bj_pi_cold <- make_basin_jsd_panel(
+  basin_jsd_data, "pi", "vanilla -> annotated",
+  "weighted_chord_drift", "Basin chord drift",
+  chord_drift_max, jsd_drift_max
+)
+p_bj_pi_warm <- make_basin_jsd_panel(
+  basin_jsd_data, "pi", "vanilla -> vanilla_warm",
+  "weighted_chord_drift", "Basin chord drift",
+  chord_drift_max, jsd_drift_max
+)
+
+if (requireNamespace("patchwork", quietly = TRUE)) {
+  library(patchwork)
+  p_basin_jsd_chord <-
+    (p_bj_mu_cold | p_bj_mu_warm) /
+    (p_bj_pi_cold | p_bj_pi_warm) +
+    plot_annotation(
+      title = "Basin chord drift vs PIP JSD, per (chain, pair_kind)",
+      subtitle = "Each point is one of 600 datasets. x: weighted Hungarian chord distance between matched fitted-y components. y: PIP JSD between model-wide PIP vectors. Dashed line: per-panel loess. Tight diagonal => explanatory and causal axes co-move."
+    )
+  ggsave(basin_vs_pip_jsd_chord_png, p_basin_jsd_chord,
+         width = 11, height = 10, dpi = 150)
+  print(p_basin_jsd_chord)
+} else {
+  warning("patchwork not installed; skipping basin-vs-jsd figure (chord). install.packages('patchwork').")
+}
+```
+
+```{r basin-vs-pip-jsd-r2, fig.width=11, fig.height=10}
+# 1 - r^2 sibling. Same data, x-axis is the principal-angle-based metric.
+p_bj_mu_cold_r2 <- make_basin_jsd_panel(
+  basin_jsd_data, "mu", "vanilla -> annotated",
+  "weighted_r2_drift", "Basin (1 - r^2) drift",
+  r2_drift_max, jsd_drift_max
+)
+p_bj_mu_warm_r2 <- make_basin_jsd_panel(
+  basin_jsd_data, "mu", "vanilla -> vanilla_warm",
+  "weighted_r2_drift", "Basin (1 - r^2) drift",
+  r2_drift_max, jsd_drift_max
+)
+p_bj_pi_cold_r2 <- make_basin_jsd_panel(
+  basin_jsd_data, "pi", "vanilla -> annotated",
+  "weighted_r2_drift", "Basin (1 - r^2) drift",
+  r2_drift_max, jsd_drift_max
+)
+p_bj_pi_warm_r2 <- make_basin_jsd_panel(
+  basin_jsd_data, "pi", "vanilla -> vanilla_warm",
+  "weighted_r2_drift", "Basin (1 - r^2) drift",
+  r2_drift_max, jsd_drift_max
+)
+
+if (requireNamespace("patchwork", quietly = TRUE)) {
+  library(patchwork)
+  p_basin_jsd_r2 <-
+    (p_bj_mu_cold_r2 | p_bj_mu_warm_r2) /
+    (p_bj_pi_cold_r2 | p_bj_pi_warm_r2) +
+    plot_annotation(
+      title = "Basin (1 - r^2) drift vs PIP JSD, per (chain, pair_kind)",
+      subtitle = "Same data as the chord version, x-axis swapped to 1 - r^2 = sin^2(theta) of the principal angle between matched 1D fitted-y subspaces."
+    )
+  ggsave(basin_vs_pip_jsd_r2_png, p_basin_jsd_r2,
+         width = 11, height = 10, dpi = 150)
+  print(p_basin_jsd_r2)
+} else {
+  warning("patchwork not installed; skipping basin-vs-jsd figure (1 - r^2). install.packages('patchwork').")
+}
+```
+
+# 14. Master Drift, PIP, and AUPRC Summary Figure
 
 Three metrics x three comparisons. mu and pi are overlaid in each subplot.
 
@@ -1449,7 +1602,7 @@ ggsave(basin_pip_drift_r2_png, p_master_r2,
 print(p_master_r2)
 ```
 
-# 14. Pooled Effect-Quality Density Shifts
+# 15. Pooled Effect-Quality Density Shifts
 
 For each chain and comparison, the joint (effective k, accuracy ratio)
 density of all effects is estimated by a 2D PVE-weighted KDE separately
@@ -1715,7 +1868,7 @@ print(p_effect_density_mu)
 print(p_effect_density_pi)
 ```
 
-# 15. Pooled Precision-Recall Curves
+# 16. Pooled Precision-Recall Curves
 
 Pooled precision-recall curves across all 600 datasets for the 5 arms
 (vanilla, mu, pi, vanilla_warm_from_mu, vanilla_warm_from_pi). Inputs are
@@ -1960,7 +2113,7 @@ ggsave(pr_curves_pooled_png, p_pr, width = 9, height = 6, dpi = 150)
 print(p_pr)
 ```
 
-# 16. Combined Paper Figure
+# 17. Combined Paper Figure
 
 A single full-width figure that walks the reader from the headline
 performance result (PR curves) down through the drift mechanics and the
@@ -2060,7 +2213,7 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
 }
 ```
 
-# 17. Outputs
+# 18. Outputs
 
 ```{r output-index}
 outputs <- tibble::tibble(
@@ -2075,6 +2228,8 @@ outputs <- tibble::tibble(
     "unpaired-count vs AUPRC delta scatter",
     "mu vs pi drift comparison: chord + JSD (4-panel)",
     "mu vs pi drift comparison: 1 - r^2 + JSD (4-panel)",
+    "basin chord drift vs PIP JSD scatter (2x2 by chain x pair_kind)",
+    "basin (1 - r^2) drift vs PIP JSD scatter (2x2 by chain x pair_kind)",
     "per-dataset PIP JSD summary",
     "master basin + PIP + AUPRC drift figure (chord)",
     "master basin + PIP + AUPRC drift figure (1 - r^2)",
@@ -2098,6 +2253,8 @@ outputs <- tibble::tibble(
     unpaired_vs_delta_png,
     mu_vs_pi_drift_png,
     mu_vs_pi_drift_r2_png,
+    basin_vs_pip_jsd_chord_png,
+    basin_vs_pip_jsd_r2_png,
     pip_drift_summary_csv,
     basin_pip_drift_png,
     basin_pip_drift_r2_png,
