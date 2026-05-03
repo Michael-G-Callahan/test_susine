@@ -2234,9 +2234,17 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
   basin_color_max <- max(joined_pf$basin_mu, na.rm = TRUE)
   jsd_color_max   <- max(joined_pf$jsd_mu,   na.rm = TRUE)
 
-  # Sub-panel builder. Color scale is linear (no log); endpoint labels
-  # carry the intuition ("no change" -> "most change") so the reader
-  # doesn't need to interpret raw numeric values from the legend bar.
+  # Sub-panel builder. Color uses pseudo-log transform (JSD and basin
+  # drift are both heavy-tailed near zero, so log gives the bulk of
+  # points more color resolution). Endpoint labels carry the intuition
+  # ("no change" -> "most change") so the reader doesn't need to read
+  # raw values off the legend bar.
+  #
+  # We use coord_cartesian + theme(aspect.ratio = 1) instead of
+  # coord_fixed so that ALL four sub-panels render at the same on-screen
+  # size regardless of their axis ranges (basin range [0, 0.8] vs JSD
+  # range [0, 1.7] previously caused patchwork to allocate different
+  # widths to each pair).
   make_b_panel <- function(df, x_col, y_col, color_col,
                            x_label, y_label, color_title, title_lab,
                            color_lim_max, max_val) {
@@ -2247,6 +2255,7 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
       geom_point(alpha = 0.5, size = 1.0) +
       scale_color_viridis_c(
         option = "C",
+        trans = scales::pseudo_log_trans(sigma = 0.005),
         limits = c(0, color_lim_max),
         breaks = c(0, color_lim_max),
         labels = c("no change", "most change"),
@@ -2258,10 +2267,12 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
           direction = "horizontal"
         )
       ) +
-      coord_fixed(xlim = c(0, max_val), ylim = c(0, max_val)) +
+      coord_cartesian(xlim = c(0, max_val), ylim = c(0, max_val),
+                      expand = TRUE) +
       labs(x = x_label, y = y_label, color = color_title,
            title = title_lab) +
-      theme(plot.title = element_text(size = 10))
+      theme(plot.title = element_text(size = 10),
+            aspect.ratio = 1)
   }
 
   joined_pf_cold_ann  <- joined_pf %>% dplyr::filter(pair_kind == "cold_ann")
@@ -2313,8 +2324,9 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
           legend.title     = element_text(size = 10),
           legend.text      = element_text(size = 9))
 
-  panel_B <- patchwork::wrap_elements(full = basin_pair) |
-             patchwork::wrap_elements(full = jsd_pair)
+  panel_B <- (patchwork::wrap_elements(full = basin_pair) |
+              patchwork::wrap_elements(full = jsd_pair)) +
+             plot_layout(widths = c(1, 1))
 
   # ============================================================
   # PANEL C. dAUPRC boxplots by 3-bucket basin-drift cut
