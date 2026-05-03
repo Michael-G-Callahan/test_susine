@@ -2125,14 +2125,18 @@ titles/subtitles so the paper caption can carry the framing.
 #
 #   A. Pooled PR curves (5 arms, top-K causals)
 #   B. Mu vs pi scatters with cross-axis coloring (4 sub-panels):
-#        B1: basin drift cold->ann,  colored by mu PIP JSD (cold->ann, log)
-#        B2: basin drift cold->warm, colored by mu PIP JSD (cold->warm, log)
-#        B3: PIP JSD cold->ann,      colored by mu basin drift (cold->ann)
-#        B4: PIP JSD cold->warm,     colored by mu basin drift (cold->warm)
-#      Each sub-panel matches its contrast in the coloring (cold->ann scatters
-#      use cold->ann coloring; cold->warm scatters use cold->warm coloring).
-#   C. Density of dAUPRC by 3-bucket basin-drift cut (<0.05 / 0.05-0.1 / >=0.1),
-#      faceted chain x pair_kind. Replaces the previous scatter version.
+#        B(i):  basin drift cold->ann,  colored by mu PIP JSD (cold->ann)
+#        B(ii): basin drift cold->warm, colored by mu PIP JSD (cold->warm)
+#        B(iii): PIP JSD cold->ann,     colored by mu basin drift (cold->ann)
+#        B(iv): PIP JSD cold->warm,     colored by mu basin drift (cold->warm)
+#      Coloring is on a linear viridis scale (no log). The four sub-panels
+#      are grouped as two pairs (basin row | JSD row), each pair sharing
+#      a single horizontal colorbar legend below the pair so the
+#      individual scatters can use their full width.
+#   C. Boxplots of dAUPRC by 3-bucket basin-drift cut (<0.05 / 0.05-0.10
+#      / >=0.10), faceted chain x pair_kind. Per-cell n annotated above
+#      each box. Boxplots (not densities) chosen because the high-drift
+#      bucket has only ~10-25 datasets per cell.
 #   D. Per-effect quality shifts on the (K_l, A_l) plane, 2 chains x 2
 #      contrasts (cold->ann, cold->warm). Drops the annotated->warm
 #      intermediate. Mu and pi shown side-by-side so the reader can
@@ -2145,6 +2149,23 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
   )
 } else {
   library(patchwork)
+
+  # Greek-symbol shortcuts to keep label code tight.
+  expr_basin_x <- expression(paste("Basin drift (", mu, ")"))
+  expr_basin_y <- expression(paste("Basin drift (", pi, ")"))
+  expr_jsd_x   <- expression(paste("PIP JSD (", mu, ")"))
+  expr_jsd_y   <- expression(paste("PIP JSD (", pi, ")"))
+  expr_dauprc  <- expression(paste(Delta, "AUPRC vs cold vanilla"))
+
+  # Common labellers (chain rows, pair_kind cols) used in C and D.
+  chain_labeller <- c(
+    mu = "μ chain (signed prior mean, μ₀)",
+    pi = "π chain (unsigned inclusion log-odds)"
+  )
+  pair_kind_labeller <- c(
+    "cold -> annotated"    = "Cold annotated fit (treatment)",
+    "cold -> vanilla_warm" = "Warm-vanilla refit (durability check)"
+  )
 
   # ============================================================
   # PANEL A. PR curves (existing p_pr)
@@ -2201,75 +2222,102 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
   joined_pf <- basin_wide_pf %>%
     dplyr::inner_join(jsd_wide_pf, by = c("dataset_bundle_id", "pair_kind"))
 
+  # Axis maxes (square plots, both chains share scale).
   basin_max_pf <- max(0.05,
     max(joined_pf$basin_mu, joined_pf$basin_pi, na.rm = TRUE))
   jsd_max_pf <- max(0.05,
     max(joined_pf$jsd_mu, joined_pf$jsd_pi, na.rm = TRUE))
 
-  # Panel B sub-panel builder. `color_log` = TRUE applies a pseudo-log
-  # color scale (handles JSD which is heavy-tailed and non-negative).
+  # Color limits (must match within each pair so the collected legend is
+  # consistent). Color uses mu-side values across BOTH cold->ann and
+  # cold->warm subsets, so we take the max across the full joined table.
+  basin_color_max <- max(joined_pf$basin_mu, na.rm = TRUE)
+  jsd_color_max   <- max(joined_pf$jsd_mu,   na.rm = TRUE)
+
+  # Sub-panel builder. Color scale is linear (no log); endpoint labels
+  # carry the intuition ("no change" -> "most change") so the reader
+  # doesn't need to interpret raw numeric values from the legend bar.
   make_b_panel <- function(df, x_col, y_col, color_col,
-                           x_label, y_label, color_label, title_lab,
-                           color_log, max_val) {
-    p <- ggplot(df, aes(x = .data[[x_col]], y = .data[[y_col]],
-                        color = .data[[color_col]])) +
+                           x_label, y_label, color_title, title_lab,
+                           color_lim_max, max_val) {
+    ggplot(df, aes(x = .data[[x_col]], y = .data[[y_col]],
+                   color = .data[[color_col]])) +
       geom_abline(slope = 1, intercept = 0,
                   color = "grey45", linetype = "dashed") +
-      geom_point(alpha = 0.5, size = 1.0)
-    if (color_log) {
-      p <- p + scale_color_viridis_c(
+      geom_point(alpha = 0.5, size = 1.0) +
+      scale_color_viridis_c(
         option = "C",
-        trans = scales::pseudo_log_trans(sigma = 0.005),
-        breaks = c(0, 0.01, 0.1, 1, 10),
-        labels = function(b) sprintf("%g", b)
-      )
-    } else {
-      p <- p + scale_color_viridis_c(option = "C")
-    }
-    p +
+        limits = c(0, color_lim_max),
+        breaks = c(0, color_lim_max),
+        labels = c("no change", "most change"),
+        guide = guide_colorbar(
+          title.position = "top",
+          title.hjust = 0.5,
+          barwidth  = grid::unit(7, "cm"),
+          barheight = grid::unit(0.35, "cm"),
+          direction = "horizontal"
+        )
+      ) +
       coord_fixed(xlim = c(0, max_val), ylim = c(0, max_val)) +
-      labs(x = x_label, y = y_label, color = color_label, title = title_lab) +
-      theme(plot.title = element_text(size = 10),
-            legend.position = "right",
-            legend.key.height = grid::unit(0.4, "cm"))
+      labs(x = x_label, y = y_label, color = color_title,
+           title = title_lab) +
+      theme(plot.title = element_text(size = 10))
   }
 
   joined_pf_cold_ann  <- joined_pf %>% dplyr::filter(pair_kind == "cold_ann")
   joined_pf_cold_warm <- joined_pf %>% dplyr::filter(pair_kind == "cold_warm")
 
+  # Color title is shared across each pair via plot_layout(guides="collect").
+  basin_color_title <- expression(paste("PIP JSD (", mu, ")"))
+  jsd_color_title   <- expression(paste("Basin drift (", mu, ")"))
+
   pB1 <- make_b_panel(
     joined_pf_cold_ann, "basin_mu", "basin_pi", "jsd_mu",
-    "Basin drift (mu)", "Basin drift (pi)",
-    "PIP JSD (mu)\npseudo-log",
-    "B(i). Basin drift, cold -> annotated",
-    color_log = TRUE, max_val = basin_max_pf
+    expr_basin_x, expr_basin_y, basin_color_title,
+    "B(i). Basin drift, cold → annotated",
+    color_lim_max = jsd_color_max, max_val = basin_max_pf
   )
   pB2 <- make_b_panel(
     joined_pf_cold_warm, "basin_mu", "basin_pi", "jsd_mu",
-    "Basin drift (mu)", "Basin drift (pi)",
-    "PIP JSD (mu)\npseudo-log",
-    "B(ii). Basin drift, cold -> vanilla_warm",
-    color_log = TRUE, max_val = basin_max_pf
+    expr_basin_x, expr_basin_y, basin_color_title,
+    "B(ii). Basin drift, cold → vanilla_warm",
+    color_lim_max = jsd_color_max, max_val = basin_max_pf
   )
   pB3 <- make_b_panel(
     joined_pf_cold_ann, "jsd_mu", "jsd_pi", "basin_mu",
-    "PIP JSD (mu)", "PIP JSD (pi)",
-    "Basin drift\n(mu)",
-    "B(iii). PIP JSD, cold -> annotated",
-    color_log = FALSE, max_val = jsd_max_pf
+    expr_jsd_x, expr_jsd_y, jsd_color_title,
+    "B(iii). PIP JSD, cold → annotated",
+    color_lim_max = basin_color_max, max_val = jsd_max_pf
   )
   pB4 <- make_b_panel(
     joined_pf_cold_warm, "jsd_mu", "jsd_pi", "basin_mu",
-    "PIP JSD (mu)", "PIP JSD (pi)",
-    "Basin drift\n(mu)",
-    "B(iv). PIP JSD, cold -> vanilla_warm",
-    color_log = FALSE, max_val = jsd_max_pf
+    expr_jsd_x, expr_jsd_y, jsd_color_title,
+    "B(iv). PIP JSD, cold → vanilla_warm",
+    color_lim_max = basin_color_max, max_val = jsd_max_pf
   )
 
-  panel_B <- pB1 + pB2 + pB3 + pB4 + plot_layout(nrow = 1)
+  # Two sub-pairs each collecting their own legend horizontally below.
+  basin_pair <- (pB1 | pB2) +
+    plot_layout(guides = "collect") &
+    theme(legend.position  = "bottom",
+          legend.direction = "horizontal",
+          legend.box       = "horizontal",
+          legend.title     = element_text(size = 10),
+          legend.text      = element_text(size = 9))
+
+  jsd_pair <- (pB3 | pB4) +
+    plot_layout(guides = "collect") &
+    theme(legend.position  = "bottom",
+          legend.direction = "horizontal",
+          legend.box       = "horizontal",
+          legend.title     = element_text(size = 10),
+          legend.text      = element_text(size = 9))
+
+  panel_B <- patchwork::wrap_elements(full = basin_pair) |
+             patchwork::wrap_elements(full = jsd_pair)
 
   # ============================================================
-  # PANEL C. dAUPRC density by 3-bucket basin-drift cut
+  # PANEL C. dAUPRC boxplots by 3-bucket basin-drift cut
   # ============================================================
   auprc_lookup_pf <- auprc_per_dataset %>%
     dplyr::transmute(
@@ -2304,38 +2352,44 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
     ) %>%
     dplyr::filter(is.finite(.data$auprc_delta), !is.na(.data$drift_bucket))
 
+  # Per-cell counts for n=X annotations above each box.
   bucket_counts <- panel_C_long %>%
-    dplyr::count(.data$chain, .data$pair_kind, .data$drift_bucket) %>%
-    dplyr::mutate(label = sprintf("%s (n=%d)", .data$drift_bucket, .data$n))
+    dplyr::count(.data$chain, .data$pair_kind, .data$drift_bucket)
+  y_top <- max(panel_C_long$auprc_delta, na.rm = TRUE) * 1.08
 
   panel_C <- ggplot(
     panel_C_long,
-    aes(x = .data$auprc_delta,
-        color = .data$drift_bucket,
+    aes(x = .data$drift_bucket,
+        y = .data$auprc_delta,
         fill = .data$drift_bucket)
   ) +
-    geom_density(alpha = 0.30, linewidth = 0.6) +
-    geom_vline(xintercept = 0, color = "grey45", linetype = "dashed") +
-    facet_grid(chain ~ pair_kind, scales = "free_y") +
-    scale_color_manual(values = c(
-      "low (<0.05)"     = "#878787",
-      "mid (0.05-0.10)" = "#fd8d3c",
-      "high (>=0.10)"   = "#a50f15"
-    )) +
+    geom_hline(yintercept = 0, color = "grey45", linetype = "dashed") +
+    geom_boxplot(alpha = 0.65, outlier.size = 0.6, width = 0.65) +
+    geom_text(
+      data = bucket_counts,
+      aes(x = .data$drift_bucket, y = y_top,
+          label = sprintf("n=%d", .data$n)),
+      inherit.aes = FALSE, size = 3.0, color = "grey25"
+    ) +
+    facet_grid(
+      chain ~ pair_kind,
+      labeller = labeller(chain = chain_labeller,
+                          pair_kind = pair_kind_labeller)
+    ) +
     scale_fill_manual(values = c(
       "low (<0.05)"     = "#878787",
       "mid (0.05-0.10)" = "#fd8d3c",
       "high (>=0.10)"   = "#a50f15"
     )) +
     labs(
-      x = expression(paste(Delta, "AUPRC vs cold vanilla")),
-      y = "Density",
-      color = "Basin drift bucket",
-      fill = "Basin drift bucket",
-      title = "C. Density of dAUPRC by basin-drift bucket (3-bucket cut at 0.05 / 0.10)"
+      x = "Basin drift bucket",
+      y = expr_dauprc,
+      fill = "Basin drift",
+      title = "C. ΔAUPRC by basin-drift bucket (3-bucket cut at 0.05 / 0.10)"
     ) +
     theme(plot.title = element_text(size = 11),
-          legend.position = "right")
+          legend.position = "right",
+          axis.text.x = element_text(angle = 0, hjust = 0.5))
 
   # ============================================================
   # PANEL D. Per-effect (K_l, A_l) density shifts: 2 x 2
@@ -2360,7 +2414,11 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
     geom_raster(interpolate = TRUE) +
     geom_contour(aes(z = .data$density_diff),
                  color = "grey20", alpha = 0.45, linewidth = 0.18) +
-    facet_grid(chain ~ comparison_kind) +
+    facet_grid(
+      chain ~ comparison_kind,
+      labeller = labeller(chain = chain_labeller,
+                          comparison_kind = pair_kind_labeller)
+    ) +
     scale_fill_gradient2(
       low = "#2b6cb0", mid = "white", high = "#c53030",
       midpoint = 0, limits = c(-shared_fill_lim, shared_fill_lim),
@@ -2373,7 +2431,7 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
     labs(
       x = x_label, y = y_label,
       fill = "destination - source\n(PVE-weighted density)",
-      title = "D. Per-effect quality shifts on the (K_l, A_l) plane"
+      title = "D. Per-effect quality shifts on the (Kℓ, Aℓ) plane"
     ) +
     theme(plot.title = element_text(size = 11),
           legend.position = "right")
@@ -2382,7 +2440,7 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
   # Assemble
   # ============================================================
   combined_fig <- panel_A / panel_B / panel_C / panel_D +
-    plot_layout(heights = c(0.7, 1.0, 1.0, 1.1)) &
+    plot_layout(heights = c(0.7, 1.1, 1.0, 1.1)) &
     theme(plot.title = element_text(face = "bold", size = 12))
 
   ggsave(
