@@ -30,10 +30,15 @@ mu chain:                              pi chain:
 3. Record all `L` assignment correlations.
 4. Derive per-pair summaries: `mean_corr`, `min_corr`, `n_below_0p9`
    (count of assignment edges with correlation < 0.9), legacy
-   `weighted_drift` (`1 - corr`), and the main basin-drift metric
-   `weighted_chord_drift` (`sqrt(2 * (1 - corr))`), with both weighted
-   by `min(var_y_explained_A_i, var_y_explained_B_j)` so inactive pairs
-   contribute little.
+   `weighted_drift` (`1 - corr`), `weighted_chord_drift`
+   (`sqrt(2 * (1 - corr))`, geometric L2 distance between unit-normalized
+   fitted-y vectors), and `weighted_r2_drift` (`1 - corr^2`,
+   `sin^2(theta)` between matched 1D fitted-y subspaces, the explanatory-
+   subspace residual variance). All weighted by
+   `min(var_y_explained_A_i, var_y_explained_B_j)` so inactive pairs
+   contribute little. Downstream plots are produced in parallel for the
+   chord and 1 - r^2 versions; see the `_r2.png` siblings of the basin
+   figures.
 
 This drift framework + AUPRC trajectory operationalizes the
 **refinement-vs-exploration test**:
@@ -151,6 +156,22 @@ pr_curves_pooled_png <- file.path(plot_dir, "pr_curves_pooled_top8.png")
 pr_curves_pooled_csv <- file.path(study_dir, "pr_curves_pooled_top8_5arm.csv")
 paper_figure_png <- file.path(plot_dir, "paper_figure_effect_drift.png")
 
+# Parallel outputs for the 1 - r^2 ("explanatory subspace distance") version
+# of the basin-drift metric. The chord and r2 versions consume the same
+# drift_summary table; only the column read and the axis labels differ.
+headline_scatter_r2_png <- file.path(
+  plot_dir, "headline_drift_vs_warm_auprc_r2.png"
+)
+mu_vs_pi_drift_r2_png <- file.path(
+  plot_dir, "mu_vs_pi_drift_comparison_r2.png"
+)
+basin_pip_drift_r2_png <- file.path(
+  plot_dir, "basin_and_pip_drift_summary_r2.png"
+)
+paper_figure_r2_png <- file.path(
+  plot_dir, "paper_figure_effect_drift_r2.png"
+)
+
 # Number of causals counted as positives in pooled PR scoring (top-K by
 # |beta| per dataset). This matches the baseline simulation study, which
 # uses the top 8 = 3 sparse + 5 oligogenic tier of the SuSiE 2.0
@@ -210,6 +231,14 @@ safe_corr <- function(x) {
 
 chord_distance <- function(corr) {
   sqrt(pmax(0, 2 * (1 - safe_corr(corr))))
+}
+
+# 1 - r^2 distance: residual variance after linear projection (sin^2 of the
+# principal angle between the two 1D fitted_y subspaces). Bounded in [0, 1],
+# so 0.95 -> 0.0975 ("near-identical basis") and 0.5 -> 0.75 ("most of the
+# way to a fully different basis"). See methods write-up.
+r2_distance <- function(corr) {
+  1 - safe_corr(corr)^2
 }
 
 # Stack effect rows for one (dataset, model) into an n x L matrix of
@@ -345,6 +374,17 @@ summarize_drift <- function(edges_df, drift_corr_cutoff, active_var_threshold) {
         )
         if (sum(w) > 0) {
           sum(w * chord_distance(.data$corr), na.rm = TRUE) / sum(w)
+        } else {
+          NA_real_
+        }
+      },
+      weighted_r2_drift = {
+        w <- pmin(
+          tidyr::replace_na(.data$var_y_explained_a, 0),
+          tidyr::replace_na(.data$var_y_explained_b, 0)
+        )
+        if (sum(w) > 0) {
+          sum(w * r2_distance(.data$corr), na.rm = TRUE) / sum(w)
         } else {
           NA_real_
         }
@@ -707,6 +747,94 @@ ggsave(headline_scatter_png, p_headline, width = 12, height = 5.5, dpi = 150)
 print(p_headline)
 ```
 
+```{r headline-scatter-r2, fig.width=12, fig.height=5.5}
+# 1 - r^2 sibling of the headline scatter. Same shape, same data sources;
+# only the basin metric column and the axis label change.
+headline_long_r2 <- dplyr::bind_rows(
+  drift_summary %>%
+    dplyr::filter(.data$pair_id == "vanilla__vanilla_warm_from_mu") %>%
+    dplyr::transmute(
+      dataset_bundle_id = .data$dataset_bundle_id,
+      chain = "mu",
+      basin_drift = .data$weighted_r2_drift
+    ) %>%
+    dplyr::left_join(
+      auprc_per_dataset %>%
+        dplyr::transmute(
+          dataset_bundle_id = .data$dataset_bundle_id,
+          delta_auprc_treatment = .data$auprc_delta_mu,
+          delta_auprc_warm = .data$auprc_delta_warm_mu_vs_vanilla
+        ),
+      by = "dataset_bundle_id"
+    ),
+  drift_summary %>%
+    dplyr::filter(.data$pair_id == "vanilla__vanilla_warm_from_pi") %>%
+    dplyr::transmute(
+      dataset_bundle_id = .data$dataset_bundle_id,
+      chain = "pi",
+      basin_drift = .data$weighted_r2_drift
+    ) %>%
+    dplyr::left_join(
+      auprc_per_dataset %>%
+        dplyr::transmute(
+          dataset_bundle_id = .data$dataset_bundle_id,
+          delta_auprc_treatment = .data$auprc_delta_pi,
+          delta_auprc_warm = .data$auprc_delta_warm_pi_vs_vanilla
+        ),
+      by = "dataset_bundle_id"
+    )
+) %>%
+  tidyr::pivot_longer(
+    cols = c("delta_auprc_treatment", "delta_auprc_warm"),
+    names_to = "delta_kind",
+    values_to = "delta_auprc"
+  ) %>%
+  dplyr::mutate(
+    delta_kind = factor(
+      .data$delta_kind,
+      levels = c("delta_auprc_treatment", "delta_auprc_warm"),
+      labels = c(
+        "DAUPRC(annotated cold) - vanilla",
+        "DAUPRC(vanilla, warm refit) - vanilla"
+      )
+    ),
+    chain = factor(.data$chain, levels = c("mu", "pi"))
+  )
+
+headline_max_drift_r2 <- max(0.05,
+                              max(headline_long_r2$basin_drift, na.rm = TRUE))
+
+p_headline_r2 <- ggplot(
+  headline_long_r2,
+  aes(x = .data$basin_drift, y = .data$delta_auprc, color = .data$chain)
+) +
+  geom_hline(yintercept = 0, color = "grey45", linetype = "dashed") +
+  geom_point(alpha = 0.5, size = 1.2) +
+  scale_color_manual(
+    values = c(mu = "#2b8cbe", pi = "#74c476"),
+    labels = c(mu = "mu chain (signed mu_0)",
+               pi = "pi chain (unsigned pi)")
+  ) +
+  facet_wrap(~ delta_kind, ncol = 2) +
+  scale_x_continuous(limits = c(0, headline_max_drift_r2)) +
+  labs(
+    x = expression(
+      paste("Basin (1 - r^2) drift  ",
+            italic(D)[1 - r^2],
+            "(vanilla, vanilla-warm)")
+    ),
+    y = expression(paste(Delta, "AUPRC vs cold vanilla")),
+    color = "Annotation channel",
+    title = "AUPRC change versus basin (1 - r^2) drift, by chain and arm",
+    subtitle = "x in both facets: basin (1 - r^2) drift between cold vanilla and the warm-vanilla refit. Same data and axes as the chord-distance sibling; the metric is sin^2(theta) of the principal angle between matched fitted-y components."
+  ) +
+  theme(legend.position = "bottom")
+
+ggsave(headline_scatter_r2_png, p_headline_r2,
+       width = 12, height = 5.5, dpi = 150)
+print(p_headline_r2)
+```
+
 # 10. Unpaired Count vs AUPRC Delta (User's Plot)
 
 ```{r unpaired-vs-delta, fig.width=12, fig.height=8}
@@ -819,79 +947,7 @@ ggsave(unpaired_vs_delta_png, p_unpaired, width = 12, height = 8, dpi = 150)
 print(p_unpaired)
 ```
 
-# 11. Mu vs Pi Drift Comparison
-
-Two panels per dataset: the cold treatment fit (vanilla -> annotated)
-answers "did the prior move the model at all?", and the warm-vanilla refit
-(vanilla -> vanilla_warm) answers "does the new basin survive when the
-prior is removed?". Stacking them side-by-side lets the reader read
-exploration vs basin-retention off a single figure.
-
-```{r mu-vs-pi-drift, fig.width=11, fig.height=5.5}
-mu_vs_pi_long <- drift_summary %>%
-  dplyr::filter(.data$pair_id %in% c(
-    "vanilla__mu", "vanilla__pi",
-    "vanilla__vanilla_warm_from_mu", "vanilla__vanilla_warm_from_pi"
-  )) %>%
-  dplyr::transmute(
-    .data$dataset_bundle_id,
-    chain = dplyr::if_else(grepl("mu", .data$pair_id), "mu", "pi"),
-    pair_kind = dplyr::if_else(
-      .data$pair_id %in% c("vanilla__mu", "vanilla__pi"),
-      "vanilla -> annotated",
-      "vanilla -> vanilla_warm"
-    ),
-    weighted_chord_drift = .data$weighted_chord_drift
-  )
-
-mu_vs_pi_wide <- mu_vs_pi_long %>%
-  tidyr::pivot_wider(
-    id_cols = c("dataset_bundle_id", "pair_kind"),
-    names_from = "chain",
-    values_from = "weighted_chord_drift"
-  ) %>%
-  dplyr::mutate(
-    pair_kind = factor(
-      .data$pair_kind,
-      levels = c("vanilla -> annotated", "vanilla -> vanilla_warm"),
-      labels = c(
-        "Cold annotated fit (exploration)",
-        "Warm-vanilla refit (basin retention)"
-      )
-    )
-  )
-
-max_mupi_chord <- max(
-  mu_vs_pi_wide$mu, mu_vs_pi_wide$pi, na.rm = TRUE
-)
-max_mupi_chord <- max(0.05, max_mupi_chord)
-
-p_mupi <- ggplot(
-  mu_vs_pi_wide,
-  aes(x = .data$mu, y = .data$pi)
-) +
-  geom_abline(slope = 1, intercept = 0,
-              color = "grey45", linetype = "dashed") +
-  geom_point(alpha = 0.5, size = 1.2) +
-  facet_wrap(~ pair_kind, ncol = 2) +
-  coord_fixed(xlim = c(0, max_mupi_chord),
-              ylim = c(0, max_mupi_chord)) +
-  labs(
-    x = expression(paste("Basin chord drift on mu chain  ",
-                          italic(D)["chord"],
-                          "(vanilla, mu_0 arm)")),
-    y = expression(paste("Basin chord drift on pi chain  ",
-                          italic(D)["chord"],
-                          "(vanilla, pi arm)")),
-    title = "Basin movement asymmetry: signed mu_0 vs unsigned pi annotation channels",
-    subtitle = "Each point is one of 600 datasets. Below y=x: pi moved the basin less than mu. Left facet: cold annotated fit (did the prior pull IBSS off vanilla's basin?). Right facet: warm-vanilla refit (did the new basin survive prior removal?)."
-  )
-
-ggsave(mu_vs_pi_drift_png, p_mupi, width = 11, height = 5.5, dpi = 150)
-print(p_mupi)
-```
-
-# 12. Per-Dataset PIP JSD
+# 11. Per-Dataset PIP JSD
 
 Loads the per-fit model-wide PIP sidecar (`pip_records_5arm.rds`, written by
 `effect_matching_refit_export_5arm.Rmd`) and computes Jensen-Shannon
@@ -900,6 +956,9 @@ PIP vectors for each dataset. JSD definition mirrors
 `R/run_model.R::js_distance`: a categorical JSD on raw model-wide PIP
 vectors with an additive epsilon, summed (not averaged) across SNPs. See
 the study plan note "JSD ... currently computed on raw model-wide PIPs".
+
+This block runs before the mu-vs-pi figure so the figure can plot basin
+drift and PIP JSD side-by-side.
 
 ```{r pip-jsd}
 # Inline copy of test_susine:::js_distance (R/run_model.R:2021) so the Rmd
@@ -992,9 +1051,11 @@ if (file.exists(pip_records_rds)) {
 readr::write_csv(pip_drift_summary, pip_drift_summary_csv)
 cat("PIP drift summary rows:", nrow(pip_drift_summary), "\n")
 
-# Sanity: rho between basin weighted_chord_drift and pip_jsd on matched (dataset,
-# pair). Both metrics measure "how much did the model move", so a strongly
-# positive rank correlation is expected.
+# Sanity: rho between basin drift and pip_jsd on matched (dataset, pair).
+# Both metrics measure "how much did the model move", so a strongly
+# positive rank correlation is expected. Carry both basin metrics
+# (weighted_chord_drift and weighted_r2_drift) so downstream chunks can
+# read either column.
 basin_for_join <- drift_summary %>%
   dplyr::filter(.data$pair_id %in% c(
     "vanilla__mu", "mu__vanilla_warm_from_mu",
@@ -1013,7 +1074,8 @@ basin_for_join <- drift_summary %>%
         "treatment_to_warm",
       TRUE ~ "vanilla_to_warm"
     ),
-    weighted_chord_drift = .data$weighted_chord_drift
+    weighted_chord_drift = .data$weighted_chord_drift,
+    weighted_r2_drift = .data$weighted_r2_drift
   )
 
 basin_pip_join <- basin_for_join %>%
@@ -1026,13 +1088,188 @@ rho_check <- basin_pip_join %>%
   dplyr::group_by(.data$chain, .data$pair_kind) %>%
   dplyr::summarise(
     n = dplyr::n(),
-    rho = suppressWarnings(stats::cor(
+    rho_chord = suppressWarnings(stats::cor(
       .data$weighted_chord_drift, .data$pip_jsd,
+      method = "spearman", use = "pairwise.complete.obs"
+    )),
+    rho_r2 = suppressWarnings(stats::cor(
+      .data$weighted_r2_drift, .data$pip_jsd,
       method = "spearman", use = "pairwise.complete.obs"
     )),
     .groups = "drop"
   )
 print(rho_check)
+```
+
+# 12. Mu vs Pi Drift Comparison (basin + PIP JSD, 4-panel)
+
+Four panels per dataset, all with mu chain on x and pi chain on y. Left
+two panels show the **basin drift** (fitted-y subspace displacement,
+the *explanatory* axis): cold annotated fit and the warm-vanilla refit.
+Right two panels show the **PIP JSD** between the same fits (the
+*causal* axis: PIP-mass redistribution). Stacking basin and PIP
+side-by-side lets the reader compare the two semantic axes for each
+chain.
+
+The chord-distance and 1 - r^2 versions of the basin metric are produced
+in separate chunks below, so the reader can compare scales side by side.
+
+```{r mu-vs-pi-drift, fig.width=18, fig.height=5}
+mu_vs_pi_basin_chord <- drift_summary %>%
+  dplyr::filter(.data$pair_id %in% c(
+    "vanilla__mu", "vanilla__pi",
+    "vanilla__vanilla_warm_from_mu", "vanilla__vanilla_warm_from_pi"
+  )) %>%
+  dplyr::transmute(
+    .data$dataset_bundle_id,
+    chain = dplyr::if_else(grepl("mu", .data$pair_id), "mu", "pi"),
+    pair_kind = dplyr::if_else(
+      .data$pair_id %in% c("vanilla__mu", "vanilla__pi"),
+      "vanilla -> annotated",
+      "vanilla -> vanilla_warm"
+    ),
+    metric_value = .data$weighted_chord_drift
+  ) %>%
+  tidyr::pivot_wider(
+    id_cols = c("dataset_bundle_id", "pair_kind"),
+    names_from = "chain",
+    values_from = "metric_value"
+  )
+
+mu_vs_pi_pip_jsd <- pip_drift_summary %>%
+  dplyr::filter(.data$pair_kind %in% c("vanilla_to_treatment",
+                                        "vanilla_to_warm")) %>%
+  dplyr::transmute(
+    .data$dataset_bundle_id,
+    .data$chain,
+    pair_kind = dplyr::if_else(
+      .data$pair_kind == "vanilla_to_treatment",
+      "vanilla -> annotated",
+      "vanilla -> vanilla_warm"
+    ),
+    metric_value = .data$pip_jsd
+  ) %>%
+  tidyr::pivot_wider(
+    id_cols = c("dataset_bundle_id", "pair_kind"),
+    names_from = "chain",
+    values_from = "metric_value"
+  )
+
+basin_chord_max <- max(0.05,
+  max(mu_vs_pi_basin_chord$mu, mu_vs_pi_basin_chord$pi, na.rm = TRUE)
+)
+jsd_max <- max(0.05,
+  max(mu_vs_pi_pip_jsd$mu, mu_vs_pi_pip_jsd$pi, na.rm = TRUE)
+)
+
+# Panel builder: scatter of mu (x) vs pi (y), with y=x dashed reference
+# and a coord_fixed scale shared within each metric pair.
+make_mupi_panel <- function(df, kind, max_val, axis_label, title_lab) {
+  d <- df %>% dplyr::filter(.data$pair_kind == kind)
+  ggplot(d, aes(x = .data$mu, y = .data$pi)) +
+    geom_abline(slope = 1, intercept = 0,
+                color = "grey45", linetype = "dashed") +
+    geom_point(alpha = 0.5, size = 1.0) +
+    coord_fixed(xlim = c(0, max_val), ylim = c(0, max_val)) +
+    labs(
+      x = paste0(axis_label, " (mu chain)"),
+      y = paste0(axis_label, " (pi chain)"),
+      title = title_lab
+    ) +
+    theme(plot.title = element_text(size = 11))
+}
+
+p_basin_chord_cold <- make_mupi_panel(
+  mu_vs_pi_basin_chord, "vanilla -> annotated", basin_chord_max,
+  "Basin chord drift",
+  "Basin chord: vanilla -> annotated"
+)
+p_basin_chord_warm <- make_mupi_panel(
+  mu_vs_pi_basin_chord, "vanilla -> vanilla_warm", basin_chord_max,
+  "Basin chord drift",
+  "Basin chord: vanilla -> vanilla_warm"
+)
+p_jsd_cold <- make_mupi_panel(
+  mu_vs_pi_pip_jsd, "vanilla -> annotated", jsd_max,
+  "PIP JSD",
+  "PIP JSD: vanilla -> annotated"
+)
+p_jsd_warm <- make_mupi_panel(
+  mu_vs_pi_pip_jsd, "vanilla -> vanilla_warm", jsd_max,
+  "PIP JSD",
+  "PIP JSD: vanilla -> vanilla_warm"
+)
+
+if (requireNamespace("patchwork", quietly = TRUE)) {
+  library(patchwork)
+  p_mupi <- p_basin_chord_cold + p_basin_chord_warm +
+            p_jsd_cold + p_jsd_warm +
+            plot_layout(nrow = 1) +
+            plot_annotation(
+              title = "Mu vs Pi: basin chord drift (explanatory) and PIP JSD (causal)",
+              subtitle = "Each point is one of 600 datasets. Below y=x: pi moved less than mu on the metric in question. Left two: basin chord drift (fitted-y subspace displacement). Right two: PIP JSD drift (causal-PIP redistribution)."
+            )
+  ggsave(mu_vs_pi_drift_png, p_mupi, width = 18, height = 5, dpi = 150)
+  print(p_mupi)
+} else {
+  warning("patchwork not installed; skipping 4-panel mu-vs-pi figure (chord). install.packages('patchwork').")
+}
+```
+
+```{r mu-vs-pi-drift-r2, fig.width=18, fig.height=5}
+# 4-panel mu-vs-pi using 1 - r^2 weighted basin distance instead of chord.
+# The right two panels (PIP JSD) are identical to the chord version; only
+# the left two basin panels change.
+mu_vs_pi_basin_r2 <- drift_summary %>%
+  dplyr::filter(.data$pair_id %in% c(
+    "vanilla__mu", "vanilla__pi",
+    "vanilla__vanilla_warm_from_mu", "vanilla__vanilla_warm_from_pi"
+  )) %>%
+  dplyr::transmute(
+    .data$dataset_bundle_id,
+    chain = dplyr::if_else(grepl("mu", .data$pair_id), "mu", "pi"),
+    pair_kind = dplyr::if_else(
+      .data$pair_id %in% c("vanilla__mu", "vanilla__pi"),
+      "vanilla -> annotated",
+      "vanilla -> vanilla_warm"
+    ),
+    metric_value = .data$weighted_r2_drift
+  ) %>%
+  tidyr::pivot_wider(
+    id_cols = c("dataset_bundle_id", "pair_kind"),
+    names_from = "chain",
+    values_from = "metric_value"
+  )
+
+basin_r2_max <- max(0.05,
+  max(mu_vs_pi_basin_r2$mu, mu_vs_pi_basin_r2$pi, na.rm = TRUE)
+)
+
+p_basin_r2_cold <- make_mupi_panel(
+  mu_vs_pi_basin_r2, "vanilla -> annotated", basin_r2_max,
+  "Basin (1 - r^2) drift",
+  "Basin (1 - r^2): vanilla -> annotated"
+)
+p_basin_r2_warm <- make_mupi_panel(
+  mu_vs_pi_basin_r2, "vanilla -> vanilla_warm", basin_r2_max,
+  "Basin (1 - r^2) drift",
+  "Basin (1 - r^2): vanilla -> vanilla_warm"
+)
+
+if (requireNamespace("patchwork", quietly = TRUE)) {
+  library(patchwork)
+  p_mupi_r2 <- p_basin_r2_cold + p_basin_r2_warm +
+               p_jsd_cold + p_jsd_warm +
+               plot_layout(nrow = 1) +
+               plot_annotation(
+                 title = "Mu vs Pi: basin (1 - r^2) drift (explanatory) and PIP JSD (causal)",
+                 subtitle = "Each point is one of 600 datasets. 1 - r^2 = sin^2(theta) = explanatory-subspace residual variance per fitted-y component, weighted by min var-explained."
+               )
+  ggsave(mu_vs_pi_drift_r2_png, p_mupi_r2, width = 18, height = 5, dpi = 150)
+  print(p_mupi_r2)
+} else {
+  warning("patchwork not installed; skipping 4-panel mu-vs-pi figure (1 - r^2). install.packages('patchwork').")
+}
 ```
 
 # 13. Master Drift, PIP, and AUPRC Summary Figure
@@ -1151,6 +1388,65 @@ p_master <- ggplot(combined, aes(x = .data$value, fill = .data$chain)) +
 
 ggsave(basin_pip_drift_png, p_master, width = 13, height = 8.5, dpi = 150)
 print(p_master)
+```
+
+```{r master-drift-figure-r2, fig.width=13, fig.height=8.5}
+# 1 - r^2 sibling of the master figure. Reuses pip_long and auprc_delta_long
+# from the chord chunk; only the basin_long source column changes.
+basin_long_r2 <- basin_for_join %>%
+  dplyr::transmute(
+    .data$dataset_bundle_id, .data$chain, .data$pair_kind,
+    metric = "basin_drift",
+    value = .data$weighted_r2_drift
+  )
+
+combined_r2 <- dplyr::bind_rows(basin_long_r2, pip_long, auprc_delta_long) %>%
+  dplyr::mutate(
+    metric = factor(
+      .data$metric,
+      levels = c("basin_drift", "pip_drift", "auprc_delta")
+    ),
+    pair_kind = factor(
+      .data$pair_kind,
+      levels = c("vanilla_to_treatment",
+                 "treatment_to_warm",
+                 "vanilla_to_warm")
+    ),
+    chain = factor(.data$chain, levels = c("mu", "pi"))
+  )
+
+p_master_r2 <- ggplot(combined_r2, aes(x = .data$value, fill = .data$chain)) +
+  geom_histogram(
+    aes(y = after_stat(density)),
+    bins = 50, position = "identity", alpha = 0.55, color = NA
+  ) +
+  facet_grid(
+    pair_kind ~ metric,
+    scales = "free_x",
+    labeller = labeller(
+      metric = c(
+        basin_drift = "Basin drift\n(weighted 1 - r^2)",
+        pip_drift   = "PIP drift\n(JSD)",
+        auprc_delta = "AUPRC delta"
+      ),
+      pair_kind = c(
+        vanilla_to_treatment = "vanilla -> annotated",
+        treatment_to_warm    = "annotated -> vanilla_warm",
+        vanilla_to_warm      = "vanilla -> vanilla_warm"
+      )
+    )
+  ) +
+  scale_fill_manual(values = c(mu = "#2b8cbe", pi = "#74c476")) +
+  labs(
+    x = NULL, y = "Density", fill = "Chain",
+    title = "Basin (1 - r^2), PIP, and AUPRC movement along the 5-arm refit chain",
+    subtitle = "Basin drift uses Hungarian-matched fitted-y weighted 1 - r^2 distance (sin^2 of the principal angle); PIP drift is model-wide PIP-vector JSD."
+  ) +
+  theme(legend.position = "bottom")
+
+ggsave(basin_pip_drift_r2_png, p_master_r2,
+       width = 13, height = 8.5, dpi = 150)
+print(p_master_r2)
 ```
 
 # 14. Pooled Effect-Quality Density Shifts
@@ -1694,7 +1990,7 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
       " causal SNPs (5 arms, 600 datasets)"
     ))
   panel_B <- strip_chrome(p_mupi) +
-    labs(title = "B. Per-dataset basin chord drift: mu chain vs pi chain")
+    labs(title = "B. Mu vs pi: basin chord drift (left two) and PIP JSD (right two)")
   panel_C <- strip_chrome(p_headline) +
     labs(title = "C. AUPRC change vs basin chord drift, by chain and arm")
   panel_D <- strip_chrome(p_effect_density_mu) +
@@ -1715,6 +2011,55 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
 }
 ```
 
+```{r paper-figure-r2, eval=have_pip_records, fig.width=14, fig.height=22}
+# 1 - r^2 sibling of the combined paper figure. Reuses the same A/D/E
+# panels (none depend on the basin metric); swaps in p_mupi_r2 for B and
+# p_headline_r2 for C.
+if (!requireNamespace("patchwork", quietly = TRUE)) {
+  warning(
+    "patchwork not installed; combined paper figure (1 - r^2) skipped. ",
+    "install.packages('patchwork')."
+  )
+} else {
+  library(patchwork)
+
+  strip_chrome <- function(p) {
+    p + labs(title = NULL, subtitle = NULL) +
+      theme(
+        plot.title = element_blank(),
+        plot.subtitle = element_blank()
+      )
+  }
+
+  panel_A_r2 <- strip_chrome(p_pr) +
+    labs(title = paste0(
+      "A. Pooled precision-recall on top-", pr_top_k,
+      " causal SNPs (5 arms, 600 datasets)"
+    ))
+  panel_B_r2 <- strip_chrome(p_mupi_r2) +
+    labs(title = "B. Mu vs pi: basin (1 - r^2) drift (left two) and PIP JSD (right two)")
+  panel_C_r2 <- strip_chrome(p_headline_r2) +
+    labs(title = "C. AUPRC change vs basin (1 - r^2) drift, by chain and arm")
+  panel_D_r2 <- strip_chrome(p_effect_density_mu) +
+    labs(title = "D. Per-effect joint-density shifts along the mu refit chain")
+  panel_E_r2 <- strip_chrome(p_effect_density_pi) +
+    labs(title = "E. Per-effect joint-density shifts along the pi refit chain")
+
+  combined_fig_r2 <- panel_A_r2 / panel_B_r2 / panel_C_r2 /
+                      panel_D_r2 / panel_E_r2 +
+    plot_layout(heights = c(1.0, 1.05, 1.05, 0.95, 0.95)) &
+    theme(plot.title = element_text(face = "bold", size = 13))
+
+  ggsave(
+    paper_figure_r2_png, combined_fig_r2,
+    width = 14, height = 22, dpi = 130, limitsize = FALSE
+  )
+  cat("Wrote combined paper figure (1 - r^2) to ",
+      paper_figure_r2_png, "\n", sep = "")
+  print(combined_fig_r2)
+}
+```
+
 # 17. Outputs
 
 ```{r output-index}
@@ -1726,17 +2071,21 @@ outputs <- tibble::tibble(
     "drift profile histograms",
     "chain AUPRC trajectory",
     "headline scatter (basin chord drift)",
+    "headline scatter (basin 1 - r^2 drift)",
     "unpaired-count vs AUPRC delta scatter",
-    "mu vs pi drift comparison (cold + warm panels)",
+    "mu vs pi drift comparison: chord + JSD (4-panel)",
+    "mu vs pi drift comparison: 1 - r^2 + JSD (4-panel)",
     "per-dataset PIP JSD summary",
-    "master basin + PIP + AUPRC drift figure",
+    "master basin + PIP + AUPRC drift figure (chord)",
+    "master basin + PIP + AUPRC drift figure (1 - r^2)",
     "effect-quality density pooled (mu)",
     "effect-quality density pooled (pi)",
     "effect-quality pair rows",
     "pooled PR curves top-K by |beta| (5 arms)",
     "pooled PR curve rows (csv)",
     "regenerated causal truth cache (idx + top-K)",
-    "combined paper figure"
+    "combined paper figure (chord)",
+    "combined paper figure (1 - r^2)"
   ),
   path = c(
     drift_assignments_csv,
@@ -1745,17 +2094,21 @@ outputs <- tibble::tibble(
     drift_profile_hist_png,
     chain_trajectory_png,
     headline_scatter_png,
+    headline_scatter_r2_png,
     unpaired_vs_delta_png,
     mu_vs_pi_drift_png,
+    mu_vs_pi_drift_r2_png,
     pip_drift_summary_csv,
     basin_pip_drift_png,
+    basin_pip_drift_r2_png,
     effect_quality_density_mu_png,
     effect_quality_density_pi_png,
     effect_quality_pair_rows_csv,
     pr_curves_pooled_png,
     pr_curves_pooled_csv,
     causal_truth_rds,
-    paper_figure_png
+    paper_figure_png,
+    paper_figure_r2_png
   )
 )
 kable(outputs)
