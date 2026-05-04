@@ -329,7 +329,7 @@ if (!is.finite(shared_fill_lim) || shared_fill_lim <= 0) {
 
 # Combined Paper Figure
 
-```{r paper-figure, fig.width=8.8, fig.height=11.4}
+```{r paper-figure, fig.width=8.8, fig.height=9.9}
 expr_basin_x <- expression(paste("Basin drift (", mu, " chain)"))
 expr_basin_y <- expression(paste("Basin drift (", pi, " chain)"))
 expr_jsd_x   <- expression(paste("PIP JSD (", mu, " chain)"))
@@ -734,15 +734,15 @@ panel_D <- (panel_D_core + guide_area()) +
   plot_layout(widths = c(1, 0.13), guides = "collect") &
   theme(legend.position = "right")
 
-top_summary_row <- (panel_A | panel_B) +
-  plot_layout(widths = c(0.56, 0.44))
+top_summary_row <- (wrap_elements(full = panel_A) | wrap_elements(full = panel_B)) +
+  plot_layout(widths = c(0.52, 0.48))
 
 combined_fig <- (top_summary_row / panel_C / panel_D) +
-  plot_layout(heights = c(0.88, 1.12, 1.46))
+  plot_layout(heights = c(0.70, 1.12, 1.17))
 
 ggsave(
   paper_figure_png, combined_fig,
-  width = 8.8, height = 11.4, dpi = 300, bg = "white",
+  width = 8.8, height = 9.9, dpi = 300, bg = "white",
   limitsize = FALSE
 )
 cat("Wrote combined paper figure to ", paper_figure_png, "\n", sep = "")
