@@ -2234,17 +2234,13 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
   basin_color_max <- max(joined_pf$basin_mu, na.rm = TRUE)
   jsd_color_max   <- max(joined_pf$jsd_mu,   na.rm = TRUE)
 
-  # Sub-panel builder. Color uses pseudo-log transform (JSD and basin
-  # drift are both heavy-tailed near zero, so log gives the bulk of
-  # points more color resolution). Endpoint labels carry the intuition
-  # ("no change" -> "most change") so the reader doesn't need to read
-  # raw values off the legend bar.
+  # Sub-panel builder. Color is linear viridis (no log). Endpoint labels
+  # carry the intuition ("no change" -> "most change") so the reader
+  # doesn't need to read raw values off the legend bar.
   #
-  # We use coord_cartesian + theme(aspect.ratio = 1) instead of
-  # coord_fixed so that ALL four sub-panels render at the same on-screen
-  # size regardless of their axis ranges (basin range [0, 0.8] vs JSD
-  # range [0, 1.7] previously caused patchwork to allocate different
-  # widths to each pair).
+  # coord_cartesian + theme(aspect.ratio = 1) decouples the panel's
+  # on-screen square size from the data range, so basin (0-0.8) and
+  # JSD (0-1.7) panels render at the same physical size.
   make_b_panel <- function(df, x_col, y_col, color_col,
                            x_label, y_label, color_title, title_lab,
                            color_lim_max, max_val) {
@@ -2255,14 +2251,13 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
       geom_point(alpha = 0.5, size = 1.0) +
       scale_color_viridis_c(
         option = "C",
-        trans = scales::pseudo_log_trans(sigma = 0.005),
         limits = c(0, color_lim_max),
         breaks = c(0, color_lim_max),
         labels = c("no change", "most change"),
         guide = guide_colorbar(
           title.position = "top",
           title.hjust = 0.5,
-          barwidth  = grid::unit(7, "cm"),
+          barwidth  = grid::unit(6, "cm"),
           barheight = grid::unit(0.35, "cm"),
           direction = "horizontal"
         )
@@ -2307,26 +2302,18 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
     color_lim_max = basin_color_max, max_val = jsd_max_pf
   )
 
-  # Two sub-pairs each collecting their own legend horizontally below.
-  basin_pair <- (pB1 | pB2) +
-    plot_layout(guides = "collect") &
+  # Flat 1x4 layout with explicit equal widths and guide collection.
+  # patchwork merges identical guides automatically: pB1+pB2 share a JSD
+  # color scale (same limits/breaks) and collapse into one legend; same
+  # for pB3+pB4 with the basin scale. The two collected legends end up
+  # side-by-side at the bottom because both have legend.position="bottom".
+  panel_B <- pB1 + pB2 + pB3 + pB4 +
+    plot_layout(nrow = 1, guides = "collect", widths = c(1, 1, 1, 1)) &
     theme(legend.position  = "bottom",
           legend.direction = "horizontal",
           legend.box       = "horizontal",
           legend.title     = element_text(size = 10),
           legend.text      = element_text(size = 9))
-
-  jsd_pair <- (pB3 | pB4) +
-    plot_layout(guides = "collect") &
-    theme(legend.position  = "bottom",
-          legend.direction = "horizontal",
-          legend.box       = "horizontal",
-          legend.title     = element_text(size = 10),
-          legend.text      = element_text(size = 9))
-
-  panel_B <- (patchwork::wrap_elements(full = basin_pair) |
-              patchwork::wrap_elements(full = jsd_pair)) +
-             plot_layout(widths = c(1, 1))
 
   # ============================================================
   # PANEL C. dAUPRC boxplots by 3-bucket basin-drift cut
