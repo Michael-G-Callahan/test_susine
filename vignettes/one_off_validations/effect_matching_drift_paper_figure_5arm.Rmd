@@ -536,7 +536,7 @@ pB4 <- make_b_panel(
 
 b_pair_header <- function(lbl) {
   ggplot() +
-    annotate("text", x = 0.5, y = 0.50, label = lbl,
+    annotate("text", x = 0.5, y = 0.38, label = lbl,
              size = 2.5, fontface = "bold") +
     xlim(0, 1) + ylim(0, 1) +
     theme_void() +
@@ -545,7 +545,7 @@ b_pair_header <- function(lbl) {
 
 b_panel_title <- function(lbl) {
   ggplot() +
-    annotate("text", x = -0.055, y = 0.25, label = lbl,
+    annotate("text", x = -0.055, y = 0.70, label = lbl,
              hjust = 0, size = 3.05, fontface = "bold") +
     coord_cartesian(xlim = c(0, 1), ylim = c(0, 1), clip = "off") +
     theme_void() +
@@ -558,7 +558,7 @@ basin_pair_B <- (
     guide_area()
 ) +
   plot_layout(
-    heights = c(0.022, 1, 0.095),
+    heights = c(0.055, 1, 0.070),
     guides = "collect"
   ) &
   theme(
@@ -567,8 +567,8 @@ basin_pair_B <- (
     legend.box = "horizontal",
     legend.title = element_text(size = 6.8),
     legend.text = element_text(size = 6.0),
-    legend.margin = margin(t = -7, r = 0, b = -6, l = 0),
-    legend.box.margin = margin(t = -10, r = 0, b = -5, l = 0)
+    legend.margin = margin(t = -9, r = 0, b = -7, l = 0),
+    legend.box.margin = margin(t = -12, r = 0, b = -6, l = 0)
   )
 
 jsd_pair_B <- (
@@ -577,7 +577,7 @@ jsd_pair_B <- (
     guide_area()
 ) +
   plot_layout(
-    heights = c(0.022, 1, 0.095),
+    heights = c(0.055, 1, 0.070),
     guides = "collect"
   ) &
   theme(
@@ -586,15 +586,15 @@ jsd_pair_B <- (
     legend.box = "horizontal",
     legend.title = element_text(size = 6.8),
     legend.text = element_text(size = 6.0),
-    legend.margin = margin(t = -7, r = 0, b = -6, l = 0),
-    legend.box.margin = margin(t = -10, r = 0, b = -5, l = 0)
+    legend.margin = margin(t = -9, r = 0, b = -7, l = 0),
+    legend.box.margin = margin(t = -12, r = 0, b = -6, l = 0)
   )
 
 panel_C <- (
   b_panel_title("C. Effect-level drift diagnostics (mu vs pi)") /
     (basin_pair_B | jsd_pair_B)
 ) +
-  plot_layout(heights = c(0.035, 1))
+  plot_layout(heights = c(0.060, 1))
 
 auprc_lookup_pf <- auprc_per_dataset %>%
   dplyr::transmute(
@@ -738,7 +738,7 @@ top_summary_row <- (panel_A | panel_B) +
   plot_layout(widths = c(0.56, 0.44))
 
 combined_fig <- (top_summary_row / panel_C / panel_D) +
-  plot_layout(heights = c(0.88, 1.30, 1.28))
+  plot_layout(heights = c(0.88, 1.12, 1.46))
 
 ggsave(
   paper_figure_png, combined_fig,
