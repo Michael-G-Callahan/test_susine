@@ -1,0 +1,747 @@
+---
+title: "Effect Drift Paper Figure (5-arm, cached plotting only)"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+This notebook is the lightweight plotting companion to
+`effect_matching_drift_analysis_5arm.Rmd`. It assumes the heavy notebook has
+already generated the cached CSV outputs in `study_dir`, then rebuilds only the
+combined paper figure. Use this notebook for figure layout, titles, labels,
+legends, and styling tweaks.
+
+```{r setup, message=FALSE}
+here::i_am("vignettes/one_off_validations/effect_matching_drift_paper_figure_5arm.Rmd")
+
+library(here)
+library(dplyr)
+library(readr)
+library(tidyr)
+library(ggplot2)
+library(patchwork)
+library(scales)
+```
+
+# Inputs
+
+```{r paths}
+output_root <- here("output")
+study_name <- "baseline_sims_5arm_effect_matching"
+study_dir <- file.path(output_root, "effect_matching_study", study_name)
+plot_dir <- file.path(study_dir, "drift_analysis_plots")
+dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
+
+drift_summary_csv <- file.path(study_dir, "drift_summary_5arm.csv")
+auprc_per_dataset_csv <- file.path(study_dir, "auprc_per_dataset_5arm.csv")
+pip_drift_summary_csv <- file.path(study_dir, "pip_drift_summary_5arm.csv")
+pr_curves_pooled_csv <- file.path(study_dir, "pr_curves_pooled_top8_5arm.csv")
+pr_auc_pooled_csv <- file.path(study_dir, "pr_auc_pooled_top8_5arm.csv")
+effect_quality_pair_rows_csv <- file.path(study_dir, "effect_quality_pair_rows_5arm.csv")
+effect_quality_density_shift_csv <- file.path(study_dir, "effect_quality_density_shift_5arm.csv")
+
+paper_figure_png <- file.path(plot_dir, "paper_figure_effect_drift.png")
+
+required_cache_files <- c(
+  drift_summary_csv,
+  auprc_per_dataset_csv,
+  pip_drift_summary_csv,
+  pr_curves_pooled_csv
+)
+missing_cache_files <- required_cache_files[!file.exists(required_cache_files)]
+if (length(missing_cache_files)) {
+  stop(
+    "Missing required cached plotting inputs. Run ",
+    "effect_matching_drift_analysis_5arm.Rmd once to generate them:\n",
+    paste(missing_cache_files, collapse = "\n")
+  )
+}
+
+cat("Study dir:", study_dir, "\n")
+cat("Plot dir:", plot_dir, "\n")
+```
+
+# Plot Options
+
+```{r options}
+baseline_method <- "susie_vanilla"
+mu_method <- "susine_functional_mu"
+pi_method <- "susie_functional_pi"
+warm_mu_method <- "susie_vanilla_warm_from_mu"
+warm_pi_method <- "susie_vanilla_warm_from_pi"
+
+method_labels <- c(
+  susie_vanilla = "SuSiE-vanilla (cold)",
+  susine_functional_mu = "SuSiNE-functional-mu (cold)",
+  susie_vanilla_warm_from_mu = "SuSiE-vanilla (warm from mu)",
+  susie_functional_pi = "SuSiE-functional-pi (cold)",
+  susie_vanilla_warm_from_pi = "SuSiE-vanilla (warm from pi)"
+)
+method_legend_short <- c(
+  susie_vanilla = "Vanilla cold",
+  susine_functional_mu = "Functional-mu",
+  susie_vanilla_warm_from_mu = "Warm vanilla (mu)",
+  susie_functional_pi = "Functional-pi",
+  susie_vanilla_warm_from_pi = "Warm vanilla (pi)"
+)
+method_color <- c(
+  susie_vanilla = "black",
+  susine_functional_mu = "#2b8cbe",
+  susie_vanilla_warm_from_mu = "#9ecae1",
+  susie_functional_pi = "#74c476",
+  susie_vanilla_warm_from_pi = "#bae4b3"
+)
+methods_in_order <- c(
+  baseline_method, mu_method, warm_mu_method, pi_method, warm_pi_method
+)
+
+pr_top_k <- 8L
+
+x_keff_breaks <- c(1, 2, 5, 10, 20, 50, 100, 200, 500, 1000)
+x_limits <- NULL
+y_limits <- c(0, 1)
+density_grid_n <- 140L
+density_bandwidth <- c(0.45, 0.10)
+density_trim_quantile <- c(0.005, 0.995)
+density_fill_quantile <- 0.95
+```
+
+# Helpers
+
+```{r helpers}
+`%||%` <- function(x, y) if (is.null(x)) y else x
+
+resolve_limits <- function(values, user_limits, trim = density_trim_quantile) {
+  if (!is.null(user_limits)) {
+    return(user_limits)
+  }
+  values <- values[is.finite(values)]
+  if (!length(values)) {
+    stop("Cannot infer limits from an empty/non-finite vector.")
+  }
+  stats::quantile(values, probs = trim, na.rm = TRUE, names = FALSE)
+}
+
+keff_x_scale <- function(breaks = x_keff_breaks, xlim = NULL) {
+  finite_breaks <- breaks[breaks > 0]
+  scale_x_continuous(
+    breaks = log(finite_breaks),
+    labels = formatC(finite_breaks, format = "fg", big.mark = ","),
+    limits = xlim
+  )
+}
+
+theme_effect_paper <- function(base_size = 8) {
+  theme_bw(base_size = base_size) +
+    theme(
+      panel.grid.major = element_line(color = "grey91", linewidth = 0.22),
+      panel.grid.minor = element_blank(),
+      panel.border = element_rect(color = "grey35", fill = NA, linewidth = 0.35),
+      axis.title = element_text(size = base_size),
+      axis.text = element_text(size = base_size - 1, color = "grey25"),
+      plot.title = element_text(face = "bold", size = base_size + 1.2,
+                                margin = margin(b = 3)),
+      strip.background = element_rect(fill = "grey88", color = "grey35",
+                                      linewidth = 0.35),
+      strip.text = element_text(size = base_size - 0.8, color = "grey20"),
+      legend.title = element_text(size = base_size - 0.4),
+      legend.text = element_text(size = base_size - 1.1),
+      legend.key.height = grid::unit(3.2, "mm"),
+      legend.key.width = grid::unit(6.0, "mm"),
+      plot.margin = margin(2.5, 2.5, 2.5, 2.5)
+    )
+}
+
+weighted_kde2d_df <- function(df, xlim, ylim, n, h) {
+  group_values <- c("source", "destination")
+  dens <- lapply(group_values, function(g) {
+    sub <- df %>%
+      dplyr::filter(.data$arm_role == g) %>%
+      dplyr::filter(
+        is.finite(.data$x_value),
+        is.finite(.data$y_value),
+        .data$x_value >= xlim[[1]],
+        .data$x_value <= xlim[[2]],
+        .data$y_value >= ylim[[1]],
+        .data$y_value <= ylim[[2]]
+      )
+    if (nrow(sub) < 3L) return(NULL)
+    w <- pmax(tidyr::replace_na(sub$pve_weight, 0), 0)
+    if (sum(w) <= 0) {
+      w <- rep(1 / nrow(sub), nrow(sub))
+    } else {
+      w <- w / sum(w)
+    }
+    x_grid <- seq(xlim[[1]], xlim[[2]], length.out = n)
+    y_grid <- seq(ylim[[1]], ylim[[2]], length.out = n)
+    kx <- outer(x_grid, sub$x_value, function(grid, obs) {
+      stats::dnorm((grid - obs) / h[[1]]) / h[[1]]
+    })
+    ky <- outer(y_grid, sub$y_value, function(grid, obs) {
+      stats::dnorm((grid - obs) / h[[2]]) / h[[2]]
+    })
+    ky <- sweep(ky, 2L, w, `*`)
+    z <- kx %*% t(ky)
+    list(group = g, x = x_grid, y = y_grid, z = z,
+         n_rows = nrow(sub), pve_mass = sum(sub$pve_weight, na.rm = TRUE))
+  })
+  names(dens) <- group_values
+  if (is.null(dens$source) || is.null(dens$destination)) {
+    return(tibble::tibble())
+  }
+  tidyr::expand_grid(x = dens$source$x, y = dens$source$y) %>%
+    dplyr::mutate(
+      density_source = as.vector(t(dens$source$z)),
+      density_destination = as.vector(t(dens$destination$z)),
+      density_diff = .data$density_destination - .data$density_source,
+      n_source = dens$source$n_rows,
+      n_destination = dens$destination$n_rows,
+      pve_source = dens$source$pve_mass,
+      pve_destination = dens$destination$pve_mass
+    )
+}
+
+build_density_shift_from_pair_rows <- function(pair_rows) {
+  x_limits_resolved <- resolve_limits(pair_rows$x_value, x_limits)
+  y_limits_resolved <- resolve_limits(pair_rows$y_value, y_limits)
+  density_shift_rows <- list()
+  for (ch in levels(pair_rows$chain)) {
+    for (cmp in levels(pair_rows$comparison_kind)) {
+      sub <- pair_rows %>%
+        dplyr::filter(.data$chain == ch, .data$comparison_kind == cmp)
+      dens <- weighted_kde2d_df(
+        sub,
+        xlim = x_limits_resolved,
+        ylim = y_limits_resolved,
+        n = density_grid_n,
+        h = density_bandwidth
+      )
+      if (!nrow(dens)) next
+      density_shift_rows[[length(density_shift_rows) + 1L]] <- dens %>%
+        dplyr::mutate(chain = ch, comparison_kind = cmp)
+    }
+  }
+  dplyr::bind_rows(density_shift_rows)
+}
+```
+
+# Read Cached Data
+
+```{r read-cache}
+drift_summary <- readr::read_csv(drift_summary_csv, show_col_types = FALSE)
+auprc_per_dataset <- readr::read_csv(auprc_per_dataset_csv, show_col_types = FALSE) %>%
+  dplyr::mutate(dataset_bundle_id = as.character(.data$dataset_bundle_id))
+pip_drift_summary <- readr::read_csv(pip_drift_summary_csv, show_col_types = FALSE) %>%
+  dplyr::mutate(dataset_bundle_id = as.character(.data$dataset_bundle_id))
+
+pr_curve_df <- readr::read_csv(pr_curves_pooled_csv, show_col_types = FALSE) %>%
+  dplyr::mutate(
+    model_method = factor(.data$model_method, levels = methods_in_order)
+  )
+if (file.exists(pr_auc_pooled_csv)) {
+  pr_auc_df <- readr::read_csv(pr_auc_pooled_csv, show_col_types = FALSE) %>%
+    dplyr::mutate(
+      model_method = factor(.data$model_method, levels = methods_in_order)
+    )
+  prevalence <- unique(pr_auc_df$prevalence)
+  if (!length(prevalence) || !is.finite(prevalence[[1]])) {
+    prevalence <- 0.008
+  } else {
+    prevalence <- prevalence[[1]]
+  }
+} else {
+  message("PR-AUC cache missing; estimating AUPRC labels from cached PR curves.")
+  pr_auc_df <- pr_curve_df %>%
+    dplyr::arrange(.data$model_method, .data$recall) %>%
+    dplyr::group_by(.data$model_method) %>%
+    dplyr::summarise(
+      auprc_integral = sum(
+        diff(.data$recall) *
+          0.5 * (dplyr::lag(.data$precision)[-1] + .data$precision[-1]),
+        na.rm = TRUE
+      ),
+      .groups = "drop"
+    ) %>%
+    dplyr::mutate(
+      model_method = factor(.data$model_method, levels = methods_in_order)
+    )
+  prevalence <- 0.008
+}
+
+if (file.exists(effect_quality_density_shift_csv)) {
+  density_shift_df <- readr::read_csv(
+    effect_quality_density_shift_csv, show_col_types = FALSE
+  )
+} else {
+  if (!file.exists(effect_quality_pair_rows_csv)) {
+    stop(
+      "Missing both density-shift cache and pair-row cache:\n",
+      effect_quality_density_shift_csv, "\n", effect_quality_pair_rows_csv
+    )
+  }
+  message("Density-shift cache missing; rebuilding once from effect-quality pair rows.")
+  effect_quality_pair_rows <- readr::read_csv(
+    effect_quality_pair_rows_csv, show_col_types = FALSE
+  ) %>%
+    dplyr::mutate(
+      chain = factor(.data$chain, levels = c("mu", "pi")),
+      arm_role = factor(.data$arm_role, levels = c("source", "destination")),
+      comparison_kind = factor(
+        .data$comparison_kind,
+        levels = c("vanilla_to_treatment",
+                   "treatment_to_warm",
+                   "vanilla_to_warm")
+      )
+    )
+  density_shift_df <- build_density_shift_from_pair_rows(effect_quality_pair_rows)
+  readr::write_csv(density_shift_df, effect_quality_density_shift_csv)
+}
+
+density_shift_df <- density_shift_df %>%
+  dplyr::mutate(
+    chain = factor(.data$chain, levels = c("mu", "pi")),
+    comparison_kind = factor(
+      .data$comparison_kind,
+      levels = c("vanilla_to_treatment",
+                 "treatment_to_warm",
+                 "vanilla_to_warm")
+    )
+  )
+
+x_limits_resolved <- range(density_shift_df$x, na.rm = TRUE)
+y_limits_resolved <- range(density_shift_df$y, na.rm = TRUE)
+shared_abs_diff <- abs(density_shift_df$density_diff)
+shared_abs_diff <- shared_abs_diff[is.finite(shared_abs_diff)]
+shared_fill_lim <- stats::quantile(
+  shared_abs_diff, probs = density_fill_quantile, na.rm = TRUE, names = FALSE
+)
+if (!is.finite(shared_fill_lim) || shared_fill_lim <= 0) {
+  shared_fill_lim <- max(shared_abs_diff, na.rm = TRUE)
+}
+if (!is.finite(shared_fill_lim) || shared_fill_lim <= 0) {
+  shared_fill_lim <- 1
+}
+```
+
+# Combined Paper Figure
+
+```{r paper-figure, fig.width=8.8, fig.height=11.4}
+expr_basin_x <- expression(paste("Basin drift (", mu, " chain)"))
+expr_basin_y <- expression(paste("Basin drift (", pi, " chain)"))
+expr_jsd_x   <- expression(paste("PIP JSD (", mu, " chain)"))
+expr_jsd_y   <- expression(paste("PIP JSD (", pi, " chain)"))
+expr_dauprc  <- expression(paste(Delta, "AUPRC vs cold vanilla"))
+
+chain_labeller <- c(mu = "mu chain", pi = "pi chain")
+pair_kind_labeller <- c(
+  "cold -> annotated" = "Cold -> annotated",
+  "cold -> vanilla_warm" = "Cold -> warm vanilla"
+)
+
+method_legend_labels <- vapply(
+  levels(pr_curve_df$model_method),
+  function(m) {
+    auprc_val <- pr_auc_df$auprc_integral[
+      match(m, as.character(pr_auc_df$model_method))
+    ]
+    sprintf("%s (%.3f)",
+            method_legend_short[[m]] %||% method_labels[[m]] %||% m,
+            auprc_val)
+  },
+  character(1)
+)
+
+p_pr <- ggplot(pr_curve_df,
+               aes(x = .data$recall, y = .data$precision,
+                   color = .data$model_method)) +
+  geom_hline(yintercept = prevalence, color = "grey60",
+             linetype = "dashed", linewidth = 0.4) +
+  geom_step(direction = "vh", linewidth = 0.7) +
+  scale_color_manual(
+    values = method_color[levels(pr_curve_df$model_method)],
+    labels = method_legend_labels
+  ) +
+  coord_cartesian(xlim = c(0, 1), ylim = c(0, 1)) +
+  labs(x = "Recall", y = "Precision", color = "Method (pooled AUPRC)") +
+  theme(legend.position = "right")
+
+strip_chrome <- function(p) {
+  p + labs(title = NULL, subtitle = NULL) +
+    theme(plot.title = element_blank(), plot.subtitle = element_blank())
+}
+
+panel_A <- strip_chrome(p_pr) +
+  labs(title = paste0(
+    "A. Precision-recall on top-", pr_top_k,
+    " causal SNPs (600 datasets)"
+  )) +
+  guides(color = guide_legend(
+    ncol = 2, byrow = TRUE, title.position = "top",
+    override.aes = list(linewidth = 0.7)
+  )) +
+  theme_effect_paper(base_size = 8) +
+  theme(
+    legend.position = "bottom",
+    legend.justification = "left",
+    legend.box.margin = margin(t = -4),
+    legend.key.height = grid::unit(3.0, "mm"),
+    legend.key.width = grid::unit(6, "mm"),
+    legend.title = element_text(size = 6.8),
+    legend.text = element_text(size = 6.2),
+    panel.grid.minor = element_line(color = "grey95", linewidth = 0.18)
+  )
+
+basin_long_pf <- drift_summary %>%
+  dplyr::filter(.data$pair_id %in% c(
+    "vanilla__mu", "vanilla__pi",
+    "vanilla__vanilla_warm_from_mu", "vanilla__vanilla_warm_from_pi"
+  )) %>%
+  dplyr::transmute(
+    dataset_bundle_id = as.character(.data$dataset_bundle_id),
+    chain = dplyr::if_else(grepl("mu", .data$pair_id), "mu", "pi"),
+    pair_kind = dplyr::if_else(
+      .data$pair_id %in% c("vanilla__mu", "vanilla__pi"),
+      "cold_ann", "cold_warm"
+    ),
+    basin_drift = .data$weighted_r2_drift
+  )
+
+jsd_long_pf <- pip_drift_summary %>%
+  dplyr::filter(.data$pair_kind %in% c("vanilla_to_treatment",
+                                       "vanilla_to_warm")) %>%
+  dplyr::transmute(
+    dataset_bundle_id = as.character(.data$dataset_bundle_id),
+    chain = .data$chain,
+    pair_kind = dplyr::if_else(
+      .data$pair_kind == "vanilla_to_treatment", "cold_ann", "cold_warm"
+    ),
+    pip_jsd = .data$pip_jsd
+  )
+
+basin_wide_pf <- basin_long_pf %>%
+  tidyr::pivot_wider(names_from = chain, values_from = basin_drift,
+                     names_prefix = "basin_")
+jsd_wide_pf <- jsd_long_pf %>%
+  tidyr::pivot_wider(names_from = chain, values_from = pip_jsd,
+                     names_prefix = "jsd_")
+joined_pf <- basin_wide_pf %>%
+  dplyr::inner_join(jsd_wide_pf, by = c("dataset_bundle_id", "pair_kind"))
+
+basin_max_pf <- max(0.05,
+  max(joined_pf$basin_mu, joined_pf$basin_pi, na.rm = TRUE))
+jsd_max_pf <- max(0.05,
+  max(joined_pf$jsd_mu, joined_pf$jsd_pi, na.rm = TRUE))
+basin_color_max <- max(joined_pf$basin_mu, na.rm = TRUE)
+jsd_color_max <- max(joined_pf$jsd_mu, na.rm = TRUE)
+
+make_b_panel <- function(df, x_col, y_col, color_col,
+                         x_label, y_label, color_title, title_lab,
+                         color_lim_max, max_val,
+                         show_y = TRUE,
+                         show_legend = TRUE) {
+  ggplot(df, aes(x = .data[[x_col]], y = .data[[y_col]],
+                 color = .data[[color_col]])) +
+    geom_abline(slope = 1, intercept = 0,
+                color = "grey50", linetype = "dashed", linewidth = 0.35) +
+    geom_point(alpha = 0.62, size = 1.5, stroke = 0) +
+    scale_color_viridis_c(
+      option = "C",
+      limits = c(0, color_lim_max),
+      breaks = c(0, color_lim_max),
+      labels = c("low", "high"),
+      guide = if (show_legend) {
+        guide_colorbar(
+          title.position = "top",
+          title.hjust = 0.5,
+          label.position = "bottom",
+          barwidth  = grid::unit(2.3, "cm"),
+          barheight = grid::unit(0.24, "cm"),
+          direction = "horizontal"
+        )
+      } else {
+        "none"
+      }
+    ) +
+    scale_x_continuous(expand = expansion(mult = c(0.015, 0.035))) +
+    scale_y_continuous(expand = expansion(mult = c(0.015, 0.035))) +
+    coord_cartesian(xlim = c(-0.02, max_val), ylim = c(-0.01, max_val),
+                    expand = FALSE) +
+    labs(x = x_label, y = y_label, color = color_title,
+         title = title_lab) +
+    theme_effect_paper(base_size = 7.2) +
+    theme(
+      plot.title = element_text(size = 7.6, face = "bold",
+                                margin = margin(b = 0.5)),
+      axis.title.x = element_text(size = 7.0, margin = margin(t = 3)),
+      axis.title.y = element_text(size = 7.0, margin = margin(r = 3)),
+      axis.text = element_text(size = 6.2, color = "grey25"),
+      legend.margin = margin(t = -3, b = -4),
+      legend.box.margin = margin(t = -4),
+      plot.margin = margin(0.5, 2.5, 1.0, 2.5),
+      aspect.ratio = 1
+    ) +
+    {
+      if (show_y) {
+        theme()
+      } else {
+        theme(axis.title.y = element_blank(),
+              axis.text.y = element_blank(),
+              axis.ticks.y = element_blank())
+      }
+    }
+}
+
+joined_pf_cold_ann  <- joined_pf %>% dplyr::filter(pair_kind == "cold_ann")
+joined_pf_cold_warm <- joined_pf %>% dplyr::filter(pair_kind == "cold_warm")
+
+basin_color_title <- expression(paste("PIP JSD (", mu, ")"))
+jsd_color_title   <- expression(paste("Basin drift (", mu, ")"))
+
+pB1 <- make_b_panel(
+  joined_pf_cold_ann, "basin_mu", "basin_pi", "jsd_mu",
+  expr_basin_x, expr_basin_y, basin_color_title,
+  "Cold -> annotated",
+  color_lim_max = jsd_color_max, max_val = basin_max_pf,
+  show_y = TRUE,
+  show_legend = TRUE
+)
+pB2 <- make_b_panel(
+  joined_pf_cold_warm, "basin_mu", "basin_pi", "jsd_mu",
+  expr_basin_x, expr_basin_y, basin_color_title,
+  "Cold -> warm vanilla",
+  color_lim_max = jsd_color_max, max_val = basin_max_pf,
+  show_y = FALSE,
+  show_legend = FALSE
+)
+pB3 <- make_b_panel(
+  joined_pf_cold_ann, "jsd_mu", "jsd_pi", "basin_mu",
+  expr_jsd_x, expr_jsd_y, jsd_color_title,
+  "Cold -> annotated",
+  color_lim_max = basin_color_max, max_val = jsd_max_pf,
+  show_y = TRUE,
+  show_legend = TRUE
+)
+pB4 <- make_b_panel(
+  joined_pf_cold_warm, "jsd_mu", "jsd_pi", "basin_mu",
+  expr_jsd_x, expr_jsd_y, jsd_color_title,
+  "Cold -> warm vanilla",
+  color_lim_max = basin_color_max, max_val = jsd_max_pf,
+  show_y = FALSE,
+  show_legend = FALSE
+)
+
+b_pair_header <- function(lbl) {
+  ggplot() +
+    annotate("text", x = 0.5, y = 0.35, label = lbl,
+             size = 2.6, fontface = "bold") +
+    xlim(0, 1) + ylim(0, 1) +
+    theme_void() +
+    theme(plot.margin = margin(0, 0, 0, 0))
+}
+
+b_panel_title <- function(lbl) {
+  ggplot() +
+    annotate("text", x = 0, y = 0.25, label = lbl,
+             hjust = 0, size = 3.05, fontface = "bold") +
+    xlim(0, 1) + ylim(0, 1) +
+    theme_void() +
+    theme(plot.margin = margin(0, 0, 0, 0))
+}
+
+basin_pair_B <- (
+  b_pair_header("Basin drift") /
+    (pB1 | pB2)
+) +
+  plot_layout(
+    heights = c(0.035, 1),
+    guides = "collect"
+  ) &
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.box = "horizontal",
+    legend.title = element_text(size = 6.8),
+    legend.text = element_text(size = 6.0),
+    legend.margin = margin(t = -5, r = 0, b = -5, l = 0),
+    legend.box.margin = margin(t = -7, r = 0, b = -4, l = 0)
+  )
+
+jsd_pair_B <- (
+  b_pair_header("PIP JSD") /
+    (pB3 | pB4)
+) +
+  plot_layout(
+    heights = c(0.035, 1),
+    guides = "collect"
+  ) &
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.box = "horizontal",
+    legend.title = element_text(size = 6.8),
+    legend.text = element_text(size = 6.0),
+    legend.margin = margin(t = -5, r = 0, b = -5, l = 0),
+    legend.box.margin = margin(t = -7, r = 0, b = -4, l = 0)
+  )
+
+panel_C <- (
+  b_panel_title("C. Effect-level drift diagnostics (mu vs pi)") /
+    (basin_pair_B | jsd_pair_B)
+) +
+  plot_layout(heights = c(0.05, 1))
+
+auprc_lookup_pf <- auprc_per_dataset %>%
+  dplyr::transmute(
+    dataset_bundle_id = as.character(.data$dataset_bundle_id),
+    delta_mu_treat = .data$auprc_delta_mu,
+    delta_mu_warm  = .data$auprc_delta_warm_mu_vs_vanilla,
+    delta_pi_treat = .data$auprc_delta_pi,
+    delta_pi_warm  = .data$auprc_delta_warm_pi_vs_vanilla
+  )
+
+panel_B_long <- basin_long_pf %>%
+  dplyr::left_join(auprc_lookup_pf, by = "dataset_bundle_id") %>%
+  dplyr::mutate(
+    auprc_delta = dplyr::case_when(
+      chain == "mu" & pair_kind == "cold_ann"  ~ delta_mu_treat,
+      chain == "mu" & pair_kind == "cold_warm" ~ delta_mu_warm,
+      chain == "pi" & pair_kind == "cold_ann"  ~ delta_pi_treat,
+      chain == "pi" & pair_kind == "cold_warm" ~ delta_pi_warm
+    ),
+    drift_bucket = cut(
+      basin_drift,
+      breaks = c(-Inf, 0.05, Inf),
+      labels = c("<0.05", ">=0.05"),
+      right = FALSE
+    ),
+    chain = factor(chain, levels = c("mu", "pi")),
+    pair_kind = factor(
+      pair_kind,
+      levels = c("cold_ann", "cold_warm"),
+      labels = c("cold -> annotated", "cold -> vanilla_warm")
+    )
+  ) %>%
+  dplyr::filter(is.finite(.data$auprc_delta), !is.na(.data$drift_bucket))
+
+bucket_counts <- panel_B_long %>%
+  dplyr::count(.data$chain, .data$pair_kind, .data$drift_bucket)
+y_top <- max(panel_B_long$auprc_delta, na.rm = TRUE) * 1.08
+
+panel_B <- ggplot(
+  panel_B_long,
+  aes(x = .data$drift_bucket,
+      y = .data$auprc_delta,
+      fill = .data$drift_bucket)
+) +
+  geom_hline(yintercept = 0, color = "grey45", linetype = "dashed") +
+  geom_boxplot(alpha = 0.65, outlier.size = 0.6, width = 0.65) +
+  geom_text(
+    data = bucket_counts,
+    aes(x = .data$drift_bucket, y = y_top,
+        label = sprintf("n=%d", .data$n)),
+    inherit.aes = FALSE, size = 2.1, color = "grey25"
+  ) +
+  facet_grid(
+    chain ~ pair_kind,
+    labeller = labeller(chain = chain_labeller,
+                        pair_kind = pair_kind_labeller)
+  ) +
+  scale_fill_manual(values = c("<0.05" = "#878787", ">=0.05" = "#c44e52")) +
+  labs(
+    x = "Basin drift bucket",
+    y = expr_dauprc,
+    fill = NULL,
+    title = "B. AUPRC change by basin-drift bucket"
+  ) +
+  guides(fill = "none") +
+  theme_effect_paper(base_size = 8) +
+  theme(
+    axis.text.x = element_text(angle = 0, hjust = 0.5, size = 6.8),
+    plot.title = element_text(face = "bold", size = 9.2,
+                              margin = margin(b = 3))
+  )
+
+panel_D_df <- density_shift_df %>%
+  dplyr::filter(.data$comparison_kind %in% c(
+    "vanilla_to_treatment", "vanilla_to_warm"
+  )) %>%
+  dplyr::mutate(
+    comparison_kind = factor(
+      .data$comparison_kind,
+      levels = c("vanilla_to_treatment", "vanilla_to_warm"),
+      labels = c("cold -> annotated", "cold -> vanilla_warm")
+    ),
+    chain = factor(.data$chain, levels = c("mu", "pi"))
+  )
+
+x_label_paper <- expression(paste(
+  "Effect diffuseness: effective top-95% support size  ", K[l]
+))
+y_label_paper <- expression(paste(
+  "Effect accuracy: ", A[l], " = max causal PIP / max SNP PIP"
+))
+
+panel_D_core <- ggplot(panel_D_df,
+                  aes(x = .data$x, y = .data$y,
+                      fill = .data$density_diff)) +
+  geom_raster(interpolate = TRUE) +
+  geom_contour(aes(z = .data$density_diff),
+               color = "grey20", alpha = 0.45, linewidth = 0.18) +
+  facet_grid(
+    chain ~ comparison_kind,
+    labeller = labeller(chain = chain_labeller,
+                        comparison_kind = pair_kind_labeller)
+  ) +
+  scale_fill_gradient2(
+    low = "#2b6cb0", mid = "white", high = "#c53030",
+    midpoint = 0, limits = c(-shared_fill_lim, shared_fill_lim),
+    oob = scales::squish
+  ) +
+  keff_x_scale(xlim = x_limits_resolved) +
+  coord_cartesian(xlim = x_limits_resolved,
+                  ylim = y_limits_resolved,
+                  expand = FALSE) +
+  labs(
+    x = x_label_paper, y = y_label_paper,
+    fill = "destination - source\n(PVE-weighted density)",
+    title = "D. Per-effect quality shifts"
+  ) +
+  guides(fill = guide_colorbar(
+    title.position = "top",
+    title.hjust = 0.5,
+    barwidth = grid::unit(0.34, "cm"),
+    barheight = grid::unit(2.4, "cm"),
+    direction = "vertical"
+  )) +
+  theme_effect_paper(base_size = 8) +
+  theme(
+    legend.position = "right",
+    legend.justification = "center",
+    legend.margin = margin(0, 0, 0, 2),
+    legend.box.margin = margin(0, 0, 0, 2),
+    plot.title = element_text(face = "bold", size = 9.2,
+                              margin = margin(b = 3))
+  )
+
+panel_D <- (panel_D_core + guide_area()) +
+  plot_layout(widths = c(1, 0.13), guides = "collect") &
+  theme(legend.position = "right")
+
+top_summary_row <- (panel_A | panel_B) +
+  plot_layout(widths = c(0.60, 0.40))
+
+combined_fig <- (top_summary_row / panel_C / panel_D) +
+  plot_layout(heights = c(0.92, 1.50, 1.25))
+
+ggsave(
+  paper_figure_png, combined_fig,
+  width = 8.8, height = 11.4, dpi = 300, bg = "white",
+  limitsize = FALSE
+)
+cat("Wrote combined paper figure to ", paper_figure_png, "\n", sep = "")
+print(combined_fig)
+```

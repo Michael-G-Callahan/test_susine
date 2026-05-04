@@ -148,12 +148,16 @@ effect_quality_density_pi_png <- file.path(
 effect_quality_pair_rows_csv <- file.path(
   study_dir, "effect_quality_pair_rows_5arm.csv"
 )
+effect_quality_density_shift_csv <- file.path(
+  study_dir, "effect_quality_density_shift_5arm.csv"
+)
 pip_records_rds <- file.path(study_dir, "pip_records_5arm.rds")
 pip_drift_summary_csv <- file.path(study_dir, "pip_drift_summary_5arm.csv")
 causal_idx_rds <- file.path(study_dir, "causal_idx_5arm.rds")
 causal_truth_rds <- file.path(study_dir, "causal_truth_5arm.rds")
 pr_curves_pooled_png <- file.path(plot_dir, "pr_curves_pooled_top8.png")
 pr_curves_pooled_csv <- file.path(study_dir, "pr_curves_pooled_top8_5arm.csv")
+pr_auc_pooled_csv <- file.path(study_dir, "pr_auc_pooled_top8_5arm.csv")
 paper_figure_png <- file.path(plot_dir, "paper_figure_effect_drift.png")
 
 # Parallel outputs for the 1 - r^2 ("explanatory subspace distance") version
@@ -1796,6 +1800,9 @@ density_shift_df <- dplyr::bind_rows(density_shift_rows) %>%
                  "vanilla_to_warm")
     )
   )
+readr::write_csv(density_shift_df, effect_quality_density_shift_csv)
+cat("Wrote effect-quality density-shift grid:", nrow(density_shift_df),
+    "->", effect_quality_density_shift_csv, "\n")
 
 # Use the 95th-percentile |density_diff| from BOTH chains pooled to set a
 # shared symmetric fill scale; that way the two chains' panels are
@@ -2067,6 +2074,11 @@ pr_auc_df <- dplyr::bind_rows(pr_auc_rows) %>%
 
 readr::write_csv(pr_curve_df, pr_curves_pooled_csv)
 cat("Wrote PR curve rows:", nrow(pr_curve_df), "->", pr_curves_pooled_csv, "\n")
+readr::write_csv(
+  pr_auc_df %>% dplyr::mutate(prevalence = prevalence),
+  pr_auc_pooled_csv
+)
+cat("Wrote pooled PR AUC rows:", nrow(pr_auc_df), "->", pr_auc_pooled_csv, "\n")
 print(pr_auc_df)
 
 method_legend_short <- c(
