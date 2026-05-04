@@ -2577,9 +2577,12 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
     )) +
     theme_effect_paper(base_size = 8) +
     theme(
-      legend.position = "right",
-      legend.justification = "center",
-      legend.box.margin = margin(l = 4),
+      legend.position = c(0.965, 0.52),
+      legend.justification = c(1, 0.5),
+      legend.background = element_rect(fill = scales::alpha("white", 0.86),
+                                       color = NA),
+      legend.box.background = element_blank(),
+      legend.margin = margin(2, 2, 2, 2),
       plot.title = element_text(face = "bold", size = 9.2,
                                 margin = margin(b = 3))
     )
@@ -2590,7 +2593,7 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
   top_summary_row <- panel_A | panel_C
 
   combined_fig <- (top_summary_row / panel_B / panel_D) +
-    plot_layout(heights = c(1.18, 0.92, 1.56))
+    plot_layout(heights = c(0.92, 1.18, 1.56))
 
   ggsave(
     paper_figure_png, combined_fig,
