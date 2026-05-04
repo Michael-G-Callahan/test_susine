@@ -33,8 +33,13 @@ suppressPackageStartupMessages({
 })
 
 pkg_root <- "c:/Users/mgcal/OneDrive/Documents/School/Research/Genetics/cTWAS Generalization/Code/test_susine"
-plots_dir <- "c:/Users/mgcal/OneDrive/Documents/School/Research/Genetics/cTWAS Generalization/Writings/plots"
+plots_dir <- file.path(
+  "c:/Users/mgcal/OneDrive/Documents/School/Research/Genetics",
+  "cTWAS Generalization/Writings/plots/annotation_calibration"
+)
 cache_path <- file.path(pkg_root, "vignettes/one_off_validations/annotation_calibration_cache.rds")
+
+dir.create(plots_dir, recursive = TRUE, showWarnings = FALSE)
 
 devtools::load_all(pkg_root, quiet = TRUE)
 
@@ -59,6 +64,7 @@ working_phi_vals <- c(0.3)
 working_nu_vals  <- c(0.9, 1.0)
 
 fmt_num <- function(x) formatC(x, format = "f", digits = 2)
+fmt_axis <- function(x) formatC(x, format = "f", digits = 1)
 
 ## --------------------------------------------------------------------- ##
 ## Calibration helpers (copied verbatim from the Rmd)                    ##
@@ -308,9 +314,9 @@ plot_calibration_heatmap <- function(tbl, value_col, fill_label,
                                                  title.position = "top",
                                                  title.hjust = 0)) +
     scale_x_continuous(breaks = seq_along(annotation_r2_grid),
-                       labels = fmt_num(annotation_r2_grid), expand = c(0, 0)) +
+                       labels = fmt_axis(annotation_r2_grid), expand = c(0, 0)) +
     scale_y_continuous(breaks = seq_along(inflate_match_grid),
-                       labels = fmt_num(inflate_match_grid), expand = c(0, 0)) +
+                       labels = fmt_axis(inflate_match_grid), expand = c(0, 0)) +
     coord_equal(clip = "off") +
     labs(x = if (show_x) expression(paste("Annotation accuracy  ", phi[a])) else NULL,
          y = if (show_y) expression(paste("Non-causal inflation  ", nu[a])) else NULL,
@@ -357,6 +363,14 @@ p_c <- plot_calibration_heatmap(pooled_summary_tbl,
                                 show_x = TRUE, show_y = TRUE)
 
 top_row <- p_a | p_b
+
+out_a <- file.path(plots_dir, "annotation_calibration_panel_a.png")
+ggsave(out_a, p_a, width = 3.5, height = 3.6, dpi = 300, bg = "white")
+cat("Wrote", out_a, "\n")
+
+out_b <- file.path(plots_dir, "annotation_calibration_panel_b.png")
+ggsave(out_b, p_b, width = 3.5, height = 3.6, dpi = 300, bg = "white")
+cat("Wrote", out_b, "\n")
 
 out_top <- file.path(plots_dir, "annotation_calibration_top_row.png")
 ggsave(out_top, top_row, width = 7.0, height = 3.6, dpi = 300, bg = "white")
