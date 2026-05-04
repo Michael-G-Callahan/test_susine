@@ -2280,8 +2280,8 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
   # doesn't need to read raw values off the legend bar.
   #
   # The x/y limits are matched within each metric so the diagonal is still
-  # interpretable, but the panels are allowed to be rectangular to keep the
-  # full manuscript figure from becoming vertically cramped.
+  # interpretable. Small negative lower bounds keep points on the axes from
+  # being clipped at the origin.
   make_b_panel <- function(df, x_col, y_col, color_col,
                            x_label, y_label, color_title, title_lab,
                            color_lim_max, max_val,
@@ -2291,7 +2291,7 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
                    color = .data[[color_col]])) +
       geom_abline(slope = 1, intercept = 0,
                   color = "grey50", linetype = "dashed", linewidth = 0.35) +
-      geom_point(alpha = 0.58, size = 0.75, stroke = 0) +
+      geom_point(alpha = 0.62, size = 1.5, stroke = 0) +
       scale_color_viridis_c(
         option = "C",
         limits = c(0, color_lim_max),
@@ -2301,9 +2301,9 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
           guide_colorbar(
             title.position = "top",
             title.hjust = 0.5,
-            barwidth  = grid::unit(2.8, "cm"),
-            barheight = grid::unit(0.26, "cm"),
-            direction = "horizontal"
+            barwidth  = grid::unit(0.30, "cm"),
+            barheight = grid::unit(2.2, "cm"),
+            direction = "vertical"
           )
         } else {
           "none"
@@ -2311,7 +2311,7 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
       ) +
       scale_x_continuous(expand = expansion(mult = c(0.015, 0.035))) +
       scale_y_continuous(expand = expansion(mult = c(0.015, 0.035))) +
-      coord_cartesian(xlim = c(0, max_val), ylim = c(0, max_val),
+      coord_cartesian(xlim = c(-0.02, max_val), ylim = c(-0.01, max_val),
                       expand = FALSE) +
       labs(x = x_label, y = y_label, color = color_title,
            title = title_lab) +
@@ -2324,7 +2324,8 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
         axis.text = element_text(size = 6.2, color = "grey25"),
         legend.margin = margin(t = -3, b = -4),
         legend.box.margin = margin(t = -4),
-        plot.margin = margin(1.5, 2.5, 1.5, 2.5)
+        plot.margin = margin(1.5, 2.5, 1.5, 2.5),
+        aspect.ratio = 1
       ) +
       {
         if (show_y) {
@@ -2386,41 +2387,57 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
       theme(plot.margin = margin(0, 0, 0, 0))
   }
 
-  # Panel B is assembled as two self-contained metric pairs. This keeps the
-  # one-row reading order while centering each colorbar under its own pair.
-  basin_pair_B <- ((b_pair_header("Basin drift") / (pB1 | pB2)) +
-    plot_layout(heights = c(0.08, 1), guides = "collect")) &
+  b_panel_title <- function(lbl) {
+    ggplot() +
+      annotate("text", x = 0, y = 0.5, label = lbl,
+               hjust = 0, size = 3.05, fontface = "bold") +
+      xlim(0, 1) + ylim(0, 1) +
+      theme_void() +
+      theme(plot.margin = margin(0, 0, 0, 0))
+  }
+
+  # Panel B reads left-to-right as:
+  # basin plot, basin plot, basin legend, PIP-JSD plot, PIP-JSD plot, JSD legend.
+  # Each pair collects only its own guide into a narrow legend cell.
+  basin_pair_B <- (
+    b_pair_header("Basin drift") + plot_spacer() +
+      pB1 + pB2 + guide_area()
+  ) +
+    plot_layout(
+      design = "AAB\nCDE",
+      widths = c(1, 1, 0.24),
+      heights = c(0.09, 1),
+      guides = "collect"
+    ) &
     theme(
-      legend.position  = "bottom",
-      legend.direction = "horizontal",
-      legend.box       = "horizontal",
-      legend.title     = element_text(size = 7.0),
-      legend.text      = element_text(size = 6.2),
-      legend.spacing.x = grid::unit(2, "mm"),
-      legend.box.margin = margin(t = -3, b = -2)
+      legend.position = "right",
+      legend.title = element_text(size = 6.8),
+      legend.text = element_text(size = 6.0),
+      legend.box.margin = margin(0, 0, 0, 1)
     )
 
-  jsd_pair_B <- ((b_pair_header("PIP JSD") / (pB3 | pB4)) +
-    plot_layout(heights = c(0.08, 1), guides = "collect")) &
+  jsd_pair_B <- (
+    b_pair_header("PIP JSD") + plot_spacer() +
+      pB3 + pB4 + guide_area()
+  ) +
+    plot_layout(
+      design = "AAB\nCDE",
+      widths = c(1, 1, 0.24),
+      heights = c(0.09, 1),
+      guides = "collect"
+    ) &
     theme(
-      legend.position  = "bottom",
-      legend.direction = "horizontal",
-      legend.box       = "horizontal",
-      legend.title     = element_text(size = 7.0),
-      legend.text      = element_text(size = 6.2),
-      legend.spacing.x = grid::unit(2, "mm"),
-      legend.box.margin = margin(t = -3, b = -2)
+      legend.position = "right",
+      legend.title = element_text(size = 6.8),
+      legend.text = element_text(size = 6.0),
+      legend.box.margin = margin(0, 0, 0, 1)
     )
 
-  panel_B <- (((basin_pair_B | jsd_pair_B) +
-    plot_layout(widths = c(1, 1))) +
-    plot_annotation(
-      title = "B. Effect-level drift diagnostics (mu vs pi)",
-      theme = theme(
-        plot.title = element_text(face = "bold", size = 9.2,
-                                  margin = margin(b = 3))
-      )
-    ))
+  panel_B <- (
+    b_panel_title("B. Effect-level drift diagnostics (mu vs pi)") /
+      (basin_pair_B | jsd_pair_B)
+  ) +
+    plot_layout(heights = c(0.10, 1))
 
   # ============================================================
   # PANEL C. dAUPRC boxplots by 3-bucket basin-drift cut
@@ -2573,7 +2590,7 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
   # Assemble
   # ============================================================
   combined_fig <- (panel_A / panel_B / panel_C / panel_D) +
-    plot_layout(heights = c(0.78, 1.10, 1.25, 1.52))
+    plot_layout(heights = c(0.78, 0.92, 1.31, 1.56))
 
   ggsave(
     paper_figure_png, combined_fig,
