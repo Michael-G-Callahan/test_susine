@@ -380,7 +380,7 @@ panel_A <- strip_chrome(p_pr) +
     " causal SNPs (600 datasets)"
   )) +
   guides(color = guide_legend(
-    ncol = 2, byrow = TRUE, title.position = "top",
+    nrow = 2, byrow = TRUE, title.position = "top",
     override.aes = list(linewidth = 0.7)
   )) +
   theme_effect_paper(base_size = 8) +
@@ -432,9 +432,9 @@ joined_pf <- basin_wide_pf %>%
   dplyr::inner_join(jsd_wide_pf, by = c("dataset_bundle_id", "pair_kind"))
 
 basin_max_pf <- max(0.05,
-  max(joined_pf$basin_mu, joined_pf$basin_pi, na.rm = TRUE))
+  max(joined_pf$basin_mu, joined_pf$basin_pi, na.rm = TRUE)) + 0.01
 jsd_max_pf <- max(0.05,
-  max(joined_pf$jsd_mu, joined_pf$jsd_pi, na.rm = TRUE))
+  max(joined_pf$jsd_mu, joined_pf$jsd_pi, na.rm = TRUE)) + 0.02
 basin_color_max <- max(joined_pf$basin_mu, na.rm = TRUE)
 jsd_color_max <- max(joined_pf$jsd_mu, na.rm = TRUE)
 
@@ -447,7 +447,7 @@ make_b_panel <- function(df, x_col, y_col, color_col,
                  color = .data[[color_col]])) +
     geom_abline(slope = 1, intercept = 0,
                 color = "grey50", linetype = "dashed", linewidth = 0.35) +
-    geom_point(alpha = 0.62, size = 1.5, stroke = 0) +
+    geom_point(alpha = 0.62, size = 2.25, stroke = 0) +
     scale_color_viridis_c(
       option = "C",
       limits = c(0, color_lim_max),
@@ -536,8 +536,8 @@ pB4 <- make_b_panel(
 
 b_pair_header <- function(lbl) {
   ggplot() +
-    annotate("text", x = 0.5, y = 0.35, label = lbl,
-             size = 2.6, fontface = "bold") +
+    annotate("text", x = 0.5, y = 0.50, label = lbl,
+             size = 2.5, fontface = "bold") +
     xlim(0, 1) + ylim(0, 1) +
     theme_void() +
     theme(plot.margin = margin(0, 0, 0, 0))
@@ -545,19 +545,20 @@ b_pair_header <- function(lbl) {
 
 b_panel_title <- function(lbl) {
   ggplot() +
-    annotate("text", x = 0, y = 0.25, label = lbl,
+    annotate("text", x = -0.055, y = 0.25, label = lbl,
              hjust = 0, size = 3.05, fontface = "bold") +
-    xlim(0, 1) + ylim(0, 1) +
+    coord_cartesian(xlim = c(0, 1), ylim = c(0, 1), clip = "off") +
     theme_void() +
     theme(plot.margin = margin(0, 0, 0, 0))
 }
 
 basin_pair_B <- (
   b_pair_header("Basin drift") /
-    (pB1 | pB2)
+    (pB1 | pB2) /
+    guide_area()
 ) +
   plot_layout(
-    heights = c(0.035, 1),
+    heights = c(0.022, 1, 0.095),
     guides = "collect"
   ) &
   theme(
@@ -566,16 +567,17 @@ basin_pair_B <- (
     legend.box = "horizontal",
     legend.title = element_text(size = 6.8),
     legend.text = element_text(size = 6.0),
-    legend.margin = margin(t = -5, r = 0, b = -5, l = 0),
-    legend.box.margin = margin(t = -7, r = 0, b = -4, l = 0)
+    legend.margin = margin(t = -7, r = 0, b = -6, l = 0),
+    legend.box.margin = margin(t = -10, r = 0, b = -5, l = 0)
   )
 
 jsd_pair_B <- (
   b_pair_header("PIP JSD") /
-    (pB3 | pB4)
+    (pB3 | pB4) /
+    guide_area()
 ) +
   plot_layout(
-    heights = c(0.035, 1),
+    heights = c(0.022, 1, 0.095),
     guides = "collect"
   ) &
   theme(
@@ -584,15 +586,15 @@ jsd_pair_B <- (
     legend.box = "horizontal",
     legend.title = element_text(size = 6.8),
     legend.text = element_text(size = 6.0),
-    legend.margin = margin(t = -5, r = 0, b = -5, l = 0),
-    legend.box.margin = margin(t = -7, r = 0, b = -4, l = 0)
+    legend.margin = margin(t = -7, r = 0, b = -6, l = 0),
+    legend.box.margin = margin(t = -10, r = 0, b = -5, l = 0)
   )
 
 panel_C <- (
   b_panel_title("C. Effect-level drift diagnostics (mu vs pi)") /
     (basin_pair_B | jsd_pair_B)
 ) +
-  plot_layout(heights = c(0.05, 1))
+  plot_layout(heights = c(0.035, 1))
 
 auprc_lookup_pf <- auprc_per_dataset %>%
   dplyr::transmute(
@@ -723,6 +725,7 @@ panel_D_core <- ggplot(panel_D_df,
     legend.justification = "center",
     legend.margin = margin(0, 0, 0, 2),
     legend.box.margin = margin(0, 0, 0, 2),
+    panel.spacing.y = grid::unit(1.25, "mm"),
     plot.title = element_text(face = "bold", size = 9.2,
                               margin = margin(b = 3))
   )
@@ -732,10 +735,10 @@ panel_D <- (panel_D_core + guide_area()) +
   theme(legend.position = "right")
 
 top_summary_row <- (panel_A | panel_B) +
-  plot_layout(widths = c(0.60, 0.40))
+  plot_layout(widths = c(0.56, 0.44))
 
 combined_fig <- (top_summary_row / panel_C / panel_D) +
-  plot_layout(heights = c(0.92, 1.50, 1.25))
+  plot_layout(heights = c(0.88, 1.30, 1.28))
 
 ggsave(
   paper_figure_png, combined_fig,
