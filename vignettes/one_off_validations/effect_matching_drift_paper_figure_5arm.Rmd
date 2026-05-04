@@ -738,7 +738,7 @@ top_summary_row <- (wrap_elements(full = panel_A) | wrap_elements(full = panel_B
   plot_layout(widths = c(0.52, 0.48))
 
 combined_fig <- (top_summary_row / panel_C / panel_D) +
-  plot_layout(heights = c(0.70, 1.12, 1.17))
+  plot_layout(heights = c(0.84, 1.12, 1.17))
 
 ggsave(
   paper_figure_png, combined_fig,
