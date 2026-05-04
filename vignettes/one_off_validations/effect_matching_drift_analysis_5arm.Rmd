@@ -2209,16 +2209,18 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
       " causal SNPs (600 datasets)"
     )) +
     guides(color = guide_legend(
-      ncol = 1, byrow = TRUE, title.position = "top",
+      ncol = 2, byrow = TRUE, title.position = "top",
       override.aes = list(linewidth = 0.7)
     )) +
     theme_effect_paper(base_size = 8) +
     theme(
-      legend.position = "right",
-      legend.justification = "center",
-      legend.box.margin = margin(l = 4),
+      legend.position = "bottom",
+      legend.justification = "left",
+      legend.box.margin = margin(t = -4),
       legend.key.height = grid::unit(3.0, "mm"),
-      legend.key.width = grid::unit(8, "mm"),
+      legend.key.width = grid::unit(6, "mm"),
+      legend.title = element_text(size = 6.8),
+      legend.text = element_text(size = 6.2),
       panel.grid.minor = element_line(color = "grey95", linewidth = 0.18)
     )
 
@@ -2434,13 +2436,13 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
     )
 
   panel_B <- (
-    b_panel_title("B. Effect-level drift diagnostics (mu vs pi)") /
+    b_panel_title("C. Effect-level drift diagnostics (mu vs pi)") /
       (basin_pair_B | jsd_pair_B)
   ) +
     plot_layout(heights = c(0.10, 1))
 
   # ============================================================
-  # PANEL C. dAUPRC boxplots by 3-bucket basin-drift cut
+  # PANEL B. dAUPRC boxplots by 2-bucket basin-drift cut
   # ============================================================
   auprc_lookup_pf <- auprc_per_dataset %>%
     dplyr::transmute(
@@ -2462,8 +2464,8 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
       ),
       drift_bucket = cut(
         basin_drift,
-        breaks = c(-Inf, 0.05, 0.10, Inf),
-        labels = c("low (<0.05)", "mid (0.05-0.10)", "high (>=0.10)"),
+        breaks = c(-Inf, 0.05, Inf),
+        labels = c("<0.05", ">=0.05"),
         right = FALSE
       ),
       chain = factor(chain, levels = c("mu", "pi")),
@@ -2499,23 +2501,19 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
       labeller = labeller(chain = chain_labeller,
                           pair_kind = pair_kind_labeller)
     ) +
-    scale_fill_manual(values = c(
-      "low (<0.05)"     = "#878787",
-      "mid (0.05-0.10)" = "#fd8d3c",
-      "high (>=0.10)"   = "#a50f15"
-    )) +
+    scale_fill_manual(values = c("<0.05" = "#878787", ">=0.05" = "#c44e52")) +
     labs(
       x = "Basin drift bucket",
       y = expr_dauprc,
       fill = "Basin drift",
-      title = "C. AUPRC change by basin-drift bucket"
+      title = "B. AUPRC change by basin-drift bucket"
     ) +
-    guides(fill = guide_legend(ncol = 1, title.position = "top")) +
+    guides(fill = guide_legend(nrow = 1, title.position = "top")) +
     theme_effect_paper(base_size = 8) +
     theme(
-      legend.position = "right",
-      legend.justification = "center",
-      legend.box.margin = margin(l = 4),
+      legend.position = "bottom",
+      legend.justification = "left",
+      legend.box.margin = margin(t = -4),
       axis.text.x = element_text(angle = 0, hjust = 0.5, size = 6.8),
       plot.title = element_text(face = "bold", size = 9.2,
                                 margin = margin(b = 3))
@@ -2589,8 +2587,10 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
   # ============================================================
   # Assemble
   # ============================================================
-  combined_fig <- (panel_A / panel_B / panel_C / panel_D) +
-    plot_layout(heights = c(0.78, 0.92, 1.31, 1.56))
+  top_summary_row <- panel_A | panel_C
+
+  combined_fig <- (top_summary_row / panel_B / panel_D) +
+    plot_layout(heights = c(1.18, 0.92, 1.56))
 
   ggsave(
     paper_figure_png, combined_fig,
