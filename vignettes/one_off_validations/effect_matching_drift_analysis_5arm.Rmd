@@ -2238,13 +2238,14 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
   # carry the intuition ("no change" -> "most change") so the reader
   # doesn't need to read raw values off the legend bar.
   #
-  # coord_cartesian + theme(aspect.ratio = 1) decouples the panel's
-  # on-screen square size from the data range, so basin (0-0.8) and
-  # JSD (0-1.7) panels render at the same physical size.
+  # The x/y limits are matched within each metric so the diagonal is still
+  # interpretable, but the panels are allowed to be rectangular to keep the
+  # full manuscript figure from becoming vertically cramped.
   make_b_panel <- function(df, x_col, y_col, color_col,
                            x_label, y_label, color_title, title_lab,
                            color_lim_max, max_val,
-                           show_y = TRUE) {
+                           show_y = TRUE,
+                           show_legend = TRUE) {
     ggplot(df, aes(x = .data[[x_col]], y = .data[[y_col]],
                    color = .data[[color_col]])) +
       geom_abline(slope = 1, intercept = 0,
@@ -2258,8 +2259,8 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
         guide = guide_colorbar(
           title.position = "top",
           title.hjust = 0.5,
-          barwidth  = grid::unit(5.3, "cm"),
-          barheight = grid::unit(0.35, "cm"),
+          barwidth  = grid::unit(4.1, "cm"),
+          barheight = grid::unit(0.30, "cm"),
           direction = "horizontal"
         )
       ) +
@@ -2270,16 +2271,15 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
       labs(x = x_label, y = y_label, color = color_title,
            title = title_lab) +
       theme(
-        plot.title = element_text(size = 10.5, face = "bold",
-                                  margin = margin(b = 4)),
-        axis.title.x = element_text(size = 10, margin = margin(t = 5)),
-        axis.title.y = element_text(size = 10, margin = margin(r = 5)),
-        axis.text = element_text(size = 8.5, color = "grey25"),
+        plot.title = element_text(size = 9.5, face = "bold",
+                                  margin = margin(b = 3)),
+        axis.title.x = element_text(size = 8.8, margin = margin(t = 4)),
+        axis.title.y = element_text(size = 8.8, margin = margin(r = 4)),
+        axis.text = element_text(size = 7.8, color = "grey25"),
         panel.grid.major = element_line(color = "grey90", linewidth = 0.3),
         panel.grid.minor = element_line(color = "grey95", linewidth = 0.2),
         legend.margin = margin(t = -2, b = -2),
-        plot.margin = margin(3, 6, 3, 6),
-        aspect.ratio = 1
+        plot.margin = margin(2, 5, 2, 5)
       ) +
       {
         if (show_y) {
@@ -2288,6 +2288,13 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
           theme(axis.title.y = element_blank(),
                 axis.text.y = element_blank(),
                 axis.ticks.y = element_blank())
+        }
+      } +
+      {
+        if (show_legend) {
+          theme()
+        } else {
+          theme(legend.position = "none")
         }
       }
   }
@@ -2304,61 +2311,65 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
     expr_basin_x, expr_basin_y, basin_color_title,
     "B(i). Cold -> annotated",
     color_lim_max = jsd_color_max, max_val = basin_max_pf,
-    show_y = TRUE
+    show_y = TRUE,
+    show_legend = TRUE
   )
   pB2 <- make_b_panel(
     joined_pf_cold_warm, "basin_mu", "basin_pi", "jsd_mu",
     expr_basin_x, expr_basin_y, basin_color_title,
     "B(ii). Cold -> warm vanilla",
     color_lim_max = jsd_color_max, max_val = basin_max_pf,
-    show_y = FALSE
+    show_y = FALSE,
+    show_legend = FALSE
   )
   pB3 <- make_b_panel(
     joined_pf_cold_ann, "jsd_mu", "jsd_pi", "basin_mu",
     expr_jsd_x, expr_jsd_y, jsd_color_title,
     "B(iii). Cold -> annotated",
     color_lim_max = basin_color_max, max_val = jsd_max_pf,
-    show_y = TRUE
+    show_y = TRUE,
+    show_legend = TRUE
   )
   pB4 <- make_b_panel(
     joined_pf_cold_warm, "jsd_mu", "jsd_pi", "basin_mu",
     expr_jsd_x, expr_jsd_y, jsd_color_title,
     "B(iv). Cold -> warm vanilla",
     color_lim_max = basin_color_max, max_val = jsd_max_pf,
-    show_y = FALSE
+    show_y = FALSE,
+    show_legend = FALSE
   )
 
-  # A 2 x 2 two-pair layout gives the four scatters much more physical area
-  # than the old 1 x 4 strip. Within each row-pair, the left plot carries
-  # the shared y-axis label and the right plot drops duplicate y text.
-  basin_pair_B <- (pB1 | pB2) +
-    plot_layout(guides = "collect", widths = c(1, 1)) +
-    plot_annotation(title = "B. Basin drift: mu vs pi") &
+  b_group_header <- function(lbl) {
+    ggplot() +
+      annotate("text", x = 0.5, y = 0.5, label = lbl,
+               size = 3.4, fontface = "bold") +
+      xlim(0, 1) + ylim(0, 1) +
+      theme_void() +
+      theme(plot.margin = margin(0, 0, 0, 0))
+  }
+
+  # One visual row keeps the full figure from becoming vertically strained.
+  # Headers span metric pairs; within each pair, only the left plot carries
+  # the shared y-axis label and only one compact colorbar is retained.
+  panel_B_header <- (
+    b_group_header("B. Basin drift: mu vs pi") |
+      b_group_header("PIP JSD: mu vs pi")
+  ) +
+    plot_layout(widths = c(1, 1))
+
+  panel_B_plots <- (pB1 | pB2 | pB3 | pB4) +
+    plot_layout(widths = c(1, 1, 1, 1), guides = "collect")
+
+  panel_B <- (panel_B_header / panel_B_plots) +
+    plot_layout(heights = c(0.10, 1), guides = "collect") &
     theme(
       legend.position  = "bottom",
       legend.direction = "horizontal",
       legend.box       = "horizontal",
-      legend.title     = element_text(size = 9.5),
-      legend.text      = element_text(size = 8.5),
-      plot.title       = element_text(face = "bold", size = 11,
-                                      margin = margin(b = 5))
+      legend.title     = element_text(size = 8.6),
+      legend.text      = element_text(size = 7.6),
+      legend.spacing.x = grid::unit(2, "mm")
     )
-
-  jsd_pair_B <- (pB3 | pB4) +
-    plot_layout(guides = "collect", widths = c(1, 1)) +
-    plot_annotation(title = "PIP JSD: mu vs pi") &
-    theme(
-      legend.position  = "bottom",
-      legend.direction = "horizontal",
-      legend.box       = "horizontal",
-      legend.title     = element_text(size = 9.5),
-      legend.text      = element_text(size = 8.5),
-      plot.title       = element_text(face = "bold", size = 11,
-                                      margin = margin(b = 5))
-    )
-
-  panel_B <- (basin_pair_B / jsd_pair_B) +
-    plot_layout(heights = c(1, 1))
 
   # ============================================================
   # PANEL C. dAUPRC boxplots by 3-bucket basin-drift cut
@@ -2484,7 +2495,7 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
   # Assemble
   # ============================================================
   combined_fig <- panel_A / panel_B / panel_C / panel_D +
-    plot_layout(heights = c(0.58, 2.15, 1.0, 1.1)) &
+    plot_layout(heights = c(0.62, 0.98, 1.10, 1.22)) &
     theme(plot.title = element_text(face = "bold", size = 12))
 
   ggsave(
