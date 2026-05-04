@@ -2505,15 +2505,12 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
     labs(
       x = "Basin drift bucket",
       y = expr_dauprc,
-      fill = "Basin drift",
+      fill = NULL,
       title = "B. AUPRC change by basin-drift bucket"
     ) +
-    guides(fill = guide_legend(nrow = 1, title.position = "top")) +
+    guides(fill = "none") +
     theme_effect_paper(base_size = 8) +
     theme(
-      legend.position = "bottom",
-      legend.justification = "left",
-      legend.box.margin = margin(t = -4),
       axis.text.x = element_text(angle = 0, hjust = 0.5, size = 6.8),
       plot.title = element_text(face = "bold", size = 9.2,
                                 margin = margin(b = 3))
