@@ -2069,14 +2069,22 @@ readr::write_csv(pr_curve_df, pr_curves_pooled_csv)
 cat("Wrote PR curve rows:", nrow(pr_curve_df), "->", pr_curves_pooled_csv, "\n")
 print(pr_auc_df)
 
+method_legend_short <- c(
+  susie_vanilla = "Vanilla cold",
+  susine_functional_mu = "Functional-mu",
+  susie_vanilla_warm_from_mu = "Warm vanilla (mu)",
+  susie_functional_pi = "Functional-pi",
+  susie_vanilla_warm_from_pi = "Warm vanilla (pi)"
+)
+
 method_legend_labels <- vapply(
   levels(pr_curve_df$model_method),
   function(m) {
     auprc_val <- pr_auc_df$auprc_integral[
       match(m, as.character(pr_auc_df$model_method))
     ]
-    sprintf("%s (AUPRC = %.3f)",
-            method_labels[[m]] %||% m,
+    sprintf("%s (%.3f)",
+            method_legend_short[[m]] %||% method_labels[[m]] %||% m,
             auprc_val)
   },
   character(1)
@@ -2119,7 +2127,7 @@ performance result (PR curves) down through the drift mechanics and the
 per-effect mechanism. Component plots are stripped of their per-chunk
 titles/subtitles so the paper caption can carry the framing.
 
-```{r paper-figure, eval=have_pip_records, fig.width=16, fig.height=22}
+```{r paper-figure, eval=have_pip_records, fig.width=8.8, fig.height=12.2}
 # Headline 4-panel paper figure. Locked in to the 1 - r^2 basin metric
 # (chord version retained as diagnostic in §12/§14/§17 sibling chunks).
 #
@@ -2130,9 +2138,8 @@ titles/subtitles so the paper caption can carry the framing.
 #        B(iii): PIP JSD cold->ann,     colored by mu basin drift (cold->ann)
 #        B(iv): PIP JSD cold->warm,     colored by mu basin drift (cold->warm)
 #      Coloring is on a linear viridis scale (no log). The four sub-panels
-#      are grouped as two pairs (basin row | JSD row), each pair sharing
-#      a single horizontal colorbar legend below the pair so the
-#      individual scatters can use their full width.
+#      are grouped as a compact one-row diagnostic table with shared
+#      y-labels within the basin and PIP-JSD pairs.
 #   C. Boxplots of dAUPRC by 3-bucket basin-drift cut (<0.05 / 0.05-0.10
 #      / >=0.10), faceted chain x pair_kind. Per-cell n annotated above
 #      each box. Boxplots (not densities) chosen because the high-drift
@@ -2150,6 +2157,27 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
 } else {
   library(patchwork)
 
+  theme_effect_paper <- function(base_size = 8) {
+    theme_bw(base_size = base_size) +
+      theme(
+        panel.grid.major = element_line(color = "grey91", linewidth = 0.22),
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(color = "grey35", fill = NA, linewidth = 0.35),
+        axis.title = element_text(size = base_size),
+        axis.text = element_text(size = base_size - 1, color = "grey25"),
+        plot.title = element_text(face = "bold", size = base_size + 1.2,
+                                  margin = margin(b = 3)),
+        strip.background = element_rect(fill = "grey88", color = "grey35",
+                                        linewidth = 0.35),
+        strip.text = element_text(size = base_size - 0.8, color = "grey20"),
+        legend.title = element_text(size = base_size - 0.4),
+        legend.text = element_text(size = base_size - 1.1),
+        legend.key.height = grid::unit(3.2, "mm"),
+        legend.key.width = grid::unit(6.0, "mm"),
+        plot.margin = margin(2.5, 2.5, 2.5, 2.5)
+      )
+  }
+
   # Greek-symbol shortcuts to keep label code tight.
   expr_basin_x <- expression(paste("Basin drift (", mu, " chain)"))
   expr_basin_y <- expression(paste("Basin drift (", pi, " chain)"))
@@ -2159,12 +2187,12 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
 
   # Common labellers (chain rows, pair_kind cols) used in C and D.
   chain_labeller <- c(
-    mu = "μ chain (signed prior mean, μ₀)",
-    pi = "π chain (unsigned inclusion log-odds)"
+    mu = "μ chain",
+    pi = "π chain"
   )
   pair_kind_labeller <- c(
-    "cold -> annotated"    = "Cold annotated fit (treatment)",
-    "cold -> vanilla_warm" = "Warm-vanilla refit (durability check)"
+    "cold -> annotated"    = "Cold -> annotated",
+    "cold -> vanilla_warm" = "Cold -> warm vanilla"
   )
 
   # ============================================================
@@ -2177,9 +2205,21 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
   }
   panel_A <- strip_chrome(p_pr) +
     labs(title = paste0(
-      "A. Pooled precision-recall on top-", pr_top_k,
-      " causal SNPs (5 arms, 600 datasets)"
-    ))
+      "A. Precision-recall on top-", pr_top_k,
+      " causal SNPs (600 datasets)"
+    )) +
+    guides(color = guide_legend(
+      nrow = 2, byrow = TRUE, title.position = "top",
+      override.aes = list(linewidth = 0.7)
+    )) +
+    theme_effect_paper(base_size = 8) +
+    theme(
+      legend.position = "bottom",
+      legend.justification = "left",
+      legend.box.margin = margin(t = -2),
+      legend.key.width = grid::unit(8, "mm"),
+      panel.grid.minor = element_line(color = "grey95", linewidth = 0.18)
+    )
 
   # ============================================================
   # PANEL B. Mu vs pi scatters with cross-axis coloring
@@ -2250,19 +2290,23 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
                    color = .data[[color_col]])) +
       geom_abline(slope = 1, intercept = 0,
                   color = "grey50", linetype = "dashed", linewidth = 0.35) +
-      geom_point(alpha = 0.58, size = 1.35, stroke = 0) +
+      geom_point(alpha = 0.58, size = 0.75, stroke = 0) +
       scale_color_viridis_c(
         option = "C",
         limits = c(0, color_lim_max),
         breaks = c(0, color_lim_max),
-        labels = c("no change", "most change"),
-        guide = guide_colorbar(
-          title.position = "top",
-          title.hjust = 0.5,
-          barwidth  = grid::unit(4.1, "cm"),
-          barheight = grid::unit(0.30, "cm"),
-          direction = "horizontal"
-        )
+        labels = c("low", "high"),
+        guide = if (show_legend) {
+          guide_colorbar(
+            title.position = "top",
+            title.hjust = 0.5,
+            barwidth  = grid::unit(2.8, "cm"),
+            barheight = grid::unit(0.26, "cm"),
+            direction = "horizontal"
+          )
+        } else {
+          "none"
+        }
       ) +
       scale_x_continuous(expand = expansion(mult = c(0.015, 0.035))) +
       scale_y_continuous(expand = expansion(mult = c(0.015, 0.035))) +
@@ -2270,16 +2314,16 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
                       expand = FALSE) +
       labs(x = x_label, y = y_label, color = color_title,
            title = title_lab) +
+      theme_effect_paper(base_size = 7.2) +
       theme(
-        plot.title = element_text(size = 9.5, face = "bold",
-                                  margin = margin(b = 3)),
-        axis.title.x = element_text(size = 8.8, margin = margin(t = 4)),
-        axis.title.y = element_text(size = 8.8, margin = margin(r = 4)),
-        axis.text = element_text(size = 7.8, color = "grey25"),
-        panel.grid.major = element_line(color = "grey90", linewidth = 0.3),
-        panel.grid.minor = element_line(color = "grey95", linewidth = 0.2),
-        legend.margin = margin(t = -2, b = -2),
-        plot.margin = margin(2, 5, 2, 5)
+        plot.title = element_text(size = 7.6, face = "bold",
+                                  margin = margin(b = 2)),
+        axis.title.x = element_text(size = 7.0, margin = margin(t = 3)),
+        axis.title.y = element_text(size = 7.0, margin = margin(r = 3)),
+        axis.text = element_text(size = 6.2, color = "grey25"),
+        legend.margin = margin(t = -3, b = -4),
+        legend.box.margin = margin(t = -4),
+        plot.margin = margin(1.5, 2.5, 1.5, 2.5)
       ) +
       {
         if (show_y) {
@@ -2288,13 +2332,6 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
           theme(axis.title.y = element_blank(),
                 axis.text.y = element_blank(),
                 axis.ticks.y = element_blank())
-        }
-      } +
-      {
-        if (show_legend) {
-          theme()
-        } else {
-          theme(legend.position = "none")
         }
       }
   }
@@ -2309,7 +2346,7 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
   pB1 <- make_b_panel(
     joined_pf_cold_ann, "basin_mu", "basin_pi", "jsd_mu",
     expr_basin_x, expr_basin_y, basin_color_title,
-    "B(i). Cold -> annotated",
+    "B(i). Basin: cold -> annotated",
     color_lim_max = jsd_color_max, max_val = basin_max_pf,
     show_y = TRUE,
     show_legend = TRUE
@@ -2317,7 +2354,7 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
   pB2 <- make_b_panel(
     joined_pf_cold_warm, "basin_mu", "basin_pi", "jsd_mu",
     expr_basin_x, expr_basin_y, basin_color_title,
-    "B(ii). Cold -> warm vanilla",
+    "B(ii). Basin: cold -> warm vanilla",
     color_lim_max = jsd_color_max, max_val = basin_max_pf,
     show_y = FALSE,
     show_legend = FALSE
@@ -2325,7 +2362,7 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
   pB3 <- make_b_panel(
     joined_pf_cold_ann, "jsd_mu", "jsd_pi", "basin_mu",
     expr_jsd_x, expr_jsd_y, jsd_color_title,
-    "B(iii). Cold -> annotated",
+    "B(iii). PIP JSD: cold -> annotated",
     color_lim_max = basin_color_max, max_val = jsd_max_pf,
     show_y = TRUE,
     show_legend = TRUE
@@ -2333,42 +2370,30 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
   pB4 <- make_b_panel(
     joined_pf_cold_warm, "jsd_mu", "jsd_pi", "basin_mu",
     expr_jsd_x, expr_jsd_y, jsd_color_title,
-    "B(iv). Cold -> warm vanilla",
+    "B(iv). PIP JSD: cold -> warm vanilla",
     color_lim_max = basin_color_max, max_val = jsd_max_pf,
     show_y = FALSE,
     show_legend = FALSE
   )
 
-  b_group_header <- function(lbl) {
-    ggplot() +
-      annotate("text", x = 0.5, y = 0.5, label = lbl,
-               size = 3.4, fontface = "bold") +
-      xlim(0, 1) + ylim(0, 1) +
-      theme_void() +
-      theme(plot.margin = margin(0, 0, 0, 0))
-  }
-
   # One visual row keeps the full figure from becoming vertically strained.
-  # Headers span metric pairs; within each pair, only the left plot carries
-  # the shared y-axis label and only one compact colorbar is retained.
-  panel_B_header <- (
-    b_group_header("B. Basin drift: mu vs pi") |
-      b_group_header("PIP JSD: mu vs pi")
-  ) +
-    plot_layout(widths = c(1, 1))
-
+  # Within each metric pair, only the left plot carries the shared y-axis
+  # label and only one compact colorbar is retained.
   panel_B_plots <- (pB1 | pB2 | pB3 | pB4) +
     plot_layout(widths = c(1, 1, 1, 1), guides = "collect")
 
-  panel_B <- (panel_B_header / panel_B_plots) +
-    plot_layout(heights = c(0.10, 1), guides = "collect") &
+  panel_B <- (panel_B_plots +
+    plot_layout(guides = "collect") +
+    plot_annotation(title = "B. Effect-level drift diagnostics (mu vs pi)")) &
     theme(
       legend.position  = "bottom",
       legend.direction = "horizontal",
       legend.box       = "horizontal",
-      legend.title     = element_text(size = 8.6),
-      legend.text      = element_text(size = 7.6),
-      legend.spacing.x = grid::unit(2, "mm")
+      legend.title     = element_text(size = 7.0),
+      legend.text      = element_text(size = 6.2),
+      legend.spacing.x = grid::unit(2, "mm"),
+      plot.title       = element_text(face = "bold", size = 9.2,
+                                      margin = margin(b = 3))
     )
 
   # ============================================================
@@ -2424,7 +2449,7 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
       data = bucket_counts,
       aes(x = .data$drift_bucket, y = y_top,
           label = sprintf("n=%d", .data$n)),
-      inherit.aes = FALSE, size = 3.0, color = "grey25"
+      inherit.aes = FALSE, size = 2.1, color = "grey25"
     ) +
     facet_grid(
       chain ~ pair_kind,
@@ -2440,11 +2465,18 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
       x = "Basin drift bucket",
       y = expr_dauprc,
       fill = "Basin drift",
-      title = "C. ΔAUPRC by basin-drift bucket (3-bucket cut at 0.05 / 0.10)"
+      title = "C. AUPRC change by basin-drift bucket"
     ) +
-    theme(plot.title = element_text(size = 11),
-          legend.position = "right",
-          axis.text.x = element_text(angle = 0, hjust = 0.5))
+    guides(fill = guide_legend(nrow = 1, title.position = "top")) +
+    theme_effect_paper(base_size = 8) +
+    theme(
+      legend.position = "bottom",
+      legend.justification = "left",
+      legend.box.margin = margin(t = -4),
+      axis.text.x = element_text(angle = 0, hjust = 0.5, size = 6.8),
+      plot.title = element_text(face = "bold", size = 9.2,
+                                margin = margin(b = 3))
+    )
 
   # ============================================================
   # PANEL D. Per-effect (K_l, A_l) density shifts: 2 x 2
@@ -2462,6 +2494,13 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
       ),
       chain = factor(.data$chain, levels = c("mu", "pi"))
     )
+
+  x_label_paper <- expression(paste(
+    "Effect diffuseness: effective top-95% support size  ", K[l]
+  ))
+  y_label_paper <- expression(paste(
+    "Effect accuracy: ", A[l], " = max causal PIP / max SNP PIP"
+  ))
 
   panel_D <- ggplot(panel_D_df,
                     aes(x = .data$x, y = .data$y,
@@ -2484,23 +2523,37 @@ if (!requireNamespace("patchwork", quietly = TRUE)) {
                     ylim = y_limits_resolved,
                     expand = FALSE) +
     labs(
-      x = x_label, y = y_label,
+      x = x_label_paper, y = y_label_paper,
       fill = "destination - source\n(PVE-weighted density)",
-      title = "D. Per-effect quality shifts on the (Kℓ, Aℓ) plane"
+      title = "D. Per-effect quality shifts"
     ) +
-    theme(plot.title = element_text(size = 11),
-          legend.position = "right")
+    guides(fill = guide_colorbar(
+      title.position = "top",
+      title.hjust = 0.5,
+      barwidth = grid::unit(4.0, "cm"),
+      barheight = grid::unit(0.30, "cm"),
+      direction = "horizontal"
+    )) +
+    theme_effect_paper(base_size = 8) +
+    theme(
+      legend.position = "bottom",
+      legend.justification = "left",
+      legend.box.margin = margin(t = -4),
+      plot.title = element_text(face = "bold", size = 9.2,
+                                margin = margin(b = 3))
+    )
 
   # ============================================================
   # Assemble
   # ============================================================
-  combined_fig <- panel_A / panel_B / panel_C / panel_D +
-    plot_layout(heights = c(0.62, 0.98, 1.10, 1.22)) &
-    theme(plot.title = element_text(face = "bold", size = 12))
+  combined_fig <- ((panel_A / panel_B / panel_C / panel_D) +
+    plot_layout(heights = c(0.90, 1.10, 1.35, 1.55))) &
+    theme(plot.title = element_text(face = "bold"))
 
   ggsave(
     paper_figure_png, combined_fig,
-    width = 16.5, height = 22, dpi = 160, limitsize = FALSE
+    width = 8.8, height = 12.2, dpi = 300, bg = "white",
+    limitsize = FALSE
   )
   cat("Wrote combined paper figure to ", paper_figure_png, "\n", sep = "")
   print(combined_fig)
