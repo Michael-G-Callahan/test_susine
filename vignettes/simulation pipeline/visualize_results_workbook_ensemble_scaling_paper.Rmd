@@ -78,15 +78,43 @@ format_r2_tag <- function(x) {
   gsub("\\.", "p", format(x, trim = TRUE, scientific = FALSE))
 }
 
-save_paper_png <- function(plot, filename, width, height) {
-  ggplot2::ggsave(
-    filename = file.path(fig_dir, filename),
-    plot = plot,
-    width = width,
-    height = height,
-    dpi = 300,
-    bg = "white"
+open_png_device <- function(path, width, height, res = 300, bg = "white") {
+  if (requireNamespace("ragg", quietly = TRUE)) {
+    return(ragg::agg_png(
+      filename = path,
+      width = width,
+      height = height,
+      units = "in",
+      res = res,
+      background = bg
+    ))
+  }
+
+  if (isTRUE(grDevices::capabilities("cairo"))) {
+    return(grDevices::png(
+      filename = path,
+      width = width,
+      height = height,
+      units = "in",
+      res = res,
+      bg = bg,
+      type = "cairo"
+    ))
+  }
+
+  stop(
+    "No headless PNG device is available. Install the R package 'ragg' ",
+    "or use an R build with Cairo support.",
+    call. = FALSE
   )
+}
+
+save_paper_png <- function(plot, filename, width, height) {
+  path <- file.path(fig_dir, filename)
+  open_png_device(path, width = width, height = height, res = 300, bg = "white")
+  on.exit(grDevices::dev.off(), add = TRUE)
+  print(plot)
+  invisible(path)
 }
 
 paper_theme <- function(base_size = 11) {
@@ -178,7 +206,7 @@ save_composite_png <- function(filename, panels, layout_matrix,
   if (is.null(heights)) heights <- rep(1, nrow(layout_matrix))
 
   path <- file.path(fig_dir, filename)
-  grDevices::png(path, width = width, height = height, units = "in", res = 300)
+  open_png_device(path, width = width, height = height, res = 300, bg = "white")
   on.exit(grDevices::dev.off(), add = TRUE)
 
   grid::grid.newpage()
@@ -298,7 +326,7 @@ if (nrow(heatmap_data) > 0L && is.finite(baseline_auprc)) {
     width = 11,
     height = 8
   )
-  p_heatmap
+  invisible(NULL)
 } else {
   message("Skipping heatmap: no rows after filtering.")
 }
@@ -360,7 +388,7 @@ if (nrow(ccs_by_r2_plot_data) > 0L) {
     width = 7,
     height = 4.8
   )
-  p_ccs_r2
+  invisible(NULL)
 } else {
   message("Skipping C-CS by annotation quality plot: no rows.")
 }
@@ -419,7 +447,7 @@ if (nrow(boot_plot_data) > 0L) {
     width = 7,
     height = 4.8
   )
-  p_boot
+  invisible(NULL)
 } else {
   message("Skipping bootstrap plot: insufficient shared dataset IDs.")
 }
@@ -459,7 +487,7 @@ if (nrow(pr_plot_data) > 0L) {
     width = 8,
     height = 5
   )
-  p_pr
+  invisible(NULL)
 } else {
   message("Skipping PR curves: no rows.")
 }
@@ -510,7 +538,7 @@ if (nrow(hg2_plot_data) > 0L) {
     width = 8.5,
     height = 5
   )
-  p_hg2
+  invisible(NULL)
 } else {
   message("Skipping hg2 plot: no rows after filtering.")
 }
@@ -555,7 +583,7 @@ if (nrow(pip_cal_data) > 0L) {
     width = 6.8,
     height = 5
   )
-  p_cal
+  invisible(NULL)
 } else {
   message("Skipping PIP calibration plot: no rows.")
 }
@@ -610,7 +638,7 @@ if (nrow(ccs_resolution_plot_data) > 0L) {
     width = 6.5,
     height = 4.7
   )
-  p_res
+  invisible(NULL)
 } else {
   message("Skipping C-CS 4x4/8x8 plot: no rows.")
 }
@@ -721,7 +749,7 @@ if (nrow(compute_plot_data) > 0L) {
     width = 8.8,
     height = 5
   )
-  p_compute
+  invisible(NULL)
 } else {
   message("Skipping compute plot: no rows after joining compute times.")
 }
@@ -776,7 +804,7 @@ if (length(missing_composite) == 0L) {
   )
 
   cat("Saved composite main figure:", composite_path, "\n")
-  knitr::include_graphics(composite_path)
+  invisible(NULL)
 } else {
   message(
     "Skipping composite figure; missing component plots: ",
