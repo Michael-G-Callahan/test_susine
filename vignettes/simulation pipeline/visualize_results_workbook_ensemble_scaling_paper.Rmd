@@ -159,6 +159,53 @@ sort_subscale_labels <- function(labels) {
   second_dim <- suppressWarnings(as.integer(sub("^.*x", "", labels)))
   labels[order(second_dim, first_dim, labels, na.last = TRUE)]
 }
+
+tag_panel <- function(plot, tag) {
+  plot +
+    ggplot2::labs(tag = tag) +
+    ggplot2::theme(
+      plot.tag = ggplot2::element_text(face = "bold", size = 18),
+      plot.tag.position = c(0.01, 0.99),
+      plot.margin = grid::unit(c(5.5, 5.5, 5.5, 5.5), "pt")
+    )
+}
+
+save_composite_png <- function(filename, panels, layout_matrix,
+                               widths = NULL, heights = NULL,
+                               width = 15, height = 20) {
+  stopifnot(is.matrix(layout_matrix))
+  if (is.null(widths)) widths <- rep(1, ncol(layout_matrix))
+  if (is.null(heights)) heights <- rep(1, nrow(layout_matrix))
+
+  path <- file.path(fig_dir, filename)
+  grDevices::png(path, width = width, height = height, units = "in", res = 300)
+  on.exit(grDevices::dev.off(), add = TRUE)
+
+  grid::grid.newpage()
+  grid::pushViewport(grid::viewport(
+    layout = grid::grid.layout(
+      nrow(layout_matrix),
+      ncol(layout_matrix),
+      widths = grid::unit(widths, "null"),
+      heights = grid::unit(heights, "null")
+    )
+  ))
+
+  panel_ids <- unique(as.vector(layout_matrix))
+  panel_ids <- panel_ids[!is.na(panel_ids)]
+  for (id in panel_ids) {
+    pos <- which(layout_matrix == id, arr.ind = TRUE)
+    print(
+      panels[[id]],
+      vp = grid::viewport(
+        layout.pos.row = range(pos[, "row"]),
+        layout.pos.col = range(pos[, "col"])
+      ),
+      newpage = FALSE
+    )
+  }
+  invisible(path)
+}
 ```
 
 # 2. Manuscript Numbers
@@ -680,7 +727,65 @@ if (nrow(compute_plot_data) > 0L) {
 }
 ```
 
-# 11. Output Check
+# 11. Composite Main Figure
+
+The bootstrap panel is intentionally left out of the main composite. It is
+better summarized in text using the paired delta CI from the prep workbook,
+while the figure space is used for performance patterns, operating behavior,
+calibration, heritability, and model-fit time.
+
+```{r fig-composite-main, fig.width=15, fig.height=20}
+composite_required <- c(
+  "p_heatmap", "p_ccs_r2", "p_res", "p_pr",
+  "p_cal", "p_hg2", "p_compute"
+)
+missing_composite <- composite_required[!vapply(
+  composite_required,
+  exists,
+  logical(1L),
+  envir = knitr::knit_global()
+)]
+
+if (length(missing_composite) == 0L) {
+  composite_panels <- list(
+    A = tag_panel(p_heatmap, "A"),
+    B = tag_panel(p_ccs_r2, "B"),
+    C = tag_panel(p_res, "C"),
+    D = tag_panel(p_pr, "D"),
+    E = tag_panel(p_cal, "E"),
+    F = tag_panel(p_hg2, "F"),
+    G = tag_panel(p_compute, "G")
+  )
+
+  composite_layout <- rbind(
+    c("A", "A"),
+    c("B", "C"),
+    c("D", "E"),
+    c("F", "F"),
+    c("G", "G")
+  )
+
+  composite_path <- save_composite_png(
+    filename = "paper_ensemble_scaling_composite_main.png",
+    panels = composite_panels,
+    layout_matrix = composite_layout,
+    widths = c(1, 1),
+    heights = c(2.35, 1.25, 1.45, 1.55, 1.75),
+    width = 15,
+    height = 20
+  )
+
+  cat("Saved composite main figure:", composite_path, "\n")
+  knitr::include_graphics(composite_path)
+} else {
+  message(
+    "Skipping composite figure; missing component plots: ",
+    paste(missing_composite, collapse = ", ")
+  )
+}
+```
+
+# 12. Output Check
 
 ```{r output-check}
 expected_figures <- c(
@@ -699,7 +804,8 @@ expected_figures <- c(
     "paper_compute_vs_auprc_cluster_weight_r2_",
     format_r2_tag(annotation_r2_focus),
     ".png"
-  )
+  ),
+  "paper_ensemble_scaling_composite_main.png"
 )
 
 figure_paths <- file.path(fig_dir, expected_figures)
