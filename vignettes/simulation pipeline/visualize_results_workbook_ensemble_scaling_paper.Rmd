@@ -712,7 +712,7 @@ knitr::kable(spec_key, caption = "Ensemble abbreviation key")
 
 # 2. Overall Ensemble Performance Heatmap
 
-```{r fig-delta-heatmap, fig.width=10, fig.height=7}
+```{r fig-delta-heatmap, fig.width=11, fig.height=8}
 heatmap_data <- test_susine:::filter_shared_plot_metric_rows(
   auprc_plot_table,
   r2_filter = annotation_r2_focus
@@ -760,7 +760,8 @@ if (nrow(heatmap_data) > 0L && is.finite(baseline_auprc)) {
     ggplot2::geom_tile(color = "white", linewidth = 0.4) +
     ggplot2::geom_text(
       ggplot2::aes(label = .data$tile_label, color = .data$tile_text_color),
-      size = 2.7
+      size = 3.6,
+      lineheight = 0.9
     ) +
     ggplot2::geom_hline(
       yintercept = y_separators,
@@ -784,13 +785,19 @@ if (nrow(heatmap_data) > 0L && is.finite(baseline_auprc)) {
         "; labels show delta AUPRC and percent gain"
       )
     ) +
-    paper_theme()
+    paper_theme(base_size = 15) +
+    ggplot2::theme(
+      axis.text.x = ggplot2::element_text(size = 13),
+      axis.text.y = ggplot2::element_text(size = 13),
+      legend.text = ggplot2::element_text(size = 12),
+      legend.title = ggplot2::element_text(size = 13)
+    )
 
   save_paper_png(
     p_heatmap,
     paste0("paper_delta_auprc_heatmap_r2_", format_r2_tag(annotation_r2_focus), ".png"),
-    width = 10,
-    height = 7
+    width = 11,
+    height = 8
   )
   p_heatmap
 } else {
@@ -1091,7 +1098,12 @@ if (!is.null(hg2_by_agg) && nrow(hg2_by_agg) > 0L) {
   hg2_plot_data <- dplyr::bind_rows(hg2_focus, baseline_hg2) %>%
     dplyr::mutate(
       spec_name = factor(.data$spec_name, levels = c("baseline", spec_order)),
-      series = factor(.data$series, levels = c("baseline", "ensemble"))
+      series = dplyr::case_when(
+        as.character(.data$spec_name) == "C-CS" ~ "C-CS",
+        .data$series == "baseline" ~ "baseline",
+        TRUE ~ "ensemble"
+      ),
+      series = factor(.data$series, levels = c("baseline", "ensemble", "C-CS"))
     )
 
   if (nrow(hg2_plot_data) > 0L) {
@@ -1112,7 +1124,7 @@ if (!is.null(hg2_by_agg) && nrow(hg2_by_agg) > 0L) {
         sprintf("true h2 = %.2f", true_h2)
       ) +
       ggplot2::scale_fill_manual(
-        values = c(baseline = "grey70", ensemble = "#4C78A8"),
+        values = c(baseline = "grey70", ensemble = "#9BBAD7", `C-CS` = "#D95F02"),
         guide = "none"
       ) +
       ggplot2::labs(
@@ -1416,6 +1428,14 @@ if (nrow(scaling_metrics) > 0L && "wall_time_sec" %in% names(model_metrics)) {
     )
 
   baseline_compute_min <- baseline_compute_minutes(model_metrics)
+  baseline_compute_sec <- baseline_compute_min * 60
+  if (is.finite(baseline_compute_min)) {
+    cat(
+      "Baseline SuSiE mean compute time:",
+      round(baseline_compute_sec, 2), "sec;",
+      round(baseline_compute_min, 4), "min\n"
+    )
+  }
 
   if (nrow(compute_plot_data) > 0L) {
     subscale_levels <- sort_subscale_labels(compute_plot_data$subscale_label)
@@ -1455,6 +1475,18 @@ if (nrow(scaling_metrics) > 0L && "wall_time_sec" %in% names(model_metrics)) {
         baseline_auprc,
         "SuSiE baseline"
       ) +
+      (if (is.finite(baseline_compute_min)) {
+        reference_label_layer(
+          baseline_compute_min,
+          baseline_auprc,
+          sprintf("%.1f sec", baseline_compute_sec),
+          hjust = -0.1,
+          vjust = -0.45,
+          size = 2.8
+        )
+      } else {
+        NULL
+      }) +
       ggplot2::labs(
         x = "Mean compute time per dataset (minutes)",
         y = "Pooled AUPRC",
@@ -1462,10 +1494,37 @@ if (nrow(scaling_metrics) > 0L && "wall_time_sec" %in% names(model_metrics)) {
         shape = "Subscale shape",
         title = "Compute versus AUPRC for cluster-weight aggregation",
         subtitle = paste0("A specs are annotation-independent; B/C specs use annotation_r2 = ",
-                          annotation_r2_focus)
+                          annotation_r2_focus),
+        caption = if (is.finite(baseline_compute_min)) {
+          sprintf(
+            "Baseline marker uses mean wall_time_sec = %.1f sec (%.4f min); it is not forced to zero.",
+            baseline_compute_sec,
+            baseline_compute_min
+          )
+        } else {
+          NULL
+        }
       ) +
       ggplot2::scale_shape_manual(values = shape_values_for(subscale_levels)) +
-      paper_theme()
+      ggplot2::guides(
+        color = ggplot2::guide_legend(
+          nrow = 2,
+          byrow = TRUE,
+          order = 1,
+          override.aes = list(shape = 16, size = 3)
+        ),
+        shape = ggplot2::guide_legend(
+          nrow = 1,
+          byrow = TRUE,
+          order = 2,
+          override.aes = list(color = "grey20", size = 3)
+        )
+      ) +
+      paper_theme() +
+      ggplot2::theme(
+        legend.spacing.y = grid::unit(0.03, "cm"),
+        legend.box.spacing = grid::unit(0.08, "cm")
+      )
 
     save_paper_png(
       p_compute,
@@ -1474,8 +1533,8 @@ if (nrow(scaling_metrics) > 0L && "wall_time_sec" %in% names(model_metrics)) {
         format_r2_tag(annotation_r2_focus),
         ".png"
       ),
-      width = 7.5,
-      height = 5.2
+      width = 8.8,
+      height = 5
     )
     p_compute
   } else {
