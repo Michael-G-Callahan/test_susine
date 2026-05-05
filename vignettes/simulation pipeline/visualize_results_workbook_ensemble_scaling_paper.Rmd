@@ -45,7 +45,7 @@ theme_set(theme_bw(base_size = 11))
 
 ```{r config}
 job_name <- "ensemble_scaling_full"
-parent_job_id <- "50452623"
+parent_job_id <- "51250228"
 output_root <- here("output")
 
 job_dir <- file.path(output_root, "slurm_output", job_name, parent_job_id)
