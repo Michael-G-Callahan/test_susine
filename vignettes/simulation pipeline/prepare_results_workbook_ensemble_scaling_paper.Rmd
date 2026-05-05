@@ -1,0 +1,1139 @@
+---
+title: "Ensemble Scaling Experiment - Paper Plot Data Prep"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+Prepares compact plot-data objects for the ensemble scaling paper figures.
+Run this workbook on the HPC output after
+`collect_results_workbook_ensemble_scaling.Rmd`. The companion visualization
+workbook reads the RDS written here and can be rerun quickly while iterating on
+figure styling.
+
+```{r setup, message=FALSE}
+here::i_am("vignettes/simulation pipeline/prepare_results_workbook_ensemble_scaling_paper.Rmd")
+library(here)
+library(devtools)
+
+susine_path <- here("..", "susine")
+if (file.exists(file.path(susine_path, "DESCRIPTION"))) {
+  options(test_susine.local_susine_path = normalizePath(
+    susine_path, winslash = "/", mustWork = TRUE
+  ))
+  devtools::load_all(susine_path)
+}
+devtools::load_all(".")
+
+library(dplyr)
+library(tidyr)
+library(readr)
+library(knitr)
+
+`%||%` <- function(x, y) {
+  if (is.null(x) || length(x) == 0L) y else x
+}
+```
+
+# 0. User Configuration
+
+```{r config}
+job_name <- "ensemble_scaling_full"
+parent_job_id <- "51250228"
+output_root <- here("output")
+
+job_dir <- file.path(output_root, "slurm_output", job_name, parent_job_id)
+consolidated_dir <- file.path(job_dir, "consolidated")
+
+annotation_r2_focus <- 0.2
+drop_aggs <- "cluster_weight_jsd_050"
+bootstrap_B <- 2000L
+bootstrap_seed <- 20260505L
+true_h2 <- 0.25
+
+fig_dir <- file.path(job_dir, "figures", "paper_ensemble_scaling")
+plot_data_dir <- file.path(fig_dir, "plot_data")
+plot_data_rds <- file.path(plot_data_dir, "paper_ensemble_plot_data.rds")
+
+if (!dir.exists(consolidated_dir)) {
+  stop(
+    "Consolidated output directory not found: ", consolidated_dir, "\n",
+    "Run collect_results_workbook_ensemble_scaling.Rmd on the HPC output first, ",
+    "or update job_name/parent_job_id/consolidated_dir at the top of this workbook.",
+    call. = FALSE
+  )
+}
+dir.create(plot_data_dir, recursive = TRUE, showWarnings = FALSE)
+
+cat("Consolidated dir:", consolidated_dir, "\n")
+cat("Plot data dir:", plot_data_dir, "\n")
+```
+
+```{r load-data}
+read_required_csv <- function(filename) {
+  path <- file.path(consolidated_dir, filename)
+  if (!file.exists(path)) {
+    stop("Required consolidated CSV missing: ", path, call. = FALSE)
+  }
+  readr::read_csv(path, show_col_types = FALSE)
+}
+
+read_optional_csv <- function(filename) {
+  path <- file.path(consolidated_dir, filename)
+  if (!file.exists(path)) {
+    message("Optional consolidated CSV missing: ", filename)
+    return(NULL)
+  }
+  readr::read_csv(path, show_col_types = FALSE)
+}
+
+auprc_pooled_agg <- read_required_csv("auprc_pooled_aggregated.csv") %>%
+  test_susine:::normalize_agg_method_df()
+auprc_pooled_agg_by_r2 <- read_required_csv("auprc_pooled_agg_by_r2.csv") %>%
+  test_susine:::normalize_agg_method_df()
+auprc_pooled_individual_overall <- read_required_csv(
+  "auprc_pooled_individual_overall.csv"
+)
+auprc_pooled_individual <- read_required_csv("auprc_pooled_individual.csv")
+
+confusion_bins <- read_required_csv("confusion_bins_full.csv") %>%
+  test_susine:::normalize_agg_method_df()
+model_metrics <- read_required_csv("model_metrics_full.csv") %>%
+  test_susine:::normalize_agg_method_df()
+
+hg2_by_agg <- read_optional_csv("hg2_by_agg.csv")
+if (!is.null(hg2_by_agg)) {
+  hg2_by_agg <- test_susine:::normalize_agg_method_df(hg2_by_agg)
+}
+
+scaling_bins_pooled <- read_optional_csv("scaling_bins_pooled.csv")
+if (!is.null(scaling_bins_pooled)) {
+  scaling_bins_pooled <- scaling_bins_pooled %>%
+    test_susine:::normalize_agg_method_df()
+}
+
+cat("Confusion-bin rows:", nrow(confusion_bins), "\n")
+cat("Model-metric rows:", nrow(model_metrics), "\n")
+cat("Scaling-bin rows:", if (is.null(scaling_bins_pooled)) 0 else nrow(scaling_bins_pooled), "\n")
+```
+
+# 1. Helpers
+
+```{r helpers}
+approx_equal <- function(x, y, tol = 1e-8) {
+  is.finite(x) & is.finite(y) & abs(x - y) <= tol
+}
+
+near_focus <- function(x, focus = annotation_r2_focus) {
+  approx_equal(as.numeric(x), focus)
+}
+
+is_group_a <- function(spec_name) {
+  startsWith(as.character(spec_name), "A-")
+}
+
+is_focus_annotation_row <- function(spec_name, annotation_r2,
+                                    focus = annotation_r2_focus) {
+  is_group_a(spec_name) & is.na(annotation_r2) |
+    !is_group_a(spec_name) & near_focus(annotation_r2, focus)
+}
+
+auprc_from_bins <- function(bins) {
+  test_susine:::auprc_from_pooled_bins(bins)
+}
+
+format_r2_tag <- function(x) {
+  gsub("\\.", "p", format(x, trim = TRUE, scientific = FALSE))
+}
+
+spec_order <- c(
+  "A-R", "A-F", "A-S", "A-RF", "A-RS", "A-FS", "A-RFS",
+  "B-R", "B-F", "B-RF",
+  "C-C", "C-CS", "C-CSR", "C-CSFR", "C-CFR", "C-CF"
+)
+
+spec_key <- tibble::tribble(
+  ~spec_name, ~family, ~description,
+  "A-R", "A: vanilla SuSiE", "Restarts",
+  "A-F", "A: vanilla SuSiE", "Refinement",
+  "A-S", "A: vanilla SuSiE", "Prior-variance grid",
+  "A-RF", "A: vanilla SuSiE", "Restarts x refinement",
+  "A-RS", "A: vanilla SuSiE", "Restarts x prior-variance grid",
+  "A-FS", "A: vanilla SuSiE", "Refinement x prior-variance grid",
+  "A-RFS", "A: vanilla SuSiE", "Restarts x refinement x prior-variance grid",
+  "B-R", "B: EB SuSiNE", "Restarts",
+  "B-F", "B: EB SuSiNE", "Refinement",
+  "B-RF", "B: EB SuSiNE", "Restarts x refinement",
+  "C-C", "C: grid SuSiNE", "Annotation-scale grid",
+  "C-CS", "C: grid SuSiNE", "Annotation-scale x prior-variance grid",
+  "C-CSR", "C: grid SuSiNE", "C-CS search, then default-prior refit",
+  "C-CSFR", "C: grid SuSiNE", "C x sigma x refinement x restarts",
+  "C-CFR", "C: grid SuSiNE", "C x refinement x restarts",
+  "C-CF", "C: grid SuSiNE", "C x refinement"
+)
+
+agg_order <- c("max_elbo", "uniform", "elbo_softmax", "cluster_weight", "oracle")
+agg_labels <- c(
+  max_elbo = "max ELBO",
+  uniform = "uniform",
+  elbo_softmax = "ELBO softmax",
+  cluster_weight = "cluster weight",
+  oracle = "oracle"
+)
+
+extract_baseline_metric <- function(plot_table, metric_col) {
+  plot_table %>%
+    dplyr::filter(
+      .data$series_type == "baseline_single",
+      .data$spec_name == "baseline-single",
+      .data$use_case_id == "susine_vanilla",
+      is.na(.data$annotation_r2)
+    ) %>%
+    dplyr::pull(!!rlang::sym(metric_col)) %>%
+    dplyr::first()
+}
+
+extract_truth_warm_refs <- function(plot_table, metric_col) {
+  plot_table %>%
+    dplyr::filter(.data$series_type == "truth_warm") %>%
+    dplyr::select(use_case_id, annotation_r2, dplyr::all_of(metric_col)) %>%
+    dplyr::mutate(
+      label = dplyr::case_when(
+        .data$use_case_id == "susine_vanilla" ~ "truth-warm vanilla",
+        .data$use_case_id == "susine_eb_clamped_scale_var_nonneg" &
+          is.na(.data$annotation_r2) ~ "truth-warm EB",
+        .data$use_case_id == "susine_functional_mu" &
+          is.na(.data$annotation_r2) ~ "truth-warm grid (c=0.5)",
+        .data$use_case_id == "susine_eb_clamped_scale_var_nonneg" ~
+          paste0("truth-warm EB (R2=", .data$annotation_r2, ")"),
+        .data$use_case_id == "susine_functional_mu" ~
+          paste0("truth-warm grid (c=0.5, R2=", .data$annotation_r2, ")"),
+        TRUE ~ .data$use_case_id
+      )
+    )
+}
+
+build_pr_curve_counts <- function(bins, group_vars) {
+  bins %>%
+    dplyr::group_by(dplyr::across(dplyr::all_of(c(group_vars, "pip_threshold")))) %>%
+    dplyr::summarise(
+      n_causal_at_bucket = sum(.data$n_causal_at_bucket, na.rm = TRUE),
+      n_noncausal_at_bucket = sum(.data$n_noncausal_at_bucket, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    dplyr::group_by(dplyr::across(dplyr::all_of(group_vars))) %>%
+    dplyr::arrange(dplyr::desc(.data$pip_threshold), .by_group = TRUE) %>%
+    dplyr::mutate(
+      cum_tp = cumsum(.data$n_causal_at_bucket),
+      cum_fp = cumsum(.data$n_noncausal_at_bucket),
+      called_variants = .data$cum_tp + .data$cum_fp,
+      total_p = sum(.data$n_causal_at_bucket),
+      recall = .data$cum_tp / .data$total_p,
+      precision = .data$cum_tp / .data$called_variants
+    ) %>%
+    dplyr::filter(.data$total_p > 0L, .data$called_variants > 0L) %>%
+    dplyr::ungroup()
+}
+
+pick_precision_operating_points <- function(curve_counts, target_precision = 0.50) {
+  if (!nrow(curve_counts)) return(tibble::tibble())
+
+  curve_counts %>%
+    dplyr::group_by(.data$method, .data$annotation_r2) %>%
+    dplyr::group_modify(function(.x, .y) {
+      candidates <- .x %>%
+        dplyr::filter(is.finite(.data$precision), .data$precision >= target_precision)
+      if (nrow(candidates) > 0L) {
+        candidates %>%
+          dplyr::arrange(dplyr::desc(.data$recall), .data$pip_threshold) %>%
+          dplyr::slice(1L) %>%
+          dplyr::mutate(operating_rule = "max recall with precision >= target")
+      } else {
+        .x %>%
+          dplyr::mutate(precision_abs_diff = abs(.data$precision - target_precision)) %>%
+          dplyr::arrange(.data$precision_abs_diff, dplyr::desc(.data$recall)) %>%
+          dplyr::slice(1L) %>%
+          dplyr::select(-dplyr::any_of("precision_abs_diff")) %>%
+          dplyr::mutate(operating_rule = "closest observed precision to target")
+      }
+    }) %>%
+    dplyr::ungroup() %>%
+    dplyr::mutate(target_precision = target_precision) %>%
+    dplyr::select(
+      method, annotation_r2, operating_rule, target_precision,
+      pip_threshold, precision, recall, cum_tp, cum_fp, called_variants, total_p
+    )
+}
+
+pick_same_recall_operating_points <- function(curve_counts,
+                                              precision_points,
+                                              baseline_method = "SuSiE baseline") {
+  baseline_recall <- precision_points %>%
+    dplyr::filter(.data$method == baseline_method) %>%
+    dplyr::select(
+      annotation_r2,
+      baseline_p50_pip_threshold = pip_threshold,
+      baseline_p50_precision = precision,
+      baseline_p50_recall = recall,
+      baseline_p50_tp = cum_tp,
+      baseline_p50_fp = cum_fp,
+      baseline_p50_called = called_variants
+    )
+
+  if (!nrow(baseline_recall)) return(tibble::tibble())
+
+  curve_counts %>%
+    dplyr::filter(.data$method != baseline_method) %>%
+    dplyr::inner_join(baseline_recall, by = "annotation_r2") %>%
+    dplyr::mutate(recall_abs_diff = abs(.data$recall - .data$baseline_p50_recall)) %>%
+    dplyr::group_by(.data$method, .data$annotation_r2) %>%
+    dplyr::arrange(.data$recall_abs_diff, dplyr::desc(.data$precision), .by_group = TRUE) %>%
+    dplyr::slice(1L) %>%
+    dplyr::ungroup() %>%
+    dplyr::mutate(operating_rule = "closest observed recall to baseline 50% precision recall") %>%
+    dplyr::select(
+      method, annotation_r2, operating_rule,
+      baseline_p50_pip_threshold, baseline_p50_precision, baseline_p50_recall,
+      baseline_p50_tp, baseline_p50_fp, baseline_p50_called,
+      pip_threshold, precision, recall, recall_abs_diff,
+      cum_tp, cum_fp, called_variants, total_p
+    )
+}
+
+paper_select_axis_subset <- function(vals, n_keep, axis_col) {
+  vals <- sort(unique(vals))
+  vals <- vals[!is.na(vals)]
+  if (!length(vals)) return(vals)
+  n_keep <- min(as.integer(n_keep), length(vals))
+  if (n_keep >= length(vals)) return(vals)
+  if (axis_col %in% c("restart_id", "refine_step")) {
+    return(vals[seq_len(n_keep)])
+  }
+  vals[unique(round(seq(1, length(vals), length.out = n_keep)))]
+}
+
+paper_select_subsample_run_ids <- function(run_meta, n_ens, lever_type) {
+  n_sel <- min(as.integer(n_ens), nrow(run_meta))
+  switch(lever_type,
+    restart = {
+      run_meta %>%
+        dplyr::arrange(.data$restart_id, .data$run_id) %>%
+        dplyr::slice_head(n = n_sel) %>%
+        dplyr::pull("run_id")
+    },
+    refine = {
+      run_meta %>%
+        dplyr::arrange(.data$refine_step, .data$run_id) %>%
+        dplyr::slice_head(n = n_sel) %>%
+        dplyr::pull("run_id")
+    },
+    sigma_0_2 = {
+      vals <- sort(unique(run_meta$sigma_0_2_scalar_num))
+      keep <- vals[unique(round(seq(1, length(vals), length.out = n_sel)))]
+      run_meta %>%
+        dplyr::filter(.data$sigma_0_2_scalar_num %in% keep) %>%
+        dplyr::pull("run_id")
+    },
+    c_grid = {
+      vals <- sort(unique(run_meta$c_value))
+      keep <- vals[unique(round(seq(1, length(vals), length.out = n_sel)))]
+      run_meta %>%
+        dplyr::filter(.data$c_value %in% keep) %>%
+        dplyr::pull("run_id")
+    },
+    stop("Unknown lever_type: ", lever_type)
+  )
+}
+
+prepare_individual_run_rows <- function(model_metrics) {
+  model_metrics %>%
+    dplyr::filter(
+      .data$filtering == "purity_filtered",
+      !is.na(.data$spec_name),
+      !.data$spec_name %in% c("baseline-single", "truth-warm"),
+      is.na(.data$agg_method) | .data$explore_method != "aggregation"
+    ) %>%
+    dplyr::mutate(
+      sigma_0_2_scalar_num = suppressWarnings(as.numeric(.data$sigma_0_2_scalar)),
+      c_value = suppressWarnings(as.numeric(.data$c_value)),
+      restart_id = suppressWarnings(as.integer(.data$restart_id)),
+      refine_step = suppressWarnings(as.integer(.data$refine_step)),
+      wall_time_sec = as.numeric(.data$wall_time_sec)
+    ) %>%
+    dplyr::distinct(run_id, .keep_all = TRUE)
+}
+
+select_subscale_run_rows <- function(run_rows, n_ensemble, resolution) {
+  run_rows <- run_rows %>% dplyr::arrange(.data$run_id)
+  if (!nrow(run_rows)) return(run_rows)
+
+  method_ids <- unique(trimws(strsplit(
+    as.character(run_rows$exploration_methods[[1]] %||% ""),
+    "x",
+    fixed = TRUE
+  )[[1]]))
+  is_cs_grid_refit <- "cs_grid_refit" %in% method_ids
+
+  if (!is.na(resolution) && nzchar(as.character(resolution))) {
+    axis_info <- list(
+      if ("restart" %in% method_ids) list(col = "restart_id") else NULL,
+      if ("refine" %in% method_ids) list(col = "refine_step") else NULL,
+      if ("c_grid" %in% method_ids || is_cs_grid_refit) list(col = "c_value") else NULL,
+      if ("sigma_0_2_grid" %in% method_ids || is_cs_grid_refit) {
+        list(col = "sigma_0_2_scalar_num")
+      } else {
+        NULL
+      }
+    )
+    axis_info <- Filter(Negate(is.null), axis_info)
+    if (!length(axis_info)) return(run_rows[0, , drop = FALSE])
+
+    axis_sizes <- vapply(axis_info, function(ax) {
+      length(unique(stats::na.omit(run_rows[[ax$col]])))
+    }, integer(1L))
+    axis_info <- axis_info[order(axis_sizes, decreasing = TRUE)]
+
+    res_sizes <- suppressWarnings(as.integer(strsplit(
+      as.character(resolution), "x", fixed = TRUE
+    )[[1]]))
+    if (length(res_sizes) != length(axis_info) || any(is.na(res_sizes))) {
+      return(run_rows[0, , drop = FALSE])
+    }
+
+    selected <- run_rows
+    for (i in seq_along(axis_info)) {
+      col <- axis_info[[i]]$col
+      keep_vals <- paper_select_axis_subset(selected[[col]], res_sizes[[i]], col)
+      selected <- selected %>% dplyr::filter(.data[[col]] %in% keep_vals)
+    }
+    return(selected)
+  }
+
+  lever_type <- if ("restart" %in% method_ids) {
+    "restart"
+  } else if ("refine" %in% method_ids) {
+    "refine"
+  } else if ("sigma_0_2_grid" %in% method_ids) {
+    "sigma_0_2"
+  } else if ("c_grid" %in% method_ids) {
+    "c_grid"
+  } else {
+    NA_character_
+  }
+  if (is.na(lever_type)) return(run_rows[0, , drop = FALSE])
+
+  ids <- paper_select_subsample_run_ids(run_rows, n_ensemble, lever_type)
+  run_rows %>% dplyr::filter(.data$run_id %in% ids)
+}
+
+compute_scaling_metrics <- function(scaling_bins) {
+  if (is.null(scaling_bins) || !nrow(scaling_bins)) return(tibble::tibble())
+
+  scaling_bins <- scaling_bins %>%
+    dplyr::filter(!.data$agg_method %in% drop_aggs) %>%
+    dplyr::mutate(resolution = dplyr::na_if(as.character(.data$resolution), ""))
+
+  scaling_pure <- scaling_bins %>% dplyr::filter(is.na(.data$resolution))
+  scaling_inter <- scaling_bins %>% dplyr::filter(!is.na(.data$resolution))
+
+  pure_metrics <- if (nrow(scaling_pure) > 0L) {
+    scaling_pure %>%
+      dplyr::group_by(
+        .data$spec_name, .data$annotation_r2, .data$n_ensemble,
+        .data$agg_method, .data$rep
+      ) %>%
+      dplyr::summarise(
+        AUPRC = auprc_from_bins(dplyr::pick(dplyr::everything())),
+        .groups = "drop"
+      ) %>%
+      dplyr::mutate(resolution = NA_character_)
+  } else {
+    tibble::tibble()
+  }
+
+  inter_metrics <- if (nrow(scaling_inter) > 0L) {
+    scaling_inter %>%
+      dplyr::group_by(
+        .data$spec_name, .data$annotation_r2, .data$resolution,
+        .data$agg_method, .data$rep, .data$pip_threshold
+      ) %>%
+      dplyr::summarise(
+        n_causal_at_bucket = sum(.data$n_causal_at_bucket, na.rm = TRUE),
+        n_noncausal_at_bucket = sum(.data$n_noncausal_at_bucket, na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      dplyr::group_by(
+        .data$spec_name, .data$annotation_r2, .data$resolution,
+        .data$agg_method, .data$rep
+      ) %>%
+      dplyr::summarise(
+        AUPRC = auprc_from_bins(dplyr::pick(dplyr::everything())),
+        .groups = "drop"
+      ) %>%
+      dplyr::mutate(n_ensemble = NA_integer_)
+  } else {
+    tibble::tibble()
+  }
+
+  dplyr::bind_rows(pure_metrics, inter_metrics) %>%
+    dplyr::group_by(
+      .data$spec_name, .data$annotation_r2, .data$n_ensemble,
+      .data$resolution, .data$agg_method, .data$rep
+    ) %>%
+    dplyr::summarise(AUPRC = dplyr::first(.data$AUPRC), .groups = "drop") %>%
+    dplyr::group_by(
+      .data$spec_name, .data$annotation_r2, .data$n_ensemble,
+      .data$resolution, .data$agg_method
+    ) %>%
+    dplyr::summarise(
+      AUPRC_mean = mean(.data$AUPRC, na.rm = TRUE),
+      AUPRC_se = ifelse(
+        dplyr::n() > 1L,
+        stats::sd(.data$AUPRC, na.rm = TRUE) / sqrt(sum(!is.na(.data$AUPRC))),
+        NA_real_
+      ),
+      n_reps = dplyr::n(),
+      .groups = "drop"
+    )
+}
+
+estimate_subscale_compute <- function(points, model_metrics) {
+  if (!nrow(points) || !"wall_time_sec" %in% names(model_metrics)) {
+    return(tibble::tibble())
+  }
+
+  base_runs <- prepare_individual_run_rows(model_metrics)
+  out <- lapply(seq_len(nrow(points)), function(i) {
+    point <- points[i, , drop = FALSE]
+    run_rows <- base_runs %>%
+      dplyr::filter(.data$spec_name == point$spec_name[[1]])
+
+    if (is_group_a(point$spec_name[[1]])) {
+      run_rows <- run_rows %>% dplyr::filter(is.na(.data$annotation_r2))
+    } else {
+      run_rows <- run_rows %>%
+        dplyr::filter(near_focus(.data$annotation_r2, annotation_r2_focus))
+    }
+
+    if (!nrow(run_rows)) {
+      return(tibble::tibble(
+        spec_name = point$spec_name,
+        annotation_r2 = point$annotation_r2,
+        n_ensemble = point$n_ensemble,
+        resolution = point$resolution,
+        mean_total_wall_sec = NA_real_,
+        n_datasets_compute = 0L
+      ))
+    }
+
+    dataset_groups <- split(run_rows, run_rows$dataset_bundle_id)
+    wall_times <- vapply(dataset_groups, function(g) {
+      selected <- select_subscale_run_rows(g, point$n_ensemble[[1]], point$resolution[[1]])
+      sum(selected$wall_time_sec, na.rm = TRUE)
+    }, numeric(1L))
+
+    tibble::tibble(
+      spec_name = point$spec_name,
+      annotation_r2 = point$annotation_r2,
+      n_ensemble = point$n_ensemble,
+      resolution = point$resolution,
+      mean_total_wall_sec = mean(wall_times, na.rm = TRUE),
+      n_datasets_compute = length(wall_times)
+    )
+  })
+
+  dplyr::bind_rows(out)
+}
+
+baseline_compute_minutes <- function(model_metrics) {
+  if (!"wall_time_sec" %in% names(model_metrics)) return(NA_real_)
+  model_metrics %>%
+    dplyr::filter(
+      .data$spec_name == "baseline-single",
+      .data$use_case_id == "susine_vanilla",
+      .data$filtering == "purity_filtered"
+    ) %>%
+    dplyr::distinct(dataset_bundle_id, run_id, .keep_all = TRUE) %>%
+    dplyr::summarise(mean_wall_sec = mean(.data$wall_time_sec, na.rm = TRUE)) %>%
+    dplyr::pull("mean_wall_sec") / 60
+}
+
+parse_annotation_r2_from_group_key <- function(group_key) {
+  group_key <- as.character(group_key)
+  has_r2 <- grepl("\\|r2=", group_key)
+  r2_chr <- rep(NA_character_, length(group_key))
+  r2_chr[has_r2] <- sub(".*\\|r2=([^|]+).*", "\\1", group_key[has_r2])
+  r2_chr[r2_chr %in% c("NA", "NaN", "")] <- NA_character_
+  suppressWarnings(as.numeric(r2_chr))
+}
+
+enrich_hg2_metadata <- function(hg2_tbl, model_metrics) {
+  if (is.null(hg2_tbl) || !nrow(hg2_tbl)) return(hg2_tbl)
+
+  out <- hg2_tbl %>% test_susine:::normalize_agg_method_df()
+  if (!"group_key" %in% names(out) && "group_label" %in% names(out)) {
+    out <- out %>%
+      dplyr::mutate(group_key = sub("^model_grid\\|", "", .data$group_label))
+  }
+
+  join_keys <- intersect(c("dataset_bundle_id", "use_case_id", "group_key"), names(out))
+  if (length(join_keys) > 0L &&
+      all(c(join_keys, "spec_name", "annotation_r2") %in% names(model_metrics))) {
+    meta_map <- model_metrics %>%
+      dplyr::filter(!is.na(.data$group_key)) %>%
+      dplyr::distinct(dplyr::across(dplyr::all_of(
+        c(join_keys, "spec_name", "annotation_r2")
+      )))
+
+    out <- out %>%
+      dplyr::left_join(meta_map, by = join_keys, suffix = c("", ".meta"))
+
+    if ("spec_name.meta" %in% names(out)) {
+      if ("spec_name" %in% names(out)) {
+        out <- out %>%
+          dplyr::mutate(spec_name = dplyr::coalesce(.data$spec_name, .data$spec_name.meta))
+      } else {
+        out <- out %>% dplyr::rename(spec_name = spec_name.meta)
+      }
+      out <- out %>% dplyr::select(-dplyr::any_of("spec_name.meta"))
+    }
+
+    if ("annotation_r2.meta" %in% names(out)) {
+      if ("annotation_r2" %in% names(out)) {
+        out <- out %>%
+          dplyr::mutate(
+            annotation_r2 = dplyr::coalesce(
+              as.numeric(.data$annotation_r2),
+              as.numeric(.data$annotation_r2.meta)
+            )
+          )
+      } else {
+        out <- out %>% dplyr::rename(annotation_r2 = annotation_r2.meta)
+      }
+      out <- out %>% dplyr::select(-dplyr::any_of("annotation_r2.meta"))
+    }
+  }
+
+  if ("group_key" %in% names(out)) {
+    parsed_r2 <- parse_annotation_r2_from_group_key(out$group_key)
+    if ("annotation_r2" %in% names(out)) {
+      out <- out %>%
+        dplyr::mutate(annotation_r2 = dplyr::coalesce(as.numeric(.data$annotation_r2), parsed_r2))
+    } else {
+      out <- out %>% dplyr::mutate(annotation_r2 = parsed_r2)
+    }
+  }
+
+  if (!"spec_name" %in% names(out)) out <- out %>% dplyr::mutate(spec_name = NA_character_)
+  if (!"annotation_r2" %in% names(out)) out <- out %>% dplyr::mutate(annotation_r2 = NA_real_)
+  out
+}
+```
+
+# 2. Shared Metric Tables
+
+```{r shared-tables}
+auprc_plot_table <- test_susine:::build_shared_plot_metric_table(
+  auprc_pooled_agg,
+  auprc_pooled_agg_by_r2,
+  auprc_pooled_individual_overall,
+  auprc_pooled_individual,
+  metric_col = "AUPRC",
+  label = "Paper AUPRC plot table"
+) %>%
+  dplyr::filter(is.na(.data$agg_method) | !.data$agg_method %in% drop_aggs)
+
+baseline_auprc <- extract_baseline_metric(auprc_plot_table, "AUPRC")
+truth_warm_refs <- extract_truth_warm_refs(auprc_plot_table, "AUPRC")
+truth_warm_vanilla_vec <- truth_warm_refs %>%
+  dplyr::filter(.data$use_case_id == "susine_vanilla", is.na(.data$annotation_r2)) %>%
+  dplyr::pull("AUPRC")
+truth_warm_vanilla <- if (length(truth_warm_vanilla_vec)) truth_warm_vanilla_vec[[1]] else NA_real_
+
+cat("Baseline SuSiE AUPRC:", round(baseline_auprc, 4), "\n")
+cat("Truth-warm vanilla AUPRC:", round(truth_warm_vanilla, 4), "\n")
+```
+
+# 3. Plot Data
+
+```{r plot-data}
+heatmap_data <- test_susine:::filter_shared_plot_metric_rows(
+  auprc_plot_table,
+  r2_filter = annotation_r2_focus
+) %>%
+  dplyr::filter(
+    !.data$agg_method %in% drop_aggs,
+    .data$agg_method %in% agg_order,
+    .data$spec_name %in% spec_order
+  ) %>%
+  dplyr::mutate(
+    delta_auprc = .data$AUPRC - baseline_auprc,
+    delta_pct = if (is.finite(baseline_auprc) && baseline_auprc != 0) {
+      100 * .data$delta_auprc / baseline_auprc
+    } else {
+      NA_real_
+    },
+    tile_label = dplyr::if_else(
+      is.finite(.data$delta_pct),
+      sprintf("%+.3f\n(%+.0f%%)", .data$delta_auprc, .data$delta_pct),
+      sprintf("%+.3f", .data$delta_auprc)
+    )
+  )
+
+if (nrow(heatmap_data) > 0L && is.finite(baseline_auprc)) {
+  heatmap_check <- heatmap_data %>%
+    dplyr::mutate(check_delta = .data$AUPRC - baseline_auprc - .data$delta_auprc)
+  stopifnot(max(abs(heatmap_check$check_delta), na.rm = TRUE) < 1e-12)
+}
+
+ccs_by_r2 <- auprc_plot_table %>%
+  dplyr::filter(
+    .data$series_type == "aggregated",
+    .data$spec_name == "C-CS",
+    !is.na(.data$annotation_r2),
+    !.data$agg_method %in% drop_aggs,
+    .data$agg_method %in% agg_order
+  )
+```
+
+```{r bootstrap-data}
+bootstrap_auprc_from_bins <- function(bins, sample_ids) {
+  weights <- tibble::tibble(dataset_bundle_id = sample_ids) %>%
+    dplyr::count(.data$dataset_bundle_id, name = "boot_weight")
+
+  bins %>%
+    dplyr::inner_join(weights, by = "dataset_bundle_id") %>%
+    dplyr::group_by(.data$pip_threshold) %>%
+    dplyr::summarise(
+      n_causal_at_bucket = sum(.data$n_causal_at_bucket * .data$boot_weight, na.rm = TRUE),
+      n_noncausal_at_bucket = sum(
+        .data$n_noncausal_at_bucket * .data$boot_weight,
+        na.rm = TRUE
+      ),
+      .groups = "drop"
+    ) %>%
+    auprc_from_bins()
+}
+
+baseline_boot_bins <- confusion_bins %>%
+  dplyr::filter(
+    .data$spec_name == "baseline-single",
+    .data$use_case_id == "susine_vanilla",
+    is.na(.data$agg_method)
+  )
+
+ccs_boot_bins <- confusion_bins %>%
+  dplyr::filter(
+    .data$spec_name == "C-CS",
+    near_focus(.data$annotation_r2, annotation_r2_focus),
+    .data$agg_method == "cluster_weight"
+  )
+
+shared_boot_ids <- intersect(
+  unique(baseline_boot_bins$dataset_bundle_id),
+  unique(ccs_boot_bins$dataset_bundle_id)
+)
+
+boot_plot_data <- tibble::tibble()
+delta_ci <- c(`2.5%` = NA_real_, `97.5%` = NA_real_)
+observed_delta <- NA_real_
+shared_boot_n <- length(shared_boot_ids)
+
+if (length(shared_boot_ids) > 1L) {
+  set.seed(bootstrap_seed)
+  boot_samples <- replicate(
+    bootstrap_B,
+    sample(shared_boot_ids, size = length(shared_boot_ids), replace = TRUE),
+    simplify = FALSE
+  )
+  baseline_boot <- vapply(
+    boot_samples,
+    function(ids) bootstrap_auprc_from_bins(baseline_boot_bins, ids),
+    numeric(1L)
+  )
+  ccs_boot <- vapply(
+    boot_samples,
+    function(ids) bootstrap_auprc_from_bins(ccs_boot_bins, ids),
+    numeric(1L)
+  )
+  delta_boot <- ccs_boot - baseline_boot
+  delta_ci <- stats::quantile(delta_boot, c(0.025, 0.975), na.rm = TRUE)
+  observed_delta <- bootstrap_auprc_from_bins(ccs_boot_bins, shared_boot_ids) -
+    bootstrap_auprc_from_bins(baseline_boot_bins, shared_boot_ids)
+  boot_plot_data <- tibble::tibble(delta_AUPRC = delta_boot)
+}
+```
+
+```{r pr-data}
+r2_values <- sort(unique(stats::na.omit(confusion_bins$annotation_r2)))
+
+baseline_pr_bins <- confusion_bins %>%
+  dplyr::filter(
+    .data$spec_name == "baseline-single",
+    .data$use_case_id == "susine_vanilla",
+    is.na(.data$agg_method)
+  ) %>%
+  dplyr::select(dataset_bundle_id, pip_threshold, n_causal_at_bucket, n_noncausal_at_bucket) %>%
+  tidyr::crossing(annotation_r2 = r2_values) %>%
+  dplyr::mutate(method = "SuSiE baseline")
+
+ccs_pr_bins <- confusion_bins %>%
+  dplyr::filter(
+    .data$spec_name == "C-CS",
+    !is.na(.data$annotation_r2),
+    .data$agg_method == "cluster_weight"
+  ) %>%
+  dplyr::transmute(
+    method = "C-CS cluster weight",
+    annotation_r2 = .data$annotation_r2,
+    dataset_bundle_id = .data$dataset_bundle_id,
+    pip_threshold = .data$pip_threshold,
+    n_causal_at_bucket = .data$n_causal_at_bucket,
+    n_noncausal_at_bucket = .data$n_noncausal_at_bucket
+  )
+
+pr_curve_counts <- dplyr::bind_rows(baseline_pr_bins, ccs_pr_bins) %>%
+  build_pr_curve_counts(c("method", "annotation_r2"))
+
+pr_precision50_points <- pick_precision_operating_points(
+  pr_curve_counts,
+  target_precision = 0.50
+)
+pr_same_recall_points <- pick_same_recall_operating_points(
+  pr_curve_counts,
+  pr_precision50_points
+)
+```
+
+```{r hg2-data}
+hg2_plot_data <- tibble::tibble()
+if (!is.null(hg2_by_agg) && nrow(hg2_by_agg) > 0L) {
+  hg2_plot_source <- enrich_hg2_metadata(hg2_by_agg, model_metrics)
+
+  hg2_focus <- hg2_plot_source %>%
+    dplyr::filter(
+      .data$agg_method == "cluster_weight",
+      .data$spec_name %in% spec_order,
+      is_focus_annotation_row(.data$spec_name, .data$annotation_r2)
+    ) %>%
+    dplyr::transmute(
+      spec_name = as.character(.data$spec_name),
+      dataset_bundle_id = .data$dataset_bundle_id,
+      hg2 = .data$hg2,
+      series = "ensemble"
+    )
+
+  baseline_hg2 <- model_metrics %>%
+    dplyr::filter(
+      .data$spec_name == "baseline-single",
+      .data$use_case_id == "susine_vanilla",
+      .data$filtering == "purity_filtered",
+      !is.na(.data$hg2)
+    ) %>%
+    dplyr::distinct(dataset_bundle_id, run_id, .keep_all = TRUE) %>%
+    dplyr::transmute(
+      spec_name = "baseline",
+      dataset_bundle_id = .data$dataset_bundle_id,
+      hg2 = .data$hg2,
+      series = "baseline"
+    )
+
+  hg2_plot_data <- dplyr::bind_rows(hg2_focus, baseline_hg2) %>%
+    dplyr::mutate(
+      series = dplyr::case_when(
+        .data$spec_name == "C-CS" ~ "C-CS",
+        .data$series == "baseline" ~ "baseline",
+        TRUE ~ "ensemble"
+      )
+    )
+}
+```
+
+```{r calibration-data}
+pip_cal_with_se <- function(bins) {
+  bins %>%
+    dplyr::mutate(
+      pip_bin = pmin(0.9, floor(.data$pip_threshold / 0.10) * 0.10)
+    ) %>%
+    dplyr::group_by(.data$method, .data$dataset_bundle_id, .data$pip_bin) %>%
+    dplyr::summarise(
+      causal = sum(.data$n_causal_at_bucket, na.rm = TRUE),
+      noncausal = sum(.data$n_noncausal_at_bucket, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    dplyr::mutate(
+      total = .data$causal + .data$noncausal,
+      frac_causal = dplyr::if_else(.data$total > 0, .data$causal / .data$total, NA_real_)
+    ) %>%
+    dplyr::filter(.data$total > 0) %>%
+    dplyr::group_by(.data$method, .data$pip_bin) %>%
+    dplyr::summarise(
+      n_bin = sum(.data$total, na.rm = TRUE),
+      mean_frac = stats::weighted.mean(.data$frac_causal, .data$total, na.rm = TRUE),
+      se = sqrt(pmax(.data$mean_frac * (1 - .data$mean_frac) / pmax(.data$n_bin, 1), 0)),
+      .groups = "drop"
+    ) %>%
+    dplyr::mutate(
+      pip_mid = .data$pip_bin + 0.05,
+      lo = pmax(0, .data$mean_frac - 1.96 * .data$se),
+      hi = pmin(1, .data$mean_frac + 1.96 * .data$se)
+    )
+}
+
+baseline_cal_bins <- confusion_bins %>%
+  dplyr::filter(
+    .data$spec_name == "baseline-single",
+    .data$use_case_id == "susine_vanilla",
+    is.na(.data$agg_method)
+  ) %>%
+  dplyr::mutate(method = "SuSiE baseline")
+
+ccs_cal_bins <- confusion_bins %>%
+  dplyr::filter(
+    .data$spec_name == "C-CS",
+    near_focus(.data$annotation_r2, annotation_r2_focus),
+    .data$agg_method == "cluster_weight"
+  ) %>%
+  dplyr::mutate(method = "C-CS cluster weight")
+
+pip_cal_data <- dplyr::bind_rows(baseline_cal_bins, ccs_cal_bins) %>%
+  pip_cal_with_se()
+```
+
+```{r scaling-data}
+compute_ccs_resolution_oracle <- function(confusion_bins, focus = annotation_r2_focus) {
+  ccs_rows <- confusion_bins %>%
+    dplyr::filter(
+      .data$spec_name == "C-CS",
+      near_focus(.data$annotation_r2, focus),
+      is.na(.data$agg_method) | .data$explore_method != "aggregation"
+    ) %>%
+    dplyr::mutate(
+      c_value = suppressWarnings(as.numeric(.data$c_value)),
+      sigma_0_2_scalar_num = suppressWarnings(as.numeric(.data$sigma_0_2_scalar))
+    )
+  if (!nrow(ccs_rows)) return(tibble::tibble())
+
+  res_list <- lapply(c("4x4", "8x8"), function(resolution) {
+    res_sizes <- as.integer(strsplit(resolution, "x", fixed = TRUE)[[1]])
+    selected <- ccs_rows %>%
+      dplyr::group_by(.data$dataset_bundle_id) %>%
+      dplyr::group_modify(function(.x, .y) {
+        c_vals <- sort(unique(stats::na.omit(.x$c_value)))
+        s_vals <- sort(unique(stats::na.omit(.x$sigma_0_2_scalar_num)))
+        keep_c <- paper_select_axis_subset(c_vals, res_sizes[[1]], "c_value")
+        keep_s <- paper_select_axis_subset(s_vals, res_sizes[[2]], "sigma_0_2_scalar_num")
+        .x %>%
+          dplyr::filter(
+            .data$c_value %in% keep_c,
+            .data$sigma_0_2_scalar_num %in% keep_s
+          )
+      }) %>%
+      dplyr::ungroup()
+
+    selected %>%
+      dplyr::group_by(.data$dataset_bundle_id, .data$run_id) %>%
+      dplyr::summarise(
+        AUPRC = auprc_from_bins(dplyr::pick(dplyr::everything())),
+        .groups = "drop"
+      ) %>%
+      dplyr::group_by(.data$dataset_bundle_id) %>%
+      dplyr::slice_max(.data$AUPRC, n = 1L, with_ties = FALSE) %>%
+      dplyr::ungroup() %>%
+      dplyr::inner_join(
+        selected,
+        by = c("dataset_bundle_id", "run_id")
+      ) %>%
+      dplyr::mutate(resolution = resolution)
+  })
+
+  dplyr::bind_rows(res_list) %>%
+    dplyr::group_by(.data$resolution, .data$pip_threshold) %>%
+    dplyr::summarise(
+      n_causal_at_bucket = sum(.data$n_causal_at_bucket, na.rm = TRUE),
+      n_noncausal_at_bucket = sum(.data$n_noncausal_at_bucket, na.rm = TRUE),
+      .groups = "drop_last"
+    ) %>%
+    dplyr::summarise(
+      AUPRC = auprc_from_bins(dplyr::pick(dplyr::everything())),
+      .groups = "drop"
+    ) %>%
+    dplyr::mutate(method = "oracle")
+}
+
+scaling_metrics <- compute_scaling_metrics(scaling_bins_pooled)
+
+ccs_resolution_cluster <- scaling_metrics %>%
+  dplyr::filter(
+    .data$spec_name == "C-CS",
+    near_focus(.data$annotation_r2, annotation_r2_focus),
+    .data$agg_method == "cluster_weight",
+    .data$resolution %in% c("4x4", "8x8")
+  ) %>%
+  dplyr::transmute(
+    resolution = .data$resolution,
+    method = "cluster weight",
+    AUPRC = .data$AUPRC_mean
+  )
+
+ccs_resolution_oracle <- compute_ccs_resolution_oracle(confusion_bins)
+ccs_resolution_plot_data <- dplyr::bind_rows(
+  ccs_resolution_cluster,
+  ccs_resolution_oracle
+)
+
+compute_plot_data <- tibble::tibble()
+ccs_compute_coordinates <- tibble::tibble(
+  spec_name = character(),
+  annotation_r2 = double(),
+  subscale_label = character(),
+  x_compute_min = double(),
+  x_model_fit_wall_sec = double(),
+  y_AUPRC = double(),
+  AUPRC_se = double(),
+  n_reps = integer(),
+  n_datasets_compute = integer()
+)
+baseline_compute_min <- baseline_compute_minutes(model_metrics)
+baseline_compute_sec <- baseline_compute_min * 60
+
+if (nrow(scaling_metrics) > 0L && "wall_time_sec" %in% names(model_metrics)) {
+  compute_scaling_points <- scaling_metrics %>%
+    dplyr::filter(
+      .data$agg_method == "cluster_weight",
+      .data$spec_name %in% spec_order,
+      is_focus_annotation_row(.data$spec_name, .data$annotation_r2)
+    )
+
+  compute_times <- estimate_subscale_compute(compute_scaling_points, model_metrics)
+
+  compute_plot_data <- compute_scaling_points %>%
+    dplyr::left_join(
+      compute_times,
+      by = c("spec_name", "annotation_r2", "n_ensemble", "resolution")
+    ) %>%
+    dplyr::filter(is.finite(.data$mean_total_wall_sec)) %>%
+    dplyr::mutate(
+      compute_min = .data$mean_total_wall_sec / 60,
+      subscale_label = dplyr::if_else(
+        is.na(.data$resolution),
+        paste0(.data$n_ensemble, "x1"),
+        .data$resolution
+      )
+    )
+
+  ccs_compute_coordinates <- compute_plot_data %>%
+    dplyr::filter(
+      .data$spec_name == "C-CS",
+      .data$subscale_label %in% c("4x4", "8x8")
+    ) %>%
+    dplyr::transmute(
+      spec_name,
+      annotation_r2,
+      subscale_label,
+      x_compute_min = .data$compute_min,
+      x_model_fit_wall_sec = .data$mean_total_wall_sec,
+      y_AUPRC = .data$AUPRC_mean,
+      AUPRC_se,
+      n_reps,
+      n_datasets_compute
+    )
+}
+```
+
+# 4. Save Plot Data
+
+```{r save-plot-data}
+paper_plot_data <- list(
+  config = list(
+    job_name = job_name,
+    parent_job_id = parent_job_id,
+    job_dir = job_dir,
+    consolidated_dir = consolidated_dir,
+    fig_dir = fig_dir,
+    plot_data_dir = plot_data_dir,
+    annotation_r2_focus = annotation_r2_focus,
+    drop_aggs = drop_aggs,
+    bootstrap_B = bootstrap_B,
+    bootstrap_seed = bootstrap_seed,
+    true_h2 = true_h2
+  ),
+  labels = list(
+    spec_order = spec_order,
+    spec_key = spec_key,
+    agg_order = agg_order,
+    agg_labels = agg_labels
+  ),
+  refs = list(
+    baseline_auprc = baseline_auprc,
+    truth_warm_vanilla = truth_warm_vanilla,
+    baseline_compute_min = baseline_compute_min,
+    baseline_compute_sec = baseline_compute_sec,
+    delta_ci = delta_ci,
+    observed_delta = observed_delta,
+    shared_boot_n = shared_boot_n
+  ),
+  data = list(
+    heatmap_data = heatmap_data,
+    ccs_by_r2 = ccs_by_r2,
+    boot_plot_data = boot_plot_data,
+    pr_curve_counts = pr_curve_counts,
+    hg2_plot_data = hg2_plot_data,
+    pip_cal_data = pip_cal_data,
+    ccs_resolution_plot_data = ccs_resolution_plot_data,
+    compute_plot_data = compute_plot_data
+  ),
+  diagnostics = list(
+    ccs_compute_coordinates = ccs_compute_coordinates,
+    pr_precision50_points = pr_precision50_points,
+    pr_same_recall_points = pr_same_recall_points
+  )
+)
+
+saveRDS(paper_plot_data, plot_data_rds)
+readr::write_csv(
+  ccs_compute_coordinates,
+  file.path(plot_data_dir, paste0(
+    "paper_ccs_compute_coordinates_r2_",
+    format_r2_tag(annotation_r2_focus),
+    ".csv"
+  ))
+)
+readr::write_csv(
+  pr_precision50_points,
+  file.path(plot_data_dir, "paper_pr_precision50_operating_points.csv")
+)
+readr::write_csv(
+  pr_same_recall_points,
+  file.path(plot_data_dir, "paper_pr_same_recall_as_baseline_precision50.csv")
+)
+
+cat("Saved plot-data RDS:", plot_data_rds, "\n")
+cat("Saved diagnostic CSVs to:", plot_data_dir, "\n")
+```
+
+# 5. Manuscript Numbers
+
+```{r manuscript-numbers}
+knitr::kable(
+  ccs_compute_coordinates,
+  digits = 4,
+  caption = "C-CS compute plot coordinates for 4x4 and 8x8"
+)
+
+knitr::kable(
+  pr_precision50_points,
+  digits = 4,
+  caption = "PR operating points: maximum recall with precision >= 50%"
+)
+
+knitr::kable(
+  pr_same_recall_points,
+  digits = 4,
+  caption = "PR operating points: non-baseline rows at baseline 50%-precision recall"
+)
+```
