@@ -489,6 +489,87 @@ baseline_compute_minutes <- function(model_metrics) {
     dplyr::summarise(mean_wall_sec = mean(.data$wall_time_sec, na.rm = TRUE)) %>%
     dplyr::pull("mean_wall_sec") / 60
 }
+
+parse_annotation_r2_from_group_key <- function(group_key) {
+  group_key <- as.character(group_key)
+  has_r2 <- grepl("\\|r2=", group_key)
+  r2_chr <- rep(NA_character_, length(group_key))
+  r2_chr[has_r2] <- sub(".*\\|r2=([^|]+).*", "\\1", group_key[has_r2])
+  r2_chr[r2_chr %in% c("NA", "NaN", "")] <- NA_character_
+  suppressWarnings(as.numeric(r2_chr))
+}
+
+enrich_hg2_metadata <- function(hg2_tbl, model_metrics) {
+  if (is.null(hg2_tbl) || !nrow(hg2_tbl)) return(hg2_tbl)
+
+  out <- hg2_tbl %>%
+    test_susine:::normalize_agg_method_df()
+
+  if (!"group_key" %in% names(out) && "group_label" %in% names(out)) {
+    out <- out %>%
+      dplyr::mutate(group_key = sub("^model_grid\\|", "", .data$group_label))
+  }
+
+  join_keys <- intersect(
+    c("dataset_bundle_id", "use_case_id", "group_key"),
+    names(out)
+  )
+  if (length(join_keys) > 0L &&
+      all(c(join_keys, "spec_name", "annotation_r2") %in% names(model_metrics))) {
+    meta_map <- model_metrics %>%
+      dplyr::filter(!is.na(.data$group_key)) %>%
+      dplyr::distinct(dplyr::across(dplyr::all_of(
+        c(join_keys, "spec_name", "annotation_r2")
+      )))
+
+    out <- out %>%
+      dplyr::left_join(meta_map, by = join_keys, suffix = c("", ".meta"))
+
+    if ("spec_name.meta" %in% names(out)) {
+      if ("spec_name" %in% names(out)) {
+        out <- out %>%
+          dplyr::mutate(spec_name = dplyr::coalesce(.data$spec_name, .data$spec_name.meta))
+      } else {
+        out <- out %>% dplyr::rename(spec_name = .data$spec_name.meta)
+      }
+      out <- out %>% dplyr::select(-dplyr::any_of("spec_name.meta"))
+    }
+
+    if ("annotation_r2.meta" %in% names(out)) {
+      if ("annotation_r2" %in% names(out)) {
+        out <- out %>%
+          dplyr::mutate(
+            annotation_r2 = dplyr::coalesce(
+              as.numeric(.data$annotation_r2),
+              as.numeric(.data$annotation_r2.meta)
+            )
+          )
+      } else {
+        out <- out %>% dplyr::rename(annotation_r2 = .data$annotation_r2.meta)
+      }
+      out <- out %>% dplyr::select(-dplyr::any_of("annotation_r2.meta"))
+    }
+  }
+
+  if ("group_key" %in% names(out)) {
+    parsed_r2 <- parse_annotation_r2_from_group_key(out$group_key)
+    if ("annotation_r2" %in% names(out)) {
+      out <- out %>%
+        dplyr::mutate(annotation_r2 = dplyr::coalesce(as.numeric(.data$annotation_r2), parsed_r2))
+    } else {
+      out <- out %>% dplyr::mutate(annotation_r2 = parsed_r2)
+    }
+  }
+
+  if (!"spec_name" %in% names(out)) {
+    out <- out %>% dplyr::mutate(spec_name = NA_character_)
+  }
+  if (!"annotation_r2" %in% names(out)) {
+    out <- out %>% dplyr::mutate(annotation_r2 = NA_real_)
+  }
+
+  out
+}
 ```
 
 ```{r shared-tables}
@@ -853,16 +934,9 @@ if (nrow(pr_curve_data) > 0L) {
 
 ```{r fig-hg2, fig.width=8.5, fig.height=5}
 if (!is.null(hg2_by_agg) && nrow(hg2_by_agg) > 0L) {
-  if (!"spec_name" %in% names(hg2_by_agg) && "group_label" %in% names(hg2_by_agg)) {
-    spec_map <- model_metrics %>%
-      dplyr::distinct(group_key, spec_name)
-    hg2_by_agg <- hg2_by_agg %>%
-      dplyr::mutate(group_key = sub("^model_grid\\|", "", .data$group_label)) %>%
-      dplyr::left_join(spec_map, by = "group_key") %>%
-      dplyr::select(-dplyr::any_of("group_key"))
-  }
+  hg2_plot_source <- enrich_hg2_metadata(hg2_by_agg, model_metrics)
 
-  hg2_focus <- hg2_by_agg %>%
+  hg2_focus <- hg2_plot_source %>%
     dplyr::filter(
       .data$agg_method == "cluster_weight",
       .data$spec_name %in% spec_order,
