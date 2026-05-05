@@ -1,0 +1,1310 @@
+---
+title: "Ensemble Scaling Experiment - Paper Figures"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+Paper-focused figures for the ensemble scaling simulation. This workbook reads
+the consolidated CSV files produced by
+`collect_results_workbook_ensemble_scaling.Rmd` and writes PNG figures only.
+
+```{r setup, message=FALSE}
+here::i_am("vignettes/simulation pipeline/visualize_results_workbook_ensemble_scaling_paper.Rmd")
+library(here)
+library(devtools)
+
+susine_path <- here("..", "susine")
+if (file.exists(file.path(susine_path, "DESCRIPTION"))) {
+  options(test_susine.local_susine_path = normalizePath(
+    susine_path, winslash = "/", mustWork = TRUE
+  ))
+  devtools::load_all(susine_path)
+}
+devtools::load_all(".")
+
+library(dplyr)
+library(tidyr)
+library(readr)
+library(ggplot2)
+library(knitr)
+
+theme_set(theme_bw(base_size = 11))
+
+`%||%` <- function(x, y) {
+  if (is.null(x) || length(x) == 0L) y else x
+}
+```
+
+# 0. User Configuration
+
+```{r config}
+job_name <- "ensemble_scaling_full"
+parent_job_id <- "50452623"
+output_root <- here("output")
+
+job_dir <- file.path(output_root, "slurm_output", job_name, parent_job_id)
+consolidated_dir <- file.path(job_dir, "consolidated")
+
+annotation_r2_focus <- 0.2
+drop_aggs <- "cluster_weight_jsd_050"
+bootstrap_B <- 2000L
+bootstrap_seed <- 20260505L
+true_h2 <- 0.25
+
+fig_dir <- file.path(job_dir, "figures", "paper_ensemble_scaling")
+
+if (!dir.exists(consolidated_dir)) {
+  stop(
+    "Consolidated output directory not found: ", consolidated_dir, "\n",
+    "Run collect_results_workbook_ensemble_scaling.Rmd on the HPC output first, ",
+    "or update job_name/parent_job_id/consolidated_dir at the top of this workbook.",
+    call. = FALSE
+  )
+}
+dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
+
+cat("Consolidated dir:", consolidated_dir, "\n")
+cat("Figure dir:", fig_dir, "\n")
+```
+
+```{r load-data}
+read_required_csv <- function(filename) {
+  path <- file.path(consolidated_dir, filename)
+  if (!file.exists(path)) {
+    stop("Required consolidated CSV missing: ", path, call. = FALSE)
+  }
+  readr::read_csv(path, show_col_types = FALSE)
+}
+
+read_optional_csv <- function(filename) {
+  path <- file.path(consolidated_dir, filename)
+  if (!file.exists(path)) {
+    message("Optional consolidated CSV missing: ", filename)
+    return(NULL)
+  }
+  readr::read_csv(path, show_col_types = FALSE)
+}
+
+auprc_agg <- read_required_csv("auprc_aggregated.csv") %>%
+  test_susine:::normalize_agg_method_df()
+auprc_individual <- read_required_csv("auprc_individual.csv")
+auprc_pooled_agg <- read_required_csv("auprc_pooled_aggregated.csv") %>%
+  test_susine:::normalize_agg_method_df()
+auprc_pooled_agg_by_r2 <- read_required_csv("auprc_pooled_agg_by_r2.csv") %>%
+  test_susine:::normalize_agg_method_df()
+auprc_pooled_individual_overall <- read_required_csv(
+  "auprc_pooled_individual_overall.csv"
+)
+auprc_pooled_individual <- read_required_csv("auprc_pooled_individual.csv")
+
+confusion_bins <- read_required_csv("confusion_bins_full.csv") %>%
+  test_susine:::normalize_agg_method_df()
+model_metrics <- read_required_csv("model_metrics_full.csv") %>%
+  test_susine:::normalize_agg_method_df()
+
+hg2_by_agg <- read_optional_csv("hg2_by_agg.csv")
+if (!is.null(hg2_by_agg)) {
+  hg2_by_agg <- test_susine:::normalize_agg_method_df(hg2_by_agg)
+}
+
+scaling_bins_pooled <- read_optional_csv("scaling_bins_pooled.csv")
+if (!is.null(scaling_bins_pooled)) {
+  scaling_bins_pooled <- scaling_bins_pooled %>%
+    test_susine:::normalize_agg_method_df()
+}
+
+cat("AUPRC aggregated rows:", nrow(auprc_agg), "\n")
+cat("AUPRC individual rows:", nrow(auprc_individual), "\n")
+cat("Confusion-bin rows:", nrow(confusion_bins), "\n")
+cat("Model-metric rows:", nrow(model_metrics), "\n")
+```
+
+# 1. Helpers
+
+```{r helpers}
+approx_equal <- function(x, y, tol = 1e-8) {
+  is.finite(x) & is.finite(y) & abs(x - y) <= tol
+}
+
+near_focus <- function(x, focus = annotation_r2_focus) {
+  approx_equal(as.numeric(x), focus)
+}
+
+is_group_a <- function(spec_name) {
+  startsWith(as.character(spec_name), "A-")
+}
+
+is_focus_annotation_row <- function(spec_name, annotation_r2,
+                                    focus = annotation_r2_focus) {
+  is_group_a(spec_name) & is.na(annotation_r2) |
+    !is_group_a(spec_name) & near_focus(annotation_r2, focus)
+}
+
+auprc_from_bins <- function(bins) {
+  test_susine:::auprc_from_pooled_bins(bins)
+}
+
+save_paper_png <- function(plot, filename, width, height) {
+  ggplot2::ggsave(
+    filename = file.path(fig_dir, filename),
+    plot = plot,
+    width = width,
+    height = height,
+    dpi = 300,
+    bg = "white"
+  )
+}
+
+paper_theme <- function(base_size = 11) {
+  ggplot2::theme_bw(base_size = base_size) +
+    ggplot2::theme(
+      panel.grid.minor = ggplot2::element_blank(),
+      plot.title.position = "plot",
+      legend.position = "bottom",
+      legend.box = "vertical"
+    )
+}
+
+spec_order <- c(
+  "A-R", "A-F", "A-S", "A-RF", "A-RS", "A-FS", "A-RFS",
+  "B-R", "B-F", "B-RF",
+  "C-C", "C-CS", "C-CSR", "C-CSFR", "C-CFR", "C-CF"
+)
+
+spec_key <- tibble::tribble(
+  ~spec_name, ~family, ~description,
+  "A-R", "A: vanilla SuSiE", "Restarts",
+  "A-F", "A: vanilla SuSiE", "Refinement",
+  "A-S", "A: vanilla SuSiE", "Prior-variance grid",
+  "A-RF", "A: vanilla SuSiE", "Restarts x refinement",
+  "A-RS", "A: vanilla SuSiE", "Restarts x prior-variance grid",
+  "A-FS", "A: vanilla SuSiE", "Refinement x prior-variance grid",
+  "A-RFS", "A: vanilla SuSiE", "Restarts x refinement x prior-variance grid",
+  "B-R", "B: EB SuSiNE", "Restarts",
+  "B-F", "B: EB SuSiNE", "Refinement",
+  "B-RF", "B: EB SuSiNE", "Restarts x refinement",
+  "C-C", "C: grid SuSiNE", "Annotation-scale grid",
+  "C-CS", "C: grid SuSiNE", "Annotation-scale x prior-variance grid",
+  "C-CSR", "C: grid SuSiNE", "C-CS search, then default-prior refit",
+  "C-CSFR", "C: grid SuSiNE", "C x sigma x refinement x restarts",
+  "C-CFR", "C: grid SuSiNE", "C x refinement x restarts",
+  "C-CF", "C: grid SuSiNE", "C x refinement"
+)
+
+agg_order <- c("max_elbo", "uniform", "elbo_softmax", "cluster_weight", "oracle")
+agg_labels <- c(
+  max_elbo = "max ELBO",
+  uniform = "uniform",
+  elbo_softmax = "ELBO softmax",
+  cluster_weight = "cluster weight",
+  oracle = "oracle"
+)
+
+format_r2_tag <- function(x) {
+  gsub("\\.", "p", format(x, trim = TRUE, scientific = FALSE))
+}
+
+extract_baseline_metric <- function(plot_table, metric_col) {
+  plot_table %>%
+    dplyr::filter(
+      .data$series_type == "baseline_single",
+      .data$spec_name == "baseline-single",
+      .data$use_case_id == "susine_vanilla",
+      is.na(.data$annotation_r2)
+    ) %>%
+    dplyr::pull(!!rlang::sym(metric_col)) %>%
+    dplyr::first()
+}
+
+extract_truth_warm_refs <- function(plot_table, metric_col) {
+  plot_table %>%
+    dplyr::filter(.data$series_type == "truth_warm") %>%
+    dplyr::select(use_case_id, annotation_r2, dplyr::all_of(metric_col)) %>%
+    dplyr::mutate(
+      label = dplyr::case_when(
+        .data$use_case_id == "susine_vanilla" ~ "truth-warm vanilla",
+        .data$use_case_id == "susine_eb_clamped_scale_var_nonneg" &
+          is.na(.data$annotation_r2) ~ "truth-warm EB",
+        .data$use_case_id == "susine_functional_mu" &
+          is.na(.data$annotation_r2) ~ "truth-warm grid (c=0.5)",
+        .data$use_case_id == "susine_eb_clamped_scale_var_nonneg" ~
+          paste0("truth-warm EB (R2=", .data$annotation_r2, ")"),
+        .data$use_case_id == "susine_functional_mu" ~
+          paste0("truth-warm grid (c=0.5, R2=", .data$annotation_r2, ")"),
+        TRUE ~ .data$use_case_id
+      )
+    )
+}
+
+build_pr_curves <- function(bins, group_vars) {
+  bins %>%
+    dplyr::group_by(dplyr::across(dplyr::all_of(group_vars))) %>%
+    dplyr::arrange(dplyr::desc(.data$pip_threshold), .by_group = TRUE) %>%
+    dplyr::mutate(
+      cum_tp = cumsum(.data$n_causal_at_bucket),
+      cum_fp = cumsum(.data$n_noncausal_at_bucket),
+      total_p = sum(.data$n_causal_at_bucket)
+    ) %>%
+    dplyr::filter(.data$total_p > 0L, (.data$cum_tp + .data$cum_fp) > 0L) %>%
+    dplyr::mutate(
+      recall = .data$cum_tp / .data$total_p,
+      precision = .data$cum_tp / (.data$cum_tp + .data$cum_fp)
+    ) %>%
+    dplyr::ungroup() %>%
+    dplyr::select(dplyr::all_of(group_vars), recall, precision)
+}
+
+pool_bins <- function(bins, group_vars) {
+  bins %>%
+    dplyr::group_by(dplyr::across(dplyr::all_of(c(group_vars, "pip_threshold")))) %>%
+    dplyr::summarise(
+      n_causal_at_bucket = sum(.data$n_causal_at_bucket, na.rm = TRUE),
+      n_noncausal_at_bucket = sum(.data$n_noncausal_at_bucket, na.rm = TRUE),
+      .groups = "drop"
+    )
+}
+
+paper_select_axis_subset <- function(vals, n_keep, axis_col) {
+  vals <- sort(unique(vals))
+  vals <- vals[!is.na(vals)]
+  if (!length(vals)) return(vals)
+  n_keep <- min(as.integer(n_keep), length(vals))
+  if (n_keep >= length(vals)) return(vals)
+  if (axis_col %in% c("restart_id", "refine_step")) {
+    return(vals[seq_len(n_keep)])
+  }
+  vals[unique(round(seq(1, length(vals), length.out = n_keep)))]
+}
+
+paper_select_subsample_run_ids <- function(run_meta, n_ens, lever_type) {
+  n_sel <- min(as.integer(n_ens), nrow(run_meta))
+  switch(lever_type,
+    restart = {
+      run_meta %>%
+        dplyr::arrange(.data$restart_id, .data$run_id) %>%
+        dplyr::slice_head(n = n_sel) %>%
+        dplyr::pull("run_id")
+    },
+    refine = {
+      run_meta %>%
+        dplyr::arrange(.data$refine_step, .data$run_id) %>%
+        dplyr::slice_head(n = n_sel) %>%
+        dplyr::pull("run_id")
+    },
+    sigma_0_2 = {
+      vals <- sort(unique(run_meta$sigma_0_2_scalar_num))
+      keep <- vals[unique(round(seq(1, length(vals), length.out = n_sel)))]
+      run_meta %>%
+        dplyr::filter(.data$sigma_0_2_scalar_num %in% keep) %>%
+        dplyr::pull("run_id")
+    },
+    c_grid = {
+      vals <- sort(unique(run_meta$c_value))
+      keep <- vals[unique(round(seq(1, length(vals), length.out = n_sel)))]
+      run_meta %>%
+        dplyr::filter(.data$c_value %in% keep) %>%
+        dplyr::pull("run_id")
+    },
+    stop("Unknown lever_type: ", lever_type)
+  )
+}
+
+prepare_individual_run_rows <- function(model_metrics) {
+  model_metrics %>%
+    dplyr::filter(
+      .data$filtering == "purity_filtered",
+      !is.na(.data$spec_name),
+      !.data$spec_name %in% c("baseline-single", "truth-warm"),
+      is.na(.data$agg_method) | .data$explore_method != "aggregation"
+    ) %>%
+    dplyr::mutate(
+      sigma_0_2_scalar_num = suppressWarnings(as.numeric(.data$sigma_0_2_scalar)),
+      c_value = suppressWarnings(as.numeric(.data$c_value)),
+      restart_id = suppressWarnings(as.integer(.data$restart_id)),
+      refine_step = suppressWarnings(as.integer(.data$refine_step)),
+      wall_time_sec = as.numeric(.data$wall_time_sec)
+    ) %>%
+    dplyr::distinct(run_id, .keep_all = TRUE)
+}
+
+select_subscale_run_rows <- function(run_rows, n_ensemble, resolution) {
+  run_rows <- run_rows %>%
+    dplyr::arrange(.data$run_id)
+  if (!nrow(run_rows)) return(run_rows)
+
+  method_ids <- unique(trimws(strsplit(
+    as.character(run_rows$exploration_methods[[1]] %||% ""),
+    "x",
+    fixed = TRUE
+  )[[1]]))
+  is_cs_grid_refit <- "cs_grid_refit" %in% method_ids
+
+  if (!is.na(resolution) && nzchar(as.character(resolution))) {
+    axis_info <- list(
+      if ("restart" %in% method_ids) list(col = "restart_id") else NULL,
+      if ("refine" %in% method_ids) list(col = "refine_step") else NULL,
+      if ("c_grid" %in% method_ids || is_cs_grid_refit) list(col = "c_value") else NULL,
+      if ("sigma_0_2_grid" %in% method_ids || is_cs_grid_refit) {
+        list(col = "sigma_0_2_scalar_num")
+      } else {
+        NULL
+      }
+    )
+    axis_info <- Filter(Negate(is.null), axis_info)
+    if (!length(axis_info)) return(run_rows[0, , drop = FALSE])
+
+    axis_sizes <- vapply(axis_info, function(ax) {
+      length(unique(stats::na.omit(run_rows[[ax$col]])))
+    }, integer(1L))
+    sort_order <- order(axis_sizes, decreasing = TRUE)
+    axis_info <- axis_info[sort_order]
+
+    res_sizes <- suppressWarnings(as.integer(strsplit(
+      as.character(resolution), "x", fixed = TRUE
+    )[[1]]))
+    if (length(res_sizes) != length(axis_info) || any(is.na(res_sizes))) {
+      return(run_rows[0, , drop = FALSE])
+    }
+
+    selected <- run_rows
+    for (i in seq_along(axis_info)) {
+      col <- axis_info[[i]]$col
+      keep_vals <- paper_select_axis_subset(selected[[col]], res_sizes[[i]], col)
+      selected <- selected %>% dplyr::filter(.data[[col]] %in% keep_vals)
+    }
+    return(selected)
+  }
+
+  lever_type <- if ("restart" %in% method_ids) {
+    "restart"
+  } else if ("refine" %in% method_ids) {
+    "refine"
+  } else if ("sigma_0_2_grid" %in% method_ids) {
+    "sigma_0_2"
+  } else if ("c_grid" %in% method_ids) {
+    "c_grid"
+  } else {
+    NA_character_
+  }
+  if (is.na(lever_type)) return(run_rows[0, , drop = FALSE])
+
+  ids <- paper_select_subsample_run_ids(run_rows, n_ensemble, lever_type)
+  run_rows %>% dplyr::filter(.data$run_id %in% ids)
+}
+
+compute_scaling_metrics <- function(scaling_bins) {
+  if (is.null(scaling_bins) || !nrow(scaling_bins)) {
+    return(tibble::tibble())
+  }
+
+  scaling_bins %>%
+    dplyr::filter(!.data$agg_method %in% drop_aggs) %>%
+    dplyr::group_by(
+      .data$spec_name, .data$annotation_r2, .data$n_ensemble,
+      .data$resolution, .data$agg_method, .data$rep
+    ) %>%
+    dplyr::summarise(
+      AUPRC = auprc_from_bins(dplyr::pick(dplyr::everything())),
+      .groups = "drop"
+    ) %>%
+    dplyr::group_by(
+      .data$spec_name, .data$annotation_r2, .data$n_ensemble,
+      .data$resolution, .data$agg_method
+    ) %>%
+    dplyr::summarise(
+      AUPRC_mean = mean(.data$AUPRC, na.rm = TRUE),
+      AUPRC_se = ifelse(
+        dplyr::n() > 1L,
+        stats::sd(.data$AUPRC, na.rm = TRUE) / sqrt(sum(!is.na(.data$AUPRC))),
+        NA_real_
+      ),
+      n_reps = dplyr::n(),
+      .groups = "drop"
+    )
+}
+
+estimate_subscale_compute <- function(points, model_metrics) {
+  if (!nrow(points) || !"wall_time_sec" %in% names(model_metrics)) {
+    return(tibble::tibble())
+  }
+
+  base_runs <- prepare_individual_run_rows(model_metrics)
+  out <- lapply(seq_len(nrow(points)), function(i) {
+    point <- points[i, , drop = FALSE]
+    run_rows <- base_runs %>%
+      dplyr::filter(.data$spec_name == point$spec_name[[1]])
+
+    if (is_group_a(point$spec_name[[1]])) {
+      run_rows <- run_rows %>% dplyr::filter(is.na(.data$annotation_r2))
+    } else {
+      run_rows <- run_rows %>%
+        dplyr::filter(near_focus(.data$annotation_r2, annotation_r2_focus))
+    }
+
+    if (!nrow(run_rows)) {
+      return(tibble::tibble(
+        spec_name = point$spec_name,
+        annotation_r2 = point$annotation_r2,
+        n_ensemble = point$n_ensemble,
+        resolution = point$resolution,
+        mean_total_wall_sec = NA_real_,
+        n_datasets_compute = 0L
+      ))
+    }
+
+    dataset_groups <- split(run_rows, run_rows$dataset_bundle_id)
+    wall_times <- vapply(dataset_groups, function(g) {
+      selected <- select_subscale_run_rows(g, point$n_ensemble[[1]], point$resolution[[1]])
+      sum(selected$wall_time_sec, na.rm = TRUE)
+    }, numeric(1L))
+
+    tibble::tibble(
+      spec_name = point$spec_name,
+      annotation_r2 = point$annotation_r2,
+      n_ensemble = point$n_ensemble,
+      resolution = point$resolution,
+      mean_total_wall_sec = mean(wall_times, na.rm = TRUE),
+      n_datasets_compute = length(wall_times)
+    )
+  })
+
+  dplyr::bind_rows(out)
+}
+
+baseline_compute_minutes <- function(model_metrics) {
+  if (!"wall_time_sec" %in% names(model_metrics)) return(NA_real_)
+  model_metrics %>%
+    dplyr::filter(
+      .data$spec_name == "baseline-single",
+      .data$use_case_id == "susine_vanilla",
+      .data$filtering == "purity_filtered"
+    ) %>%
+    dplyr::distinct(dataset_bundle_id, run_id, .keep_all = TRUE) %>%
+    dplyr::summarise(mean_wall_sec = mean(.data$wall_time_sec, na.rm = TRUE)) %>%
+    dplyr::pull("mean_wall_sec") / 60
+}
+```
+
+```{r shared-tables}
+auprc_plot_table <- test_susine:::build_shared_plot_metric_table(
+  auprc_pooled_agg,
+  auprc_pooled_agg_by_r2,
+  auprc_pooled_individual_overall,
+  auprc_pooled_individual,
+  metric_col = "AUPRC",
+  label = "Paper AUPRC plot table"
+) %>%
+  dplyr::filter(is.na(.data$agg_method) | !.data$agg_method %in% drop_aggs)
+
+baseline_auprc <- extract_baseline_metric(auprc_plot_table, "AUPRC")
+truth_warm_refs <- extract_truth_warm_refs(auprc_plot_table, "AUPRC")
+truth_warm_vanilla_vec <- truth_warm_refs %>%
+  dplyr::filter(.data$use_case_id == "susine_vanilla", is.na(.data$annotation_r2)) %>%
+  dplyr::pull("AUPRC")
+truth_warm_vanilla <- if (length(truth_warm_vanilla_vec)) {
+  truth_warm_vanilla_vec[[1]]
+} else {
+  NA_real_
+}
+
+cat("Baseline SuSiE AUPRC:", round(baseline_auprc, 4), "\n")
+cat("Truth-warm vanilla AUPRC:", round(truth_warm_vanilla, 4), "\n")
+
+knitr::kable(spec_key, caption = "Ensemble abbreviation key")
+```
+
+# 2. Overall Ensemble Performance Heatmap
+
+```{r fig-delta-heatmap, fig.width=10, fig.height=7}
+heatmap_data <- test_susine:::filter_shared_plot_metric_rows(
+  auprc_plot_table,
+  r2_filter = annotation_r2_focus
+) %>%
+  dplyr::filter(
+    !.data$agg_method %in% drop_aggs,
+    .data$agg_method %in% agg_order,
+    .data$spec_name %in% spec_order
+  ) %>%
+  dplyr::mutate(
+    delta_auprc = .data$AUPRC - baseline_auprc,
+    spec_name = factor(.data$spec_name, levels = rev(spec_order)),
+    agg_method = factor(.data$agg_method, levels = agg_order)
+  )
+
+if (nrow(heatmap_data) > 0L && is.finite(baseline_auprc)) {
+  heatmap_check <- heatmap_data %>%
+    dplyr::mutate(check_delta = .data$AUPRC - baseline_auprc - .data$delta_auprc)
+  stopifnot(max(abs(heatmap_check$check_delta), na.rm = TRUE) < 1e-12)
+
+  y_levels <- levels(heatmap_data$spec_name)
+  y_prefix <- sub("-.*$", "", y_levels)
+  y_separators <- if (length(y_prefix) > 1L) {
+    which(y_prefix[-length(y_prefix)] != y_prefix[-1L]) + 0.5
+  } else {
+    numeric(0L)
+  }
+  oracle_x <- match("oracle", agg_order) - 0.5
+
+  p_heatmap <- ggplot2::ggplot(
+    heatmap_data,
+    ggplot2::aes(x = .data$agg_method, y = .data$spec_name, fill = .data$delta_auprc)
+  ) +
+    ggplot2::geom_tile(color = "white", linewidth = 0.4) +
+    ggplot2::geom_text(
+      ggplot2::aes(label = sprintf("%+.3f", .data$delta_auprc)),
+      size = 2.7
+    ) +
+    ggplot2::geom_hline(
+      yintercept = y_separators,
+      linewidth = 0.6,
+      color = "grey20"
+    ) +
+    ggplot2::geom_vline(
+      xintercept = oracle_x,
+      linewidth = 0.6,
+      color = "grey20"
+    ) +
+    ggplot2::scale_x_discrete(labels = agg_labels, drop = FALSE) +
+    ggplot2::scale_fill_gradient2(
+      low = "#2166AC",
+      mid = "white",
+      high = "#B2182B",
+      midpoint = 0,
+      name = "Delta AUPRC"
+    ) +
+    ggplot2::labs(
+      x = "Aggregation method",
+      y = "Ensemble method",
+      title = "AUPRC gain over baseline SuSiE",
+      subtitle = paste0("annotation_r2 = ", annotation_r2_focus)
+    ) +
+    paper_theme()
+
+  save_paper_png(
+    p_heatmap,
+    paste0("paper_delta_auprc_heatmap_r2_", format_r2_tag(annotation_r2_focus), ".png"),
+    width = 10,
+    height = 7
+  )
+  p_heatmap
+} else {
+  message("Skipping heatmap: no rows after filtering.")
+}
+```
+
+# 3. Best Methods vs Annotation Quality
+
+```{r fig-ccs-by-r2, fig.width=7, fig.height=4.8}
+ccs_by_r2 <- auprc_plot_table %>%
+  dplyr::filter(
+    .data$series_type == "aggregated",
+    .data$spec_name == "C-CS",
+    !is.na(.data$annotation_r2),
+    !.data$agg_method %in% drop_aggs,
+    .data$agg_method %in% agg_order
+  ) %>%
+  dplyr::mutate(
+    agg_method = factor(.data$agg_method, levels = agg_order)
+  )
+
+if (nrow(ccs_by_r2) > 0L) {
+  p_ccs_r2 <- ggplot2::ggplot(
+    ccs_by_r2,
+    ggplot2::aes(
+      x = .data$annotation_r2,
+      y = .data$AUPRC,
+      color = .data$agg_method,
+      group = .data$agg_method
+    )
+  ) +
+    ggplot2::geom_hline(
+      yintercept = baseline_auprc,
+      linetype = "dashed",
+      color = "grey25",
+      linewidth = 0.55
+    ) +
+    ggplot2::geom_hline(
+      yintercept = truth_warm_vanilla,
+      linetype = "dotted",
+      color = "grey25",
+      linewidth = 0.55
+    ) +
+    ggplot2::geom_line(linewidth = 0.75) +
+    ggplot2::geom_point(size = 2) +
+    ggplot2::coord_cartesian(ylim = c(0.2, 0.4)) +
+    ggplot2::scale_x_continuous(breaks = sort(unique(ccs_by_r2$annotation_r2))) +
+    ggplot2::scale_color_discrete(labels = agg_labels[levels(ccs_by_r2$agg_method)]) +
+    ggplot2::labs(
+      x = "Annotation R2",
+      y = "Pooled AUPRC",
+      color = "Aggregation",
+      title = "C-CS aggregation performance across annotation quality"
+    ) +
+    paper_theme()
+
+  save_paper_png(
+    p_ccs_r2,
+    "paper_ccs_aggregation_by_annotation_r2.png",
+    width = 7,
+    height = 4.8
+  )
+  p_ccs_r2
+} else {
+  message("Skipping C-CS by annotation quality plot: no rows.")
+}
+```
+
+# 4. Bootstrap AUPRC CI
+
+```{r fig-bootstrap, fig.width=7, fig.height=4.8}
+bootstrap_auprc_from_bins <- function(bins, sample_ids) {
+  weights <- tibble::tibble(dataset_bundle_id = sample_ids) %>%
+    dplyr::count(.data$dataset_bundle_id, name = "boot_weight")
+
+  bins %>%
+    dplyr::inner_join(weights, by = "dataset_bundle_id") %>%
+    dplyr::group_by(.data$pip_threshold) %>%
+    dplyr::summarise(
+      n_causal_at_bucket = sum(.data$n_causal_at_bucket * .data$boot_weight, na.rm = TRUE),
+      n_noncausal_at_bucket = sum(
+        .data$n_noncausal_at_bucket * .data$boot_weight,
+        na.rm = TRUE
+      ),
+      .groups = "drop"
+    ) %>%
+    auprc_from_bins()
+}
+
+baseline_boot_bins <- confusion_bins %>%
+  dplyr::filter(
+    .data$spec_name == "baseline-single",
+    .data$use_case_id == "susine_vanilla",
+    is.na(.data$agg_method)
+  )
+
+ccs_boot_bins <- confusion_bins %>%
+  dplyr::filter(
+    .data$spec_name == "C-CS",
+    near_focus(.data$annotation_r2, annotation_r2_focus),
+    .data$agg_method == "cluster_weight"
+  )
+
+shared_boot_ids <- intersect(
+  unique(baseline_boot_bins$dataset_bundle_id),
+  unique(ccs_boot_bins$dataset_bundle_id)
+)
+
+if (length(shared_boot_ids) > 1L) {
+  set.seed(bootstrap_seed)
+  boot_samples <- replicate(
+    bootstrap_B,
+    sample(shared_boot_ids, size = length(shared_boot_ids), replace = TRUE),
+    simplify = FALSE
+  )
+
+  baseline_boot <- vapply(
+    boot_samples,
+    function(ids) bootstrap_auprc_from_bins(baseline_boot_bins, ids),
+    numeric(1L)
+  )
+  ccs_boot <- vapply(
+    boot_samples,
+    function(ids) bootstrap_auprc_from_bins(ccs_boot_bins, ids),
+    numeric(1L)
+  )
+  delta_boot <- ccs_boot - baseline_boot
+
+  method_ci <- dplyr::bind_rows(
+    tibble::tibble(method = "SuSiE baseline", AUPRC = baseline_boot),
+    tibble::tibble(method = "C-CS cluster weight", AUPRC = ccs_boot)
+  ) %>%
+    dplyr::group_by(.data$method) %>%
+    dplyr::summarise(
+      ci_lo = stats::quantile(.data$AUPRC, 0.025, na.rm = TRUE),
+      ci_hi = stats::quantile(.data$AUPRC, 0.975, na.rm = TRUE),
+      .groups = "drop"
+    )
+  delta_ci <- stats::quantile(delta_boot, c(0.025, 0.975), na.rm = TRUE)
+
+  boot_plot_data <- dplyr::bind_rows(
+    tibble::tibble(method = "SuSiE baseline", AUPRC = baseline_boot),
+    tibble::tibble(method = "C-CS cluster weight", AUPRC = ccs_boot)
+  )
+
+  p_boot <- ggplot2::ggplot(
+    boot_plot_data,
+    ggplot2::aes(x = .data$AUPRC, fill = .data$method, color = .data$method)
+  ) +
+    ggplot2::geom_histogram(
+      ggplot2::aes(y = ggplot2::after_stat(density)),
+      bins = 45,
+      alpha = 0.35,
+      position = "identity"
+    ) +
+    ggplot2::geom_vline(
+      data = method_ci,
+      ggplot2::aes(xintercept = .data$ci_lo, color = .data$method),
+      linetype = "dashed",
+      linewidth = 0.5
+    ) +
+    ggplot2::geom_vline(
+      data = method_ci,
+      ggplot2::aes(xintercept = .data$ci_hi, color = .data$method),
+      linetype = "dashed",
+      linewidth = 0.5
+    ) +
+    ggplot2::labs(
+      x = "Bootstrap pooled AUPRC",
+      y = "Density",
+      fill = NULL,
+      color = NULL,
+      title = "Dataset bootstrap AUPRC",
+      subtitle = sprintf(
+        "annotation_r2 = %.1f; n = %d datasets; paired delta 95%% CI: [%.3f, %.3f]",
+        annotation_r2_focus,
+        length(shared_boot_ids),
+        delta_ci[[1]],
+        delta_ci[[2]]
+      )
+    ) +
+    paper_theme()
+
+  save_paper_png(
+    p_boot,
+    paste0("paper_bootstrap_auprc_r2_", format_r2_tag(annotation_r2_focus), ".png"),
+    width = 7,
+    height = 4.8
+  )
+  p_boot
+} else {
+  message("Skipping bootstrap plot: insufficient shared dataset IDs.")
+}
+```
+
+# 5. PR Curves
+
+```{r fig-pr-curves, fig.width=9, fig.height=4.8}
+ccs_pr_bins <- confusion_bins %>%
+  dplyr::filter(
+    .data$spec_name == "C-CS",
+    .data$agg_method == "cluster_weight",
+    !is.na(.data$annotation_r2)
+  ) %>%
+  dplyr::mutate(method = "C-CS cluster weight")
+
+pr_r2_values <- sort(unique(ccs_pr_bins$annotation_r2))
+
+baseline_pr_bins_raw <- confusion_bins %>%
+  dplyr::filter(
+    .data$spec_name == "baseline-single",
+    .data$use_case_id == "susine_vanilla",
+    is.na(.data$agg_method)
+  )
+
+baseline_pr_bins <- dplyr::bind_rows(lapply(pr_r2_values, function(r2) {
+  baseline_pr_bins_raw %>%
+    dplyr::mutate(annotation_r2 = r2, method = "SuSiE baseline")
+}))
+
+pr_curve_data <- dplyr::bind_rows(baseline_pr_bins, ccs_pr_bins) %>%
+  build_pr_curves(c("method", "annotation_r2"))
+
+if (nrow(pr_curve_data) > 0L) {
+  p_pr <- ggplot2::ggplot(
+    pr_curve_data,
+    ggplot2::aes(
+      x = .data$recall,
+      y = .data$precision,
+      color = .data$method,
+      group = .data$method
+    )
+  ) +
+    ggplot2::geom_line(linewidth = 0.75) +
+    ggplot2::facet_wrap(~ annotation_r2, nrow = 1, labeller = ggplot2::label_both) +
+    ggplot2::scale_x_continuous(limits = c(0, 1), breaks = c(0, 0.5, 1)) +
+    ggplot2::scale_y_continuous(limits = c(0, 1), breaks = c(0, 0.5, 1)) +
+    ggplot2::labs(
+      x = "Recall",
+      y = "Precision",
+      color = NULL,
+      title = "Precision-recall curves for baseline SuSiE and C-CS cluster weight"
+    ) +
+    paper_theme()
+
+  save_paper_png(
+    p_pr,
+    "paper_pr_curves_ccs_cluster_weight_by_r2.png",
+    width = 9,
+    height = 4.8
+  )
+  p_pr
+} else {
+  message("Skipping PR curves: no rows.")
+}
+```
+
+# 6. Estimated Heritability
+
+```{r fig-hg2, fig.width=8.5, fig.height=5}
+if (!is.null(hg2_by_agg) && nrow(hg2_by_agg) > 0L) {
+  if (!"spec_name" %in% names(hg2_by_agg) && "group_label" %in% names(hg2_by_agg)) {
+    spec_map <- model_metrics %>%
+      dplyr::distinct(group_key, spec_name)
+    hg2_by_agg <- hg2_by_agg %>%
+      dplyr::mutate(group_key = sub("^model_grid\\|", "", .data$group_label)) %>%
+      dplyr::left_join(spec_map, by = "group_key") %>%
+      dplyr::select(-dplyr::any_of("group_key"))
+  }
+
+  hg2_focus <- hg2_by_agg %>%
+    dplyr::filter(
+      .data$agg_method == "cluster_weight",
+      .data$spec_name %in% spec_order,
+      is_focus_annotation_row(.data$spec_name, .data$annotation_r2)
+    ) %>%
+    dplyr::transmute(
+      spec_name = as.character(.data$spec_name),
+      dataset_bundle_id = .data$dataset_bundle_id,
+      hg2 = .data$hg2,
+      series = "ensemble"
+    )
+
+  baseline_hg2 <- model_metrics %>%
+    dplyr::filter(
+      .data$spec_name == "baseline-single",
+      .data$use_case_id == "susine_vanilla",
+      .data$filtering == "purity_filtered",
+      !is.na(.data$hg2)
+    ) %>%
+    dplyr::distinct(dataset_bundle_id, run_id, .keep_all = TRUE) %>%
+    dplyr::transmute(
+      spec_name = "baseline",
+      dataset_bundle_id = .data$dataset_bundle_id,
+      hg2 = .data$hg2,
+      series = "baseline"
+    )
+
+  hg2_plot_data <- dplyr::bind_rows(hg2_focus, baseline_hg2) %>%
+    dplyr::mutate(
+      spec_name = factor(.data$spec_name, levels = c("baseline", spec_order)),
+      series = factor(.data$series, levels = c("baseline", "ensemble"))
+    )
+
+  if (nrow(hg2_plot_data) > 0L) {
+    p_hg2 <- ggplot2::ggplot(
+      hg2_plot_data,
+      ggplot2::aes(x = .data$spec_name, y = .data$hg2, fill = .data$series)
+    ) +
+      ggplot2::geom_boxplot(outlier.size = 0.4, linewidth = 0.35) +
+      ggplot2::geom_hline(
+        yintercept = true_h2,
+        linetype = "dashed",
+        color = "grey25",
+        linewidth = 0.55
+      ) +
+      ggplot2::scale_fill_manual(
+        values = c(baseline = "grey70", ensemble = "#4C78A8"),
+        guide = "none"
+      ) +
+      ggplot2::labs(
+        x = "Method",
+        y = "Estimated h_g^2",
+        title = "Estimated heritability under cluster-weight aggregation",
+        subtitle = paste0("annotation_r2 = ", annotation_r2_focus, "; dashed line = true h2")
+      ) +
+      paper_theme() +
+      ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 45, hjust = 1))
+
+    save_paper_png(
+      p_hg2,
+      paste0("paper_hg2_cluster_weight_r2_", format_r2_tag(annotation_r2_focus), ".png"),
+      width = 8.5,
+      height = 5
+    )
+    p_hg2
+  } else {
+    message("Skipping hg2 plot: no rows after filtering.")
+  }
+} else {
+  message("Skipping hg2 plot: hg2_by_agg.csv is unavailable.")
+}
+```
+
+# 7. PIP Calibration
+
+```{r fig-pip-calibration, fig.width=6.8, fig.height=5}
+pip_cal_with_se <- function(bins) {
+  bins %>%
+    dplyr::mutate(
+      pip_bin = pmin(0.9, floor(.data$pip_threshold / 0.10) * 0.10)
+    ) %>%
+    dplyr::group_by(.data$method, .data$dataset_bundle_id, .data$pip_bin) %>%
+    dplyr::summarise(
+      n_causal = sum(.data$n_causal_at_bucket, na.rm = TRUE),
+      n_noncausal = sum(.data$n_noncausal_at_bucket, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    dplyr::mutate(
+      n_total = .data$n_causal + .data$n_noncausal,
+      observed_frac = dplyr::if_else(
+        .data$n_total > 0L,
+        .data$n_causal / .data$n_total,
+        NA_real_
+      )
+    ) %>%
+    dplyr::group_by(.data$method, .data$pip_bin) %>%
+    dplyr::summarise(
+      mean_frac = mean(.data$observed_frac, na.rm = TRUE),
+      se_frac = stats::sd(.data$observed_frac, na.rm = TRUE) /
+        sqrt(sum(!is.na(.data$observed_frac))),
+      n_datasets = sum(!is.na(.data$observed_frac)),
+      total_causal = sum(.data$n_causal, na.rm = TRUE),
+      total_noncausal = sum(.data$n_noncausal, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    dplyr::mutate(
+      total = .data$total_causal + .data$total_noncausal,
+      ci_lo = pmax(0, .data$mean_frac - 1.96 * .data$se_frac),
+      ci_hi = pmin(1, .data$mean_frac + 1.96 * .data$se_frac),
+      pip_mid = .data$pip_bin + 0.05
+    )
+}
+
+baseline_cal_bins <- confusion_bins %>%
+  dplyr::filter(
+    .data$spec_name == "baseline-single",
+    .data$use_case_id == "susine_vanilla",
+    is.na(.data$agg_method)
+  ) %>%
+  dplyr::mutate(method = "SuSiE baseline")
+
+ccs_cal_bins <- confusion_bins %>%
+  dplyr::filter(
+    .data$spec_name == "C-CS",
+    near_focus(.data$annotation_r2, annotation_r2_focus),
+    .data$agg_method == "cluster_weight"
+  ) %>%
+  dplyr::mutate(method = "C-CS cluster weight")
+
+pip_cal_data <- dplyr::bind_rows(baseline_cal_bins, ccs_cal_bins) %>%
+  pip_cal_with_se()
+
+if (nrow(pip_cal_data) > 0L) {
+  p_cal <- ggplot2::ggplot(
+    pip_cal_data,
+    ggplot2::aes(x = .data$pip_mid, y = .data$mean_frac, color = .data$method)
+  ) +
+    ggplot2::geom_abline(
+      slope = 1,
+      intercept = 0,
+      linetype = "dashed",
+      color = "grey45"
+    ) +
+    ggplot2::geom_errorbar(
+      ggplot2::aes(ymin = .data$ci_lo, ymax = .data$ci_hi),
+      width = 0.018,
+      linewidth = 0.35,
+      alpha = 0.75
+    ) +
+    ggplot2::geom_line(linewidth = 0.7) +
+    ggplot2::geom_point(size = 1.8) +
+    ggplot2::coord_cartesian(xlim = c(0, 1), ylim = c(0, 1)) +
+    ggplot2::labs(
+      x = "PIP bin midpoint",
+      y = "Observed causal fraction",
+      color = NULL,
+      title = "PIP calibration",
+      subtitle = paste0("annotation_r2 = ", annotation_r2_focus)
+    ) +
+    paper_theme()
+
+  save_paper_png(
+    p_cal,
+    paste0(
+      "paper_pip_calibration_ccs_cluster_weight_r2_",
+      format_r2_tag(annotation_r2_focus),
+      ".png"
+    ),
+    width = 6.8,
+    height = 5
+  )
+  p_cal
+} else {
+  message("Skipping PIP calibration: no rows.")
+}
+```
+
+# 8. C-CS 4x4 vs 8x8 Scaling
+
+```{r fig-ccs-resolution-scaling, fig.width=6.5, fig.height=4.7}
+compute_ccs_resolution_oracle <- function(confusion_bins, focus = annotation_r2_focus) {
+  ccs_individual <- confusion_bins %>%
+    dplyr::filter(
+      .data$spec_name == "C-CS",
+      near_focus(.data$annotation_r2, focus),
+      is.na(.data$agg_method),
+      !is.na(.data$c_value),
+      !is.na(.data$sigma_0_2_scalar)
+    ) %>%
+    dplyr::mutate(
+      c_value = suppressWarnings(as.numeric(.data$c_value)),
+      sigma_0_2_scalar_num = suppressWarnings(as.numeric(.data$sigma_0_2_scalar))
+    )
+
+  if (!nrow(ccs_individual)) return(tibble::tibble())
+
+  out <- lapply(split(ccs_individual, ccs_individual$dataset_bundle_id), function(ds_bins) {
+    c_vals <- sort(unique(stats::na.omit(ds_bins$c_value)))
+    s_vals <- sort(unique(stats::na.omit(ds_bins$sigma_0_2_scalar_num)))
+    if (!length(c_vals) || !length(s_vals)) return(tibble::tibble())
+
+    resolution_rows <- lapply(c("4x4", "8x8"), function(resolution) {
+      res_sizes <- as.integer(strsplit(resolution, "x", fixed = TRUE)[[1]])
+      keep_c <- paper_select_axis_subset(c_vals, res_sizes[[1]], "c_value")
+      keep_s <- paper_select_axis_subset(s_vals, res_sizes[[2]], "sigma_0_2_scalar_num")
+
+      selected <- ds_bins %>%
+        dplyr::filter(
+          .data$c_value %in% keep_c,
+          .data$sigma_0_2_scalar_num %in% keep_s
+        )
+      if (!nrow(selected)) return(tibble::tibble())
+
+      per_run <- selected %>%
+        dplyr::group_by(.data$dataset_bundle_id, .data$run_id) %>%
+        dplyr::summarise(
+          AUPRC = auprc_from_bins(dplyr::pick(dplyr::everything())),
+          .groups = "drop"
+        ) %>%
+        dplyr::slice_max(.data$AUPRC, n = 1L, with_ties = FALSE) %>%
+        dplyr::mutate(resolution = resolution)
+
+      selected %>%
+        dplyr::inner_join(
+          per_run %>% dplyr::select(dataset_bundle_id, run_id, resolution),
+          by = c("dataset_bundle_id", "run_id")
+        )
+    })
+    dplyr::bind_rows(resolution_rows)
+  })
+
+  oracle_bins <- dplyr::bind_rows(out)
+  if (!nrow(oracle_bins)) return(tibble::tibble())
+
+  oracle_bins %>%
+    dplyr::group_by(.data$resolution, .data$pip_threshold) %>%
+    dplyr::summarise(
+      n_causal_at_bucket = sum(.data$n_causal_at_bucket, na.rm = TRUE),
+      n_noncausal_at_bucket = sum(.data$n_noncausal_at_bucket, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    dplyr::group_by(.data$resolution) %>%
+    dplyr::summarise(
+      AUPRC = auprc_from_bins(dplyr::pick(dplyr::everything())),
+      .groups = "drop"
+    ) %>%
+    dplyr::mutate(method = "oracle")
+}
+
+scaling_metrics <- compute_scaling_metrics(scaling_bins_pooled)
+
+ccs_resolution_cluster <- scaling_metrics %>%
+  dplyr::filter(
+    .data$spec_name == "C-CS",
+    near_focus(.data$annotation_r2, annotation_r2_focus),
+    .data$agg_method == "cluster_weight",
+    .data$resolution %in% c("4x4", "8x8")
+  ) %>%
+  dplyr::transmute(
+    resolution = .data$resolution,
+    method = "cluster weight",
+    AUPRC = .data$AUPRC_mean
+  )
+
+ccs_resolution_oracle <- compute_ccs_resolution_oracle(confusion_bins)
+ccs_resolution_plot_data <- dplyr::bind_rows(
+  ccs_resolution_cluster,
+  ccs_resolution_oracle
+) %>%
+  dplyr::mutate(
+    resolution = factor(.data$resolution, levels = c("4x4", "8x8")),
+    method = factor(.data$method, levels = c("cluster weight", "oracle"))
+  )
+
+if (nrow(ccs_resolution_plot_data) > 0L) {
+  p_res <- ggplot2::ggplot(
+    ccs_resolution_plot_data,
+    ggplot2::aes(
+      x = .data$resolution,
+      y = .data$AUPRC,
+      color = .data$method,
+      group = .data$method
+    )
+  ) +
+    ggplot2::geom_hline(
+      yintercept = baseline_auprc,
+      linetype = "dashed",
+      color = "grey25",
+      linewidth = 0.55
+    ) +
+    ggplot2::geom_line(linewidth = 0.75) +
+    ggplot2::geom_point(size = 2.5) +
+    ggplot2::labs(
+      x = "C-CS grid resolution",
+      y = "Pooled AUPRC",
+      color = NULL,
+      title = "C-CS grid resolution scaling",
+      subtitle = paste0("annotation_r2 = ", annotation_r2_focus)
+    ) +
+    paper_theme()
+
+  save_paper_png(
+    p_res,
+    paste0("paper_ccs_4x4_8x8_r2_", format_r2_tag(annotation_r2_focus), ".png"),
+    width = 6.5,
+    height = 4.7
+  )
+  p_res
+} else {
+  message("Skipping C-CS 4x4/8x8 plot: no rows.")
+}
+```
+
+# 9. Compute vs AUPRC
+
+```{r fig-compute-vs-auprc, fig.width=7.5, fig.height=5.2}
+if (nrow(scaling_metrics) > 0L && "wall_time_sec" %in% names(model_metrics)) {
+  compute_scaling_points <- scaling_metrics %>%
+    dplyr::filter(
+      .data$agg_method == "cluster_weight",
+      .data$spec_name %in% spec_order,
+      is_focus_annotation_row(.data$spec_name, .data$annotation_r2)
+    )
+
+  compute_times <- estimate_subscale_compute(compute_scaling_points, model_metrics)
+
+  compute_plot_data <- compute_scaling_points %>%
+    dplyr::left_join(
+      compute_times,
+      by = c("spec_name", "annotation_r2", "n_ensemble", "resolution")
+    ) %>%
+    dplyr::filter(is.finite(.data$mean_total_wall_sec)) %>%
+    dplyr::mutate(
+      compute_min = .data$mean_total_wall_sec / 60,
+      scaling_point = dplyr::if_else(
+        is.na(.data$resolution),
+        paste0("n=", .data$n_ensemble),
+        .data$resolution
+      ),
+      spec_name = factor(.data$spec_name, levels = spec_order)
+    )
+
+  baseline_compute_min <- baseline_compute_minutes(model_metrics)
+
+  if (nrow(compute_plot_data) > 0L) {
+    p_compute <- ggplot2::ggplot(
+      compute_plot_data,
+      ggplot2::aes(
+        x = .data$compute_min,
+        y = .data$AUPRC_mean,
+        color = .data$spec_name
+      )
+    ) +
+      ggplot2::geom_hline(
+        yintercept = baseline_auprc,
+        linetype = "dashed",
+        color = "grey25",
+        linewidth = 0.55
+      ) +
+      ggplot2::geom_point(size = 2, alpha = 0.85) +
+      ggplot2::geom_point(
+        data = dplyr::filter(compute_plot_data, !is.na(.data$resolution)),
+        ggplot2::aes(shape = .data$scaling_point),
+        size = 2.6,
+        stroke = 0.8
+      ) +
+      ggplot2::annotate(
+        "point",
+        x = baseline_compute_min,
+        y = baseline_auprc,
+        shape = 8,
+        size = 3.2,
+        color = "black",
+        stroke = 1
+      ) +
+      ggplot2::labs(
+        x = "Mean compute time per dataset (minutes)",
+        y = "Pooled AUPRC",
+        color = "Ensemble",
+        shape = "Grid resolution",
+        title = "Compute versus AUPRC for cluster-weight aggregation",
+        subtitle = paste0("A specs are annotation-independent; B/C specs use annotation_r2 = ",
+                          annotation_r2_focus)
+      ) +
+      paper_theme()
+
+    save_paper_png(
+      p_compute,
+      paste0(
+        "paper_compute_vs_auprc_cluster_weight_r2_",
+        format_r2_tag(annotation_r2_focus),
+        ".png"
+      ),
+      width = 7.5,
+      height = 5.2
+    )
+    p_compute
+  } else {
+    message("Skipping compute plot: no rows after joining compute times.")
+  }
+} else {
+  message("Skipping compute plot: scaling bins or wall_time_sec unavailable.")
+}
+```
+
+# 10. Output Check
+
+```{r output-check}
+expected_figures <- c(
+  paste0("paper_delta_auprc_heatmap_r2_", format_r2_tag(annotation_r2_focus), ".png"),
+  "paper_ccs_aggregation_by_annotation_r2.png",
+  paste0("paper_bootstrap_auprc_r2_", format_r2_tag(annotation_r2_focus), ".png"),
+  "paper_pr_curves_ccs_cluster_weight_by_r2.png",
+  paste0("paper_hg2_cluster_weight_r2_", format_r2_tag(annotation_r2_focus), ".png"),
+  paste0(
+    "paper_pip_calibration_ccs_cluster_weight_r2_",
+    format_r2_tag(annotation_r2_focus),
+    ".png"
+  ),
+  paste0("paper_ccs_4x4_8x8_r2_", format_r2_tag(annotation_r2_focus), ".png"),
+  paste0(
+    "paper_compute_vs_auprc_cluster_weight_r2_",
+    format_r2_tag(annotation_r2_focus),
+    ".png"
+  )
+)
+
+figure_paths <- file.path(fig_dir, expected_figures)
+figure_exists <- file.exists(figure_paths)
+figure_bytes <- rep(NA_real_, length(figure_paths))
+figure_bytes[figure_exists] <- file.info(figure_paths[figure_exists])$size
+
+figure_check <- tibble::tibble(
+  figure = expected_figures,
+  path = figure_paths,
+  exists = figure_exists,
+  bytes = figure_bytes
+)
+
+knitr::kable(figure_check, caption = "Expected paper figure outputs")
+
+if (any(!figure_check$exists | is.na(figure_check$bytes) | figure_check$bytes <= 0)) {
+  warning("Some expected figures were not written or are empty. See table above.")
+}
+```
