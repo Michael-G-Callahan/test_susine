@@ -986,7 +986,7 @@ if (length(missing_composite) == 0L) {
     widths = 1,
     heights = 1,
     width = 18,
-    height = 8.5,
+    height = 10.2,
     bottom_note = composite_note,
     bottom_note_size = 24
   )
@@ -1013,7 +1013,7 @@ if (length(missing_composite) == 0L) {
     widths = rep(1, composite_cols),
     heights = c(1.75, 2.25, 2.22),
     width = 18,
-    height = 18,
+    height = 20.7,
     bottom_note = composite_note,
     bottom_note_size = 24
   )
