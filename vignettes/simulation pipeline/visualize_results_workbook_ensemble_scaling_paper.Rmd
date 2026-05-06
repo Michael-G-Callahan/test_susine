@@ -335,6 +335,11 @@ if (nrow(heatmap_data) > 0L && is.finite(baseline_auprc)) {
       spec_name = factor(.data$spec_name, levels = rev(spec_order)),
       agg_method = factor(.data$agg_method, levels = agg_order)
     )
+  heatmap_highlight_data <- heatmap_plot_data %>%
+    dplyr::filter(
+      as.character(.data$spec_name) == "C-CS",
+      as.character(.data$agg_method) == "cluster_weight"
+    )
 
   y_levels <- levels(heatmap_plot_data$spec_name)
   y_prefix <- sub("-.*$", "", y_levels)
@@ -350,6 +355,14 @@ if (nrow(heatmap_data) > 0L && is.finite(baseline_auprc)) {
     ggplot2::aes(x = .data$agg_method, y = .data$spec_name, fill = .data$delta_auprc)
   ) +
     ggplot2::geom_tile(color = "white", linewidth = 0.65) +
+    ggplot2::geom_tile(
+      data = heatmap_highlight_data,
+      ggplot2::aes(x = .data$agg_method, y = .data$spec_name),
+      fill = NA,
+      color = "#D62728",
+      linewidth = 2.2,
+      inherit.aes = FALSE
+    ) +
     ggplot2::geom_text(
       ggplot2::aes(label = .data$tile_label, color = .data$tile_text_color),
       size = 3.1
@@ -508,7 +521,7 @@ if (nrow(boot_plot_data) > 0L) {
       linewidth = 1.1
     ) +
     ggplot2::labs(
-      x = "Paired bootstrap delta AUPRC (C-CS cluster weight - SuSiE baseline)",
+      x = "Paired bootstrap delta AUPRC (SuSiNE (C-CS) - SuSiE baseline)",
       y = "Density",
       title = "Paired dataset bootstrap gain",
       subtitle = sprintf(
@@ -544,7 +557,11 @@ pr_plot_data <- pr_curve_counts %>%
       dplyr::mutate(recall = 0, precision = 1)
   ) %>%
   dplyr::mutate(
-    method = factor(.data$method, levels = c("SuSiE baseline", "C-CS cluster weight")),
+    method = dplyr::recode(
+      .data$method,
+      "C-CS cluster weight" = "SuSiNE (C-CS)"
+    ),
+    method = factor(.data$method, levels = c("SuSiE baseline", "SuSiNE (C-CS)")),
     annotation_label = sprintf("phi[a] == %.2f", as.numeric(.data$annotation_r2))
   ) %>%
   dplyr::arrange(.data$method, .data$annotation_r2, .data$recall, dplyr::desc(.data$precision))
@@ -560,7 +577,7 @@ if (nrow(pr_plot_data) > 0L) {
       labeller = ggplot2::label_parsed
     ) +
     ggplot2::scale_color_manual(
-      values = c("SuSiE baseline" = "grey35", "C-CS cluster weight" = "#4C78A8")
+      values = c("SuSiE baseline" = "grey35", "SuSiNE (C-CS)" = "#4C78A8")
     ) +
     ggplot2::coord_cartesian(xlim = c(0, 1), ylim = c(0, 1)) +
     ggplot2::labs(
@@ -593,12 +610,12 @@ if (nrow(hg2_plot_data) > 0L) {
     dplyr::mutate(
       method_label = dplyr::case_when(
         as.character(.data$spec_name) == "baseline" ~ "SuSiE baseline",
-        as.character(.data$spec_name) == "C-CS" ~ "C-CS cluster weight",
+        as.character(.data$spec_name) == "C-CS" ~ "SuSiNE (C-CS)",
         TRUE ~ as.character(.data$spec_name)
       ),
       method_label = factor(
         .data$method_label,
-        levels = c("SuSiE baseline", "C-CS cluster weight")
+        levels = c("SuSiE baseline", "SuSiNE (C-CS)")
       ),
       series = factor(.data$series, levels = c("baseline", "ensemble", "C-CS"))
     )
@@ -654,8 +671,17 @@ if (nrow(hg2_plot_data) > 0L) {
 
 ```{r fig-pip-calibration, fig.width=6.8, fig.height=5}
 if (nrow(pip_cal_data) > 0L) {
+  pip_cal_plot_data <- pip_cal_data %>%
+    dplyr::mutate(
+      method = dplyr::recode(
+        .data$method,
+        "C-CS cluster weight" = "SuSiNE (C-CS)"
+      ),
+      method = factor(.data$method, levels = c("SuSiE baseline", "SuSiNE (C-CS)"))
+    )
+
   p_cal <- ggplot2::ggplot(
-    pip_cal_data,
+    pip_cal_plot_data,
     ggplot2::aes(x = .data$pip_mid, y = .data$mean_frac, color = .data$method)
   ) +
     ggplot2::geom_abline(
@@ -674,7 +700,7 @@ if (nrow(pip_cal_data) > 0L) {
     ggplot2::geom_line(linewidth = 1.05) +
     ggplot2::coord_cartesian(xlim = c(0, 1), ylim = c(0, 1)) +
     ggplot2::scale_color_manual(
-      values = c("SuSiE baseline" = "grey35", "C-CS cluster weight" = "#4C78A8")
+      values = c("SuSiE baseline" = "grey35", "SuSiNE (C-CS)" = "#4C78A8")
     ) +
     ggplot2::labs(
       x = "Mean PIP bin",
@@ -873,7 +899,7 @@ calibration, heritability, and model-fit time.
 
 ```{r fig-composite-main, fig.width=17.55, fig.height=25.48}
 composite_required <- c(
-  "p_heatmap", "p_ccs_r2", "p_res", "p_pr",
+  "p_heatmap", "p_ccs_r2", "p_pr",
   "p_cal", "p_hg2", "p_compute"
 )
 missing_composite <- composite_required[!vapply(
@@ -887,9 +913,8 @@ if (length(missing_composite) == 0L) {
   composite_panels <- list(
     A = tag_panel(p_heatmap, "A"),
     B = tag_panel(p_ccs_r2, "B"),
-    C = tag_panel(p_res, "C"),
+    C = tag_panel(p_cal, "C"),
     D = tag_panel(p_pr, "D"),
-    E = tag_panel(p_cal, "E"),
     F = tag_panel(p_hg2, "F"),
     G = tag_panel(p_compute, "G")
   )
@@ -898,7 +923,7 @@ if (length(missing_composite) == 0L) {
   composite_layout <- rbind(
     rep("A", composite_cols),
     c(rep("B", 13L), rep("C", 12L)),
-    c(rep("D", 14L), rep("E", 11L)),
+    rep("D", composite_cols),
     c(rep("F", 10L), rep("G", 15L))
   )
 
@@ -915,7 +940,7 @@ if (length(missing_composite) == 0L) {
     panels = composite_panels,
     layout_matrix = composite_layout,
     widths = rep(1, composite_cols),
-    heights = c(2.5, 1.75, 2.0, 2.47),
+    heights = c(2.5, 1.75, 2.25, 2.22),
     width = 18,
     height = 26,
     bottom_note = composite_note,
