@@ -1008,7 +1008,7 @@ if (length(missing_composite) == 0L) {
 
   composite_cols <- 25L
   performance_layout <- rbind(
-    c(rep("B", 13L), rep("C", 12L)),
+    c(rep("B", 12L), rep("C", 13L)),
     rep(NA_character_, composite_cols),
     rep("D", composite_cols),
     rep(NA_character_, composite_cols),
