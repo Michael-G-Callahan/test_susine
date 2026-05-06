@@ -119,15 +119,15 @@ save_paper_png <- function(plot, filename, width, height) {
 
 font_sizes <- list(
   base = 14,
-  title = 21,
+  title = 25,
   subtitle = 13,
-  axis_title = 20,
+  axis_title = 23,
   axis_text = 22,
   strip = 11,
   legend_title = 22,
   legend_text = 20,
   caption = 10,
-  tag = 22
+  tag = 30
 )
 
 paper_theme <- function(base_size = font_sizes$base) {
@@ -137,11 +137,19 @@ paper_theme <- function(base_size = font_sizes$base) {
       plot.title.position = "plot",
       plot.title = ggplot2::element_text(
         size = font_sizes$title,
-        hjust = 0.3
+        hjust = 0.5
       ),
       plot.subtitle = ggplot2::element_text(size = font_sizes$subtitle),
       axis.title = ggplot2::element_text(size = font_sizes$axis_title),
       axis.text = ggplot2::element_text(size = font_sizes$axis_text),
+      axis.title.x = ggplot2::element_text(
+        size = font_sizes$axis_title,
+        margin = ggplot2::margin(t = 10)
+      ),
+      axis.title.y = ggplot2::element_text(
+        size = font_sizes$axis_title,
+        margin = ggplot2::margin(r = 10)
+      ),
       strip.text = ggplot2::element_text(size = font_sizes$strip),
       legend.title = ggplot2::element_text(size = font_sizes$legend_title),
       legend.text = ggplot2::element_text(size = font_sizes$legend_text),
@@ -153,7 +161,7 @@ paper_theme <- function(base_size = font_sizes$base) {
 
 compact_bottom_legend_theme <- function() {
   ggplot2::theme(
-    legend.margin = ggplot2::margin(t = 1, r = 0, b = 1, l = 0),
+    legend.margin = ggplot2::margin(t = 0.5, r = 0, b = 1, l = 0),
     legend.box.margin = ggplot2::margin(t = -2, r = 0, b = -2, l = 0),
     legend.spacing.y = grid::unit(0.01, "cm"),
     legend.key.height = grid::unit(0.32, "cm")
@@ -242,7 +250,7 @@ save_composite_png <- function(filename, panels, layout_matrix,
   on.exit(grDevices::dev.off(), add = TRUE)
 
   grid::grid.newpage()
-  note_height <- if (is.null(bottom_note)) 0 else 0.06
+  note_height <- if (is.null(bottom_note)) 0 else 0.08
   grid::pushViewport(grid::viewport(
     y = grid::unit(1, "npc"),
     height = grid::unit(1 - note_height, "npc"),
@@ -263,22 +271,22 @@ save_composite_png <- function(filename, panels, layout_matrix,
       layout.pos.row = range(pos[, "row"]),
       layout.pos.col = range(pos[, "col"])
     ))
-    grid::grid.text(
-      id,
-      x = grid::unit(0.002, "npc"),
-      y = grid::unit(0.995, "npc"),
-      just = c("left", "top"),
-      gp = grid::gpar(fontface = "bold", fontsize = font_sizes$tag)
-    )
     print(
       panels[[id]],
       vp = grid::viewport(
         x = grid::unit(0.5, "npc"),
         y = grid::unit(0.5, "npc"),
-        width = grid::unit(0.9, "npc"),
-        height = grid::unit(0.9, "npc")
+        width = grid::unit(0.95, "npc"),
+        height = grid::unit(0.95, "npc")
       ),
       newpage = FALSE
+    )
+    grid::grid.text(
+      id,
+      x = grid::unit(0.02, "npc"),
+      y = grid::unit(0.995, "npc"),
+      just = c("left", "top"),
+      gp = grid::gpar(fontface = "bold", fontsize = font_sizes$tag)
     )
     grid::popViewport()
   }
@@ -365,7 +373,7 @@ if (nrow(heatmap_data) > 0L && is.finite(baseline_auprc)) {
     ) +
     ggplot2::geom_text(
       ggplot2::aes(label = .data$tile_label, color = .data$tile_text_color),
-      size = 3.1
+      size = 5
     ) +
     ggplot2::geom_hline(
       yintercept = y_separators,
@@ -456,8 +464,8 @@ if (nrow(ccs_by_r2_plot_data) > 0L) {
     reference_label_layer(
       ccs_r2_label_x,
       truth_warm_vanilla,
-      "truth-warm vanilla",
-      vjust = 2.0,
+      "truth-warm SuSiE",
+      # vjust = 0,
       size = 6.4
     ) +
     ggplot2::coord_cartesian(ylim = c(0.2, 0.4)) +
@@ -580,6 +588,10 @@ if (nrow(pr_plot_data) > 0L) {
       values = c("SuSiE baseline" = "grey35", "SuSiNE (C-CS)" = "#4C78A8")
     ) +
     ggplot2::coord_cartesian(xlim = c(0, 1), ylim = c(0, 1)) +
+    ggplot2::scale_x_continuous(
+      breaks = c(0, 0.25, 0.5, 0.75, 1),
+      labels = function(x) ifelse(x %in% c(0, 1), sprintf("%.1f", x), sprintf("%.2f", x))
+    ) +
     ggplot2::labs(
       x = "Recall",
       y = "Precision",
@@ -587,8 +599,11 @@ if (nrow(pr_plot_data) > 0L) {
       title = expression("Precision-recall curves by Annotation Quality " * phi[a])
     ) +
     paper_theme() +
-    compact_bottom_legend_theme()
-
+    compact_bottom_legend_theme() +
+    ggplot2::theme(
+    strip.text = ggplot2::element_text(size = 22)
+    )
+  
   save_paper_png(
     p_pr,
     "paper_pr_curves_ccs_cluster_weight_by_r2.png",
@@ -635,7 +650,8 @@ if (nrow(hg2_plot_data) > 0L) {
       tail(levels(hg2_plot_data$method_label), 1L),
       true_h2,
       sprintf("true h2 = %.2f", true_h2),
-      size = 6.4
+      size = 6.4,
+      hjust = 1.2
     ) +
     ggplot2::scale_fill_manual(
       values = c(baseline = "grey70", ensemble = "#9BBAD7", `C-CS` = "#D95F02"),
@@ -704,7 +720,7 @@ if (nrow(pip_cal_data) > 0L) {
     ) +
     ggplot2::labs(
       x = "Mean PIP bin",
-      y = "Observed causal fraction",
+      y = "Observed causal",
       color = NULL,
       title = "PIP calibration"
     ) +
@@ -812,7 +828,7 @@ if (nrow(compute_plot_data) > 0L) {
       color = "grey25",
       linewidth = 0.9
     ) +
-    ggplot2::geom_point(size = 3.8, alpha = 0.9, stroke = 1.2) +
+    ggplot2::geom_point(size = 5, alpha = 0.9, stroke = 1.5) +
     ggplot2::annotate(
       "point",
       x = baseline_compute_sec,
@@ -822,19 +838,12 @@ if (nrow(compute_plot_data) > 0L) {
       color = "black",
       stroke = 1.4
     ) +
-    reference_label_layer(compute_label_x, baseline_auprc, "SuSiE baseline") +
-    (if (is.finite(baseline_compute_min)) {
-      reference_label_layer(
-        baseline_compute_sec,
-        baseline_auprc,
-        sprintf("%.1f sec", baseline_compute_sec),
-        hjust = -0.1,
-        vjust = -0.45,
-        size = 2.8
-      )
-    } else {
-      NULL
-    }) +
+    reference_label_layer(
+      compute_label_x,
+      baseline_auprc,
+      "SuSiE baseline",
+      size = 7
+    ) +
     ggplot2::labs(
       x = "Mean wall time per dataset (seconds)",
       y = "AUPRC",
@@ -871,7 +880,11 @@ if (nrow(compute_plot_data) > 0L) {
       legend.text = ggplot2::element_text(size = font_sizes$legend_text),
       legend.key.size = grid::unit(0.75, "cm"),
       legend.spacing.y = grid::unit(0.03, "cm"),
-      legend.box.spacing = grid::unit(0.08, "cm")
+      legend.box.spacing = grid::unit(0.08, "cm"),
+      plot.title = ggplot2::element_text(
+        size = font_sizes$title,
+        hjust = 0.35
+      )
     )
 
   save_paper_png(
@@ -928,11 +941,12 @@ if (length(missing_composite) == 0L) {
   )
 
   composite_note <- paste0(
-    "Method key: prefix A = annotation-agnostic SuSiE; ",
-    "B = SuSiNE-EB; C = SuSiNE functional-mu0 grid.\n",
+    "Method key: \n",
+    "Prefixes: A = annotation-agnostic SuSiE; ",
+    "B = SuSiNE-EB; C = SuSiNE fixed-priors.\n",
     "Suffixes: R = restarts; F = refinement; S = prior-variance grid; ",
-    "C = annotation-scale grid. Heatmap cells show delta AUPRC (% gain) ",
-    "over baseline SuSiE."
+    "C = annotation-scale grid. \n",
+    "*Exception: C-CSR, see caption"
   )
 
   composite_path <- save_composite_png(
@@ -944,7 +958,7 @@ if (length(missing_composite) == 0L) {
     width = 18,
     height = 26,
     bottom_note = composite_note,
-    bottom_note_size = 2 * font_sizes$caption
+    bottom_note_size = 24
   )
 
   cat("Saved composite main figure:", composite_path, "\n")
