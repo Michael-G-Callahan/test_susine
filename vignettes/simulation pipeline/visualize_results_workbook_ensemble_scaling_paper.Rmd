@@ -148,6 +148,15 @@ paper_theme <- function(base_size = font_sizes$base) {
     )
 }
 
+compact_bottom_legend_theme <- function() {
+  ggplot2::theme(
+    legend.margin = ggplot2::margin(t = 1, r = 0, b = 1, l = 0),
+    legend.box.margin = ggplot2::margin(t = -2, r = 0, b = -2, l = 0),
+    legend.spacing.y = grid::unit(0.01, "cm"),
+    legend.key.height = grid::unit(0.32, "cm")
+  )
+}
+
 gain_fill_scale <- function(values, name = "Delta AUPRC") {
   if (length(values) > 0L && min(values, na.rm = TRUE) >= 0) {
     return(ggplot2::scale_fill_gradientn(
@@ -442,7 +451,8 @@ if (nrow(ccs_by_r2_plot_data) > 0L) {
       color = "Aggregation",
       title = "C-CS aggregation performance across annotation quality"
     ) +
-    paper_theme()
+    paper_theme() +
+    compact_bottom_legend_theme()
 
   save_paper_png(
     p_ccs_r2,
@@ -525,7 +535,8 @@ pr_plot_data <- pr_curve_counts %>%
       dplyr::mutate(recall = 0, precision = 1)
   ) %>%
   dplyr::mutate(
-    method = factor(.data$method, levels = c("SuSiE baseline", "C-CS cluster weight"))
+    method = factor(.data$method, levels = c("SuSiE baseline", "C-CS cluster weight")),
+    annotation_label = sprintf("phi[a] == %.2f", as.numeric(.data$annotation_r2))
   ) %>%
   dplyr::arrange(.data$method, .data$annotation_r2, .data$recall, dplyr::desc(.data$precision))
 
@@ -536,10 +547,8 @@ if (nrow(pr_plot_data) > 0L) {
   ) +
     ggplot2::geom_path(linewidth = 0.75) +
     ggplot2::facet_wrap(
-      ~annotation_r2,
-      labeller = ggplot2::labeller(
-        annotation_r2 = function(x) paste0("causal annotation signal = ", x)
-      )
+      ~annotation_label,
+      labeller = ggplot2::label_parsed
     ) +
     ggplot2::scale_color_manual(
       values = c("SuSiE baseline" = "grey35", "C-CS cluster weight" = "#4C78A8")
@@ -549,9 +558,10 @@ if (nrow(pr_plot_data) > 0L) {
       x = "Recall",
       y = "Precision",
       color = NULL,
-      title = "Precision-recall curves for C-CS cluster weight"
+      title = expression("Precision-recall curves by Annotation Quality " * phi[a])
     ) +
-    paper_theme()
+    paper_theme() +
+    compact_bottom_legend_theme()
 
   save_paper_png(
     p_pr,
@@ -612,8 +622,8 @@ if (nrow(hg2_plot_data) > 0L) {
     paper_theme() +
     ggplot2::theme(
       axis.text.x = ggplot2::element_text(
-        angle = 20,
-        hjust = 0.8,
+        angle = 0,
+        hjust = 0.5,
         size = font_sizes$axis_text
       )
     )
@@ -656,7 +666,8 @@ if (nrow(pip_cal_data) > 0L) {
       color = NULL,
       title = "PIP calibration"
     ) +
-    paper_theme()
+    paper_theme() +
+    compact_bottom_legend_theme()
 
   save_paper_png(
     p_cal,
@@ -714,7 +725,8 @@ if (nrow(ccs_resolution_plot_data) > 0L) {
       color = NULL,
       title = "C-CS grid resolution scaling"
     ) +
-    paper_theme()
+    paper_theme() +
+    compact_bottom_legend_theme()
 
   save_paper_png(
     p_res,
@@ -842,7 +854,7 @@ better summarized in text using the paired delta CI from the prep workbook,
 while the figure space is used for performance patterns, operating behavior,
 calibration, heritability, and model-fit time.
 
-```{r fig-composite-main, fig.width=13.5, fig.height=15.5}
+```{r fig-composite-main, fig.width=13.5, fig.height=18.5}
 composite_required <- c(
   "p_heatmap", "p_ccs_r2", "p_res", "p_pr",
   "p_cal", "p_hg2", "p_compute"
@@ -884,10 +896,10 @@ if (length(missing_composite) == 0L) {
     filename = "paper_ensemble_scaling_composite_main.png",
     panels = composite_panels,
     layout_matrix = composite_layout,
-    widths = c(0.9, 1.1),
-    heights = c(2.5, 1.35, 1.55, 1.45),
+    widths = c(1.1, 0.9),
+    heights = c(2.5, 1.75, 2.0, 1.9),
     width = 13.5,
-    height = 15.5,
+    height = 18.5,
     bottom_note = composite_note
   )
 
