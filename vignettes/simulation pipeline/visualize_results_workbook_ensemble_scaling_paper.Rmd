@@ -453,7 +453,7 @@ if (nrow(ccs_by_r2_plot_data) > 0L) {
     ) +
     ggplot2::labs(
       x = expression("Causal annotation signal " * phi[a]),
-      y = "Pooled AUPRC",
+      y = "AUPRC",
       color = "Aggregation",
       title = "AUPRC by Annotation Quality"
     ) +
@@ -735,7 +735,7 @@ if (nrow(ccs_resolution_plot_data) > 0L) {
     ) +
     ggplot2::labs(
       x = "C-CS grid resolution",
-      y = "Pooled AUPRC",
+      y = "AUPRC",
       color = NULL,
       title = "AUPRC by Ensemble Size"
     ) +
@@ -808,7 +808,7 @@ if (nrow(compute_plot_data) > 0L) {
     }) +
     ggplot2::labs(
       x = "Mean wall time per dataset (seconds)",
-      y = "Pooled AUPRC",
+      y = "AUPRC",
       color = "Ensemble",
       shape = "Subscale shape",
       title = "AUPRC by Compute Cost"
@@ -868,7 +868,7 @@ better summarized in text using the paired delta CI from the prep workbook,
 while the figure space is used for performance patterns, operating behavior,
 calibration, heritability, and model-fit time.
 
-```{r fig-composite-main, fig.width=13.5, fig.height=19.6}
+```{r fig-composite-main, fig.width=17.55, fig.height=25.48}
 composite_required <- c(
   "p_heatmap", "p_ccs_r2", "p_res", "p_pr",
   "p_cal", "p_hg2", "p_compute"
@@ -913,8 +913,8 @@ if (length(missing_composite) == 0L) {
     layout_matrix = composite_layout,
     widths = rep(1, composite_cols),
     heights = c(2.5, 1.75, 2.0, 2.47),
-    width = 13.5,
-    height = 19.6,
+    width = 17.55,
+    height = 25.48,
     bottom_note = composite_note,
     bottom_note_size = 2 * font_sizes$caption
   )
