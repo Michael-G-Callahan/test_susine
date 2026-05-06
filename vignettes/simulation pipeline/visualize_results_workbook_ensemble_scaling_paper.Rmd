@@ -245,7 +245,8 @@ save_composite_png <- function(filename, panels, layout_matrix,
                                widths = NULL, heights = NULL,
                                width = 15, height = 20,
                                bottom_note = NULL,
-                               bottom_note_size = font_sizes$caption) {
+                               bottom_note_size = font_sizes$caption,
+                               bottom_note_height = NULL) {
   stopifnot(is.matrix(layout_matrix))
   if (is.null(widths)) widths <- rep(1, ncol(layout_matrix))
   if (is.null(heights)) heights <- rep(1, nrow(layout_matrix))
@@ -255,7 +256,13 @@ save_composite_png <- function(filename, panels, layout_matrix,
   on.exit(grDevices::dev.off(), add = TRUE)
 
   grid::grid.newpage()
-  note_height <- if (is.null(bottom_note)) 0 else 0.08
+  note_height <- if (is.null(bottom_note)) {
+    0
+  } else if (is.null(bottom_note_height)) {
+    0.08
+  } else {
+    bottom_note_height
+  }
   grid::pushViewport(grid::viewport(
     y = grid::unit(1, "npc"),
     height = grid::unit(1 - note_height, "npc"),
@@ -988,7 +995,8 @@ if (length(missing_composite) == 0L) {
     width = 18,
     height = 10.2,
     bottom_note = composite_note,
-    bottom_note_size = 24
+    bottom_note_size = 24,
+    bottom_note_height = 0.15
   )
 
   performance_panels <- list(
@@ -1015,7 +1023,8 @@ if (length(missing_composite) == 0L) {
     width = 18,
     height = 20.7,
     bottom_note = composite_note,
-    bottom_note_size = 24
+    bottom_note_size = 24,
+    bottom_note_height = 0.10
   )
 
   cat("Saved heatmap composite figure:", heatmap_path, "\n")
