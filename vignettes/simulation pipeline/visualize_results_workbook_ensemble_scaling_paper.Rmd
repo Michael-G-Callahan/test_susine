@@ -119,13 +119,13 @@ save_paper_png <- function(plot, filename, width, height) {
 
 font_sizes <- list(
   base = 14,
-  title = 16,
+  title = 21,
   subtitle = 13,
-  axis_title = 13,
+  axis_title = 20,
   axis_text = 11,
   strip = 11,
-  legend_title = 11,
-  legend_text = 10,
+  legend_title = 22,
+  legend_text = 20,
   caption = 10,
   tag = 22
 )
@@ -239,7 +239,7 @@ save_composite_png <- function(filename, panels, layout_matrix,
   on.exit(grDevices::dev.off(), add = TRUE)
 
   grid::grid.newpage()
-  note_height <- if (is.null(bottom_note)) 0 else 0.065
+  note_height <- if (is.null(bottom_note)) 0 else 0.06
   grid::pushViewport(grid::viewport(
     y = grid::unit(1, "npc"),
     height = grid::unit(1 - note_height, "npc"),
@@ -284,7 +284,7 @@ save_composite_png <- function(filename, panels, layout_matrix,
     grid::grid.text(
       bottom_note,
       x = grid::unit(0.02, "npc"),
-      y = grid::unit(0.018, "npc"),
+      y = grid::unit(0.012, "npc"),
       just = c("left", "bottom"),
       gp = grid::gpar(fontsize = bottom_note_size, lineheight = 1.05)
     )
@@ -431,12 +431,18 @@ if (nrow(ccs_by_r2_plot_data) > 0L) {
     ) +
     ggplot2::geom_line(linewidth = 0.75) +
     ggplot2::geom_point(size = 2) +
-    reference_label_layer(ccs_r2_label_x, baseline_auprc, "SuSiE baseline") +
+    reference_label_layer(
+      ccs_r2_label_x,
+      baseline_auprc,
+      "SuSiE baseline",
+      size = 6.4
+    ) +
     reference_label_layer(
       ccs_r2_label_x,
       truth_warm_vanilla,
       "truth-warm vanilla",
-      vjust = 1.2
+      vjust = 1.2,
+      size = 6.4
     ) +
     ggplot2::coord_cartesian(ylim = c(0.2, 0.4)) +
     ggplot2::scale_x_continuous(breaks = sort(unique(ccs_by_r2_plot_data$annotation_r2))) +
@@ -608,7 +614,8 @@ if (nrow(hg2_plot_data) > 0L) {
     reference_label_layer(
       tail(levels(hg2_plot_data$method_label), 1L),
       true_h2,
-      sprintf("true h2 = %.2f", true_h2)
+      sprintf("true h2 = %.2f", true_h2),
+      size = 6.4
     ) +
     ggplot2::scale_fill_manual(
       values = c(baseline = "grey70", ensemble = "#9BBAD7", `C-CS` = "#D95F02"),
@@ -717,7 +724,8 @@ if (nrow(ccs_resolution_plot_data) > 0L) {
     reference_label_layer(
       ccs_resolution_label_x,
       baseline_auprc,
-      "SuSiE baseline"
+      "SuSiE baseline",
+      size = 6.4
     ) +
     ggplot2::labs(
       x = "C-CS grid resolution",
@@ -877,11 +885,12 @@ if (length(missing_composite) == 0L) {
     G = tag_panel(p_compute, "G")
   )
 
+  composite_cols <- 25L
   composite_layout <- rbind(
-    c("A", "A"),
-    c("B", "C"),
-    c("D", "E"),
-    c("F", "G")
+    rep("A", composite_cols),
+    c(rep("B", 13L), rep("C", 12L)),
+    c(rep("D", 13L), rep("E", 12L)),
+    c(rep("F", 10L), rep("G", 15L))
   )
 
   composite_note <- paste0(
@@ -896,11 +905,12 @@ if (length(missing_composite) == 0L) {
     filename = "paper_ensemble_scaling_composite_main.png",
     panels = composite_panels,
     layout_matrix = composite_layout,
-    widths = c(1.1, 0.9),
+    widths = rep(1, composite_cols),
     heights = c(2.5, 1.75, 2.0, 1.9),
     width = 13.5,
     height = 18.5,
-    bottom_note = composite_note
+    bottom_note = composite_note,
+    bottom_note_size = 2 * font_sizes$caption
   )
 
   cat("Saved composite main figure:", composite_path, "\n")
