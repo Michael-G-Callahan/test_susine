@@ -493,7 +493,16 @@ if (nrow(ccs_by_r2_plot_data) > 0L) {
       title = "AUPRC by Annotation Accuracy"
     ) +
     paper_theme() +
-    compact_bottom_legend_theme()
+    compact_bottom_legend_theme() +
+    ggplot2::guides(
+      color = "none",
+      linetype = ggplot2::guide_legend(
+        override.aes = list(color = paper_blue, linewidth = 1.8)
+      )
+    ) +
+    ggplot2::theme(
+      legend.key.width = grid::unit(2.6, "cm")
+    )
 
   save_paper_png(
     p_ccs_r2,
@@ -955,23 +964,6 @@ missing_composite <- composite_required[!vapply(
 )]
 
 if (length(missing_composite) == 0L) {
-  composite_panels <- list(
-    A = tag_panel(p_heatmap, "A"),
-    B = tag_panel(p_ccs_r2, "B"),
-    C = tag_panel(p_cal, "C"),
-    D = tag_panel(p_pr, "D"),
-    F = tag_panel(p_hg2, "F"),
-    G = tag_panel(p_compute, "G")
-  )
-
-  composite_cols <- 25L
-  composite_layout <- rbind(
-    rep("A", composite_cols),
-    c(rep("B", 13L), rep("C", 12L)),
-    rep("D", composite_cols),
-    c(rep("F", 10L), rep("G", 15L))
-  )
-
   composite_note <- paste0(
     "Method key: \n",
     "Prefixes: A = annotation-agnostic SuSiE; ",
@@ -981,19 +973,53 @@ if (length(missing_composite) == 0L) {
     "*Exception: C-CSR, see caption"
   )
 
-  composite_path <- save_composite_png(
-    filename = "paper_ensemble_scaling_composite_main.png",
-    panels = composite_panels,
-    layout_matrix = composite_layout,
-    widths = rep(1, composite_cols),
-    heights = c(2.5, 1.75, 2.25, 2.22),
+  heatmap_panels <- list(
+    A = tag_panel(p_heatmap, "A")
+  )
+
+  heatmap_layout <- rbind(rep("A", 1L))
+
+  heatmap_path <- save_composite_png(
+    filename = "paper_ensemble_scaling_composite_heatmap.png",
+    panels = heatmap_panels,
+    layout_matrix = heatmap_layout,
+    widths = 1,
+    heights = 1,
     width = 18,
-    height = 26,
+    height = 8.5,
     bottom_note = composite_note,
     bottom_note_size = 24
   )
 
-  cat("Saved composite main figure:", composite_path, "\n")
+  performance_panels <- list(
+    B = tag_panel(p_ccs_r2, "B"),
+    C = tag_panel(p_cal, "C"),
+    D = tag_panel(p_pr, "D"),
+    F = tag_panel(p_hg2, "F"),
+    G = tag_panel(p_compute, "G")
+  )
+
+  composite_cols <- 25L
+  performance_layout <- rbind(
+    c(rep("B", 13L), rep("C", 12L)),
+    rep("D", composite_cols),
+    c(rep("F", 10L), rep("G", 15L))
+  )
+
+  performance_path <- save_composite_png(
+    filename = "paper_ensemble_scaling_composite_performance.png",
+    panels = performance_panels,
+    layout_matrix = performance_layout,
+    widths = rep(1, composite_cols),
+    heights = c(1.75, 2.25, 2.22),
+    width = 18,
+    height = 18,
+    bottom_note = composite_note,
+    bottom_note_size = 24
+  )
+
+  cat("Saved heatmap composite figure:", heatmap_path, "\n")
+  cat("Saved performance composite figure:", performance_path, "\n")
   invisible(NULL)
 } else {
   message(
@@ -1023,7 +1049,8 @@ expected_figures <- c(
     format_r2_tag(annotation_r2_focus),
     ".png"
   ),
-  "paper_ensemble_scaling_composite_main.png"
+  "paper_ensemble_scaling_composite_heatmap.png",
+  "paper_ensemble_scaling_composite_performance.png"
 )
 
 figure_paths <- file.path(fig_dir, expected_figures)
