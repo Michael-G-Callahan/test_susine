@@ -23,7 +23,7 @@ library(ggplot2)
 library(readr)
 library(knitr)
 
-theme_set(theme_bw(base_size = 10))
+theme_set(theme_bw(base_size = 14))
 ```
 
 # 0. User Configuration
@@ -118,16 +118,16 @@ save_paper_png <- function(plot, filename, width, height) {
 }
 
 font_sizes <- list(
-  base = 9,
-  title = 11,
-  subtitle = 9,
-  axis_title = 9,
-  axis_text = 8,
-  strip = 8,
-  legend_title = 8,
-  legend_text = 7.5,
-  caption = 7.5,
-  tag = 18
+  base = 14,
+  title = 16,
+  subtitle = 13,
+  axis_title = 13,
+  axis_text = 11,
+  strip = 11,
+  legend_title = 11,
+  legend_text = 10,
+  caption = 10,
+  tag = 22
 )
 
 paper_theme <- function(base_size = font_sizes$base) {
@@ -178,7 +178,7 @@ heatmap_text_color <- function(values) {
 }
 
 reference_label_layer <- function(x, y, label, hjust = 1.02, vjust = -0.35,
-                                  size = 3) {
+                                  size = 3.2) {
   if (!is.finite(y)) return(NULL)
   ggplot2::annotate(
     "label",
@@ -212,13 +212,15 @@ sort_subscale_labels <- function(labels) {
 tag_panel <- function(plot, tag) {
   plot +
     ggplot2::theme(
-      plot.margin = grid::unit(c(5.5, 5.5, 5.5, 5.5), "pt")
+      plot.margin = grid::unit(c(9, 9, 9, 9), "pt")
     )
 }
 
 save_composite_png <- function(filename, panels, layout_matrix,
                                widths = NULL, heights = NULL,
-                               width = 15, height = 20) {
+                               width = 15, height = 20,
+                               bottom_note = NULL,
+                               bottom_note_size = font_sizes$caption) {
   stopifnot(is.matrix(layout_matrix))
   if (is.null(widths)) widths <- rep(1, ncol(layout_matrix))
   if (is.null(heights)) heights <- rep(1, nrow(layout_matrix))
@@ -228,7 +230,11 @@ save_composite_png <- function(filename, panels, layout_matrix,
   on.exit(grDevices::dev.off(), add = TRUE)
 
   grid::grid.newpage()
+  note_height <- if (is.null(bottom_note)) 0 else 0.065
   grid::pushViewport(grid::viewport(
+    y = grid::unit(1, "npc"),
+    height = grid::unit(1 - note_height, "npc"),
+    just = "top",
     layout = grid::grid.layout(
       nrow(layout_matrix),
       ncol(layout_matrix),
@@ -252,17 +258,27 @@ save_composite_png <- function(filename, panels, layout_matrix,
       just = c("left", "top"),
       gp = grid::gpar(fontface = "bold", fontsize = font_sizes$tag)
     )
-  print(
+    print(
       panels[[id]],
       vp = grid::viewport(
-        x = grid::unit(0.525, "npc"),
+        x = grid::unit(0.535, "npc"),
         y = grid::unit(0.5, "npc"),
-        width = grid::unit(0.92, "npc"),
-        height = grid::unit(0.98, "npc")
+        width = grid::unit(0.9, "npc"),
+        height = grid::unit(0.94, "npc")
       ),
       newpage = FALSE
     )
     grid::popViewport()
+  }
+  grid::popViewport()
+  if (!is.null(bottom_note)) {
+    grid::grid.text(
+      bottom_note,
+      x = grid::unit(0.02, "npc"),
+      y = grid::unit(0.018, "npc"),
+      just = c("left", "bottom"),
+      gp = grid::gpar(fontsize = bottom_note_size, lineheight = 1.05)
+    )
   }
   invisible(path)
 }
@@ -324,7 +340,7 @@ if (nrow(heatmap_data) > 0L && is.finite(baseline_auprc)) {
     ggplot2::geom_tile(color = "white", linewidth = 0.4) +
     ggplot2::geom_text(
       ggplot2::aes(label = .data$tile_label, color = .data$tile_text_color),
-      size = 2.7
+      size = 3.1
     ) +
     ggplot2::geom_hline(
       yintercept = y_separators,
@@ -350,24 +366,14 @@ if (nrow(heatmap_data) > 0L && is.finite(baseline_auprc)) {
     ggplot2::labs(
       x = "Aggregation method",
       y = "Ensemble method",
-      title = "AUPRC gain over baseline SuSiE",
-      subtitle = paste0(
-        "Causal annotation signal = ", annotation_r2_focus,
-        "; cells show delta AUPRC (% gain)"
-      ),
-      caption = paste(
-        "Ensemble prefixes: A = annotation-agnostic SuSiE;",
-        "B = SuSiNE-EB;",
-        "C = SuSiNE functional-mu0 grid."
-      )
+      title = "AUPRC gain over baseline SuSiE"
     ) +
     paper_theme() +
     ggplot2::theme(
       legend.position = "right",
       legend.direction = "vertical",
       legend.box = "vertical",
-      legend.justification = "center",
-      plot.caption = ggplot2::element_text(size = font_sizes$caption, hjust = 0)
+      legend.justification = "center"
     )
 
   save_paper_png(
@@ -385,8 +391,10 @@ if (nrow(heatmap_data) > 0L && is.finite(baseline_auprc)) {
 # 4. Best Methods vs Annotation Quality
 
 ```{r fig-ccs-by-r2, fig.width=7, fig.height=4.8}
+ccs_by_r2_keep <- c("cluster_weight", "oracle")
 ccs_by_r2_plot_data <- ccs_by_r2 %>%
-  dplyr::mutate(agg_method = factor(.data$agg_method, levels = agg_order))
+  dplyr::filter(.data$agg_method %in% ccs_by_r2_keep) %>%
+  dplyr::mutate(agg_method = factor(.data$agg_method, levels = ccs_by_r2_keep))
 
 if (nrow(ccs_by_r2_plot_data) > 0L) {
   ccs_r2_label_x <- max(ccs_by_r2_plot_data$annotation_r2, na.rm = TRUE)
@@ -423,7 +431,11 @@ if (nrow(ccs_by_r2_plot_data) > 0L) {
     ) +
     ggplot2::coord_cartesian(ylim = c(0.2, 0.4)) +
     ggplot2::scale_x_continuous(breaks = sort(unique(ccs_by_r2_plot_data$annotation_r2))) +
-    ggplot2::scale_color_discrete(labels = agg_labels[levels(ccs_by_r2_plot_data$agg_method)]) +
+    ggplot2::scale_color_manual(
+      values = c(cluster_weight = "#4C78A8", oracle = "#D95F02"),
+      labels = agg_labels[ccs_by_r2_keep],
+      drop = FALSE
+    ) +
     ggplot2::labs(
       x = expression("Causal annotation signal " * phi[a]),
       y = "Pooled AUPRC",
@@ -481,8 +493,7 @@ if (nrow(boot_plot_data) > 0L) {
       y = "Density",
       title = "Paired dataset bootstrap gain",
       subtitle = sprintf(
-        "causal annotation signal = %.1f; n = %d datasets; observed delta = %.3f; 95%% CI: [%.3f, %.3f]",
-        annotation_r2_focus,
+        "n = %d datasets; observed delta = %.3f; 95%% CI: [%.3f, %.3f]",
         shared_boot_n,
         observed_delta,
         delta_ci[[1]],
@@ -508,9 +519,15 @@ if (nrow(boot_plot_data) > 0L) {
 ```{r fig-pr-curves, fig.width=8, fig.height=5}
 pr_plot_data <- pr_curve_counts %>%
   dplyr::select(method, annotation_r2, recall, precision) %>%
+  dplyr::bind_rows(
+    pr_curve_counts %>%
+      dplyr::distinct(.data$method, .data$annotation_r2) %>%
+      dplyr::mutate(recall = 0, precision = 1)
+  ) %>%
   dplyr::mutate(
     method = factor(.data$method, levels = c("SuSiE baseline", "C-CS cluster weight"))
-  )
+  ) %>%
+  dplyr::arrange(.data$method, .data$annotation_r2, .data$recall, dplyr::desc(.data$precision))
 
 if (nrow(pr_plot_data) > 0L) {
   p_pr <- ggplot2::ggplot(
@@ -550,19 +567,28 @@ if (nrow(pr_plot_data) > 0L) {
 
 # 7. Estimated Heritability
 
-```{r fig-hg2, fig.width=8.5, fig.height=5}
+```{r fig-hg2, fig.width=4.8, fig.height=4.8}
 if (nrow(hg2_plot_data) > 0L) {
   hg2_plot_data <- hg2_plot_data %>%
+    dplyr::filter(.data$spec_name %in% c("baseline", "C-CS")) %>%
     dplyr::mutate(
-      spec_name = factor(.data$spec_name, levels = c("baseline", spec_order)),
+      method_label = dplyr::case_when(
+        as.character(.data$spec_name) == "baseline" ~ "SuSiE baseline",
+        as.character(.data$spec_name) == "C-CS" ~ "C-CS cluster weight",
+        TRUE ~ as.character(.data$spec_name)
+      ),
+      method_label = factor(
+        .data$method_label,
+        levels = c("SuSiE baseline", "C-CS cluster weight")
+      ),
       series = factor(.data$series, levels = c("baseline", "ensemble", "C-CS"))
     )
 
   p_hg2 <- ggplot2::ggplot(
     hg2_plot_data,
-    ggplot2::aes(x = .data$spec_name, y = .data$hg2, fill = .data$series)
+    ggplot2::aes(x = .data$method_label, y = .data$hg2, fill = .data$series)
   ) +
-    ggplot2::geom_boxplot(outlier.size = 0.4, linewidth = 0.35) +
+    ggplot2::geom_boxplot(outlier.size = 0.8, linewidth = 0.45) +
     ggplot2::geom_hline(
       yintercept = true_h2,
       linetype = "dashed",
@@ -570,7 +596,7 @@ if (nrow(hg2_plot_data) > 0L) {
       linewidth = 0.55
     ) +
     reference_label_layer(
-      tail(levels(hg2_plot_data$spec_name), 1L),
+      tail(levels(hg2_plot_data$method_label), 1L),
       true_h2,
       sprintf("true h2 = %.2f", true_h2)
     ) +
@@ -581,14 +607,13 @@ if (nrow(hg2_plot_data) > 0L) {
     ggplot2::labs(
       x = "Method",
       y = "Estimated h_g^2",
-      title = "Estimated heritability under cluster-weight aggregation",
-      subtitle = paste0("causal annotation signal = ", annotation_r2_focus)
+      title = "Estimated heritability"
     ) +
     paper_theme() +
     ggplot2::theme(
       axis.text.x = ggplot2::element_text(
-        angle = 45,
-        hjust = 1,
+        angle = 20,
+        hjust = 0.8,
         size = font_sizes$axis_text
       )
     )
@@ -596,8 +621,8 @@ if (nrow(hg2_plot_data) > 0L) {
   save_paper_png(
     p_hg2,
     paste0("paper_hg2_cluster_weight_r2_", format_r2_tag(annotation_r2_focus), ".png"),
-    width = 8.5,
-    height = 5
+    width = 4.8,
+    height = 4.8
   )
   invisible(NULL)
 } else {
@@ -629,8 +654,7 @@ if (nrow(pip_cal_data) > 0L) {
       x = "Mean PIP bin",
       y = "Observed causal fraction",
       color = NULL,
-      title = "PIP calibration",
-      subtitle = paste0("causal annotation signal = ", annotation_r2_focus)
+      title = "PIP calibration"
     ) +
     paper_theme()
 
@@ -688,8 +712,7 @@ if (nrow(ccs_resolution_plot_data) > 0L) {
       x = "C-CS grid resolution",
       y = "Pooled AUPRC",
       color = NULL,
-      title = "C-CS grid resolution scaling",
-      subtitle = paste0("causal annotation signal = ", annotation_r2_focus)
+      title = "C-CS grid resolution scaling"
     ) +
     paper_theme()
 
@@ -710,17 +733,19 @@ if (nrow(ccs_resolution_plot_data) > 0L) {
 ```{r fig-compute-vs-auprc, fig.width=8.8, fig.height=5}
 if (nrow(compute_plot_data) > 0L) {
   subscale_levels <- sort_subscale_labels(compute_plot_data$subscale_label)
+  compute_second_breaks <- c(0, 1, 5, 10, 30, 60, 120, 240)
   compute_plot_data <- compute_plot_data %>%
     dplyr::mutate(
+      compute_sec = 60 * .data$compute_min,
       subscale_label = factor(.data$subscale_label, levels = subscale_levels),
       spec_name = factor(.data$spec_name, levels = spec_order)
     )
-  compute_label_x <- max(compute_plot_data$compute_min, na.rm = TRUE)
+  compute_label_x <- max(compute_plot_data$compute_sec, na.rm = TRUE)
 
   p_compute <- ggplot2::ggplot(
     compute_plot_data,
     ggplot2::aes(
-      x = .data$compute_min,
+      x = .data$compute_sec,
       y = .data$AUPRC_mean,
       color = .data$spec_name,
       shape = .data$subscale_label
@@ -735,7 +760,7 @@ if (nrow(compute_plot_data) > 0L) {
     ggplot2::geom_point(size = 2.4, alpha = 0.9, stroke = 0.8) +
     ggplot2::annotate(
       "point",
-      x = baseline_compute_min,
+      x = baseline_compute_sec,
       y = baseline_auprc,
       shape = 8,
       size = 3.2,
@@ -745,7 +770,7 @@ if (nrow(compute_plot_data) > 0L) {
     reference_label_layer(compute_label_x, baseline_auprc, "SuSiE baseline") +
     (if (is.finite(baseline_compute_min)) {
       reference_label_layer(
-        baseline_compute_min,
+        baseline_compute_sec,
         baseline_auprc,
         sprintf("%.1f sec", baseline_compute_sec),
         hjust = -0.1,
@@ -756,15 +781,16 @@ if (nrow(compute_plot_data) > 0L) {
       NULL
     }) +
     ggplot2::labs(
-      x = "Mean model-fit wall time per dataset (minutes)",
+      x = "Mean model-fit wall time per dataset (seconds, pseudo-log scale)",
       y = "Pooled AUPRC",
       color = "Ensemble",
       shape = "Subscale shape",
-      title = "Model-fit time versus AUPRC for cluster-weight aggregation",
-      subtitle = paste0(
-        "A = annotation-agnostic; B/C use causal annotation signal = ",
-        annotation_r2_focus
-      )
+      title = "Model-fit time versus AUPRC for cluster-weight aggregation"
+    ) +
+    ggplot2::scale_x_continuous(
+      trans = scales::pseudo_log_trans(base = 10, sigma = 1),
+      breaks = compute_second_breaks,
+      labels = as.character(compute_second_breaks)
     ) +
     ggplot2::scale_shape_manual(values = shape_values_for(subscale_levels)) +
     ggplot2::guides(
@@ -816,7 +842,7 @@ better summarized in text using the paired delta CI from the prep workbook,
 while the figure space is used for performance patterns, operating behavior,
 calibration, heritability, and model-fit time.
 
-```{r fig-composite-main, fig.width=15, fig.height=20}
+```{r fig-composite-main, fig.width=13.5, fig.height=15.5}
 composite_required <- c(
   "p_heatmap", "p_ccs_r2", "p_res", "p_pr",
   "p_cal", "p_hg2", "p_compute"
@@ -843,18 +869,26 @@ if (length(missing_composite) == 0L) {
     c("A", "A"),
     c("B", "C"),
     c("D", "E"),
-    c("F", "F"),
-    c("G", "G")
+    c("F", "G")
+  )
+
+  composite_note <- paste0(
+    "Method key: prefix A = annotation-agnostic SuSiE; ",
+    "B = SuSiNE-EB; C = SuSiNE functional-mu0 grid.\n",
+    "Suffixes: R = restarts; F = refinement; S = prior-variance grid; ",
+    "C = annotation-scale grid. Heatmap cells show delta AUPRC (% gain) ",
+    "over baseline SuSiE."
   )
 
   composite_path <- save_composite_png(
     filename = "paper_ensemble_scaling_composite_main.png",
     panels = composite_panels,
     layout_matrix = composite_layout,
-    widths = c(1, 1),
-    heights = c(2.45, 1.32, 1.52, 1.62, 1.72),
-    width = 16.5,
-    height = 22
+    widths = c(0.9, 1.1),
+    heights = c(2.5, 1.35, 1.55, 1.45),
+    width = 13.5,
+    height = 15.5,
+    bottom_note = composite_note
   )
 
   cat("Saved composite main figure:", composite_path, "\n")
