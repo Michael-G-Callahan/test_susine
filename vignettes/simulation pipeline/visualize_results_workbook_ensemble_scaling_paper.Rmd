@@ -880,8 +880,7 @@ if (nrow(compute_plot_data) > 0L) {
       color = "grey20",
       hjust = -0.08,
       vjust = 1.7,
-      size = 7.8,
-      fontface = "bold",
+      size = 7,
       show.legend = FALSE,
       check_overlap = TRUE,
       inherit.aes = FALSE
@@ -1010,7 +1009,9 @@ if (length(missing_composite) == 0L) {
   composite_cols <- 25L
   performance_layout <- rbind(
     c(rep("B", 13L), rep("C", 12L)),
+    rep(NA_character_, composite_cols),
     rep("D", composite_cols),
+    rep(NA_character_, composite_cols),
     c(rep("F", 10L), rep("G", 15L))
   )
 
@@ -1019,8 +1020,8 @@ if (length(missing_composite) == 0L) {
     panels = performance_panels,
     layout_matrix = performance_layout,
     widths = rep(1, composite_cols),
-    heights = c(1.75, 2.25, 2.22),
-    width = 18,
+    heights = c(1.75, 0.12, 2.25, 0.12, 2.22),
+    width = 19.8,
     height = 20.7,
     bottom_note = composite_note,
     bottom_note_size = 24,
