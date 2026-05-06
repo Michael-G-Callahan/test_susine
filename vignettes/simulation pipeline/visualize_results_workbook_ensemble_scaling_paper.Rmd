@@ -122,7 +122,7 @@ font_sizes <- list(
   title = 21,
   subtitle = 13,
   axis_title = 20,
-  axis_text = 11,
+  axis_text = 22,
   strip = 11,
   legend_title = 22,
   legend_text = 20,
@@ -346,19 +346,19 @@ if (nrow(heatmap_data) > 0L && is.finite(baseline_auprc)) {
     heatmap_plot_data,
     ggplot2::aes(x = .data$agg_method, y = .data$spec_name, fill = .data$delta_auprc)
   ) +
-    ggplot2::geom_tile(color = "white", linewidth = 0.4) +
+    ggplot2::geom_tile(color = "white", linewidth = 0.65) +
     ggplot2::geom_text(
       ggplot2::aes(label = .data$tile_label, color = .data$tile_text_color),
       size = 3.1
     ) +
     ggplot2::geom_hline(
       yintercept = y_separators,
-      linewidth = 0.6,
+      linewidth = 0.95,
       color = "grey20"
     ) +
     ggplot2::geom_vline(
       xintercept = oracle_x,
-      linewidth = 0.6,
+      linewidth = 0.95,
       color = "grey20"
     ) +
     ggplot2::scale_x_discrete(labels = agg_labels, drop = FALSE) +
@@ -421,16 +421,16 @@ if (nrow(ccs_by_r2_plot_data) > 0L) {
       yintercept = baseline_auprc,
       linetype = "dashed",
       color = "grey25",
-      linewidth = 0.55
+      linewidth = 0.9
     ) +
     ggplot2::geom_hline(
       yintercept = truth_warm_vanilla,
       linetype = "dotted",
       color = "grey25",
-      linewidth = 0.55
+      linewidth = 0.9
     ) +
-    ggplot2::geom_line(linewidth = 0.75) +
-    ggplot2::geom_point(size = 2) +
+    ggplot2::geom_line(linewidth = 1.2) +
+    ggplot2::geom_point(size = 3.2) +
     reference_label_layer(
       ccs_r2_label_x,
       baseline_auprc,
@@ -441,7 +441,7 @@ if (nrow(ccs_by_r2_plot_data) > 0L) {
       ccs_r2_label_x,
       truth_warm_vanilla,
       "truth-warm vanilla",
-      vjust = 1.2,
+      vjust = 2.0,
       size = 6.4
     ) +
     ggplot2::coord_cartesian(ylim = c(0.2, 0.4)) +
@@ -455,7 +455,7 @@ if (nrow(ccs_by_r2_plot_data) > 0L) {
       x = expression("Causal annotation signal " * phi[a]),
       y = "Pooled AUPRC",
       color = "Aggregation",
-      title = "C-CS aggregation performance across annotation quality"
+      title = "AUPRC by Annotation Quality"
     ) +
     paper_theme() +
     compact_bottom_legend_theme()
@@ -485,24 +485,24 @@ if (nrow(boot_plot_data) > 0L) {
       bins = 45,
       fill = "#4C78A8",
       color = "white",
-      linewidth = 0.2
+      linewidth = 0.35
     ) +
     ggplot2::geom_vline(
       xintercept = 0,
       linetype = "dotted",
       color = "grey35",
-      linewidth = 0.55
+      linewidth = 0.9
     ) +
     ggplot2::geom_vline(
       xintercept = delta_ci,
       linetype = "dashed",
       color = "grey20",
-      linewidth = 0.55
+      linewidth = 0.9
     ) +
     ggplot2::geom_vline(
       xintercept = observed_delta,
       color = "#1B4F72",
-      linewidth = 0.7
+      linewidth = 1.1
     ) +
     ggplot2::labs(
       x = "Paired bootstrap delta AUPRC (C-CS cluster weight - SuSiE baseline)",
@@ -551,7 +551,7 @@ if (nrow(pr_plot_data) > 0L) {
     pr_plot_data,
     ggplot2::aes(x = .data$recall, y = .data$precision, color = .data$method)
   ) +
-    ggplot2::geom_path(linewidth = 0.75) +
+    ggplot2::geom_path(linewidth = 1.2) +
     ggplot2::facet_wrap(
       ~annotation_label,
       labeller = ggplot2::label_parsed
@@ -604,12 +604,12 @@ if (nrow(hg2_plot_data) > 0L) {
     hg2_plot_data,
     ggplot2::aes(x = .data$method_label, y = .data$hg2, fill = .data$series)
   ) +
-    ggplot2::geom_boxplot(outlier.size = 0.8, linewidth = 0.45) +
+    ggplot2::geom_boxplot(outlier.size = 1.3, linewidth = 0.75) +
     ggplot2::geom_hline(
       yintercept = true_h2,
       linetype = "dashed",
       color = "grey25",
-      linewidth = 0.55
+      linewidth = 0.9
     ) +
     reference_label_layer(
       tail(levels(hg2_plot_data$method_label), 1L),
@@ -655,14 +655,20 @@ if (nrow(pip_cal_data) > 0L) {
     pip_cal_data,
     ggplot2::aes(x = .data$pip_mid, y = .data$mean_frac, color = .data$method)
   ) +
-    ggplot2::geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey35") +
+    ggplot2::geom_abline(
+      slope = 1,
+      intercept = 0,
+      linetype = "dashed",
+      color = "grey35",
+      linewidth = 0.9
+    ) +
     ggplot2::geom_errorbar(
       ggplot2::aes(ymin = .data$lo, ymax = .data$hi),
       width = 0.015,
-      linewidth = 0.35
+      linewidth = 0.6
     ) +
-    ggplot2::geom_point(size = 2) +
-    ggplot2::geom_line(linewidth = 0.65) +
+    ggplot2::geom_point(size = 3.2) +
+    ggplot2::geom_line(linewidth = 1.05) +
     ggplot2::coord_cartesian(xlim = c(0, 1), ylim = c(0, 1)) +
     ggplot2::scale_color_manual(
       values = c("SuSiE baseline" = "grey35", "C-CS cluster weight" = "#4C78A8")
@@ -717,10 +723,10 @@ if (nrow(ccs_resolution_plot_data) > 0L) {
       yintercept = baseline_auprc,
       linetype = "dashed",
       color = "grey25",
-      linewidth = 0.55
+      linewidth = 0.9
     ) +
-    ggplot2::geom_line(linewidth = 0.75) +
-    ggplot2::geom_point(size = 2.5) +
+    ggplot2::geom_line(linewidth = 1.2) +
+    ggplot2::geom_point(size = 4) +
     reference_label_layer(
       ccs_resolution_label_x,
       baseline_auprc,
@@ -731,7 +737,7 @@ if (nrow(ccs_resolution_plot_data) > 0L) {
       x = "C-CS grid resolution",
       y = "Pooled AUPRC",
       color = NULL,
-      title = "C-CS grid resolution scaling"
+      title = "AUPRC by Ensemble Size"
     ) +
     paper_theme() +
     compact_bottom_legend_theme()
@@ -775,17 +781,17 @@ if (nrow(compute_plot_data) > 0L) {
       yintercept = baseline_auprc,
       linetype = "dashed",
       color = "grey25",
-      linewidth = 0.55
+      linewidth = 0.9
     ) +
-    ggplot2::geom_point(size = 2.4, alpha = 0.9, stroke = 0.8) +
+    ggplot2::geom_point(size = 3.8, alpha = 0.9, stroke = 1.2) +
     ggplot2::annotate(
       "point",
       x = baseline_compute_sec,
       y = baseline_auprc,
       shape = 8,
-      size = 3.2,
+      size = 5,
       color = "black",
-      stroke = 1
+      stroke = 1.4
     ) +
     reference_label_layer(compute_label_x, baseline_auprc, "SuSiE baseline") +
     (if (is.finite(baseline_compute_min)) {
@@ -801,11 +807,11 @@ if (nrow(compute_plot_data) > 0L) {
       NULL
     }) +
     ggplot2::labs(
-      x = "Mean model-fit wall time per dataset (seconds, pseudo-log scale)",
+      x = "Mean wall time per dataset (seconds)",
       y = "Pooled AUPRC",
       color = "Ensemble",
       shape = "Subscale shape",
-      title = "Model-fit time versus AUPRC for cluster-weight aggregation"
+      title = "AUPRC by Compute Cost"
     ) +
     ggplot2::scale_x_continuous(
       trans = scales::pseudo_log_trans(base = 10, sigma = 1),
@@ -818,13 +824,13 @@ if (nrow(compute_plot_data) > 0L) {
         ncol = 2,
         byrow = TRUE,
         order = 1,
-        override.aes = list(shape = 16, size = 3)
+        override.aes = list(shape = 16, size = 5)
       ),
       shape = ggplot2::guide_legend(
         ncol = 2,
         byrow = TRUE,
         order = 2,
-        override.aes = list(color = "grey20", size = 3)
+        override.aes = list(color = "grey20", size = 5)
       )
     ) +
     paper_theme() +
@@ -834,7 +840,7 @@ if (nrow(compute_plot_data) > 0L) {
       legend.direction = "vertical",
       legend.title = ggplot2::element_text(size = font_sizes$legend_title),
       legend.text = ggplot2::element_text(size = font_sizes$legend_text),
-      legend.key.size = grid::unit(0.4, "cm"),
+      legend.key.size = grid::unit(0.75, "cm"),
       legend.spacing.y = grid::unit(0.03, "cm"),
       legend.box.spacing = grid::unit(0.08, "cm")
     )
@@ -862,7 +868,7 @@ better summarized in text using the paired delta CI from the prep workbook,
 while the figure space is used for performance patterns, operating behavior,
 calibration, heritability, and model-fit time.
 
-```{r fig-composite-main, fig.width=13.5, fig.height=18.5}
+```{r fig-composite-main, fig.width=13.5, fig.height=19.6}
 composite_required <- c(
   "p_heatmap", "p_ccs_r2", "p_res", "p_pr",
   "p_cal", "p_hg2", "p_compute"
@@ -906,9 +912,9 @@ if (length(missing_composite) == 0L) {
     panels = composite_panels,
     layout_matrix = composite_layout,
     widths = rep(1, composite_cols),
-    heights = c(2.5, 1.75, 2.0, 1.9),
+    heights = c(2.5, 1.75, 2.0, 2.47),
     width = 13.5,
-    height = 18.5,
+    height = 19.6,
     bottom_note = composite_note,
     bottom_note_size = 2 * font_sizes$caption
   )
