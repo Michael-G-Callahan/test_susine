@@ -168,19 +168,24 @@ compact_bottom_legend_theme <- function() {
   )
 }
 
+paper_orange <- "#D95F02"
+paper_blue <- "#1F77B4"
+paper_green <- "#2CA02C"
+paper_red <- "#D62728"
+
 gain_fill_scale <- function(values, name = "Delta AUPRC") {
   if (length(values) > 0L && min(values, na.rm = TRUE) >= 0) {
     return(ggplot2::scale_fill_gradientn(
-      colors = c("#F7FCF0", "#D9F0A3", "#ADDD8E", "#78C679",
-                 "#41AB5D", "#238443", "#005A32"),
+      colors = c("#F7FBFF", "#DEEBF7", "#C6DBEF", "#9ECAE1",
+                 "#6BAED6", "#3182BD", "#08519C"),
       name = name
     ))
   }
 
   ggplot2::scale_fill_gradient2(
-    low = "#2166AC",
+    low = paper_orange,
     mid = "white",
-    high = "#B2182B",
+    high = paper_blue,
     midpoint = 0,
     name = name
   )
@@ -367,7 +372,7 @@ if (nrow(heatmap_data) > 0L && is.finite(baseline_auprc)) {
       data = heatmap_highlight_data,
       ggplot2::aes(x = .data$agg_method, y = .data$spec_name),
       fill = NA,
-      color = "#D62728",
+      color = paper_red,
       linewidth = 2.2,
       inherit.aes = FALSE
     ) +
@@ -421,7 +426,7 @@ if (nrow(heatmap_data) > 0L && is.finite(baseline_auprc)) {
 }
 ```
 
-# 4. Best Methods vs Annotation Quality
+# 4. Best Methods vs Annotation Accuracy
 
 ```{r fig-ccs-by-r2, fig.width=7, fig.height=4.8}
 ccs_by_r2_keep <- c("cluster_weight", "oracle")
@@ -443,17 +448,17 @@ if (nrow(ccs_by_r2_plot_data) > 0L) {
   ) +
     ggplot2::geom_hline(
       yintercept = baseline_auprc,
-      linetype = "dashed",
-      color = "grey25",
+      linetype = "solid",
+      color = paper_orange,
       linewidth = 0.9
     ) +
     ggplot2::geom_hline(
       yintercept = truth_warm_vanilla,
-      linetype = "dotted",
-      color = "grey25",
+      linetype = "dashed",
+      color = paper_orange,
       linewidth = 0.9
     ) +
-    ggplot2::geom_line(linewidth = 1.2) +
+    ggplot2::geom_line(ggplot2::aes(linetype = .data$agg_method), linewidth = 1.2) +
     ggplot2::geom_point(size = 3.2) +
     reference_label_layer(
       ccs_r2_label_x,
@@ -471,7 +476,12 @@ if (nrow(ccs_by_r2_plot_data) > 0L) {
     ggplot2::coord_cartesian(ylim = c(0.2, 0.4)) +
     ggplot2::scale_x_continuous(breaks = sort(unique(ccs_by_r2_plot_data$annotation_r2))) +
     ggplot2::scale_color_manual(
-      values = c(cluster_weight = "#4C78A8", oracle = "#D95F02"),
+      values = c(cluster_weight = paper_blue, oracle = paper_blue),
+      labels = agg_labels[ccs_by_r2_keep],
+      drop = FALSE
+    ) +
+    ggplot2::scale_linetype_manual(
+      values = c(cluster_weight = "solid", oracle = "dashed"),
       labels = agg_labels[ccs_by_r2_keep],
       drop = FALSE
     ) +
@@ -479,7 +489,8 @@ if (nrow(ccs_by_r2_plot_data) > 0L) {
       x = expression("Causal annotation signal " * phi[a]),
       y = "AUPRC",
       color = "Aggregation",
-      title = "AUPRC by Annotation Quality"
+      linetype = "Aggregation",
+      title = "AUPRC by Annotation Accuracy"
     ) +
     paper_theme() +
     compact_bottom_legend_theme()
@@ -492,7 +503,7 @@ if (nrow(ccs_by_r2_plot_data) > 0L) {
   )
   invisible(NULL)
 } else {
-  message("Skipping C-CS by annotation quality plot: no rows.")
+  message("Skipping C-CS by annotation accuracy plot: no rows.")
 }
 ```
 
@@ -507,7 +518,7 @@ if (nrow(boot_plot_data) > 0L) {
     ggplot2::geom_histogram(
       ggplot2::aes(y = ggplot2::after_stat(density)),
       bins = 45,
-      fill = "#4C78A8",
+      fill = paper_blue,
       color = "white",
       linewidth = 0.35
     ) +
@@ -525,7 +536,7 @@ if (nrow(boot_plot_data) > 0L) {
     ) +
     ggplot2::geom_vline(
       xintercept = observed_delta,
-      color = "#1B4F72",
+      color = paper_blue,
       linewidth = 1.1
     ) +
     ggplot2::labs(
@@ -585,7 +596,7 @@ if (nrow(pr_plot_data) > 0L) {
       labeller = ggplot2::label_parsed
     ) +
     ggplot2::scale_color_manual(
-      values = c("SuSiE baseline" = "grey35", "SuSiNE (C-CS)" = "#4C78A8")
+      values = c("SuSiE baseline" = paper_orange, "SuSiNE (C-CS)" = paper_blue)
     ) +
     ggplot2::coord_cartesian(xlim = c(0, 1), ylim = c(0, 1)) +
     ggplot2::scale_x_continuous(
@@ -596,7 +607,7 @@ if (nrow(pr_plot_data) > 0L) {
       x = "Recall",
       y = "Precision",
       color = NULL,
-      title = expression("Precision-recall curves by Annotation Quality " * phi[a])
+      title = expression("Precision-recall curves by Annotation Accuracy " * phi[a])
     ) +
     paper_theme() +
     compact_bottom_legend_theme() +
@@ -654,12 +665,12 @@ if (nrow(hg2_plot_data) > 0L) {
       hjust = 1.2
     ) +
     ggplot2::scale_fill_manual(
-      values = c(baseline = "grey70", ensemble = "#9BBAD7", `C-CS` = "#D95F02"),
+      values = c(baseline = paper_orange, ensemble = "#9BBAD7", `C-CS` = paper_blue),
       guide = "none"
     ) +
     ggplot2::labs(
       x = "Method",
-      y = "Estimated h_g^2",
+      y = expression("Estimated " * h[g]^2),
       title = "Estimated heritability"
     ) +
     paper_theme() +
@@ -716,7 +727,7 @@ if (nrow(pip_cal_data) > 0L) {
     ggplot2::geom_line(linewidth = 1.05) +
     ggplot2::coord_cartesian(xlim = c(0, 1), ylim = c(0, 1)) +
     ggplot2::scale_color_manual(
-      values = c("SuSiE baseline" = "grey35", "SuSiNE (C-CS)" = "#4C78A8")
+      values = c("SuSiE baseline" = paper_orange, "SuSiNE (C-CS)" = paper_blue)
     ) +
     ggplot2::labs(
       x = "Mean PIP bin",
@@ -811,6 +822,16 @@ if (nrow(compute_plot_data) > 0L) {
       subscale_label = factor(.data$subscale_label, levels = subscale_levels),
       spec_name = factor(.data$spec_name, levels = spec_order)
     )
+  compute_spec_colors <- stats::setNames(rep("#6BAED6", length(spec_order)), spec_order)
+  compute_spec_colors[startsWith(spec_order, "A-")] <- "#9ECAE1"
+  compute_spec_colors[startsWith(spec_order, "B-")] <- "#4292C6"
+  compute_spec_colors[startsWith(spec_order, "C-")] <- "#2171B5"
+  compute_spec_colors[["C-CS"]] <- paper_blue
+  compute_ccs_label_data <- compute_plot_data %>%
+    dplyr::filter(as.character(.data$spec_name) == "C-CS") %>%
+    dplyr::mutate(
+      dot_label = paste0("C-CS, ", as.character(.data$subscale_label))
+    )
   compute_label_x <- max(compute_plot_data$compute_sec, na.rm = TRUE)
 
   p_compute <- ggplot2::ggplot(
@@ -825,7 +846,7 @@ if (nrow(compute_plot_data) > 0L) {
     ggplot2::geom_hline(
       yintercept = baseline_auprc,
       linetype = "dashed",
-      color = "grey25",
+      color = paper_orange,
       linewidth = 0.9
     ) +
     ggplot2::geom_point(size = 5, alpha = 0.9, stroke = 1.5) +
@@ -835,8 +856,24 @@ if (nrow(compute_plot_data) > 0L) {
       y = baseline_auprc,
       shape = 8,
       size = 5,
-      color = "black",
+      color = paper_orange,
       stroke = 1.4
+    ) +
+    ggplot2::geom_text(
+      data = compute_ccs_label_data,
+      ggplot2::aes(
+        x = .data$compute_sec,
+        y = .data$AUPRC_mean,
+        label = .data$dot_label
+      ),
+      color = paper_blue,
+      hjust = -0.08,
+      vjust = -0.7,
+      size = 5.2,
+      fontface = "bold",
+      show.legend = FALSE,
+      check_overlap = TRUE,
+      inherit.aes = FALSE
     ) +
     reference_label_layer(
       compute_label_x,
@@ -856,6 +893,7 @@ if (nrow(compute_plot_data) > 0L) {
       breaks = compute_second_breaks,
       labels = as.character(compute_second_breaks)
     ) +
+    ggplot2::scale_color_manual(values = compute_spec_colors, drop = FALSE) +
     ggplot2::scale_shape_manual(values = shape_values_for(subscale_levels)) +
     ggplot2::guides(
       color = ggplot2::guide_legend(
