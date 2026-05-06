@@ -830,18 +830,53 @@ if (nrow(ccs_resolution_plot_data) > 0L) {
 
 ```{r fig-compute-vs-auprc, fig.width=8.8, fig.height=5}
 if (nrow(compute_plot_data) > 0L) {
-  subscale_levels <- sort_subscale_labels(compute_plot_data$subscale_label)
+  subscale_fraction_map <- c(
+    "4x1" = "1/16",
+    "8x1" = "1/8",
+    "16x1" = "1/4",
+    "32x1" = "1/2",
+    "64x1" = "1",
+    "4x2" = "1/4",
+    "4x4" = "1/4",
+    "8x4" = "1",
+    "8x8" = "1"
+  )
+  subscale_fraction_order <- c("1/16", "1/8", "1/4", "1/2", "1")
   compute_second_breaks <- c(0, 1, 5, 10, 30, 60, 120, 240)
   compute_plot_data <- compute_plot_data %>%
     dplyr::mutate(
       compute_sec = 60 * .data$compute_min,
-      subscale_label = factor(.data$subscale_label, levels = subscale_levels),
+      subscale_label = as.character(.data$subscale_label),
+      subscale_fraction = dplyr::recode(
+        .data$subscale_label,
+        !!!subscale_fraction_map,
+        .default = .data$subscale_label
+      ),
       spec_name = factor(.data$spec_name, levels = spec_order)
     )
+  subscale_fraction_levels <- c(
+    subscale_fraction_order,
+    sort(setdiff(unique(compute_plot_data$subscale_fraction), subscale_fraction_order))
+  )
+  fraction_shape_values <- c(
+    "1/16" = 16,
+    "1/8" = 17,
+    "1/4" = 15,
+    "1/2" = 18,
+    "1" = 0
+  )
+  if (length(setdiff(subscale_fraction_levels, names(fraction_shape_values))) > 0L) {
+    extra_fraction_levels <- setdiff(subscale_fraction_levels, names(fraction_shape_values))
+    fraction_shape_values <- c(
+      fraction_shape_values,
+      shape_values_for(extra_fraction_levels)
+    )
+  }
+  fraction_shape_values <- fraction_shape_values[subscale_fraction_levels]
   compute_ccs_label_data <- compute_plot_data %>%
     dplyr::filter(as.character(.data$spec_name) == "C-CS") %>%
     dplyr::mutate(
-      dot_label = paste0("C-CS, ", as.character(.data$subscale_label))
+      dot_label = paste0("C-CS, ", as.character(.data$subscale_fraction))
     )
   compute_label_x <- max(compute_plot_data$compute_sec, na.rm = TRUE)
 
@@ -851,7 +886,7 @@ if (nrow(compute_plot_data) > 0L) {
       x = .data$compute_sec,
       y = .data$AUPRC_mean,
       color = .data$spec_name,
-      shape = .data$subscale_label
+      shape = .data$subscale_fraction
     )
   ) +
     ggplot2::geom_hline(
@@ -895,7 +930,7 @@ if (nrow(compute_plot_data) > 0L) {
       x = "Mean wall time per dataset (seconds)",
       y = "AUPRC",
       color = "Ensemble",
-      shape = "Subscale shape",
+      shape = "Fraction of full ensemble",
       title = "AUPRC by Compute Cost"
     ) +
     ggplot2::scale_x_continuous(
@@ -903,7 +938,10 @@ if (nrow(compute_plot_data) > 0L) {
       breaks = compute_second_breaks,
       labels = as.character(compute_second_breaks)
     ) +
-    ggplot2::scale_shape_manual(values = shape_values_for(subscale_levels)) +
+    ggplot2::scale_shape_manual(
+      values = fraction_shape_values,
+      breaks = subscale_fraction_levels
+    ) +
     ggplot2::guides(
       color = ggplot2::guide_legend(
         ncol = 2,
