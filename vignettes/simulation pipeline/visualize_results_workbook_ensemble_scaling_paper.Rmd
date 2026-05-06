@@ -459,7 +459,7 @@ if (nrow(ccs_by_r2_plot_data) > 0L) {
       linewidth = 0.9
     ) +
     ggplot2::geom_line(ggplot2::aes(linetype = .data$agg_method), linewidth = 1.2) +
-    ggplot2::geom_point(size = 3.2) +
+    ggplot2::geom_point(size = 3.2, show.legend = FALSE) +
     reference_label_layer(
       ccs_r2_label_x,
       baseline_auprc,
@@ -486,7 +486,7 @@ if (nrow(ccs_by_r2_plot_data) > 0L) {
       drop = FALSE
     ) +
     ggplot2::labs(
-      x = expression("Causal annotation signal " * phi[a]),
+      x = expression("Causal annotation accuracy " * phi[a]),
       y = "AUPRC",
       color = "Aggregation",
       linetype = "Aggregation",
@@ -822,11 +822,6 @@ if (nrow(compute_plot_data) > 0L) {
       subscale_label = factor(.data$subscale_label, levels = subscale_levels),
       spec_name = factor(.data$spec_name, levels = spec_order)
     )
-  compute_spec_colors <- stats::setNames(rep("#6BAED6", length(spec_order)), spec_order)
-  compute_spec_colors[startsWith(spec_order, "A-")] <- "#9ECAE1"
-  compute_spec_colors[startsWith(spec_order, "B-")] <- "#4292C6"
-  compute_spec_colors[startsWith(spec_order, "C-")] <- "#2171B5"
-  compute_spec_colors[["C-CS"]] <- paper_blue
   compute_ccs_label_data <- compute_plot_data %>%
     dplyr::filter(as.character(.data$spec_name) == "C-CS") %>%
     dplyr::mutate(
@@ -846,7 +841,7 @@ if (nrow(compute_plot_data) > 0L) {
     ggplot2::geom_hline(
       yintercept = baseline_auprc,
       linetype = "dashed",
-      color = paper_orange,
+      color = "grey25",
       linewidth = 0.9
     ) +
     ggplot2::geom_point(size = 5, alpha = 0.9, stroke = 1.5) +
@@ -856,7 +851,7 @@ if (nrow(compute_plot_data) > 0L) {
       y = baseline_auprc,
       shape = 8,
       size = 5,
-      color = paper_orange,
+      color = "black",
       stroke = 1.4
     ) +
     ggplot2::geom_text(
@@ -866,10 +861,10 @@ if (nrow(compute_plot_data) > 0L) {
         y = .data$AUPRC_mean,
         label = .data$dot_label
       ),
-      color = paper_blue,
+      color = "grey20",
       hjust = -0.08,
-      vjust = -0.7,
-      size = 5.2,
+      vjust = 1.7,
+      size = 7.8,
       fontface = "bold",
       show.legend = FALSE,
       check_overlap = TRUE,
@@ -893,7 +888,6 @@ if (nrow(compute_plot_data) > 0L) {
       breaks = compute_second_breaks,
       labels = as.character(compute_second_breaks)
     ) +
-    ggplot2::scale_color_manual(values = compute_spec_colors, drop = FALSE) +
     ggplot2::scale_shape_manual(values = shape_values_for(subscale_levels)) +
     ggplot2::guides(
       color = ggplot2::guide_legend(
