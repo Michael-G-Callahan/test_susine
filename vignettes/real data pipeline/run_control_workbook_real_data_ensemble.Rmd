@@ -43,7 +43,7 @@ slurm_time <- "05:59:59"
 slurm_mem <- "8G"
 cpus_per_task <- 1L
 slurm_partition <- NULL
-slurm_account <- NULL
+slurm_account <- "statsresearch_sc_default"
 
 L <- 10L
 max_iter <- 100L
