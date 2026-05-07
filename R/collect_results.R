@@ -53,18 +53,25 @@ index_staging_outputs <- function(job_name,
     return(tibble::tibble(task_id = integer(), flush_id = character(), type = character(), path = character()))
   }
   parse_type <- function(fname) {
+    if (grepl("_run_metrics\\.csv$", fname)) return("run_metrics")
+    if (grepl("_effect_summaries\\.csv$", fname)) return("effect_summaries")
     if (grepl("_model_metrics\\.csv$", fname)) return("model_metrics")
     if (grepl("_effect_metrics_unfiltered\\.csv$", fname)) return("effect_metrics_unfiltered")
     if (grepl("_effect_metrics\\.csv$", fname)) return("effect_metrics")
     if (grepl("_validation\\.csv$", fname)) return("validation")
     if (grepl("_confusion_bins\\.csv$", fname)) return("confusion_bins")
     if (grepl("_dataset_metrics\\.csv$", fname)) return("dataset_metrics")
+    if (grepl("_elbo_trace\\.csv$", fname)) return("elbo_trace")
+    if (grepl("_fit_file_index\\.csv$", fname)) return("fit_file_index")
     if (grepl("_multimodal_metrics\\.csv$", fname)) return("multimodal_metrics")
     if (grepl("_refine_depth\\.csv$", fname)) return("refine_depth")
     if (grepl("_prior_diagnostics\\.csv$", fname)) return("prior_diagnostics")
     if (grepl("_tier_cs_metrics\\.csv$", fname)) return("tier_cs_metrics")
     if (grepl("_scaling_bins\\.csv$", fname)) return("scaling_bins")
     if (grepl("_hg2_by_agg\\.csv$", fname)) return("hg2_by_agg")
+    if (grepl("_credible_set_membership\\.parquet$", fname)) return("credible_set_membership")
+    if (grepl("_variant_posteriors\\.parquet$", fname)) return("variant_posteriors")
+    if (grepl("_effect_posteriors\\.parquet$", fname)) return("effect_posteriors")
     if (grepl("_snps\\.parquet$", fname)) return("snps")
     NA_character_
   }
@@ -107,18 +114,37 @@ validate_staging_outputs <- function(file_index) {
   purrr::pmap_dfr(file_index, function(task_id, flush_id, type, path) {
     reader <- switch(
       type,
+      run_metrics = function(p) readr::read_csv(p, show_col_types = FALSE, n_max = 1L, progress = FALSE),
+      effect_summaries = function(p) readr::read_csv(p, show_col_types = FALSE, n_max = 1L, progress = FALSE),
       model_metrics = function(p) readr::read_csv(p, show_col_types = FALSE, n_max = 1L, progress = FALSE),
       effect_metrics_unfiltered = function(p) readr::read_csv(p, show_col_types = FALSE, n_max = 1L, progress = FALSE),
       effect_metrics = function(p) readr::read_csv(p, show_col_types = FALSE, n_max = 1L, progress = FALSE),
       validation = function(p) readr::read_csv(p, show_col_types = FALSE, n_max = 1L, progress = FALSE),
       confusion_bins = function(p) readr::read_csv(p, show_col_types = FALSE, n_max = 1L, progress = FALSE),
       dataset_metrics = function(p) readr::read_csv(p, show_col_types = FALSE, n_max = 1L, progress = FALSE),
+      elbo_trace = function(p) readr::read_csv(p, show_col_types = FALSE, n_max = 1L, progress = FALSE),
+      fit_file_index = function(p) readr::read_csv(p, show_col_types = FALSE, n_max = 1L, progress = FALSE),
       multimodal_metrics = function(p) readr::read_csv(p, show_col_types = FALSE, n_max = 1L, progress = FALSE),
       refine_depth = function(p) readr::read_csv(p, show_col_types = FALSE, n_max = 1L, progress = FALSE),
       prior_diagnostics = function(p) readr::read_csv(p, show_col_types = FALSE, n_max = 1L, progress = FALSE),
       tier_cs_metrics = function(p) readr::read_csv(p, show_col_types = FALSE, n_max = 1L, progress = FALSE),
       scaling_bins = function(p) readr::read_csv(p, show_col_types = FALSE, n_max = 1L, progress = FALSE),
       hg2_by_agg = function(p) readr::read_csv(p, show_col_types = FALSE, n_max = 1L, progress = FALSE),
+      credible_set_membership = function(p) {
+        arrow::read_parquet(p) %>%
+          tibble::as_tibble() %>%
+          utils::head(1L)
+      },
+      variant_posteriors = function(p) {
+        arrow::read_parquet(p) %>%
+          tibble::as_tibble() %>%
+          utils::head(1L)
+      },
+      effect_posteriors = function(p) {
+        arrow::read_parquet(p) %>%
+          tibble::as_tibble() %>%
+          utils::head(1L)
+      },
       snps = function(p) {
         arrow::open_dataset(p, format = "parquet") %>%
           dplyr::slice_head(n = 1L) %>%

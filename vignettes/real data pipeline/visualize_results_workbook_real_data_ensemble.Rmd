@@ -1,0 +1,292 @@
+---
+title: "Real-Data Ensemble — Visualize Results"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+This workbook reads consolidated real-data ensemble outputs and renders the
+main locus-level visual diagnostics.
+
+```{r setup, message=FALSE}
+here::i_am("vignettes/real data pipeline/visualize_results_workbook_real_data_ensemble.Rmd")
+library(here)
+library(devtools)
+library(dplyr)
+library(readr)
+library(tidyr)
+library(purrr)
+library(ggplot2)
+library(arrow)
+library(knitr)
+
+susine_path <- here("..", "susine")
+if (file.exists(file.path(susine_path, "DESCRIPTION"))) {
+  options(test_susine.local_susine_path = normalizePath(susine_path, winslash = "/", mustWork = TRUE))
+  devtools::load_all(susine_path)
+}
+devtools::load_all(".")
+theme_set(theme_bw(base_size = 12))
+```
+
+# 1. User Configuration
+
+```{r config}
+job_name <- "real_data_ensemble_selected10"
+parent_job_id <- "REPLACE_WITH_SLURM_PARENT_ID"
+
+aggregated_dir <- here("output", "slurm_output", job_name, parent_job_id, "aggregated")
+figure_dir <- here("output", "slurm_output", job_name, parent_job_id, "figures", "real_data_ensemble")
+dir.create(figure_dir, recursive = TRUE, showWarnings = FALSE)
+```
+
+# 2. Load Outputs
+
+```{r load}
+functional_grid_summary <- readr::read_csv(
+  file.path(aggregated_dir, "functional_grid_summary.csv"),
+  show_col_types = FALSE
+)
+multimodal_metrics <- readr::read_csv(
+  file.path(aggregated_dir, "multimodal_metrics.csv"),
+  show_col_types = FALSE
+)
+run_comparisons <- readr::read_csv(
+  file.path(aggregated_dir, "run_comparisons.csv"),
+  show_col_types = FALSE
+)
+anchor_summary <- readr::read_csv(
+  file.path(aggregated_dir, "susie_anchor_summary.csv"),
+  show_col_types = FALSE
+)
+cluster_summary <- readr::read_csv(
+  file.path(aggregated_dir, "cluster_summary.csv"),
+  show_col_types = FALSE
+)
+top_variants <- readr::read_csv(
+  file.path(aggregated_dir, "top_variants_cluster_weight.csv"),
+  show_col_types = FALSE
+)
+aggregated_variants <- arrow::read_parquet(
+  file.path(aggregated_dir, "aggregated_variant_pips_cluster_weight.parquet")
+) %>%
+  tibble::as_tibble()
+variant_posteriors <- arrow::open_dataset(
+  file.path(aggregated_dir, "variant_posteriors_dataset")
+) %>%
+  dplyr::collect()
+
+loci <- sort(unique(functional_grid_summary$locus_id))
+loci
+```
+
+# 3. Plot Helpers
+
+```{r helpers}
+plot_cluster_grid <- function(locus_id) {
+  df <- functional_grid_summary %>%
+    dplyr::filter(.data$locus_id == !!locus_id)
+
+  ggplot(df, aes(x = c_value, y = sigma_0_2_scalar, color = factor(cluster_id))) +
+    geom_point(size = 3) +
+    geom_vline(aes(xintercept = baseline_c_l), linetype = "dashed", color = "grey40") +
+    labs(
+      title = paste("Clustered Functional Grid:", locus_id),
+      x = "Annotation scale c",
+      y = expression(sigma[0]^2),
+      color = "Cluster"
+    )
+}
+
+plot_weight_heatmap <- function(locus_id) {
+  df <- functional_grid_summary %>%
+    dplyr::filter(.data$locus_id == !!locus_id)
+
+  ggplot(df, aes(x = c_value, y = sigma_0_2_scalar, fill = agg_weight_run)) +
+    geom_tile(color = "white") +
+    scale_fill_gradient(low = "white", high = "#0B6E4F") +
+    labs(
+      title = paste("Cluster-Weight Aggregation Weights:", locus_id),
+      x = "Annotation scale c",
+      y = expression(sigma[0]^2),
+      fill = "Weight"
+    )
+}
+
+plot_drift <- function(locus_id) {
+  df <- functional_grid_summary %>%
+    dplyr::filter(.data$locus_id == !!locus_id)
+
+  ggplot(df, aes(x = c_value, y = jsd_from_same_sigma_c0, color = factor(sigma_0_2_scalar))) +
+    geom_line() +
+    geom_point(size = 2) +
+    labs(
+      title = paste("PIP Drift From c = 0:", locus_id),
+      x = "Annotation scale c",
+      y = "JSD from same-sigma c = 0 baseline",
+      color = expression(sigma[0]^2)
+    )
+}
+
+plot_elbo_heatmap <- function(locus_id) {
+  df <- functional_grid_summary %>%
+    dplyr::filter(.data$locus_id == !!locus_id)
+
+  ggplot(df, aes(x = c_value, y = sigma_0_2_scalar, fill = elbo_final)) +
+    geom_tile(color = "white") +
+    scale_fill_viridis_c() +
+    labs(
+      title = paste("ELBO Heatmap:", locus_id),
+      x = "Annotation scale c",
+      y = expression(sigma[0]^2),
+      fill = "ELBO"
+    )
+}
+
+plot_anchor_comparison <- function(locus_id) {
+  df <- anchor_summary %>%
+    dplyr::filter(.data$locus_id == !!locus_id) %>%
+    dplyr::transmute(
+      locus_id,
+      `susieR anchor` = susie_anchor_h2_proxy_std,
+      `susine c=0` = baseline_h2_proxy_std
+    ) %>%
+    tidyr::pivot_longer(-.data$locus_id, names_to = "fit_type", values_to = "h2_proxy_std")
+
+  ggplot(df, aes(x = fit_type, y = h2_proxy_std, fill = fit_type)) +
+    geom_col(width = 0.6) +
+    labs(
+      title = paste("susine vs susieR h2 Proxy:", locus_id),
+      x = NULL,
+      y = "Standardized h2 proxy"
+    ) +
+    theme(legend.position = "none")
+}
+
+plot_aggregated_lollipop <- function(locus_id) {
+  agg_df <- aggregated_variants %>%
+    dplyr::filter(.data$locus_id == !!locus_id) %>%
+    dplyr::arrange(dplyr::desc(.data$aggregated_pip), .data$ld_matrix_index) %>%
+    dplyr::slice_head(n = 20)
+
+  anchor_id <- anchor_summary %>%
+    dplyr::filter(.data$locus_id == !!locus_id) %>%
+    dplyr::pull(.data$susie_anchor_run_id)
+  baseline_id <- anchor_summary %>%
+    dplyr::filter(.data$locus_id == !!locus_id) %>%
+    dplyr::pull(.data$baseline_run_id)
+
+  overlay <- variant_posteriors %>%
+    dplyr::filter(.data$run_id %in% c(anchor_id, baseline_id), .data$variant_id %in% agg_df$variant_id) %>%
+    dplyr::mutate(fit_type = dplyr::case_when(
+      .data$run_id %in% anchor_id ~ "susieR anchor",
+      .data$run_id %in% baseline_id ~ "susine c=0",
+      TRUE ~ "other"
+    ))
+
+  base_plot <- ggplot(agg_df, aes(x = reorder(variant_id, aggregated_pip), y = aggregated_pip)) +
+    geom_segment(aes(xend = variant_id, y = 0, yend = aggregated_pip), color = "grey70") +
+    geom_point(size = 2.5, color = "#0B6E4F") +
+    coord_flip() +
+    labs(
+      title = paste("Aggregated Variant PIPs:", locus_id),
+      x = "Variant",
+      y = "Aggregated PIP"
+    )
+
+  if (!nrow(overlay)) {
+    return(base_plot)
+  }
+
+  base_plot +
+    geom_point(
+      data = overlay,
+      aes(x = variant_id, y = pip, color = fit_type),
+      size = 2,
+      inherit.aes = FALSE
+    )
+}
+```
+
+# 4. Save Locus Figures
+
+```{r save-figures, fig.width=10, fig.height=6}
+purrr::walk(loci, function(locus_id) {
+  ggsave(
+    file.path(figure_dir, paste0(locus_id, "_cluster_grid.png")),
+    plot_cluster_grid(locus_id),
+    width = 8,
+    height = 5,
+    dpi = 150
+  )
+  ggsave(
+    file.path(figure_dir, paste0(locus_id, "_weight_heatmap.png")),
+    plot_weight_heatmap(locus_id),
+    width = 8,
+    height = 5,
+    dpi = 150
+  )
+  ggsave(
+    file.path(figure_dir, paste0(locus_id, "_drift.png")),
+    plot_drift(locus_id),
+    width = 8,
+    height = 5,
+    dpi = 150
+  )
+  ggsave(
+    file.path(figure_dir, paste0(locus_id, "_elbo_heatmap.png")),
+    plot_elbo_heatmap(locus_id),
+    width = 8,
+    height = 5,
+    dpi = 150
+  )
+  if (locus_id %in% anchor_summary$locus_id) {
+    ggsave(
+      file.path(figure_dir, paste0(locus_id, "_anchor_comparison.png")),
+      plot_anchor_comparison(locus_id),
+      width = 7,
+      height = 4,
+      dpi = 150
+    )
+    ggsave(
+      file.path(figure_dir, paste0(locus_id, "_aggregated_lollipop.png")),
+      plot_aggregated_lollipop(locus_id),
+      width = 9,
+      height = 6,
+      dpi = 150
+    )
+  }
+})
+```
+
+# 5. Study-Level Multimodality Summary
+
+```{r multimodality}
+multimodal_plot <- ggplot(
+  multimodal_metrics,
+  aes(x = reorder(locus_id, mean_jsd), y = mean_jsd, fill = n_clusters)
+) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Mean PIP JSD by Locus",
+    x = "Locus",
+    y = "Mean JSD",
+    fill = "Clusters"
+  )
+
+ggsave(
+  file.path(figure_dir, "multimodality_summary.png"),
+  multimodal_plot,
+  width = 9,
+  height = 6,
+  dpi = 150
+)
+
+multimodal_plot
+```

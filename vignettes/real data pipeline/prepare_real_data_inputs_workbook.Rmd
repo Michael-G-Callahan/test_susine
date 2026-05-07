@@ -1,0 +1,90 @@
+---
+title: "Real-Data Ensemble — Prepare Inputs"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+This workbook syncs the selected 10 GTEx loci from the annotation repo into
+`test_susine`, rebuilds the manifest, and previews one aligned locus bundle.
+
+```{r setup, message=FALSE}
+here::i_am("vignettes/real data pipeline/prepare_real_data_inputs_workbook.Rmd")
+library(here)
+library(devtools)
+library(dplyr)
+library(readr)
+library(knitr)
+
+susine_path <- here("..", "susine")
+if (file.exists(file.path(susine_path, "DESCRIPTION"))) {
+  options(test_susine.local_susine_path = normalizePath(susine_path, winslash = "/", mustWork = TRUE))
+  devtools::load_all(susine_path)
+}
+devtools::load_all(".")
+```
+
+# 1. User Configuration
+
+```{r config}
+source_repo_root <- "/storage/work/mgc5166/Annotations/eQTL_annotations_for_susine"
+dest_root <- here("data", "real_case_studies", "selected_10_loci")
+loci <- NULL
+```
+
+# 2. Sync Selected Loci
+
+```{r sync}
+synced <- test_susine::sync_real_data_inputs(
+  source_repo_root = source_repo_root,
+  dest_root = dest_root,
+  loci = loci
+)
+
+manifest <- synced$manifest
+kable(manifest)
+```
+
+# 3. Preview One Bundle
+
+```{r preview}
+preview_locus <- manifest$locus_id[[1]]
+
+bundle <- test_susine:::load_real_data_locus_bundle(
+  locus_id = preview_locus,
+  manifest_path = file.path(dest_root, "locus_manifest.csv"),
+  repo_root = here()
+)
+
+alignment_preview <- bundle$variant_map %>%
+  dplyr::select(
+    variant_id,
+    ld_matrix_index,
+    z_score,
+    beta_hat_std,
+    annotation_a,
+    baseline_c_l
+  ) %>%
+  dplyr::slice_head(n = 10)
+
+kable(alignment_preview)
+```
+
+# 4. Bundle Diagnostics
+
+```{r diagnostics}
+list(
+  locus_id = bundle$locus_id,
+  gene_name = bundle$gene_name,
+  n_variants = nrow(bundle$variant_map),
+  n_sample = bundle$n_sample,
+  baseline_c_l = bundle$baseline_c_l,
+  cor_annotation_z = cor(bundle$a, bundle$z, use = "pairwise.complete.obs"),
+  cor_annotation_beta_hat_std = cor(bundle$a, bundle$beta_hat_std, use = "pairwise.complete.obs")
+)
+```

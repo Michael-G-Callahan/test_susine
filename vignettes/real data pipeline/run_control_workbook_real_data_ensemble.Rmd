@@ -1,0 +1,118 @@
+---
+title: "Real-Data Ensemble — Run Control"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+This workbook builds the real-data RSS ensemble job for the selected 10 loci
+and writes the SLURM-ready artifacts.
+
+```{r setup, message=FALSE}
+here::i_am("vignettes/real data pipeline/run_control_workbook_real_data_ensemble.Rmd")
+library(here)
+library(devtools)
+library(dplyr)
+library(tidyr)
+library(readr)
+library(knitr)
+
+susine_path <- here("..", "susine")
+if (file.exists(file.path(susine_path, "DESCRIPTION"))) {
+  options(test_susine.local_susine_path = normalizePath(susine_path, winslash = "/", mustWork = TRUE))
+  devtools::load_all(susine_path)
+}
+devtools::load_all(".")
+```
+
+# 1. User Configuration
+
+```{r config}
+job_name <- "real_data_ensemble_selected10"
+manifest_path <- here("data", "real_case_studies", "selected_10_loci", "locus_manifest.csv")
+
+email <- "mgc5166@psu.edu"
+slurm_time <- "05:59:59"
+slurm_mem <- "8G"
+cpus_per_task <- 1L
+slurm_partition <- NULL
+slurm_account <- NULL
+
+L <- 10L
+max_iter <- 100L
+tol <- 1e-5
+cs_coverage <- 0.95
+cs_min_purity <- 0.5
+jsd_threshold <- 0.15
+softmax_temperature <- 1
+
+c_grid_8 <- seq(0, 1.5, length.out = 8)
+sigma_grid_8 <- c(0.01, 0.03, 0.07, 0.1, 0.2, 0.4, 0.7, 1.0)
+```
+
+# 2. Build Job Config
+
+```{r build-config}
+job_config <- test_susine::build_real_data_job_config(
+  job_name = job_name,
+  manifest_path = manifest_path,
+  output_root = here("output"),
+  L = L,
+  c_grid_values = c_grid_8,
+  sigma_grid_values = sigma_grid_8,
+  max_iter = max_iter,
+  tol = tol,
+  cs_coverage = cs_coverage,
+  cs_min_purity = cs_min_purity,
+  jsd_threshold = jsd_threshold,
+  softmax_temperature = softmax_temperature,
+  email = email,
+  time = slurm_time,
+  mem = slurm_mem,
+  cpus_per_task = cpus_per_task,
+  partition = slurm_partition,
+  account = slurm_account,
+  HPC = TRUE
+)
+
+job_config$tables$tasks
+```
+
+# 3. Run Inventory
+
+```{r inventory}
+job_config$tables$runs %>%
+  dplyr::count(run_family, backend)
+```
+
+```{r per-locus}
+job_config$tables$runs %>%
+  dplyr::count(locus_id, run_family) %>%
+  tidyr::pivot_wider(names_from = run_family, values_from = n)
+```
+
+# 4. Write Artifacts
+
+```{r write-artifacts}
+artifacts <- test_susine::write_real_data_job_artifacts(
+  job_config,
+  run_task_script = here("inst", "scripts", "run_real_data_task.R")
+)
+
+kable(tibble::enframe(artifacts, name = "artifact", value = "path"))
+```
+
+# 5. Submission Reminder
+
+```{r submit, results='asis'}
+cat(
+  "Run the job with:\n\n",
+  "`sbatch ", artifacts$slurm_script, "`\n",
+  sep = ""
+)
+```

@@ -1,0 +1,1987 @@
+# Real-data RSS ensemble pipeline -------------------------------------------
+
+real_data_required_annotation_cols <- function() {
+  c(
+    "variant_id",
+    "ld_matrix_index",
+    "annotation_a",
+    "beta_hat_std",
+    "baseline_c_l",
+    "var_y_hat_from_slope",
+    "var_y_hat_from_se"
+  )
+}
+
+real_data_study_root <- function(repo_root = ensure_repo_root(getwd())) {
+  file.path(repo_root, "data", "real_case_studies", "selected_10_loci")
+}
+
+real_data_default_manifest_path <- function(repo_root = ensure_repo_root(getwd())) {
+  file.path(real_data_study_root(repo_root), "locus_manifest.csv")
+}
+
+real_data_resolve_path <- function(path, repo_root) {
+  if (is.na(path) || !nzchar(path)) {
+    return(NA_character_)
+  }
+  if (grepl("^/", path)) {
+    return(normalizePath(path, winslash = "/", mustWork = TRUE))
+  }
+  normalizePath(file.path(repo_root, path), winslash = "/", mustWork = TRUE)
+}
+
+real_data_parse_locus_id <- function(locus_id) {
+  m <- regexec("^(.+?)_(chr[^_]+)_(.+)$", locus_id)
+  parts <- regmatches(locus_id, m)[[1]]
+  if (length(parts) != 4L) {
+    stop("Unable to parse locus_id: ", locus_id)
+  }
+  list(
+    gene_key = parts[[2]],
+    chrom = parts[[3]],
+    tissue = parts[[4]]
+  )
+}
+
+real_data_source_paths <- function(source_repo_root, locus_id, gene_name) {
+  gene_upper <- toupper(gene_name)
+  list(
+    z_scores = file.path(source_repo_root, "output", "z_score", locus_id,
+                         paste0(gene_upper, "_GTEx_z_scores.csv")),
+    ld_long = file.path(source_repo_root, "output", "ld", locus_id,
+                        paste0(gene_upper, "_phase1_LD_R_long.parquet")),
+    ld_order = file.path(source_repo_root, "output", "ld", locus_id,
+                         paste0(gene_upper, "_LD_variant_order.tsv")),
+    master_variants = file.path(source_repo_root, "output", "ld", locus_id,
+                                paste0(gene_upper, "_phase1_master_variants.csv")),
+    annotations = file.path(
+      source_repo_root,
+      "output", "susine_mu0",
+      "representative_gene_sample_n10_annotation_selection",
+      "per_locus_annotations",
+      paste0(gene_upper, "_mu0_variant_annotations.csv")
+    )
+  )
+}
+
+real_data_check_required_files <- function(paths, locus_id) {
+  missing <- names(paths)[!vapply(paths, file.exists, logical(1))]
+  if (length(missing)) {
+    stop(
+      "Missing required real-data source file(s) for ", locus_id, ": ",
+      paste(missing, collapse = ", ")
+    )
+  }
+  invisible(paths)
+}
+
+real_data_first_or_default <- function(x, default = NA) {
+  if (length(x) < 1L) {
+    return(default)
+  }
+  x[[1]]
+}
+
+real_data_scalar_or_na <- function(x, default = NA) {
+  x <- unique(stats::na.omit(x))
+  if (!length(x)) {
+    return(default)
+  }
+  x[[1]]
+}
+
+real_data_bind_csv_files <- function(files) {
+  if (!length(files)) {
+    return(tibble::tibble())
+  }
+  purrr::map_dfr(
+    files,
+    ~ readr::read_csv(.x, show_col_types = FALSE, progress = FALSE)
+  )
+}
+
+sync_real_data_inputs <- function(
+    source_repo_root = "/storage/work/mgc5166/Annotations/eQTL_annotations_for_susine",
+    dest_root = real_data_study_root(),
+    loci = NULL
+) {
+  repo_root <- ensure_repo_root(getwd())
+  source_repo_root <- normalizePath(source_repo_root, winslash = "/", mustWork = TRUE)
+  dest_root <- normalizePath(dest_root, winslash = "/", mustWork = FALSE)
+  ensure_dir(dest_root)
+
+  mu0_summary_path <- file.path(
+    source_repo_root,
+    "output", "susine_mu0",
+    "representative_gene_sample_n10_annotation_selection",
+    "mu0_locus_summary.csv"
+  )
+  selection_summary_path <- file.path(
+    source_repo_root,
+    "output", "annotation", "alphagenome",
+    "representative_gene_sample_n10_annotation_selection_summary.csv"
+  )
+  if (!file.exists(mu0_summary_path)) {
+    stop("Missing mu0_locus_summary.csv at ", mu0_summary_path)
+  }
+
+  mu0_summary <- readr::read_csv(mu0_summary_path, show_col_types = FALSE)
+  if (!is.null(loci)) {
+    mu0_summary <- dplyr::filter(mu0_summary, .data$locus_id %in% loci)
+  }
+  if (!nrow(mu0_summary)) {
+    stop("No loci selected for real-data sync.")
+  }
+
+  copied_rows <- purrr::map_dfr(seq_len(nrow(mu0_summary)), function(i) {
+    row <- mu0_summary[i, , drop = FALSE]
+    locus_id <- row$locus_id[[1]]
+    gene_name <- row$gene_name[[1]]
+    locus_dir <- file.path(dest_root, locus_id)
+    ensure_dir(locus_dir)
+
+    src <- real_data_source_paths(source_repo_root, locus_id, gene_name)
+    real_data_check_required_files(src, locus_id)
+
+    dest_files <- list(
+      z_scores = file.path(locus_dir, basename(src$z_scores)),
+      ld_long = file.path(locus_dir, basename(src$ld_long)),
+      ld_order = file.path(locus_dir, basename(src$ld_order)),
+      master_variants = file.path(locus_dir, basename(src$master_variants)),
+      annotations = file.path(locus_dir, basename(src$annotations))
+    )
+
+    ok <- file.copy(
+      from = unname(unlist(src)),
+      to = unname(unlist(dest_files)),
+      overwrite = TRUE
+    )
+    if (!all(ok)) {
+      failed <- names(dest_files)[!ok]
+      stop("Failed to copy ", locus_id, " file(s): ", paste(failed, collapse = ", "))
+    }
+
+      tibble::tibble(
+      locus_id = locus_id,
+      gene_name = gene_name,
+      z_scores_path = dest_files[["z_scores"]],
+      ld_r_long_path = dest_files[["ld_long"]],
+      ld_order_path = dest_files[["ld_order"]],
+      master_variants_path = dest_files[["master_variants"]],
+      annotation_path = dest_files[["annotations"]]
+    )
+  })
+
+  provenance_files <- c(mu0_summary_path)
+  if (file.exists(selection_summary_path)) {
+    provenance_files <- c(provenance_files, selection_summary_path)
+  }
+  prov_ok <- file.copy(
+    provenance_files,
+    file.path(dest_root, basename(provenance_files)),
+    overwrite = TRUE
+  )
+  if (!all(prov_ok)) {
+    stop("Failed to copy one or more study-level provenance files.")
+  }
+
+  manifest <- build_real_data_manifest(dest_root = dest_root, repo_root = repo_root)
+  list(
+    dest_root = dest_root,
+    manifest_path = file.path(dest_root, "locus_manifest.csv"),
+    manifest = manifest,
+    copied = copied_rows
+  )
+}
+
+build_real_data_manifest <- function(
+    dest_root = real_data_study_root(),
+    repo_root = ensure_repo_root(getwd())
+) {
+  dest_root <- normalizePath(dest_root, winslash = "/", mustWork = TRUE)
+  repo_root <- normalizePath(repo_root, winslash = "/", mustWork = TRUE)
+
+  locus_dirs <- list.dirs(dest_root, recursive = FALSE, full.names = TRUE)
+  if (!length(locus_dirs)) {
+    stop("No locus directories found under ", dest_root)
+  }
+
+  manifest <- purrr::map_dfr(sort(locus_dirs), function(locus_dir) {
+    locus_id <- basename(locus_dir)
+    parsed <- real_data_parse_locus_id(locus_id)
+
+    annotation_path <- list.files(
+      locus_dir,
+      pattern = "_mu0_variant_annotations\\.csv$",
+      full.names = TRUE
+    )
+    z_scores_path <- list.files(
+      locus_dir,
+      pattern = "_GTEx_z_scores\\.csv$",
+      full.names = TRUE
+    )
+    ld_long_path <- list.files(
+      locus_dir,
+      pattern = "_phase1_LD_R_long\\.parquet$",
+      full.names = TRUE
+    )
+    ld_order_path <- list.files(
+      locus_dir,
+      pattern = "_LD_variant_order\\.tsv$",
+      full.names = TRUE
+    )
+    master_variants_path <- list.files(
+      locus_dir,
+      pattern = "_phase1_master_variants\\.csv$",
+      full.names = TRUE
+    )
+
+    paths <- c(
+      annotation = real_data_first_or_default(annotation_path, NA_character_),
+      z_scores = real_data_first_or_default(z_scores_path, NA_character_),
+      ld_long = real_data_first_or_default(ld_long_path, NA_character_),
+      ld_order = real_data_first_or_default(ld_order_path, NA_character_),
+      master_variants = real_data_first_or_default(master_variants_path, NA_character_)
+    )
+    if (any(!file.exists(paths))) {
+      missing <- names(paths)[!file.exists(paths)]
+      stop("Missing copied real-data inputs in ", locus_id, ": ", paste(missing, collapse = ", "))
+    }
+
+    annotation_tbl <- readr::read_csv(paths[["annotation"]], show_col_types = FALSE)
+    z_tbl <- readr::read_csv(paths[["z_scores"]], show_col_types = FALSE)
+
+    tibble::tibble(
+      locus_id = locus_id,
+      gene_name = if ("gene_name" %in% names(annotation_tbl)) {
+        as.character(real_data_scalar_or_na(annotation_tbl$gene_name, toupper(parsed$gene_key)))
+      } else {
+        toupper(parsed$gene_key)
+      },
+      gtex_tissue = parsed$tissue,
+      gtex_chrom = parsed$chrom,
+      n_variants = nrow(annotation_tbl),
+      n_sample_median = stats::median(z_tbl$sample_size, na.rm = TRUE),
+      baseline_c_l = as.numeric(real_data_scalar_or_na(annotation_tbl$baseline_c_l, NA_real_)),
+      z_scores_path = relativize_path(paths[["z_scores"]], repo_root),
+      ld_r_long_path = relativize_path(paths[["ld_long"]], repo_root),
+      ld_order_path = relativize_path(paths[["ld_order"]], repo_root),
+      master_variants_path = relativize_path(paths[["master_variants"]], repo_root),
+      annotation_path = relativize_path(paths[["annotation"]], repo_root)
+    )
+  }) %>%
+    dplyr::arrange(.data$locus_id) %>%
+    dplyr::mutate(dataset_bundle_id = dplyr::row_number(), .before = 1L)
+
+  manifest_path <- file.path(dest_root, "locus_manifest.csv")
+  readr::write_csv(manifest, manifest_path)
+  manifest
+}
+
+real_data_validate_annotation_columns <- function(annotation_tbl, locus_id) {
+  required <- real_data_required_annotation_cols()
+  missing <- setdiff(required, names(annotation_tbl))
+  if (length(missing)) {
+    stop(
+      "Annotation file for ", locus_id, " is missing required columns: ",
+      paste(missing, collapse = ", ")
+    )
+  }
+  invisible(annotation_tbl)
+}
+
+real_data_validate_contiguous_indices <- function(idx, label) {
+  idx <- as.integer(idx)
+  expected <- seq.int(0L, length(idx) - 1L)
+  if (!identical(idx, expected)) {
+    stop(label, " indices must be contiguous 0:(p-1).")
+  }
+  invisible(idx)
+}
+
+real_data_reconstruct_ld_matrix <- function(ld_long_tbl, p, locus_id) {
+  required <- c("snp_index_1", "snp_index_2", "r")
+  missing <- setdiff(required, names(ld_long_tbl))
+  if (length(missing)) {
+    stop("LD long table for ", locus_id, " is missing columns: ", paste(missing, collapse = ", "))
+  }
+
+  idx1 <- as.integer(ld_long_tbl$snp_index_1)
+  idx2 <- as.integer(ld_long_tbl$snp_index_2)
+  r <- as.numeric(ld_long_tbl$r)
+
+  if (any(idx1 < 0L | idx1 >= p | idx2 < 0L | idx2 >= p, na.rm = TRUE)) {
+    stop("LD indices out of range for ", locus_id)
+  }
+  key <- paste(idx1, idx2, sep = "_")
+  if (anyDuplicated(key)) {
+    stop("Duplicate LD pairs detected for ", locus_id)
+  }
+
+  R <- diag(1, p)
+  R[cbind(idx1 + 1L, idx2 + 1L)] <- r
+  R[cbind(idx2 + 1L, idx1 + 1L)] <- r
+
+  if (max(abs(R - t(R)), na.rm = TRUE) > 1e-8) {
+    stop("Reconstructed LD matrix is not symmetric for ", locus_id)
+  }
+  if (max(abs(diag(R) - 1), na.rm = TRUE) > 1e-8) {
+    stop("Reconstructed LD matrix does not have unit diagonal for ", locus_id)
+  }
+  R
+}
+
+load_real_data_locus_bundle <- function(
+    locus_id,
+    manifest_path = real_data_default_manifest_path(),
+    repo_root = ensure_repo_root(getwd())
+) {
+  repo_root <- normalizePath(repo_root, winslash = "/", mustWork = TRUE)
+  manifest_path <- normalizePath(manifest_path, winslash = "/", mustWork = TRUE)
+  manifest <- readr::read_csv(manifest_path, show_col_types = FALSE)
+  row <- dplyr::filter(manifest, .data$locus_id == !!locus_id)
+  if (nrow(row) != 1L) {
+    stop("Expected exactly one manifest row for locus_id ", locus_id)
+  }
+
+  annotation_path <- real_data_resolve_path(row$annotation_path[[1]], repo_root)
+  z_scores_path <- real_data_resolve_path(row$z_scores_path[[1]], repo_root)
+  ld_long_path <- real_data_resolve_path(row$ld_r_long_path[[1]], repo_root)
+  ld_order_path <- real_data_resolve_path(row$ld_order_path[[1]], repo_root)
+  master_variants_path <- real_data_resolve_path(row$master_variants_path[[1]], repo_root)
+
+  annotation_tbl <- readr::read_csv(annotation_path, show_col_types = FALSE) %>%
+    dplyr::arrange(.data$ld_matrix_index)
+  real_data_validate_annotation_columns(annotation_tbl, locus_id)
+  real_data_validate_contiguous_indices(annotation_tbl$ld_matrix_index, "Annotation")
+
+  ld_order_tbl <- readr::read_tsv(ld_order_path, show_col_types = FALSE) %>%
+    dplyr::arrange(.data$index)
+  real_data_validate_contiguous_indices(ld_order_tbl$index, "LD order")
+
+  if (!identical(as.character(ld_order_tbl$id), as.character(annotation_tbl$variant_id))) {
+    stop("LD order and annotation variant_id values do not match exactly for ", locus_id)
+  }
+
+  z_tbl <- readr::read_csv(z_scores_path, show_col_types = FALSE)
+  if (anyDuplicated(z_tbl$variant_id)) {
+    dupes <- unique(z_tbl$variant_id[duplicated(z_tbl$variant_id)])
+    stop(
+      "Duplicate variant_id rows found in z-score file for ", locus_id, ": ",
+      paste(head(dupes, 5L), collapse = ", ")
+    )
+  }
+  z_match <- match(ld_order_tbl$id, z_tbl$variant_id)
+  if (any(is.na(z_match))) {
+    missing_variants <- ld_order_tbl$id[is.na(z_match)]
+    stop(
+      "Missing z-score rows for ", locus_id, ": ",
+      paste(head(missing_variants, 5L), collapse = ", ")
+    )
+  }
+  z_aligned <- z_tbl[z_match, , drop = FALSE]
+
+  master_tbl <- readr::read_csv(master_variants_path, show_col_types = FALSE) %>%
+    dplyr::arrange(.data$ld_matrix_index)
+  real_data_validate_contiguous_indices(master_tbl$ld_matrix_index, "Master variants")
+  if (!identical(as.character(master_tbl$variant_id), as.character(annotation_tbl$variant_id))) {
+    stop("Master variants and annotation variant_id values do not match exactly for ", locus_id)
+  }
+
+  ld_long_tbl <- arrow::read_parquet(ld_long_path) %>%
+    tibble::as_tibble()
+  p <- nrow(ld_order_tbl)
+  R <- real_data_reconstruct_ld_matrix(ld_long_tbl, p = p, locus_id = locus_id)
+
+  variant_map <- tibble::tibble(
+    variant_id = as.character(annotation_tbl$variant_id),
+    ld_matrix_index = as.integer(annotation_tbl$ld_matrix_index),
+    chrom = as.character(ld_order_tbl$chrom %||% NA_character_),
+    pos = as.integer(ld_order_tbl$pos %||% NA_integer_),
+    ref = as.character(ld_order_tbl$ref %||% NA_character_),
+    alt = as.character(ld_order_tbl$alt %||% NA_character_),
+    z_score = as.numeric(z_aligned$z_score),
+    slope = as.numeric(z_aligned$slope %||% NA_real_),
+    slope_se = as.numeric(z_aligned$slope_se %||% NA_real_),
+    sample_size = as.numeric(z_aligned$sample_size %||% NA_real_),
+    af = as.numeric(z_aligned$af %||% NA_real_),
+    annotation_a = as.numeric(annotation_tbl$annotation_a),
+    annotation_missing = as.logical(annotation_tbl$annotation_missing %||% FALSE),
+    beta_hat_std = as.numeric(annotation_tbl$beta_hat_std),
+    mu0_source = as.numeric(annotation_tbl$mu0 %||% NA_real_),
+    var_y_hat_from_slope = as.numeric(annotation_tbl$var_y_hat_from_slope),
+    var_y_hat_from_se = as.numeric(annotation_tbl$var_y_hat_from_se),
+    baseline_c_l = as.numeric(annotation_tbl$baseline_c_l)
+  )
+
+  baseline_c <- unique(stats::na.omit(variant_map$baseline_c_l))
+  if (length(baseline_c) > 1L) {
+    stop("Multiple baseline_c_l values found for ", locus_id)
+  }
+
+  list(
+    dataset_bundle_id = as.integer(row$dataset_bundle_id[[1]]),
+    locus_id = locus_id,
+    gene_name = row$gene_name[[1]],
+    gtex_tissue = row$gtex_tissue[[1]],
+    gtex_chrom = row$gtex_chrom[[1]],
+    z = as.numeric(variant_map$z_score),
+    R = R,
+    a = as.numeric(variant_map$annotation_a),
+    variant_map = variant_map,
+    n_sample = as.numeric(stats::median(variant_map$sample_size, na.rm = TRUE)),
+    baseline_c_l = as.numeric(real_data_scalar_or_na(baseline_c, NA_real_)),
+    beta_hat_std = as.numeric(variant_map$beta_hat_std),
+    var_y_hat_from_slope = as.numeric(variant_map$var_y_hat_from_slope),
+    var_y_hat_from_se = as.numeric(variant_map$var_y_hat_from_se),
+    paths = list(
+      annotation = annotation_path,
+      z_scores = z_scores_path,
+      ld_long = ld_long_path,
+      ld_order = ld_order_path,
+      master_variants = master_variants_path
+    )
+  )
+}
+
+build_real_data_job_config <- function(
+    job_name = "real_data_ensemble_selected10",
+    manifest_path = real_data_default_manifest_path(),
+    loci = NULL,
+    output_root = "output",
+    L = 10L,
+    c_grid_values = seq(0, 1.5, length.out = 8),
+    sigma_grid_values = c(0.01, 0.03, 0.07, 0.1, 0.2, 0.4, 0.7, 1.0),
+    max_iter = 100L,
+    tol = 1e-5,
+    cs_coverage = 0.95,
+    cs_min_purity = 0.5,
+    jsd_threshold = 0.15,
+    softmax_temperature = 1,
+    email = "mgc5166@psu.edu",
+    time = "05:59:59",
+    mem = "8G",
+    cpus_per_task = 1L,
+    partition = NULL,
+    account = NULL,
+    HPC = TRUE
+) {
+  repo_root <- ensure_repo_root(getwd())
+  manifest_path <- normalizePath(manifest_path, winslash = "/", mustWork = TRUE)
+  bundles <- readr::read_csv(manifest_path, show_col_types = FALSE)
+  if (!is.null(loci)) {
+    bundles <- dplyr::filter(bundles, .data$locus_id %in% loci)
+  }
+  if (!nrow(bundles)) {
+    stop("No real-data loci selected for the job config.")
+  }
+
+  bundles <- bundles %>%
+    dplyr::arrange(.data$dataset_bundle_id) %>%
+    dplyr::mutate(task_id = dplyr::row_number())
+
+  functional_grid <- tidyr::crossing(
+    tibble::tibble(
+      sigma_index = seq_along(sigma_grid_values),
+      sigma_0_2_scalar = as.numeric(sigma_grid_values)
+    ),
+    tibble::tibble(
+      c_index = seq_along(c_grid_values),
+      c_value = as.numeric(c_grid_values)
+    )
+  ) %>%
+    dplyr::mutate(
+      backend = "susine_rss",
+      run_family = "functional_grid",
+      flush_group = as.integer(.data$sigma_index)
+    )
+  anchor_flush_group <- length(sigma_grid_values) + 1L
+  runs_per_task <- nrow(functional_grid) + 1L
+
+  runs <- purrr::map_dfr(seq_len(nrow(bundles)), function(i) {
+    bundle <- bundles[i, , drop = FALSE]
+    functional <- functional_grid %>%
+      dplyr::transmute(
+        dataset_bundle_id = bundle$dataset_bundle_id[[1]],
+        task_id = bundle$task_id[[1]],
+        locus_id = bundle$locus_id[[1]],
+        gene_name = bundle$gene_name[[1]],
+        baseline_c_l = bundle$baseline_c_l[[1]],
+        backend = .data$backend,
+        run_family = .data$run_family,
+        c_value = .data$c_value,
+        sigma_0_2_scalar = .data$sigma_0_2_scalar,
+        group_key = paste0("functional_grid|", bundle$locus_id[[1]]),
+        flush_group = .data$flush_group
+      )
+
+    anchor <- tibble::tibble(
+      dataset_bundle_id = bundle$dataset_bundle_id[[1]],
+      task_id = bundle$task_id[[1]],
+      locus_id = bundle$locus_id[[1]],
+      gene_name = bundle$gene_name[[1]],
+      baseline_c_l = bundle$baseline_c_l[[1]],
+      backend = "susie_rss",
+      run_family = "susie_anchor",
+      c_value = NA_real_,
+      sigma_0_2_scalar = 0.2,
+      group_key = paste0("susie_anchor|", bundle$locus_id[[1]]),
+      flush_group = anchor_flush_group
+    )
+
+    dplyr::bind_rows(functional, anchor)
+  }) %>%
+    dplyr::mutate(run_id = dplyr::row_number(), .before = 1L)
+
+  tasks <- bundles %>%
+    dplyr::transmute(
+      task_id = .data$task_id,
+      dataset_bundle_id = .data$dataset_bundle_id,
+      locus_id = .data$locus_id,
+      gene_name = .data$gene_name,
+      runs_per_task = as.integer(runs_per_task)
+    )
+
+  output_root <- normalizePath(output_root, winslash = "/", mustWork = FALSE)
+  list(
+    job = list(
+      name = job_name,
+      email = email,
+      created_at = timestamp_utc(),
+      manifest_path = manifest_path,
+      study_root = dirname(manifest_path),
+      L = as.integer(L),
+      max_iter = as.integer(max_iter),
+      tol = as.numeric(tol),
+      cs_coverage = as.numeric(cs_coverage),
+      cs_min_purity = as.numeric(cs_min_purity),
+      jsd_threshold = as.numeric(jsd_threshold),
+      softmax_temperature = as.numeric(softmax_temperature),
+      c_grid_values = as.numeric(c_grid_values),
+      sigma_grid_values = as.numeric(sigma_grid_values),
+      HPC = isTRUE(HPC),
+      slurm = list(
+        time = time,
+        mem = mem,
+        cpus_per_task = as.integer(cpus_per_task),
+        partition = partition,
+        account = account
+      )
+    ),
+    paths = list(
+      repo_root = repo_root,
+      output_root = output_root,
+      temp_dir = file.path(output_root, "temp", job_name),
+      slurm_scripts_dir = file.path(output_root, "slurm_scripts"),
+      slurm_prints_dir = file.path(output_root, "slurm_prints"),
+      slurm_output_dir = file.path(output_root, "slurm_output")
+    ),
+    tables = list(
+      dataset_bundles = bundles,
+      runs = runs,
+      tasks = tasks
+    )
+  )
+}
+
+write_real_data_job_artifacts <- function(job_config, run_task_script) {
+  paths <- job_config$paths
+  ensure_dir(paths$temp_dir)
+  ensure_dir(paths$slurm_scripts_dir)
+  ensure_dir(paths$slurm_prints_dir)
+  ensure_dir(paths$slurm_output_dir)
+
+  unlink(paths$temp_dir, recursive = TRUE)
+  ensure_dir(paths$temp_dir)
+
+  run_task_script <- normalizePath(run_task_script, winslash = "/", mustWork = TRUE)
+
+  job_config_json <- job_config
+  job_config_json$tables <- NULL
+  job_config_path <- file.path(paths$temp_dir, "job_config.json")
+  jsonlite::write_json(
+    job_config_json,
+    path = job_config_path,
+    auto_unbox = TRUE,
+    digits = NA,
+    pretty = TRUE
+  )
+
+  run_manifest_path <- file.path(paths$temp_dir, "run_manifest.csv")
+  dataset_bundles_path <- file.path(paths$temp_dir, "dataset_bundles.csv")
+  task_table_path <- file.path(paths$temp_dir, "task_table.csv")
+  readr::write_csv(job_config$tables$runs, run_manifest_path)
+  readr::write_csv(job_config$tables$dataset_bundles, dataset_bundles_path)
+  readr::write_csv(job_config$tables$tasks, task_table_path)
+
+  slurm_path <- file.path(paths$slurm_scripts_dir, paste0(job_config$job$name, ".slurm"))
+  writeLines(
+    render_real_data_slurm_script(job_config, run_task_script = run_task_script),
+    con = slurm_path
+  )
+
+  list(
+    job_config = job_config_path,
+    run_manifest = run_manifest_path,
+    dataset_bundles = dataset_bundles_path,
+    task_table = task_table_path,
+    slurm_script = slurm_path
+  )
+}
+
+render_real_data_slurm_script <- function(job_config, run_task_script) {
+  job <- job_config$job
+  paths <- job_config$paths
+  tasks <- job_config$tables$tasks
+  n_tasks <- nrow(tasks)
+  slurm <- job$slurm
+
+  partition_line <- if (!is.null(slurm$partition)) {
+    paste0("#SBATCH --partition=", slurm$partition)
+  } else {
+    NULL
+  }
+
+  account_line <- if (!is.null(slurm$account)) {
+    paste0("#SBATCH --account=", slurm$account)
+  } else {
+    NULL
+  }
+
+  hpc_setup <- if (isTRUE(job$HPC)) {
+    c(
+      "module load r",
+      "",
+      'export R_LIBS_USER="/storage/home/mgc5166/R/x86_64-pc-linux-gnu-library/4.3"',
+      ""
+    )
+  } else {
+    NULL
+  }
+
+  script <- c(
+    "#!/bin/bash",
+    sprintf("#SBATCH --job-name=%s", job$name),
+    sprintf("#SBATCH --array=1-%d", n_tasks),
+    sprintf("#SBATCH --time=%s", slurm$time),
+    sprintf("#SBATCH --mem=%s", slurm$mem),
+    sprintf("#SBATCH --cpus-per-task=%s", slurm$cpus_per_task),
+    sprintf("#SBATCH --mail-user=%s", job$email),
+    "#SBATCH --mail-type=BEGIN,END,FAIL",
+    partition_line,
+    account_line,
+    "#SBATCH --output=/dev/null",
+    "#SBATCH --error=/dev/null",
+    "",
+    "set -euo pipefail",
+    "",
+    sprintf('JOB_ROOT="%s"', normalizePath(paths$output_root, winslash = "/", mustWork = FALSE)),
+    sprintf('CONFIG_PATH="%s"', normalizePath(file.path(paths$temp_dir, "job_config.json"), winslash = "/", mustWork = FALSE)),
+    sprintf('RUN_TASK_SCRIPT="%s"', normalizePath(run_task_script, winslash = "/", mustWork = FALSE)),
+    sprintf('SLURM_PRINTS_BASE="%s"', normalizePath(paths$slurm_prints_dir, winslash = "/", mustWork = FALSE)),
+    sprintf('SLURM_OUTPUT_BASE="%s"', normalizePath(paths$slurm_output_dir, winslash = "/", mustWork = FALSE)),
+    sprintf('TEMP_DIR="%s"', normalizePath(paths$temp_dir, winslash = "/", mustWork = FALSE)),
+    sprintf('RUN_HISTORY_BASE="%s"', normalizePath(file.path(paths$output_root, "run_history"), winslash = "/", mustWork = FALSE)),
+    "",
+    'JOBNAME="${SLURM_JOB_NAME}"',
+    'PARENT_ID="${SLURM_ARRAY_JOB_ID:-$SLURM_JOB_ID}"',
+    'TASK_ID="${SLURM_ARRAY_TASK_ID:-0}"',
+    'PRINTS_DIR="${SLURM_PRINTS_BASE}/${JOBNAME}/${PARENT_ID}"',
+    'mkdir -p "${PRINTS_DIR}"',
+    "",
+    'exec >"${PRINTS_DIR}/${TASK_ID}.out" 2>"${PRINTS_DIR}/${TASK_ID}.err"',
+    'echo "[$(date -Is)] Starting task ${TASK_ID} for job ${JOBNAME} (parent ${PARENT_ID})"',
+    "",
+    'export SUSINE_JOB_NAME="${JOBNAME}"',
+    'export SUSINE_PARENT_ID="${PARENT_ID}"',
+    'export SUSINE_DEV="1"',
+    hpc_setup,
+    'if [ "${TASK_ID}" = "1" ]; then',
+    '  FINAL_HISTORY_DIR="${RUN_HISTORY_BASE}/${JOBNAME}/${PARENT_ID}"',
+    '  mkdir -p "${FINAL_HISTORY_DIR}"',
+    '  cp "${TEMP_DIR}"/* "${FINAL_HISTORY_DIR}/"',
+    '  echo "[$(date -Is)] Task 1: copied run_history from temp to ${FINAL_HISTORY_DIR}"',
+    'fi',
+    "",
+    'Rscript "$RUN_TASK_SCRIPT" \\',
+    '  --job-name "$JOBNAME" \\',
+    '  --task-id "$TASK_ID" \\',
+    '  --job-root "$JOB_ROOT" \\',
+    '  --config-path "$CONFIG_PATH"',
+    "",
+    'echo "[$(date -Is)] Completed task ${TASK_ID}"'
+  )
+  script[!is.na(script)]
+}
+
+real_data_read_job_artifacts <- function(config_path) {
+  cfg <- jsonlite::fromJSON(config_path, simplifyVector = TRUE)
+  temp_dir <- dirname(normalizePath(config_path, winslash = "/", mustWork = TRUE))
+  list(
+    job_config = cfg,
+    run_manifest = readr::read_csv(file.path(temp_dir, "run_manifest.csv"), show_col_types = FALSE),
+    dataset_bundles = readr::read_csv(file.path(temp_dir, "dataset_bundles.csv"), show_col_types = FALSE),
+    task_table = readr::read_csv(file.path(temp_dir, "task_table.csv"), show_col_types = FALSE)
+  )
+}
+
+real_data_safe_last <- function(x) {
+  x <- as.numeric(x)
+  x <- x[is.finite(x)]
+  if (!length(x)) NA_real_ else tail(x, 1L)
+}
+
+real_data_safe_first <- function(x) {
+  x <- as.numeric(x)
+  x <- x[is.finite(x)]
+  if (!length(x)) NA_real_ else x[[1]]
+}
+
+real_data_top_overlap <- function(x, y, k) {
+  if (!length(x) || !length(y)) {
+    return(NA_real_)
+  }
+  idx_x <- head(order(x, decreasing = TRUE), min(k, length(x)))
+  idx_y <- head(order(y, decreasing = TRUE), min(k, length(y)))
+  union_len <- length(union(idx_x, idx_y))
+  if (union_len == 0L) {
+    return(NA_real_)
+  }
+  length(intersect(idx_x, idx_y)) / union_len
+}
+
+real_data_write_parquet <- function(df, path) {
+  ensure_dir(dirname(path))
+  arrow::write_parquet(arrow::Table$create(df), path, compression = "zstd")
+}
+
+real_data_backend_matrices <- function(fit, backend) {
+  if (identical(backend, "susine_rss")) {
+    alpha <- as.matrix(fit$effect_fits$alpha)
+    alpha_b_hat <- as.matrix(fit$effect_fits$b_hat)
+    alpha_b_2_hat <- as.matrix(fit$effect_fits$b_2_hat)
+    b_hat <- ifelse(alpha > 0, alpha_b_hat / alpha, 0)
+    b_2_hat <- ifelse(alpha > 0, alpha_b_2_hat / alpha, 0)
+    pips <- as.numeric(fit$model_fit$PIPs)
+    elbo <- as.numeric(fit$model_fit$elbo)
+    sigma_2_trace <- as.numeric(fit$model_fit$sigma_2)
+    n_iter <- max(length(elbo) - 1L, 0L)
+    converged <- if (!is.null(fit$model_fit$alpha_diff) && length(fit$model_fit$alpha_diff)) {
+      as.logical(tail(fit$model_fit$alpha_diff, 1L) <= (fit$settings$tol %||% 1e-5))
+    } else if (!is.null(fit$settings$max_iter)) {
+      n_iter < fit$settings$max_iter
+    } else {
+      NA
+    }
+    return(list(
+      alpha = alpha,
+      b_hat = b_hat,
+      b_2_hat = b_2_hat,
+      alpha_b_hat = alpha_b_hat,
+      alpha_b_2_hat = alpha_b_2_hat,
+      pip = pips,
+      elbo = elbo,
+      sigma_2_trace = sigma_2_trace,
+      sigma_2_final = real_data_safe_last(sigma_2_trace),
+      n_iter = n_iter,
+      converged = converged
+    ))
+  }
+
+  if (identical(backend, "susie_rss")) {
+    alpha <- as.matrix(fit$alpha)
+    b_hat <- as.matrix(fit$mu)
+    b_2_hat <- as.matrix(fit$mu2)
+    alpha_b_hat <- alpha * b_hat
+    alpha_b_2_hat <- alpha * b_2_hat
+    pips <- fit$pip %||% (1 - apply(1 - alpha, 2L, prod))
+    elbo <- as.numeric(fit$elbo %||% numeric())
+    sigma_2_trace <- as.numeric(fit$sigma2 %||% fit$sigma_2 %||% numeric())
+    n_iter <- as.integer(fit$niter %||% max(length(elbo) - 1L, 0L))
+    return(list(
+      alpha = alpha,
+      b_hat = b_hat,
+      b_2_hat = b_2_hat,
+      alpha_b_hat = alpha_b_hat,
+      alpha_b_2_hat = alpha_b_2_hat,
+      pip = as.numeric(pips),
+      elbo = elbo,
+      sigma_2_trace = sigma_2_trace,
+      sigma_2_final = real_data_safe_last(sigma_2_trace),
+      n_iter = n_iter,
+      converged = as.logical(fit$converged %||% NA)
+    ))
+  }
+
+  stop("Unsupported backend: ", backend)
+}
+
+compute_real_data_cs_summaries <- function(
+    alpha,
+    variant_map,
+    R,
+    run_id,
+    locus_id,
+    gene_name,
+    backend,
+    cs_coverage = 0.95,
+    cs_min_purity = 0.5
+) {
+  L <- nrow(alpha)
+  raw_sets <- list()
+  filtered_sets <- list()
+  membership_rows <- list()
+  effect_rows <- list()
+
+  for (l in seq_len(L)) {
+    alpha_l <- as.numeric(alpha[l, ])
+    alpha_prob <- normalize_prob_vec(alpha_l)
+    cs_raw <- get_credible_set(alpha_prob, rho = cs_coverage)
+    purity_raw <- cs_purity_min_abs(NULL, cs_raw, cor_mat = R)
+    keep_filtered <- length(cs_raw) > 0L && is.finite(purity_raw) && purity_raw >= cs_min_purity
+    cs_filtered <- if (keep_filtered) cs_raw else integer(0)
+    purity_filtered <- if (keep_filtered) purity_raw else NA_real_
+
+    raw_sets[[length(raw_sets) + 1L]] <- cs_raw
+    filtered_sets[[length(filtered_sets) + 1L]] <- cs_filtered
+
+    add_membership <- function(set_idx, set_type) {
+      if (!length(set_idx)) {
+        return(invisible(NULL))
+      }
+      ord <- set_idx[order(alpha_prob[set_idx], decreasing = TRUE)]
+      cum_alpha <- cumsum(alpha_prob[ord])
+      membership_rows[[length(membership_rows) + 1L]] <<- tibble::tibble(
+        run_id = as.integer(run_id),
+        locus_id = as.character(locus_id),
+        gene_name = as.character(gene_name),
+        effect_l = as.integer(l),
+        backend = as.character(backend),
+        set_type = as.character(set_type),
+        member_rank = seq_along(ord),
+        variant_id = as.character(variant_map$variant_id[ord]),
+        ld_matrix_index = as.integer(variant_map$ld_matrix_index[ord]),
+        alpha_value = as.numeric(alpha_prob[ord]),
+        cumulative_alpha = as.numeric(cum_alpha)
+      )
+    }
+
+    add_membership(cs_raw, "raw")
+    add_membership(cs_filtered, "filtered")
+
+    top_idx <- which.max(alpha_prob)
+    effect_rows[[length(effect_rows) + 1L]] <- tibble::tibble(
+      run_id = as.integer(run_id),
+      locus_id = as.character(locus_id),
+      gene_name = as.character(gene_name),
+      effect_l = as.integer(l),
+      backend = as.character(backend),
+      alpha_mass = sum(alpha_l, na.rm = TRUE),
+      alpha_max = max(alpha_prob, na.rm = TRUE),
+      alpha_entropy = prob_entropy(alpha_prob),
+      alpha_k_eff = prob_k_eff(alpha_prob),
+      top_variant_id = as.character(variant_map$variant_id[[top_idx]]),
+      top_ld_index = as.integer(variant_map$ld_matrix_index[[top_idx]]),
+      cs_size_raw = length(cs_raw),
+      cs_size_filtered = length(cs_filtered),
+      cs_purity_raw = as.numeric(purity_raw),
+      cs_purity_filtered = as.numeric(purity_filtered)
+    )
+  }
+
+  effect_tbl <- dplyr::bind_rows(effect_rows)
+  membership_tbl <- dplyr::bind_rows(membership_rows)
+
+  valid_raw_sets <- raw_sets[vapply(raw_sets, length, integer(1)) > 0L]
+  valid_filtered_sets <- filtered_sets[vapply(filtered_sets, length, integer(1)) > 0L]
+
+  list(
+    effect_summaries = effect_tbl,
+    credible_set_membership = membership_tbl,
+    summary = list(
+      cs_count_raw = length(valid_raw_sets),
+      cs_count_filtered = length(valid_filtered_sets),
+      mean_cs_size_raw = if (nrow(effect_tbl)) mean(effect_tbl$cs_size_raw, na.rm = TRUE) else NA_real_,
+      mean_cs_size_filtered = if (nrow(effect_tbl)) mean(effect_tbl$cs_size_filtered, na.rm = TRUE) else NA_real_,
+      mean_cs_purity_raw = if (nrow(effect_tbl)) mean(effect_tbl$cs_purity_raw, na.rm = TRUE) else NA_real_,
+      mean_cs_purity_filtered = if (nrow(effect_tbl)) mean(effect_tbl$cs_purity_filtered, na.rm = TRUE) else NA_real_,
+      cs_overlap_rate_raw = overlap_rate_from_sets(valid_raw_sets),
+      cs_overlap_rate_filtered = overlap_rate_from_sets(valid_filtered_sets)
+    )
+  )
+}
+
+compute_real_data_run_metrics <- function(
+    run_row,
+    bundle,
+    fit,
+    backend_mats,
+    cs_info,
+    mu_0,
+    fit_rds_path,
+    wall_time_sec
+) {
+  pips <- as.numeric(backend_mats$pip)
+  elbo <- as.numeric(backend_mats$elbo)
+  sigma_2_final <- as.numeric(backend_mats$sigma_2_final)
+  top_ord <- order(pips, decreasing = TRUE)
+  top_mass <- function(k) sum(pips[head(top_ord, min(k, length(top_ord)))], na.rm = TRUE)
+
+  tibble::tibble(
+    run_id = as.integer(run_row$run_id),
+    dataset_bundle_id = as.integer(run_row$dataset_bundle_id),
+    locus_id = as.character(run_row$locus_id),
+    gene_name = as.character(run_row$gene_name),
+    backend = as.character(run_row$backend),
+    run_family = as.character(run_row$run_family),
+    c_value = as.numeric(run_row$c_value),
+    sigma_0_2_scalar = as.numeric(run_row$sigma_0_2_scalar),
+    baseline_c_l = as.numeric(run_row$baseline_c_l),
+    annotation_used = identical(run_row$backend[[1]], "susine_rss") &&
+      is.finite(run_row$c_value[[1]]) &&
+      abs(run_row$c_value[[1]]) > 0,
+    elbo_first = real_data_safe_first(elbo),
+    elbo_final = real_data_safe_last(elbo),
+    elbo_gain = real_data_safe_last(elbo) - real_data_safe_first(elbo),
+    n_iter = as.integer(backend_mats$n_iter),
+    converged = as.logical(backend_mats$converged),
+    sigma_2_final = sigma_2_final,
+    h2_proxy_std = pmin(pmax(1 - sigma_2_final, 0), 1),
+    sum_pip = sum(pips, na.rm = TRUE),
+    max_pip = max(pips, na.rm = TRUE),
+    pip_entropy = prob_entropy(pips),
+    n_snps_pip_ge_0_1 = sum(pips >= 0.1, na.rm = TRUE),
+    n_snps_pip_ge_0_5 = sum(pips >= 0.5, na.rm = TRUE),
+    n_snps_pip_ge_0_9 = sum(pips >= 0.9, na.rm = TRUE),
+    pip_mass_top1 = top_mass(1L),
+    pip_mass_top5 = top_mass(5L),
+    pip_mass_top10 = top_mass(10L),
+    L_nominal = as.integer(fit$settings$L %||% nrow(backend_mats$alpha)),
+    L_active = sum(apply(backend_mats$alpha, 1L, function(row) {
+      max(row, na.rm = TRUE) > (1 / max(length(row), 1L) + 1e-8)
+    })),
+    cs_count_raw = as.integer(cs_info$summary$cs_count_raw),
+    cs_count_filtered = as.integer(cs_info$summary$cs_count_filtered),
+    mean_cs_size_raw = as.numeric(cs_info$summary$mean_cs_size_raw),
+    mean_cs_size_filtered = as.numeric(cs_info$summary$mean_cs_size_filtered),
+    mean_cs_purity_raw = as.numeric(cs_info$summary$mean_cs_purity_raw),
+    mean_cs_purity_filtered = as.numeric(cs_info$summary$mean_cs_purity_filtered),
+    cs_overlap_rate_raw = as.numeric(cs_info$summary$cs_overlap_rate_raw),
+    cs_overlap_rate_filtered = as.numeric(cs_info$summary$cs_overlap_rate_filtered),
+    mu0_mean = mean(mu_0, na.rm = TRUE),
+    mu0_sd = stats::sd(mu_0, na.rm = TRUE),
+    mu0_l2 = sqrt(sum(mu_0^2, na.rm = TRUE)),
+    mu0_corr_z = suppressWarnings(stats::cor(mu_0, bundle$z, use = "pairwise.complete.obs")),
+    mu0_corr_beta_hat_std = suppressWarnings(stats::cor(mu_0, bundle$beta_hat_std, use = "pairwise.complete.obs")),
+    wall_time_sec = as.numeric(wall_time_sec),
+    fit_rds_path = as.character(fit_rds_path)
+  )
+}
+
+compute_real_data_dataset_metrics <- function(bundle) {
+  hl_count <- high_ld_count(bundle$R, threshold = 0.95)
+  z_metrics <- z_score_metrics(bundle$z, top_k = 10L)
+  var_y_median_slope <- stats::median(bundle$var_y_hat_from_slope, na.rm = TRUE)
+  var_y_median_se <- stats::median(bundle$var_y_hat_from_se, na.rm = TRUE)
+  var_y_iqr <- stats::IQR(bundle$var_y_hat_from_slope, na.rm = TRUE)
+
+  tibble::tibble(
+    dataset_bundle_id = as.integer(bundle$dataset_bundle_id),
+    locus_id = as.character(bundle$locus_id),
+    gene_name = as.character(bundle$gene_name),
+    n_variants = length(bundle$z),
+    n_sample_median = as.numeric(bundle$n_sample),
+    baseline_c_l = as.numeric(bundle$baseline_c_l),
+    M1 = mid_energy_M1(bundle$R),
+    high_ld_count_095 = hl_count,
+    high_ld_count_095_per_snp = if (length(bundle$z) > 0) (2 * hl_count) / length(bundle$z) else NA_real_,
+    high_ld_frac_095 = if (length(bundle$z) > 1) hl_count / (length(bundle$z) * (length(bundle$z) - 1) / 2) else NA_real_,
+    z_topk_ratio = z_metrics$z_topk_ratio,
+    z_max_abs = z_metrics$z_max_abs,
+    z_count_abs_gt_3 = z_metrics$z_count_abs_gt_3,
+    z_eff_signals = z_metrics$z_eff_signals,
+    annotation_corr_beta_hat_std = suppressWarnings(stats::cor(bundle$a, bundle$beta_hat_std, use = "pairwise.complete.obs")),
+    annotation_corr_z = suppressWarnings(stats::cor(bundle$a, bundle$z, use = "pairwise.complete.obs")),
+    annotation_mean_abs = mean(abs(bundle$a), na.rm = TRUE),
+    annotation_max_abs = max(abs(bundle$a), na.rm = TRUE),
+    var_y_hat_slope_median = as.numeric(var_y_median_slope),
+    var_y_hat_se_median = as.numeric(var_y_median_se),
+    var_y_hat_iqr = as.numeric(var_y_iqr),
+    var_y_near1_flag = isTRUE(is.finite(var_y_median_slope) &&
+      is.finite(var_y_median_se) &&
+      abs(var_y_median_slope - 1) <= 0.1 &&
+      abs(var_y_median_se - 1) <= 0.1)
+  )
+}
+
+extract_rss_fit_artifacts <- function(
+    fit,
+    run_row,
+    bundle,
+    job_config,
+    fit_rds_path,
+    wall_time_sec
+) {
+  backend_mats <- real_data_backend_matrices(fit, backend = run_row$backend)
+  mu_0 <- if (identical(run_row$backend, "susine_rss")) {
+    as.numeric(run_row$c_value) * bundle$a
+  } else {
+    rep(0, length(bundle$a))
+  }
+
+  cs_info <- compute_real_data_cs_summaries(
+    alpha = backend_mats$alpha,
+    variant_map = bundle$variant_map,
+    R = bundle$R,
+    run_id = run_row$run_id,
+    locus_id = bundle$locus_id,
+    gene_name = bundle$gene_name,
+    backend = run_row$backend,
+    cs_coverage = job_config$job$cs_coverage,
+    cs_min_purity = job_config$job$cs_min_purity
+  )
+
+  alpha_max <- apply(backend_mats$alpha, 2L, max, na.rm = TRUE)
+  alpha_sum <- colSums(backend_mats$alpha, na.rm = TRUE)
+  posterior_mean <- colSums(backend_mats$alpha_b_hat, na.rm = TRUE)
+  posterior_second_moment <- colSums(backend_mats$alpha_b_2_hat, na.rm = TRUE)
+  posterior_var <- pmax(posterior_second_moment - posterior_mean^2, 0)
+
+  variant_tbl <- bundle$variant_map %>%
+    dplyr::transmute(
+      run_id = as.integer(run_row$run_id),
+      locus_id = as.character(bundle$locus_id),
+      gene_name = as.character(bundle$gene_name),
+      backend = as.character(run_row$backend),
+      run_family = as.character(run_row$run_family),
+      variant_id = as.character(.data$variant_id),
+      ld_matrix_index = as.integer(.data$ld_matrix_index),
+      pip = as.numeric(backend_mats$pip),
+      posterior_mean = as.numeric(posterior_mean),
+      posterior_second_moment = as.numeric(posterior_second_moment),
+      posterior_var = as.numeric(posterior_var),
+      alpha_max = as.numeric(alpha_max),
+      alpha_sum = as.numeric(alpha_sum),
+      z_score = as.numeric(.data$z_score),
+      beta_hat_std = as.numeric(.data$beta_hat_std),
+      annotation_a = as.numeric(.data$annotation_a),
+      mu_0 = as.numeric(mu_0),
+      baseline_c_l = as.numeric(.data$baseline_c_l)
+    )
+
+  effect_tbl <- purrr::map_dfr(seq_len(nrow(backend_mats$alpha)), function(l) {
+    tibble::tibble(
+      run_id = as.integer(run_row$run_id),
+      locus_id = as.character(bundle$locus_id),
+      gene_name = as.character(bundle$gene_name),
+      effect_l = as.integer(l),
+      backend = as.character(run_row$backend),
+      variant_id = as.character(bundle$variant_map$variant_id),
+      ld_matrix_index = as.integer(bundle$variant_map$ld_matrix_index),
+      alpha = as.numeric(backend_mats$alpha[l, ]),
+      b_hat = as.numeric(backend_mats$b_hat[l, ]),
+      b_2_hat = as.numeric(backend_mats$b_2_hat[l, ]),
+      alpha_b_hat = as.numeric(backend_mats$alpha_b_hat[l, ]),
+      alpha_b_2_hat = as.numeric(backend_mats$alpha_b_2_hat[l, ]),
+      annotation_a = as.numeric(bundle$variant_map$annotation_a),
+      mu_0 = as.numeric(mu_0)
+    )
+  })
+
+  elbo_trace <- tibble::tibble(
+    run_id = as.integer(run_row$run_id),
+    locus_id = as.character(bundle$locus_id),
+    gene_name = as.character(bundle$gene_name),
+    backend = as.character(run_row$backend),
+    iteration = seq_along(backend_mats$elbo) - 1L,
+    elbo = as.numeric(backend_mats$elbo)
+  )
+
+  list(
+    run_metrics = compute_real_data_run_metrics(
+      run_row = run_row,
+      bundle = bundle,
+      fit = fit,
+      backend_mats = backend_mats,
+      cs_info = cs_info,
+      mu_0 = mu_0,
+      fit_rds_path = fit_rds_path,
+      wall_time_sec = wall_time_sec
+    ),
+    effect_summaries = cs_info$effect_summaries,
+    credible_set_membership = cs_info$credible_set_membership,
+    variant_posteriors = variant_tbl,
+    effect_posteriors = effect_tbl,
+    elbo_trace = elbo_trace,
+    validation = tibble::tibble(
+      run_id = as.integer(run_row$run_id),
+      task_id = as.integer(run_row$task_id),
+      has_issues = FALSE,
+      issues = NA_character_
+    )
+  )
+}
+
+real_data_build_fit_index_row <- function(run_row, fit_rds_path) {
+  tibble::tibble(
+    run_id = as.integer(run_row$run_id),
+    task_id = as.integer(run_row$task_id),
+    dataset_bundle_id = as.integer(run_row$dataset_bundle_id),
+    locus_id = as.character(run_row$locus_id),
+    gene_name = as.character(run_row$gene_name),
+    backend = as.character(run_row$backend),
+    run_family = as.character(run_row$run_family),
+    fit_rds_path = as.character(fit_rds_path)
+  )
+}
+
+real_data_run_susie_anchor <- function(bundle, run_row, job_config) {
+  if (!requireNamespace("susieR", quietly = TRUE)) {
+    stop("susieR is required for backend = 'susie_rss'.")
+  }
+  susie_fn <- getExportedValue("susieR", "susie_rss")
+  fn_formals <- names(formals(susie_fn))
+
+  args <- list(
+    R = bundle$R,
+    n = as.numeric(bundle$n_sample),
+    L = as.integer(job_config$job$L)
+  )
+  if ("z" %in% fn_formals) {
+    args$z <- bundle$z
+  } else if ("zhat" %in% fn_formals) {
+    args$zhat <- bundle$z
+  } else {
+    stop("Unable to identify z-score argument for susieR::susie_rss().")
+  }
+  if ("scaled_prior_variance" %in% fn_formals) {
+    args$scaled_prior_variance <- as.numeric(run_row$sigma_0_2_scalar)
+  } else if ("prior_variance" %in% fn_formals) {
+    args$prior_variance <- as.numeric(run_row$sigma_0_2_scalar)
+  } else {
+    stop("Unable to identify prior variance argument for susieR::susie_rss().")
+  }
+  if ("estimate_prior_variance" %in% fn_formals) {
+    args$estimate_prior_variance <- FALSE
+  }
+  if ("estimate_residual_variance" %in% fn_formals) {
+    args$estimate_residual_variance <- TRUE
+  }
+  if ("max_iter" %in% fn_formals) {
+    args$max_iter <- as.integer(job_config$job$max_iter)
+  }
+  if ("tol" %in% fn_formals) {
+    args$tol <- as.numeric(job_config$job$tol)
+  }
+  if ("convergence_method" %in% fn_formals) {
+    args$convergence_method <- "elbo"
+  }
+  if ("verbose" %in% fn_formals) {
+    args$verbose <- FALSE
+  }
+  if ("coverage" %in% fn_formals) {
+    args$coverage <- as.numeric(job_config$job$cs_coverage)
+  }
+  if ("min_abs_corr" %in% fn_formals) {
+    args$min_abs_corr <- as.numeric(job_config$job$cs_min_purity)
+  }
+  do.call(susie_fn, args)
+}
+
+run_real_data_task <- function(job_name, task_id, job_root = "output", config_path, quiet = FALSE) {
+  artifacts <- real_data_read_job_artifacts(config_path)
+  job_config <- artifacts$job_config
+  runs <- artifacts$run_manifest
+  bundles <- artifacts$dataset_bundles
+
+  task_id <- as.integer(task_id)
+  task_runs <- dplyr::filter(runs, .data$task_id == !!task_id) %>%
+    dplyr::arrange(.data$flush_group, .data$run_id)
+  if (!nrow(task_runs)) {
+    stop("No runs found for task_id ", task_id)
+  }
+
+  bundle_id <- unique(task_runs$dataset_bundle_id)
+  if (length(bundle_id) != 1L) {
+    stop("Each real-data task must map to exactly one dataset bundle.")
+  }
+  bundle_row <- dplyr::filter(bundles, .data$dataset_bundle_id == !!bundle_id)
+  if (nrow(bundle_row) != 1L) {
+    stop("Missing dataset bundle row for task_id ", task_id)
+  }
+
+  bundle <- load_real_data_locus_bundle(
+    locus_id = bundle_row$locus_id[[1]],
+    manifest_path = job_config$job$manifest_path,
+    repo_root = job_config$paths$repo_root %||% ensure_repo_root(getwd())
+  )
+
+  base_output <- determine_base_output(job_config)
+  task_dir <- prepare_task_staging_dir(base_output, task_id)
+  raw_fits_dir <- file.path(task_dir, "raw_fits")
+  ensure_dir(raw_fits_dir)
+
+  dataset_metrics_tbl <- compute_real_data_dataset_metrics(bundle)
+  fit_index_rows <- list()
+  dataset_metrics_written <- FALSE
+
+  flush_groups <- sort(unique(task_runs$flush_group))
+  for (flush_group in flush_groups) {
+    flush_label <- sprintf("flush-%03d", as.integer(flush_group))
+    group_runs <- dplyr::filter(task_runs, .data$flush_group == !!flush_group) %>%
+      dplyr::arrange(.data$run_id)
+
+    run_metrics_rows <- list()
+    effect_summary_rows <- list()
+    membership_rows <- list()
+    variant_rows <- list()
+    effect_rows <- list()
+    elbo_rows <- list()
+    validation_rows <- list()
+
+    for (i in seq_len(nrow(group_runs))) {
+      run_row <- group_runs[i, , drop = FALSE]
+      start_time <- proc.time()[["elapsed"]]
+
+      fit_result <- tryCatch({
+        if (identical(run_row$backend[[1]], "susine_rss")) {
+          susine::susine_rss(
+            L = as.integer(job_config$job$L),
+            z = bundle$z,
+            R = bundle$R,
+            n = bundle$n_sample,
+            mu_0 = as.numeric(run_row$c_value[[1]]) * bundle$a,
+            sigma_0_2 = as.numeric(run_row$sigma_0_2_scalar[[1]]),
+            prior_update_method = "none",
+            verbose = FALSE,
+            convergence_method = "elbo",
+            tol = as.numeric(job_config$job$tol),
+            max_iter = as.integer(job_config$job$max_iter)
+          )
+        } else {
+          real_data_run_susie_anchor(bundle, run_row, job_config)
+        }
+      }, error = function(e) {
+        e
+      })
+
+      if (inherits(fit_result, "error")) {
+        validation_rows[[length(validation_rows) + 1L]] <- tibble::tibble(
+          run_id = as.integer(run_row$run_id[[1]]),
+          task_id = as.integer(run_row$task_id[[1]]),
+          has_issues = TRUE,
+          issues = conditionMessage(fit_result)
+        )
+        next
+      }
+
+      fit_path <- file.path(raw_fits_dir, sprintf("run-%05d_fit.rds", as.integer(run_row$run_id[[1]])))
+      extracted <- tryCatch({
+        saveRDS(fit_result, fit_path, compress = "xz")
+        fit_index_rows[[length(fit_index_rows) + 1L]] <- real_data_build_fit_index_row(run_row, fit_path)
+
+        wall_time <- proc.time()[["elapsed"]] - start_time
+        extract_rss_fit_artifacts(
+          fit = fit_result,
+          run_row = run_row,
+          bundle = bundle,
+          job_config = job_config,
+          fit_rds_path = fit_path,
+          wall_time_sec = wall_time
+        )
+      }, error = function(e) {
+        validation_rows[[length(validation_rows) + 1L]] <<- tibble::tibble(
+          run_id = as.integer(run_row$run_id[[1]]),
+          task_id = as.integer(run_row$task_id[[1]]),
+          has_issues = TRUE,
+          issues = conditionMessage(e)
+        )
+        NULL
+      })
+      if (is.null(extracted)) {
+        next
+      }
+
+      run_metrics_rows[[length(run_metrics_rows) + 1L]] <- extracted$run_metrics
+      effect_summary_rows[[length(effect_summary_rows) + 1L]] <- extracted$effect_summaries
+      membership_rows[[length(membership_rows) + 1L]] <- extracted$credible_set_membership
+      variant_rows[[length(variant_rows) + 1L]] <- extracted$variant_posteriors
+      effect_rows[[length(effect_rows) + 1L]] <- extracted$effect_posteriors
+      elbo_rows[[length(elbo_rows) + 1L]] <- extracted$elbo_trace
+      validation_rows[[length(validation_rows) + 1L]] <- extracted$validation
+    }
+
+    run_metrics_tbl <- dplyr::bind_rows(run_metrics_rows)
+    effect_summaries_tbl <- dplyr::bind_rows(effect_summary_rows)
+    membership_tbl <- dplyr::bind_rows(membership_rows)
+    variant_tbl <- dplyr::bind_rows(variant_rows)
+    effect_tbl <- dplyr::bind_rows(effect_rows)
+    elbo_tbl <- dplyr::bind_rows(elbo_rows)
+    validation_tbl <- dplyr::bind_rows(validation_rows)
+
+    if (nrow(run_metrics_tbl)) {
+      readr::write_csv(run_metrics_tbl, file.path(task_dir, sprintf("%s_run_metrics.csv", flush_label)))
+    }
+    if (nrow(effect_summaries_tbl)) {
+      readr::write_csv(effect_summaries_tbl, file.path(task_dir, sprintf("%s_effect_summaries.csv", flush_label)))
+    }
+    if (nrow(membership_tbl)) {
+      real_data_write_parquet(membership_tbl, file.path(task_dir, sprintf("%s_credible_set_membership.parquet", flush_label)))
+    }
+    if (nrow(variant_tbl)) {
+      real_data_write_parquet(variant_tbl, file.path(task_dir, sprintf("%s_variant_posteriors.parquet", flush_label)))
+    }
+    if (nrow(effect_tbl)) {
+      real_data_write_parquet(effect_tbl, file.path(task_dir, sprintf("%s_effect_posteriors.parquet", flush_label)))
+    }
+    if (nrow(elbo_tbl)) {
+      readr::write_csv(elbo_tbl, file.path(task_dir, sprintf("%s_elbo_trace.csv", flush_label)))
+    }
+    if (nrow(validation_tbl)) {
+      readr::write_csv(validation_tbl, file.path(task_dir, sprintf("%s_validation.csv", flush_label)))
+    }
+    if (!dataset_metrics_written) {
+      readr::write_csv(dataset_metrics_tbl, file.path(task_dir, sprintf("%s_dataset_metrics.csv", flush_label)))
+      dataset_metrics_written <- TRUE
+    }
+  }
+
+  fit_index_tbl <- dplyr::bind_rows(fit_index_rows)
+  if (nrow(fit_index_tbl)) {
+    readr::write_csv(fit_index_tbl, file.path(task_dir, "flush-001_fit_file_index.csv"))
+  }
+
+  invisible(
+    list(
+      task_dir = task_dir,
+      raw_fits_dir = raw_fits_dir
+    )
+  )
+}
+
+compute_real_data_comparisons <- function(run_metrics_tbl, pip_lookup, run_rows, anchor_run_id = NA_integer_) {
+  run_rows <- dplyr::arrange(run_rows, .data$run_id)
+  functional_rows <- dplyr::filter(run_rows, .data$backend == "susine_rss", .data$run_family == "functional_grid")
+  if (!nrow(functional_rows)) {
+    return(tibble::tibble())
+  }
+
+  metric_lookup <- run_metrics_tbl %>%
+    dplyr::select(
+      .data$run_id,
+      .data$elbo_final,
+      .data$sigma_2_final,
+      .data$h2_proxy_std,
+      .data$pip_mass_top1,
+      .data$pip_mass_top10
+    )
+
+  build_row <- function(run_id, target_run_id, comparison_target) {
+    p <- pip_lookup[[as.character(run_id)]]
+    q <- pip_lookup[[as.character(target_run_id)]]
+    if (is.null(p) || is.null(q)) {
+      return(NULL)
+    }
+    run_m <- dplyr::filter(metric_lookup, .data$run_id == !!run_id)
+    target_m <- dplyr::filter(metric_lookup, .data$run_id == !!target_run_id)
+    if (nrow(run_m) != 1L || nrow(target_m) != 1L) {
+      return(NULL)
+    }
+    tibble::tibble(
+      run_id = as.integer(run_id),
+      target_run_id = as.integer(target_run_id),
+      comparison_target = as.character(comparison_target),
+      jsd_pip = as.numeric(js_distance(p, q)),
+      l1_pip = sum(abs(p - q), na.rm = TRUE),
+      spearman_pip = suppressWarnings(stats::cor(p, q, method = "spearman")),
+      top10_overlap = real_data_top_overlap(p, q, 10L),
+      top20_overlap = real_data_top_overlap(p, q, 20L),
+      delta_elbo = run_m$elbo_final[[1]] - target_m$elbo_final[[1]],
+      delta_sigma_2 = run_m$sigma_2_final[[1]] - target_m$sigma_2_final[[1]],
+      delta_h2_proxy_std = run_m$h2_proxy_std[[1]] - target_m$h2_proxy_std[[1]],
+      delta_pip_mass_top1 = run_m$pip_mass_top1[[1]] - target_m$pip_mass_top1[[1]],
+      delta_pip_mass_top10 = run_m$pip_mass_top10[[1]] - target_m$pip_mass_top10[[1]]
+    )
+  }
+
+  rows <- list()
+  for (i in seq_len(nrow(functional_rows))) {
+    run_row <- functional_rows[i, , drop = FALSE]
+    baseline_row <- dplyr::filter(
+      functional_rows,
+      .data$sigma_0_2_scalar == run_row$sigma_0_2_scalar[[1]],
+      .data$c_value == 0
+    )
+    if (nrow(baseline_row) == 1L) {
+      rows[[length(rows) + 1L]] <- build_row(
+        run_id = run_row$run_id[[1]],
+        target_run_id = baseline_row$run_id[[1]],
+        comparison_target = "same_sigma_c0"
+      )
+    }
+    if (is.finite(anchor_run_id)) {
+      rows[[length(rows) + 1L]] <- build_row(
+        run_id = run_row$run_id[[1]],
+        target_run_id = anchor_run_id,
+        comparison_target = "susie_anchor"
+      )
+    }
+  }
+  dplyr::bind_rows(rows)
+}
+
+real_data_write_dataset <- function(files, output_dir, partitioning = c("locus_id")) {
+  if (!length(files)) {
+    return(invisible(NULL))
+  }
+  unlink(output_dir, recursive = TRUE)
+  ds <- arrow::open_dataset(files, format = "parquet")
+  arrow::write_dataset(ds, output_dir, format = "parquet", partitioning = partitioning)
+  invisible(output_dir)
+}
+
+collect_real_data_results <- function(
+    job_name,
+    parent_job_id,
+    output_root = "output",
+    validate = TRUE,
+    output_dir = NULL
+) {
+  idx <- index_staging_outputs(job_name, parent_job_id, output_root = output_root)
+  validation_index <- NULL
+  if (validate) {
+    validation_index <- validate_staging_outputs(idx)
+    if (nrow(validation_index) && any(!validation_index$ok, na.rm = TRUE)) {
+      bad <- dplyr::filter(validation_index, !.data$ok)
+      stop("Real-data staging validation failed for ", nrow(bad), " file(s).")
+    }
+  }
+
+  results_dir <- file.path(output_root, "slurm_output", job_name, parent_job_id)
+  if (is.null(output_dir)) {
+    output_dir <- file.path(results_dir, "aggregated")
+  }
+  ensure_dir(output_dir)
+
+  temp_dir <- file.path(output_root, "temp", job_name)
+  history_dir <- file.path(output_root, "run_history", job_name, parent_job_id)
+  job_config_path <- if (file.exists(file.path(temp_dir, "job_config.json"))) {
+    file.path(temp_dir, "job_config.json")
+  } else {
+    file.path(history_dir, "job_config.json")
+  }
+  run_manifest_path <- if (file.exists(file.path(temp_dir, "run_manifest.csv"))) {
+    file.path(temp_dir, "run_manifest.csv")
+  } else {
+    file.path(history_dir, "run_manifest.csv")
+  }
+  dataset_bundles_path <- if (file.exists(file.path(temp_dir, "dataset_bundles.csv"))) {
+    file.path(temp_dir, "dataset_bundles.csv")
+  } else {
+    file.path(history_dir, "dataset_bundles.csv")
+  }
+
+  job_config <- if (file.exists(job_config_path)) {
+    jsonlite::read_json(job_config_path, simplifyVector = TRUE)
+  } else {
+    NULL
+  }
+  jsd_threshold <- as.numeric(job_config$job$jsd_threshold %||% 0.15)
+  softmax_temperature <- as.numeric(job_config$job$softmax_temperature %||% 1)
+
+  run_manifest <- readr::read_csv(run_manifest_path, show_col_types = FALSE)
+  dataset_bundles <- readr::read_csv(dataset_bundles_path, show_col_types = FALSE)
+  readr::write_csv(run_manifest, file.path(output_dir, "run_manifest.csv"))
+
+  csv_types <- c("run_metrics", "effect_summaries", "dataset_metrics", "validation", "elbo_trace", "fit_file_index")
+  csv_out_names <- c(
+    run_metrics = "run_metrics_full.csv",
+    effect_summaries = "effect_summaries_full.csv",
+    dataset_metrics = "dataset_metrics.csv",
+    validation = "validation.csv",
+    elbo_trace = "elbo_trace_full.csv",
+    fit_file_index = "fit_file_index.csv"
+  )
+  csv_tables <- list()
+  for (type in csv_types) {
+    files <- dplyr::filter(idx, .data$type == !!type)$path
+    tbl <- real_data_bind_csv_files(files)
+    if (identical(type, "dataset_metrics") && nrow(tbl)) {
+      tbl <- dplyr::distinct(tbl, .data$dataset_bundle_id, .keep_all = TRUE)
+    }
+    csv_tables[[type]] <- tbl
+    if (nrow(tbl)) {
+      readr::write_csv(tbl, file.path(output_dir, csv_out_names[[type]]))
+    }
+  }
+
+  variant_files <- dplyr::filter(idx, .data$type == "variant_posteriors")$path
+  effect_files <- dplyr::filter(idx, .data$type == "effect_posteriors")$path
+  cs_files <- dplyr::filter(idx, .data$type == "credible_set_membership")$path
+
+  variant_dataset_dir <- file.path(output_dir, "variant_posteriors_dataset")
+  effect_dataset_dir <- file.path(output_dir, "effect_posteriors_dataset")
+  cs_dataset_dir <- file.path(output_dir, "credible_set_membership_dataset")
+
+  real_data_write_dataset(variant_files, variant_dataset_dir)
+  real_data_write_dataset(effect_files, effect_dataset_dir)
+  real_data_write_dataset(cs_files, cs_dataset_dir)
+
+  variant_ds <- if (length(variant_files)) arrow::open_dataset(variant_dataset_dir) else NULL
+  pairwise_rows <- list()
+  multimodal_rows <- list()
+  cluster_rows <- list()
+  cluster_summary_rows <- list()
+  agg_weight_rows <- list()
+  aggregated_variant_rows <- list()
+  top_variant_rows <- list()
+  comparison_rows <- list()
+  functional_summary_rows <- list()
+  anchor_summary_rows <- list()
+
+  run_metrics_tbl <- csv_tables$run_metrics
+
+  for (i in seq_len(nrow(dataset_bundles))) {
+    locus_row <- dataset_bundles[i, , drop = FALSE]
+    locus_id <- locus_row$locus_id[[1]]
+    functional_runs <- run_manifest %>%
+      dplyr::filter(
+        .data$locus_id == !!locus_id,
+        .data$backend == "susine_rss",
+        .data$run_family == "functional_grid"
+      ) %>%
+      dplyr::arrange(.data$run_id)
+    anchor_runs <- run_manifest %>%
+      dplyr::filter(
+        .data$locus_id == !!locus_id,
+        .data$backend == "susie_rss",
+        .data$run_family == "susie_anchor"
+      ) %>%
+      dplyr::arrange(.data$run_id)
+
+    if (!nrow(functional_runs) || is.null(variant_ds)) {
+      next
+    }
+
+    locus_variant_tbl <- variant_ds %>%
+      dplyr::filter(.data$locus_id == !!locus_id) %>%
+      dplyr::select(
+        .data$run_id, .data$backend, .data$run_family, .data$variant_id,
+        .data$ld_matrix_index, .data$pip, .data$z_score, .data$beta_hat_std,
+        .data$annotation_a, .data$baseline_c_l
+      ) %>%
+      dplyr::collect()
+
+    locus_functional_tbl <- locus_variant_tbl %>%
+      dplyr::filter(.data$backend == "susine_rss", .data$run_family == "functional_grid") %>%
+      dplyr::arrange(.data$run_id, .data$ld_matrix_index)
+    pip_lookup_all <- split(
+      locus_variant_tbl %>%
+        dplyr::arrange(.data$run_id, .data$ld_matrix_index) %>%
+        dplyr::pull(.data$pip),
+      locus_variant_tbl %>%
+        dplyr::arrange(.data$run_id, .data$ld_matrix_index) %>%
+        dplyr::pull(.data$run_id)
+    )
+
+    pip_split <- split(locus_functional_tbl$pip, locus_functional_tbl$run_id)
+    run_ids <- as.integer(names(pip_split))
+    functional_runs_present <- functional_runs %>%
+      dplyr::filter(.data$run_id %in% run_ids) %>%
+      dplyr::arrange(match(.data$run_id, run_ids))
+    pip_mat <- do.call(rbind, lapply(pip_split, as.numeric))
+    rownames(pip_mat) <- run_ids
+    locus_run_metrics_present <- run_metrics_tbl %>%
+      dplyr::filter(.data$run_id %in% run_ids) %>%
+      dplyr::distinct(.data$run_id, .keep_all = TRUE) %>%
+      dplyr::arrange(match(.data$run_id, run_ids)) %>%
+      tibble::as_tibble()
+    if (nrow(locus_run_metrics_present) != length(run_ids)) {
+      stop("Missing run_metrics rows needed to collect functional runs for locus ", locus_id)
+    }
+    elbo_vec <- locus_run_metrics_present$elbo_final
+
+    pip_cache <- prepare_pip_similarity_cache(pip_mat)
+    mm <- compute_multimodal_metrics(
+      pip_list = lapply(seq_len(nrow(pip_mat)), function(j) pip_mat[j, ]),
+      jsd_threshold = jsd_threshold,
+      pip_cache = pip_cache
+    ) %>%
+      dplyr::mutate(
+        dataset_bundle_id = locus_row$dataset_bundle_id[[1]],
+        locus_id = locus_id,
+        gene_name = locus_row$gene_name[[1]],
+        group_key = paste0("functional_grid|", locus_id)
+      )
+    multimodal_rows[[length(multimodal_rows) + 1L]] <- mm
+
+    if (nrow(pip_mat) > 1L) {
+      clusters <- stats::cutree(pip_cache$hc, h = jsd_threshold)
+      cw <- .cluster_weights_from_hc(
+        pip_cache$hc,
+        jsd_threshold,
+        elbo_vec,
+        n_fits = nrow(pip_mat),
+        softmax_temperature = softmax_temperature
+      )
+      cluster_levels <- sort(unique(clusters))
+      weight_by_run <- rep(0, length(run_ids))
+      weight_by_run[cw$rep_idx] <- cw$w_rep
+
+      pair_rows <- list()
+      for (a in seq_len(nrow(pip_mat) - 1L)) {
+        for (b in seq.int(a + 1L, nrow(pip_mat))) {
+          pair_rows[[length(pair_rows) + 1L]] <- tibble::tibble(
+            locus_id = locus_id,
+            gene_name = locus_row$gene_name[[1]],
+            run_id_i = as.integer(run_ids[[a]]),
+            run_id_j = as.integer(run_ids[[b]]),
+            c_i = functional_runs_present$c_value[match(run_ids[[a]], functional_runs_present$run_id)],
+            sigma_i = functional_runs_present$sigma_0_2_scalar[match(run_ids[[a]], functional_runs_present$run_id)],
+            c_j = functional_runs_present$c_value[match(run_ids[[b]], functional_runs_present$run_id)],
+            sigma_j = functional_runs_present$sigma_0_2_scalar[match(run_ids[[b]], functional_runs_present$run_id)],
+            jsd = as.numeric(pip_cache$jsd_mat[a, b]),
+            same_cluster = as.logical(clusters[[a]] == clusters[[b]])
+          )
+        }
+      }
+      pairwise_rows[[length(pairwise_rows) + 1L]] <- dplyr::bind_rows(pair_rows)
+
+      membership_tbl <- purrr::map_dfr(seq_along(run_ids), function(j) {
+        cluster_id <- clusters[[j]]
+        cluster_members <- which(clusters == cluster_id)
+        rep_local_idx <- cw$rep_idx[match(cluster_id, cluster_levels)]
+        tibble::tibble(
+          locus_id = locus_id,
+          gene_name = locus_row$gene_name[[1]],
+          run_id = as.integer(run_ids[[j]]),
+          cluster_id = as.integer(cluster_id),
+          cluster_size = length(cluster_members),
+          cluster_freq = length(cluster_members) / length(run_ids),
+          is_representative = as.logical(j == rep_local_idx),
+          representative_run_id = as.integer(run_ids[[rep_local_idx]]),
+          representative_elbo = as.numeric(elbo_vec[[rep_local_idx]]),
+          jsd_to_representative = as.numeric(if (j == rep_local_idx) 0 else pip_cache$jsd_mat[j, rep_local_idx])
+        )
+      })
+      cluster_rows[[length(cluster_rows) + 1L]] <- membership_tbl
+
+      agg_weights_locus <- membership_tbl %>%
+        dplyr::left_join(
+          functional_runs_present %>% dplyr::select(.data$run_id, .data$c_value, .data$sigma_0_2_scalar),
+          by = "run_id"
+        ) %>%
+        dplyr::mutate(
+          agg_weight_run = weight_by_run[match(.data$run_id, run_ids)]
+        ) %>%
+        dplyr::select(
+          .data$locus_id, .data$gene_name, .data$run_id, .data$c_value,
+          .data$sigma_0_2_scalar, .data$cluster_id, .data$agg_weight_run
+        )
+      agg_weight_rows[[length(agg_weight_rows) + 1L]] <- agg_weights_locus
+
+      cluster_summary_rows[[length(cluster_summary_rows) + 1L]] <- purrr::map_dfr(seq_along(cluster_levels), function(k) {
+        cid <- cluster_levels[[k]]
+        rep_idx <- cw$rep_idx[[k]]
+        members <- which(clusters == cid)
+        tibble::tibble(
+          locus_id = locus_id,
+          gene_name = locus_row$gene_name[[1]],
+          cluster_id = as.integer(cid),
+          representative_run_id = as.integer(run_ids[[rep_idx]]),
+          cluster_size = length(members),
+          cluster_freq = length(members) / length(run_ids),
+          representative_elbo = as.numeric(elbo_vec[[rep_idx]]),
+          cluster_weight = as.numeric(cw$w_rep[[k]])
+        )
+      })
+
+      agg_pip <- aggregate_pip_matrix(
+        pip_mat = t(pip_mat),
+        elbos = elbo_vec,
+        method = "cluster_weight",
+        jsd_threshold = jsd_threshold,
+        hc = pip_cache$hc
+      )
+    } else {
+      membership_tbl <- tibble::tibble(
+        locus_id = locus_id,
+        gene_name = locus_row$gene_name[[1]],
+        run_id = as.integer(run_ids[[1]]),
+        cluster_id = 1L,
+        cluster_size = 1L,
+        cluster_freq = 1,
+        is_representative = TRUE,
+        representative_run_id = as.integer(run_ids[[1]]),
+        representative_elbo = as.numeric(elbo_vec[[1]]),
+        jsd_to_representative = 0
+      )
+      cluster_rows[[length(cluster_rows) + 1L]] <- membership_tbl
+      agg_weights_locus <- membership_tbl %>%
+        dplyr::left_join(
+          functional_runs_present %>% dplyr::select(.data$run_id, .data$c_value, .data$sigma_0_2_scalar),
+          by = "run_id"
+        ) %>%
+        dplyr::mutate(agg_weight_run = 1) %>%
+        dplyr::select(
+          .data$locus_id, .data$gene_name, .data$run_id, .data$c_value,
+          .data$sigma_0_2_scalar, .data$cluster_id, .data$agg_weight_run
+        )
+      agg_weight_rows[[length(agg_weight_rows) + 1L]] <- agg_weights_locus
+      cluster_summary_rows[[length(cluster_summary_rows) + 1L]] <- tibble::tibble(
+        locus_id = locus_id,
+        gene_name = locus_row$gene_name[[1]],
+        cluster_id = 1L,
+        representative_run_id = as.integer(run_ids[[1]]),
+        cluster_size = 1L,
+        cluster_freq = 1,
+        representative_elbo = as.numeric(elbo_vec[[1]]),
+        cluster_weight = 1
+      )
+      agg_pip <- as.numeric(pip_mat[1, ])
+    }
+
+    base_variant_tbl <- locus_functional_tbl %>%
+      dplyr::filter(.data$run_id == run_ids[[1]]) %>%
+      dplyr::arrange(.data$ld_matrix_index)
+    aggregated_tbl <- base_variant_tbl %>%
+      dplyr::transmute(
+        locus_id = locus_id,
+        gene_name = locus_row$gene_name[[1]],
+        variant_id = as.character(.data$variant_id),
+        ld_matrix_index = as.integer(.data$ld_matrix_index),
+        aggregated_pip = as.numeric(agg_pip),
+        z_score = as.numeric(.data$z_score),
+        beta_hat_std = as.numeric(.data$beta_hat_std),
+        annotation_a = as.numeric(.data$annotation_a),
+        baseline_c_l = as.numeric(.data$baseline_c_l)
+      )
+    aggregated_variant_rows[[length(aggregated_variant_rows) + 1L]] <- aggregated_tbl
+    top_variant_rows[[length(top_variant_rows) + 1L]] <- aggregated_tbl %>%
+      dplyr::arrange(dplyr::desc(.data$aggregated_pip), .data$ld_matrix_index) %>%
+      dplyr::slice_head(n = 20L) %>%
+      dplyr::mutate(rank = dplyr::row_number(), .before = 1L)
+
+    anchor_run_id <- if (nrow(anchor_runs)) as.integer(anchor_runs$run_id[[1]]) else NA_integer_
+    locus_run_metrics <- run_metrics_tbl %>% dplyr::filter(.data$locus_id == !!locus_id)
+    comparison_tbl <- compute_real_data_comparisons(
+      run_metrics_tbl = locus_run_metrics,
+      pip_lookup = pip_lookup_all,
+      run_rows = functional_runs_present,
+      anchor_run_id = anchor_run_id
+    ) %>%
+      dplyr::mutate(locus_id = locus_id, gene_name = locus_row$gene_name[[1]], .before = 1L)
+    comparison_rows[[length(comparison_rows) + 1L]] <- comparison_tbl
+
+    same_sigma_tbl <- comparison_tbl %>%
+      dplyr::filter(.data$comparison_target == "same_sigma_c0") %>%
+      dplyr::rename(
+        jsd_from_same_sigma_c0 = .data$jsd_pip,
+        l1_from_same_sigma_c0 = .data$l1_pip,
+        spearman_from_same_sigma_c0 = .data$spearman_pip,
+        top10_overlap_same_sigma_c0 = .data$top10_overlap,
+        top20_overlap_same_sigma_c0 = .data$top20_overlap,
+        delta_elbo_same_sigma_c0 = .data$delta_elbo,
+        delta_sigma_2_same_sigma_c0 = .data$delta_sigma_2,
+        delta_h2_proxy_std_same_sigma_c0 = .data$delta_h2_proxy_std,
+        delta_pip_mass_top1_same_sigma_c0 = .data$delta_pip_mass_top1,
+        delta_pip_mass_top10_same_sigma_c0 = .data$delta_pip_mass_top10
+      )
+
+    functional_summary_rows[[length(functional_summary_rows) + 1L]] <- functional_runs %>%
+      dplyr::filter(.data$run_id %in% run_ids) %>%
+      dplyr::arrange(match(.data$run_id, run_ids)) %>%
+      dplyr::left_join(
+        dplyr::select(
+          locus_run_metrics_present,
+          .data$run_id,
+          dplyr::all_of(setdiff(names(locus_run_metrics_present), c(names(functional_runs_present), "locus_id", "gene_name")))
+        ),
+        by = "run_id"
+      ) %>%
+      dplyr::left_join(
+        membership_tbl %>% dplyr::select(
+          .data$run_id, .data$cluster_id,
+          .data$cluster_size, .data$cluster_freq, .data$is_representative
+        ),
+        by = "run_id"
+      ) %>%
+      dplyr::left_join(
+        agg_weights_locus %>% dplyr::select(
+          .data$run_id, .data$agg_weight_run
+        ),
+        by = "run_id"
+      ) %>%
+      dplyr::left_join(
+        same_sigma_tbl %>% dplyr::select(-.data$comparison_target, -.data$gene_name, -.data$locus_id),
+        by = "run_id"
+      )
+
+    if (nrow(anchor_runs)) {
+      anchor_id <- as.integer(anchor_runs$run_id[[1]])
+      anchor_metric <- locus_run_metrics %>% dplyr::filter(.data$run_id == anchor_id)
+      baseline_metric <- locus_run_metrics %>%
+        dplyr::filter(.data$backend == "susine_rss", .data$run_family == "functional_grid",
+                      abs(.data$sigma_0_2_scalar - 0.2) < 1e-12,
+                      abs(.data$c_value) < 1e-12)
+      if (nrow(anchor_metric) == 1L && nrow(baseline_metric) == 1L) {
+        anchor_pip <- locus_variant_tbl %>% dplyr::filter(.data$run_id == anchor_id) %>% dplyr::arrange(.data$ld_matrix_index) %>% dplyr::pull(.data$pip)
+        base_pip <- locus_variant_tbl %>% dplyr::filter(.data$run_id == baseline_metric$run_id[[1]]) %>% dplyr::arrange(.data$ld_matrix_index) %>% dplyr::pull(.data$pip)
+        anchor_summary_rows[[length(anchor_summary_rows) + 1L]] <- tibble::tibble(
+          locus_id = locus_id,
+          gene_name = locus_row$gene_name[[1]],
+          susie_anchor_run_id = anchor_id,
+          susie_anchor_sigma_0_2_scalar = anchor_metric$sigma_0_2_scalar[[1]],
+          susie_anchor_elbo_final = anchor_metric$elbo_final[[1]],
+          susie_anchor_sigma_2_final = anchor_metric$sigma_2_final[[1]],
+          susie_anchor_h2_proxy_std = anchor_metric$h2_proxy_std[[1]],
+          susie_anchor_max_pip = anchor_metric$max_pip[[1]],
+          baseline_run_id = baseline_metric$run_id[[1]],
+          baseline_elbo_final = baseline_metric$elbo_final[[1]],
+          baseline_sigma_2_final = baseline_metric$sigma_2_final[[1]],
+          baseline_h2_proxy_std = baseline_metric$h2_proxy_std[[1]],
+          baseline_max_pip = baseline_metric$max_pip[[1]],
+          jsd_anchor_vs_baseline = as.numeric(js_distance(anchor_pip, base_pip)),
+          l1_anchor_vs_baseline = sum(abs(anchor_pip - base_pip), na.rm = TRUE),
+          top10_overlap_anchor_vs_baseline = real_data_top_overlap(anchor_pip, base_pip, 10L)
+        )
+      }
+    }
+  }
+
+  multimodal_tbl <- dplyr::bind_rows(multimodal_rows)
+  cluster_tbl <- dplyr::bind_rows(cluster_rows)
+  agg_weights_tbl <- dplyr::bind_rows(agg_weight_rows)
+  cluster_summary_tbl <- dplyr::bind_rows(cluster_summary_rows)
+  functional_summary_tbl <- dplyr::bind_rows(functional_summary_rows)
+  anchor_summary_tbl <- dplyr::bind_rows(anchor_summary_rows)
+  top_variants_tbl <- dplyr::bind_rows(top_variant_rows)
+  comparisons_tbl <- dplyr::bind_rows(comparison_rows)
+  aggregated_variants_tbl <- dplyr::bind_rows(aggregated_variant_rows)
+  pairwise_tbl <- dplyr::bind_rows(pairwise_rows)
+
+  if (nrow(multimodal_tbl)) readr::write_csv(multimodal_tbl, file.path(output_dir, "multimodal_metrics.csv"))
+  if (nrow(cluster_tbl)) readr::write_csv(cluster_tbl, file.path(output_dir, "cluster_membership.csv"))
+  if (nrow(agg_weights_tbl)) readr::write_csv(agg_weights_tbl, file.path(output_dir, "aggregation_weights_cluster_weight.csv"))
+  if (nrow(cluster_summary_tbl)) readr::write_csv(cluster_summary_tbl, file.path(output_dir, "cluster_summary.csv"))
+  if (nrow(functional_summary_tbl)) readr::write_csv(functional_summary_tbl, file.path(output_dir, "functional_grid_summary.csv"))
+  if (nrow(anchor_summary_tbl)) readr::write_csv(anchor_summary_tbl, file.path(output_dir, "susie_anchor_summary.csv"))
+  if (nrow(top_variants_tbl)) readr::write_csv(top_variants_tbl, file.path(output_dir, "top_variants_cluster_weight.csv"))
+  if (nrow(comparisons_tbl)) readr::write_csv(comparisons_tbl, file.path(output_dir, "run_comparisons.csv"))
+  if (nrow(pairwise_tbl)) real_data_write_parquet(pairwise_tbl, file.path(output_dir, "pairwise_pip_jsd.parquet"))
+  if (nrow(aggregated_variants_tbl)) real_data_write_parquet(aggregated_variants_tbl, file.path(output_dir, "aggregated_variant_pips_cluster_weight.parquet"))
+
+  metric_inventory <- tibble::tribble(
+    ~artifact, ~path, ~format, ~granularity, ~description,
+    "run_manifest", file.path(output_dir, "run_manifest.csv"), "csv", "run", "Full job run manifest",
+    "run_metrics_full", file.path(output_dir, "run_metrics_full.csv"), "csv", "run", "Per-run real-data fit metrics",
+    "effect_summaries_full", file.path(output_dir, "effect_summaries_full.csv"), "csv", "run-effect", "Per-effect alpha and credible-set summaries",
+    "dataset_metrics", file.path(output_dir, "dataset_metrics.csv"), "csv", "locus", "Per-locus LD, z, and annotation metrics",
+    "validation", file.path(output_dir, "validation.csv"), "csv", "run", "Per-run validation and issues",
+    "fit_file_index", file.path(output_dir, "fit_file_index.csv"), "csv", "run", "Index of persisted raw fit RDS files",
+    "elbo_trace_full", file.path(output_dir, "elbo_trace_full.csv"), "csv", "run-iteration", "ELBO trace for each run",
+    "multimodal_metrics", file.path(output_dir, "multimodal_metrics.csv"), "csv", "locus", "PIP diversity metrics across the functional grid",
+    "cluster_membership", file.path(output_dir, "cluster_membership.csv"), "csv", "run", "Per-run JSD cluster assignments",
+    "aggregation_weights_cluster_weight", file.path(output_dir, "aggregation_weights_cluster_weight.csv"), "csv", "run", "Cluster-weight aggregation weights per run",
+    "cluster_summary", file.path(output_dir, "cluster_summary.csv"), "csv", "locus-cluster", "Representative runs and cluster weights",
+    "functional_grid_summary", file.path(output_dir, "functional_grid_summary.csv"), "csv", "run", "Functional grid summary joined to cluster and drift metrics",
+    "susie_anchor_summary", file.path(output_dir, "susie_anchor_summary.csv"), "csv", "locus", "susieR anchor vs functional baseline summary",
+    "top_variants_cluster_weight", file.path(output_dir, "top_variants_cluster_weight.csv"), "csv", "locus-variant", "Top aggregated variants per locus",
+    "run_comparisons", file.path(output_dir, "run_comparisons.csv"), "csv", "run-target", "Per-run comparison metrics against baselines",
+    "variant_posteriors_dataset", variant_dataset_dir, "parquet-dataset", "run-variant", "Per-run variant posterior summaries",
+    "effect_posteriors_dataset", effect_dataset_dir, "parquet-dataset", "run-effect-variant", "Per-effect posterior summaries",
+    "credible_set_membership_dataset", cs_dataset_dir, "parquet-dataset", "run-effect-member", "Credible-set membership rows",
+    "pairwise_pip_jsd", file.path(output_dir, "pairwise_pip_jsd.parquet"), "parquet", "run-pair", "Pairwise PIP JSD within each locus",
+    "aggregated_variant_pips_cluster_weight", file.path(output_dir, "aggregated_variant_pips_cluster_weight.parquet"), "parquet", "locus-variant", "Cluster-weight aggregated variant PIPs"
+  )
+  readr::write_csv(metric_inventory, file.path(output_dir, "metric_inventory.csv"))
+
+  list(
+    output_dir = output_dir,
+    validation = validation_index,
+    metric_inventory = metric_inventory
+  )
+}
+
+validate_real_data_outputs <- function(output_dir) {
+  required_csv <- list(
+    run_manifest = c("run_id", "task_id", "dataset_bundle_id", "locus_id", "backend", "run_family"),
+    run_metrics_full = c("run_id", "locus_id", "backend", "elbo_final", "sigma_2_final", "fit_rds_path"),
+    effect_summaries_full = c("run_id", "effect_l", "backend", "top_variant_id", "cs_size_raw"),
+    dataset_metrics = c("dataset_bundle_id", "locus_id", "M1", "z_topk_ratio", "annotation_corr_z"),
+    validation = c("run_id", "task_id", "has_issues"),
+    fit_file_index = c("run_id", "task_id", "fit_rds_path"),
+    elbo_trace_full = c("run_id", "iteration", "elbo"),
+    multimodal_metrics = c("locus_id", "mean_jsd", "n_clusters"),
+    cluster_membership = c("locus_id", "run_id", "cluster_id", "representative_run_id"),
+    aggregation_weights_cluster_weight = c("locus_id", "run_id", "agg_weight_run"),
+    cluster_summary = c("locus_id", "cluster_id", "representative_run_id", "cluster_weight"),
+    functional_grid_summary = c("run_id", "locus_id", "cluster_id", "agg_weight_run"),
+    susie_anchor_summary = c("locus_id", "susie_anchor_run_id", "baseline_run_id"),
+    top_variants_cluster_weight = c("locus_id", "variant_id", "aggregated_pip"),
+    run_comparisons = c("run_id", "target_run_id", "comparison_target", "jsd_pip"),
+    metric_inventory = c("artifact", "path", "format", "granularity")
+  )
+
+  required_parquet <- list(
+    pairwise_pip_jsd = c("locus_id", "run_id_i", "run_id_j", "jsd", "same_cluster"),
+    aggregated_variant_pips_cluster_weight = c("locus_id", "variant_id", "aggregated_pip")
+  )
+
+  checks <- list()
+  for (nm in names(required_csv)) {
+    path <- file.path(output_dir, paste0(nm, ".csv"))
+    df <- if (file.exists(path)) readr::read_csv(path, show_col_types = FALSE, n_max = 1L) else NULL
+    missing_cols <- if (is.null(df)) required_csv[[nm]] else setdiff(required_csv[[nm]], names(df))
+    checks[[length(checks) + 1L]] <- tibble::tibble(
+      artifact = nm,
+      path = path,
+      exists = !is.null(df),
+      missing_columns = if (length(missing_cols)) paste(missing_cols, collapse = ", ") else NA_character_,
+      ok = !is.null(df) && !length(missing_cols)
+    )
+  }
+
+  dataset_dirs <- list(
+    variant_posteriors_dataset = c("run_id", "locus_id", "variant_id", "pip", "mu_0"),
+    effect_posteriors_dataset = c("run_id", "locus_id", "effect_l", "variant_id", "alpha", "b_hat"),
+    credible_set_membership_dataset = c("run_id", "locus_id", "effect_l", "set_type", "variant_id")
+  )
+  for (nm in names(dataset_dirs)) {
+    path <- file.path(output_dir, nm)
+    df <- if (dir.exists(path)) {
+      arrow::open_dataset(path) %>%
+        dplyr::slice_head(n = 1L) %>%
+        dplyr::collect()
+    } else {
+      NULL
+    }
+    missing_cols <- if (is.null(df)) dataset_dirs[[nm]] else setdiff(dataset_dirs[[nm]], names(df))
+    checks[[length(checks) + 1L]] <- tibble::tibble(
+      artifact = nm,
+      path = path,
+      exists = !is.null(df),
+      missing_columns = if (length(missing_cols)) paste(missing_cols, collapse = ", ") else NA_character_,
+      ok = !is.null(df) && !length(missing_cols)
+    )
+  }
+
+  for (nm in names(required_parquet)) {
+    path <- file.path(output_dir, paste0(nm, ".parquet"))
+    df <- if (file.exists(path)) arrow::read_parquet(path) %>% tibble::as_tibble() %>% utils::head(1L) else NULL
+    missing_cols <- if (is.null(df)) required_parquet[[nm]] else setdiff(required_parquet[[nm]], names(df))
+    checks[[length(checks) + 1L]] <- tibble::tibble(
+      artifact = nm,
+      path = path,
+      exists = !is.null(df),
+      missing_columns = if (length(missing_cols)) paste(missing_cols, collapse = ", ") else NA_character_,
+      ok = !is.null(df) && !length(missing_cols)
+    )
+  }
+
+  checks_tbl <- dplyr::bind_rows(checks)
+  list(
+    ok = all(checks_tbl$ok),
+    checks = checks_tbl
+  )
+}

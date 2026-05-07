@@ -1,0 +1,84 @@
+---
+title: "Real-Data Ensemble — Collect Results"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+This workbook consolidates staged task outputs for a completed real-data
+ensemble job and validates the final artifact inventory.
+
+```{r setup, message=FALSE}
+here::i_am("vignettes/real data pipeline/collect_results_workbook_real_data_ensemble.Rmd")
+library(here)
+library(devtools)
+library(dplyr)
+library(readr)
+library(knitr)
+
+susine_path <- here("..", "susine")
+if (file.exists(file.path(susine_path, "DESCRIPTION"))) {
+  options(test_susine.local_susine_path = normalizePath(susine_path, winslash = "/", mustWork = TRUE))
+  devtools::load_all(susine_path)
+}
+devtools::load_all(".")
+```
+
+# 1. User Configuration
+
+```{r config}
+job_name <- "real_data_ensemble_selected10"
+parent_job_id <- "REPLACE_WITH_SLURM_PARENT_ID"
+output_root <- here("output")
+```
+
+# 2. Inspect Staging
+
+```{r staging}
+file_index <- test_susine::index_staging_outputs(
+  job_name = job_name,
+  parent_job_id = parent_job_id,
+  output_root = output_root
+)
+
+file_index %>%
+  dplyr::count(type)
+```
+
+# 3. Collect
+
+```{r collect}
+collected <- test_susine::collect_real_data_results(
+  job_name = job_name,
+  parent_job_id = parent_job_id,
+  output_root = output_root,
+  validate = TRUE
+)
+
+collected$output_dir
+```
+
+# 4. Validate Outputs
+
+```{r validate}
+validation <- test_susine::validate_real_data_outputs(collected$output_dir)
+
+validation$ok
+kable(validation$checks)
+```
+
+# 5. Inventory Preview
+
+```{r inventory}
+inventory <- readr::read_csv(
+  file.path(collected$output_dir, "metric_inventory.csv"),
+  show_col_types = FALSE
+)
+
+kable(inventory)
+```
