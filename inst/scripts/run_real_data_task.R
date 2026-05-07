@@ -7,6 +7,22 @@ sanitize_path <- function(path) {
 
 suppressPackageStartupMessages(library(devtools))
 
+reload_local_packages <- function(susine_path, repo_root) {
+  if (!requireNamespace("pkgload", quietly = TRUE)) {
+    stop("pkgload is required to reload local packages cleanly.")
+  }
+
+  if ("package:test_susine" %in% search() || "test_susine" %in% loadedNamespaces()) {
+    try(pkgload::unload("test_susine"), silent = TRUE)
+  }
+  if ("package:susine" %in% search() || "susine" %in% loadedNamespaces()) {
+    try(pkgload::unload("susine"), silent = TRUE)
+  }
+
+  pkgload::load_all(susine_path, quiet = TRUE, reset = TRUE)
+  pkgload::load_all(repo_root, quiet = TRUE, reset = TRUE)
+}
+
 find_repo_root <- function() {
   cmd <- commandArgs(trailingOnly = FALSE)
   file_arg <- "--file="
@@ -27,7 +43,28 @@ find_repo_root <- function() {
 
 repo_root <- find_repo_root()
 setwd(repo_root)
-devtools::load_all(repo_root)
+
+use_dev <- Sys.getenv("SUSINE_DEV", unset = "") == "1"
+if (use_dev) {
+  susine_path <- file.path(dirname(repo_root), "susine")
+  if (dir.exists(susine_path) && file.exists(file.path(susine_path, "DESCRIPTION"))) {
+    message("Loading local dev susine from: ", susine_path)
+    options(test_susine.local_susine_path = normalizePath(susine_path, winslash = "/", mustWork = TRUE))
+    reload_local_packages(susine_path, repo_root)
+    susine_fn <- getExportedValue("susine", "susine_rss")
+    if (!"prior_update_method" %in% names(formals(susine_fn))) {
+      stop(
+        "Local dev susine was loaded from ", susine_path,
+        " but susine::susine_rss() lacks the expected prior_update_method argument. ",
+        "That sibling checkout is stale or not the expected branch."
+      )
+    }
+  } else {
+    pkgload::load_all(repo_root, quiet = TRUE, reset = TRUE)
+  }
+} else {
+  suppressPackageStartupMessages(library(test_susine))
+}
 
 parse_args <- function(args) {
   out <- list()

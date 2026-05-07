@@ -1167,6 +1167,9 @@ real_data_run_susie_anchor <- function(bundle, run_row, job_config) {
   if ("estimate_residual_variance" %in% fn_formals) {
     args$estimate_residual_variance <- TRUE
   }
+  if ("check_prior" %in% fn_formals) {
+    args$check_prior <- FALSE
+  }
   if ("max_iter" %in% fn_formals) {
     args$max_iter <- as.integer(job_config$job$max_iter)
   }

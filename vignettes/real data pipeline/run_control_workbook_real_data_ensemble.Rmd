@@ -33,6 +33,8 @@ devtools::load_all(".")
 # 1. User Configuration
 
 ```{r config}
+DRY_RUN <- TRUE
+
 job_name <- "real_data_ensemble_selected10"
 manifest_path <- here("data", "real_case_studies", "selected_10_loci", "locus_manifest.csv")
 
@@ -53,6 +55,22 @@ softmax_temperature <- 1
 
 c_grid_8 <- seq(0, 1.5, length.out = 8)
 sigma_grid_8 <- c(0.01, 0.03, 0.07, 0.1, 0.2, 0.4, 0.7, 1.0)
+
+dry_run_loci <- NULL
+if (isTRUE(DRY_RUN)) {
+  job_name <- paste0(job_name, "_dry")
+  c_grid_8 <- 0
+  sigma_grid_8 <- 0.2
+  manifest_preview <- readr::read_csv(manifest_path, show_col_types = FALSE)
+  dry_run_loci <- manifest_preview$locus_id[[1]]
+  slurm_time <- "00:29:59"
+  message(
+    "DRY_RUN active. Single-locus, single-grid-point smoke test.\n",
+    "  job_name = ", job_name, "\n",
+    "  locus    = ", dry_run_loci, "\n",
+    "  fits     = 1 functional (c=0, sigma=0.2) + 1 susieR anchor"
+  )
+}
 ```
 
 # 2. Build Job Config
@@ -61,6 +79,7 @@ sigma_grid_8 <- c(0.01, 0.03, 0.07, 0.1, 0.2, 0.4, 0.7, 1.0)
 job_config <- test_susine::build_real_data_job_config(
   job_name = job_name,
   manifest_path = manifest_path,
+  loci = dry_run_loci,
   output_root = here("output"),
   L = L,
   c_grid_values = c_grid_8,
