@@ -1184,12 +1184,13 @@ real_data_basin_r2_drift_pair <- function(b_a, b_b, R) {
   cor_mat <- ifelse(denom > 0, num / denom, 0)
   cor_mat <- pmin(pmax(cor_mat, -1), 1)
 
-  # solve_LSAP needs a square non-negative cost; pad with -1 (so padding never
-  # gets picked over a real edge in maximum-assignment mode), then re-zero
-  # outside the actual L_a x L_b block.
+  # solve_LSAP requires non-negative entries when maximum = TRUE. Cosines live
+  # in [-1, 1], so shift by +1 (adding a constant to every entry preserves the
+  # optimal assignment). Pad to square with 0 so unmatched effects pair off
+  # outside the L_a x L_b block.
   L <- max(L_a, L_b)
   M_sq <- matrix(0, L, L)
-  M_sq[seq_len(L_a), seq_len(L_b)] <- cor_mat
+  M_sq[seq_len(L_a), seq_len(L_b)] <- cor_mat + 1
   perm <- as.integer(clue::solve_LSAP(M_sq, maximum = TRUE))
 
   w_sum <- 0
