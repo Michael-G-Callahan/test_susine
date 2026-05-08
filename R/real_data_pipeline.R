@@ -414,6 +414,29 @@ load_real_data_locus_bundle <- function(
     baseline_c_l = as.numeric(annotation_tbl$baseline_c_l)
   )
 
+  # Sample-size filter: drop variants whose effective n is < 0.5 * max(n).
+  # This bounds within-locus n spread to 2x so the single-n assumption used by
+  # susie_rss / susine_rss is more honest, and pairs with `n = min(...)` below.
+  ss_vec <- variant_map$sample_size
+  ss_max <- suppressWarnings(max(ss_vec, na.rm = TRUE))
+  if (is.finite(ss_max) && ss_max > 0) {
+    ss_threshold <- 0.5 * ss_max
+    keep <- !is.na(ss_vec) & ss_vec >= ss_threshold
+  } else {
+    ss_threshold <- NA_real_
+    keep <- rep(TRUE, nrow(variant_map))
+  }
+  n_dropped_sample_size <- sum(!keep)
+  if (n_dropped_sample_size > 0L) {
+    if (sum(keep) < 2L) {
+      stop("After sample-size filter (n >= 0.5 * max), fewer than 2 variants remain for ", locus_id)
+    }
+    variant_map <- variant_map[keep, , drop = FALSE]
+    R <- R[keep, keep, drop = FALSE]
+    # Re-index 1..p_new so downstream sort/join on ld_matrix_index stays valid
+    variant_map$ld_matrix_index <- seq_len(nrow(variant_map))
+  }
+
   baseline_c <- unique(stats::na.omit(variant_map$baseline_c_l))
   if (length(baseline_c) > 1L) {
     stop("Multiple baseline_c_l values found for ", locus_id)
@@ -429,7 +452,11 @@ load_real_data_locus_bundle <- function(
     R = R,
     a = as.numeric(variant_map$annotation_a),
     variant_map = variant_map,
-    n_sample = as.numeric(stats::median(variant_map$sample_size, na.rm = TRUE)),
+    n_sample = as.numeric(min(variant_map$sample_size, na.rm = TRUE)),
+    n_sample_max = as.numeric(max(variant_map$sample_size, na.rm = TRUE)),
+    n_sample_median = as.numeric(stats::median(variant_map$sample_size, na.rm = TRUE)),
+    n_sample_threshold = as.numeric(ss_threshold),
+    n_dropped_sample_size = as.integer(n_dropped_sample_size),
     baseline_c_l = as.numeric(real_data_scalar_or_na(baseline_c, NA_real_)),
     beta_hat_std = as.numeric(variant_map$beta_hat_std),
     var_y_hat_from_slope = as.numeric(variant_map$var_y_hat_from_slope),
@@ -974,7 +1001,59 @@ compute_real_data_run_metrics <- function(
     mu0_corr_z = suppressWarnings(stats::cor(mu_0, bundle$z, use = "pairwise.complete.obs")),
     mu0_corr_beta_hat_std = suppressWarnings(stats::cor(mu_0, bundle$beta_hat_std, use = "pairwise.complete.obs")),
     wall_time_sec = as.numeric(wall_time_sec),
-    fit_rds_path = as.character(fit_rds_path)
+    fit_rds_path = as.character(fit_rds_path),
+    error_message = NA_character_
+  )
+}
+
+# Stub run_metrics row written when a fit errors, so failed runs remain visible
+# to downstream aggregators. Schema must match compute_real_data_run_metrics().
+real_data_failed_run_metrics_stub <- function(run_row, error_message) {
+  tibble::tibble(
+    run_id = as.integer(run_row$run_id[[1]]),
+    dataset_bundle_id = as.integer(run_row$dataset_bundle_id[[1]]),
+    locus_id = as.character(run_row$locus_id[[1]]),
+    gene_name = as.character(run_row$gene_name[[1]]),
+    backend = as.character(run_row$backend[[1]]),
+    run_family = as.character(run_row$run_family[[1]]),
+    c_value = as.numeric(run_row$c_value[[1]]),
+    sigma_0_2_scalar = as.numeric(run_row$sigma_0_2_scalar[[1]]),
+    baseline_c_l = as.numeric(run_row$baseline_c_l[[1]]),
+    annotation_used = NA,
+    elbo_first = NA_real_,
+    elbo_final = NA_real_,
+    elbo_gain = NA_real_,
+    n_iter = NA_integer_,
+    converged = FALSE,
+    sigma_2_final = NA_real_,
+    h2_proxy_std = NA_real_,
+    sum_pip = NA_real_,
+    max_pip = NA_real_,
+    pip_entropy = NA_real_,
+    n_snps_pip_ge_0_1 = NA_integer_,
+    n_snps_pip_ge_0_5 = NA_integer_,
+    n_snps_pip_ge_0_9 = NA_integer_,
+    pip_mass_top1 = NA_real_,
+    pip_mass_top5 = NA_real_,
+    pip_mass_top10 = NA_real_,
+    L_nominal = NA_integer_,
+    L_active = NA_integer_,
+    cs_count_raw = NA_integer_,
+    cs_count_filtered = NA_integer_,
+    mean_cs_size_raw = NA_real_,
+    mean_cs_size_filtered = NA_real_,
+    mean_cs_purity_raw = NA_real_,
+    mean_cs_purity_filtered = NA_real_,
+    cs_overlap_rate_raw = NA_real_,
+    cs_overlap_rate_filtered = NA_real_,
+    mu0_mean = NA_real_,
+    mu0_sd = NA_real_,
+    mu0_l2 = NA_real_,
+    mu0_corr_z = NA_real_,
+    mu0_corr_beta_hat_std = NA_real_,
+    wall_time_sec = NA_real_,
+    fit_rds_path = NA_character_,
+    error_message = as.character(error_message)
   )
 }
 
@@ -984,13 +1063,18 @@ compute_real_data_dataset_metrics <- function(bundle) {
   var_y_median_slope <- stats::median(bundle$var_y_hat_from_slope, na.rm = TRUE)
   var_y_median_se <- stats::median(bundle$var_y_hat_from_se, na.rm = TRUE)
   var_y_iqr <- stats::IQR(bundle$var_y_hat_from_slope, na.rm = TRUE)
+  ld_z_diag <- real_data_ld_z_consistency(bundle$R, bundle$z, bundle$n_sample)
 
   tibble::tibble(
     dataset_bundle_id = as.integer(bundle$dataset_bundle_id),
     locus_id = as.character(bundle$locus_id),
     gene_name = as.character(bundle$gene_name),
     n_variants = length(bundle$z),
-    n_sample_median = as.numeric(bundle$n_sample),
+    n_sample_min = as.numeric(bundle$n_sample),
+    n_sample_max = as.numeric(bundle$n_sample_max %||% NA_real_),
+    n_sample_median = as.numeric(bundle$n_sample_median %||% NA_real_),
+    n_sample_threshold = as.numeric(bundle$n_sample_threshold %||% NA_real_),
+    n_dropped_sample_size = as.integer(bundle$n_dropped_sample_size %||% NA_integer_),
     baseline_c_l = as.numeric(bundle$baseline_c_l),
     M1 = mid_energy_M1(bundle$R),
     high_ld_count_095 = hl_count,
@@ -1010,8 +1094,153 @@ compute_real_data_dataset_metrics <- function(bundle) {
     var_y_near1_flag = isTRUE(is.finite(var_y_median_slope) &&
       is.finite(var_y_median_se) &&
       abs(var_y_median_slope - 1) <= 0.1 &&
-      abs(var_y_median_se - 1) <= 0.1)
+      abs(var_y_median_se - 1) <= 0.1),
+    mom_sigma2_hat = ld_z_diag$mom_sigma2_hat,
+    ld_chol_ok = ld_z_diag$ld_chol_ok,
+    ld_z_inconsistency_flag = ld_z_diag$ld_z_inconsistency_flag
   )
+}
+
+# Diagnostic for (R, z, n) consistency under the susie_rss model.
+# - ld_chol_ok: TRUE iff R is positive-definite without regularization.
+# - mom_sigma2_hat: 1 - z' (R + lambda I)^-1 z / n. The susie_rss MoM estimator
+#   for residual variance; values < 0 indicate the (R, z, n) triple is
+#   internally inconsistent (e.g. external LD reference panel, allele flips,
+#   wrong n) and susieR will throw "estimated value is negative".
+# - ld_z_inconsistency_flag: TRUE if either R is not PSD or mom_sigma2_hat < 0.
+real_data_ld_z_consistency <- function(R, z, n, lambda = 1e-4) {
+  p <- length(z)
+  if (!is.finite(n) || n <= 0 || p < 2L) {
+    return(list(
+      mom_sigma2_hat = NA_real_,
+      ld_chol_ok = NA,
+      ld_z_inconsistency_flag = NA
+    ))
+  }
+  ld_chol_ok <- tryCatch({
+    suppressWarnings(chol(R))
+    TRUE
+  }, error = function(e) FALSE)
+  ch <- tryCatch(suppressWarnings(chol(R + diag(lambda, p))),
+                 error = function(e) NULL)
+  mom_sigma2 <- if (is.null(ch)) {
+    NA_real_
+  } else {
+    qf <- as.numeric(crossprod(backsolve(ch, z, transpose = TRUE)))
+    1 - qf / n
+  }
+  list(
+    mom_sigma2_hat = as.numeric(mom_sigma2),
+    ld_chol_ok = as.logical(ld_chol_ok),
+    ld_z_inconsistency_flag = isTRUE(!ld_chol_ok) ||
+                              isTRUE(is.finite(mom_sigma2) && mom_sigma2 < 0)
+  )
+}
+
+# Pull an L x p coefficient matrix b = alpha * mu from a fit object.
+# Handles both susine (fit$effect_fits$alpha / mu) and susieR (fit$alpha / mu)
+# shapes. Returns NULL if neither shape applies.
+real_data_extract_b_matrix <- function(fit) {
+  if (!is.null(fit$effect_fits$alpha) && !is.null(fit$effect_fits$mu)) {
+    alpha <- as.matrix(fit$effect_fits$alpha)
+    mu    <- as.matrix(fit$effect_fits$mu)
+  } else if (!is.null(fit$alpha) && !is.null(fit$mu)) {
+    alpha <- as.matrix(fit$alpha)
+    mu    <- as.matrix(fit$mu)
+  } else {
+    return(NULL)
+  }
+  if (nrow(alpha) != nrow(mu) || ncol(alpha) != ncol(mu)) return(NULL)
+  alpha * mu
+}
+
+# Weighted (1 - r^2) drift between two fits' per-effect coefficient vectors,
+# matched 1-to-1 by max-weight assignment. RSS analog of weighted_r2_drift in
+# effect_matching_drift_analysis_5arm.Rmd: in the SS regime where var(y) = 1
+# and X is column-standardized, var(X b_l) = b_l' R b_l and
+# cor(X b_i, X b_j) = (b_i' R b_j) / sqrt((b_i' R b_i)(b_j' R b_j)).
+# Weights: pmin(var_y_explained_a[i], var_y_explained_b[j]).
+real_data_basin_r2_drift_pair <- function(b_a, b_b, R) {
+  if (is.null(b_a) || is.null(b_b)) return(list(drift = NA_real_, n_matched = 0L))
+  L_a <- nrow(b_a); L_b <- nrow(b_b)
+  if (L_a == 0L || L_b == 0L) return(list(drift = NA_real_, n_matched = 0L))
+  if (!requireNamespace("clue", quietly = TRUE))
+    stop("Package 'clue' required for solve_LSAP. install.packages('clue').")
+
+  Rb_a <- tcrossprod(b_a, R)              # L_a x p ; rows are R %*% b_a[i,]
+  Rb_b <- tcrossprod(b_b, R)              # L_b x p
+  num  <- b_a %*% t(Rb_b)                 # L_a x L_b ; (b_a[i,]' R b_b[j,])
+  var_a <- pmax(rowSums(b_a * Rb_a), 0)   # var_y_explained per A-effect
+  var_b <- pmax(rowSums(b_b * Rb_b), 0)
+  denom <- sqrt(outer(var_a, var_b))
+  cor_mat <- ifelse(denom > 0, num / denom, 0)
+  cor_mat <- pmin(pmax(cor_mat, -1), 1)
+
+  # solve_LSAP needs a square non-negative cost; pad with -1 (so padding never
+  # gets picked over a real edge in maximum-assignment mode), then re-zero
+  # outside the actual L_a x L_b block.
+  L <- max(L_a, L_b)
+  M_sq <- matrix(0, L, L)
+  M_sq[seq_len(L_a), seq_len(L_b)] <- cor_mat
+  perm <- as.integer(clue::solve_LSAP(M_sq, maximum = TRUE))
+
+  w_sum <- 0
+  num_sum <- 0
+  n_matched <- 0L
+  for (i in seq_len(L_a)) {
+    j <- perm[i]
+    if (j > L_b) next
+    w <- min(var_a[i], var_b[j])
+    if (!is.finite(w) || w <= 0) next
+    cij <- cor_mat[i, j]
+    num_sum <- num_sum + w * (1 - cij^2)
+    w_sum <- w_sum + w
+    n_matched <- n_matched + 1L
+  }
+  list(
+    drift = if (w_sum > 0) num_sum / w_sum else NA_real_,
+    n_matched = n_matched
+  )
+}
+
+# Compute basin r^2 drift for every (sigma_0_2, c) cell in a locus's
+# functional_grid runs, vs the same-sigma c=0 baseline. Returns a long tibble.
+# `runs_tbl` must have columns: run_id, c_value, sigma_0_2_scalar, fit_rds_path.
+real_data_basin_r2_drift_locus <- function(R, runs_tbl) {
+  rows <- list()
+  sigmas <- sort(unique(runs_tbl$sigma_0_2_scalar))
+  for (sig in sigmas) {
+    sig_runs <- runs_tbl %>%
+      dplyr::filter(abs(.data$sigma_0_2_scalar - !!sig) < 1e-12) %>%
+      dplyr::arrange(.data$c_value)
+    base_row <- sig_runs %>% dplyr::filter(abs(.data$c_value) < 1e-12)
+    if (nrow(base_row) != 1L || is.na(base_row$fit_rds_path[[1]])) next
+    base_fit <- tryCatch(readRDS(base_row$fit_rds_path[[1]]), error = function(e) NULL)
+    b_base <- real_data_extract_b_matrix(base_fit)
+    if (is.null(b_base)) next
+    for (k in seq_len(nrow(sig_runs))) {
+      row <- sig_runs[k, , drop = FALSE]
+      if (is.na(row$fit_rds_path[[1]])) {
+        rows[[length(rows) + 1L]] <- tibble::tibble(
+          sigma_0_2_scalar = sig, c_value = row$c_value[[1]],
+          basin_r2_drift = NA_real_, n_matched_effects = NA_integer_,
+          run_id = row$run_id[[1]]
+        )
+        next
+      }
+      this_fit <- tryCatch(readRDS(row$fit_rds_path[[1]]), error = function(e) NULL)
+      b_this <- real_data_extract_b_matrix(this_fit)
+      drift_res <- real_data_basin_r2_drift_pair(b_this, b_base, R)
+      rows[[length(rows) + 1L]] <- tibble::tibble(
+        sigma_0_2_scalar = sig,
+        c_value = row$c_value[[1]],
+        basin_r2_drift = drift_res$drift,
+        n_matched_effects = drift_res$n_matched,
+        run_id = row$run_id[[1]]
+      )
+    }
+  }
+  dplyr::bind_rows(rows)
 }
 
 extract_rss_fit_artifacts <- function(
@@ -1269,12 +1498,17 @@ run_real_data_task <- function(job_name, task_id, job_root = "output", config_pa
       })
 
       if (inherits(fit_result, "error")) {
+        err_msg <- conditionMessage(fit_result)
         validation_rows[[length(validation_rows) + 1L]] <- tibble::tibble(
           run_id = as.integer(run_row$run_id[[1]]),
           task_id = as.integer(run_row$task_id[[1]]),
           has_issues = TRUE,
-          issues = conditionMessage(fit_result)
+          issues = err_msg
         )
+        # Emit a stub run_metrics row so failed runs stay visible to aggregators
+        # (otherwise downstream joins silently drop the locus).
+        run_metrics_rows[[length(run_metrics_rows) + 1L]] <-
+          real_data_failed_run_metrics_stub(run_row, err_msg)
         next
       }
 
@@ -1827,26 +2061,48 @@ collect_real_data_results <- function(
         dplyr::filter(.data$backend == "susine_rss", .data$run_family == "functional_grid",
                       abs(.data$sigma_0_2_scalar - 0.2) < 1e-12,
                       abs(.data$c_value) < 1e-12)
-      if (nrow(anchor_metric) == 1L && nrow(baseline_metric) == 1L) {
-        anchor_pip <- locus_variant_tbl %>% dplyr::filter(.data$run_id == anchor_id) %>% dplyr::arrange(.data$ld_matrix_index) %>% dplyr::pull(.data$pip)
-        base_pip <- locus_variant_tbl %>% dplyr::filter(.data$run_id == baseline_metric$run_id[[1]]) %>% dplyr::arrange(.data$ld_matrix_index) %>% dplyr::pull(.data$pip)
+      # Emit a row whenever the anchor was attempted; mark status so notebooks
+      # can distinguish ok vs failed without losing the locus.
+      if (nrow(anchor_metric) == 1L) {
+        anchor_failed <- isTRUE(is.na(anchor_metric$elbo_final[[1]]))
+        anchor_err <- if ("error_message" %in% names(anchor_metric))
+          anchor_metric$error_message[[1]] else NA_character_
+        base_ok <- nrow(baseline_metric) == 1L &&
+          isTRUE(is.finite(baseline_metric$elbo_final[[1]]))
+        anchor_pip <- if (!anchor_failed) {
+          locus_variant_tbl %>% dplyr::filter(.data$run_id == anchor_id) %>%
+            dplyr::arrange(.data$ld_matrix_index) %>% dplyr::pull(.data$pip)
+        } else NULL
+        base_pip <- if (base_ok) {
+          locus_variant_tbl %>%
+            dplyr::filter(.data$run_id == baseline_metric$run_id[[1]]) %>%
+            dplyr::arrange(.data$ld_matrix_index) %>% dplyr::pull(.data$pip)
+        } else NULL
+        can_compare <- !is.null(anchor_pip) && !is.null(base_pip) &&
+          length(anchor_pip) == length(base_pip) && length(anchor_pip) > 0L
+
         anchor_summary_rows[[length(anchor_summary_rows) + 1L]] <- tibble::tibble(
           locus_id = locus_id,
           gene_name = locus_row$gene_name[[1]],
           susie_anchor_run_id = anchor_id,
+          susie_anchor_status = if (anchor_failed) "failed" else "ok",
+          susie_anchor_error = if (anchor_failed) as.character(anchor_err) else NA_character_,
           susie_anchor_sigma_0_2_scalar = anchor_metric$sigma_0_2_scalar[[1]],
           susie_anchor_elbo_final = anchor_metric$elbo_final[[1]],
           susie_anchor_sigma_2_final = anchor_metric$sigma_2_final[[1]],
           susie_anchor_h2_proxy_std = anchor_metric$h2_proxy_std[[1]],
           susie_anchor_max_pip = anchor_metric$max_pip[[1]],
-          baseline_run_id = baseline_metric$run_id[[1]],
-          baseline_elbo_final = baseline_metric$elbo_final[[1]],
-          baseline_sigma_2_final = baseline_metric$sigma_2_final[[1]],
-          baseline_h2_proxy_std = baseline_metric$h2_proxy_std[[1]],
-          baseline_max_pip = baseline_metric$max_pip[[1]],
-          jsd_anchor_vs_baseline = as.numeric(js_distance(anchor_pip, base_pip)),
-          l1_anchor_vs_baseline = sum(abs(anchor_pip - base_pip), na.rm = TRUE),
-          top10_overlap_anchor_vs_baseline = real_data_top_overlap(anchor_pip, base_pip, 10L)
+          baseline_run_id = if (base_ok) baseline_metric$run_id[[1]] else NA_integer_,
+          baseline_elbo_final = if (base_ok) baseline_metric$elbo_final[[1]] else NA_real_,
+          baseline_sigma_2_final = if (base_ok) baseline_metric$sigma_2_final[[1]] else NA_real_,
+          baseline_h2_proxy_std = if (base_ok) baseline_metric$h2_proxy_std[[1]] else NA_real_,
+          baseline_max_pip = if (base_ok) baseline_metric$max_pip[[1]] else NA_real_,
+          jsd_anchor_vs_baseline = if (can_compare)
+            as.numeric(js_distance(anchor_pip, base_pip)) else NA_real_,
+          l1_anchor_vs_baseline = if (can_compare)
+            sum(abs(anchor_pip - base_pip), na.rm = TRUE) else NA_real_,
+          top10_overlap_anchor_vs_baseline = if (can_compare)
+            real_data_top_overlap(anchor_pip, base_pip, 10L) else NA_real_
         )
       }
     }

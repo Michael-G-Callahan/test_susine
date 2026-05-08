@@ -149,8 +149,15 @@ plot_elbo_heatmap <- function(locus_id) {
 }
 
 plot_anchor_comparison <- function(locus_id) {
-  df <- anchor_summary %>%
-    dplyr::filter(.data$locus_id == !!locus_id) %>%
+  row <- anchor_summary %>%
+    dplyr::filter(.data$locus_id == !!locus_id)
+
+  status <- if ("susie_anchor_status" %in% names(row) && nrow(row))
+    row$susie_anchor_status[[1]] else "ok"
+  err_msg <- if ("susie_anchor_error" %in% names(row) && nrow(row))
+    row$susie_anchor_error[[1]] else NA_character_
+
+  df <- row %>%
     dplyr::transmute(
       locus_id,
       `susieR anchor` = susie_anchor_h2_proxy_std,
@@ -158,14 +165,22 @@ plot_anchor_comparison <- function(locus_id) {
     ) %>%
     tidyr::pivot_longer(-.data$locus_id, names_to = "fit_type", values_to = "h2_proxy_std")
 
-  ggplot(df, aes(x = fit_type, y = h2_proxy_std, fill = fit_type)) +
-    geom_col(width = 0.6) +
+  p <- ggplot(df, aes(x = fit_type, y = h2_proxy_std, fill = fit_type)) +
+    geom_col(width = 0.6, na.rm = TRUE) +
     labs(
       title = paste("susine vs susieR h2 Proxy:", locus_id),
       x = NULL,
       y = "Standardized h2 proxy"
     ) +
     theme(legend.position = "none")
+
+  if (identical(status, "failed")) {
+    p <- p + labs(
+      subtitle = paste0("susieR anchor fit FAILED",
+                        if (!is.na(err_msg)) paste0(": ", err_msg) else "")
+    )
+  }
+  p
 }
 
 plot_aggregated_lollipop <- function(locus_id) {
@@ -174,12 +189,13 @@ plot_aggregated_lollipop <- function(locus_id) {
     dplyr::arrange(dplyr::desc(.data$aggregated_pip), .data$ld_matrix_index) %>%
     dplyr::slice_head(n = 20)
 
-  anchor_id <- anchor_summary %>%
-    dplyr::filter(.data$locus_id == !!locus_id) %>%
-    dplyr::pull(.data$susie_anchor_run_id)
-  baseline_id <- anchor_summary %>%
-    dplyr::filter(.data$locus_id == !!locus_id) %>%
-    dplyr::pull(.data$baseline_run_id)
+  anchor_row <- anchor_summary %>% dplyr::filter(.data$locus_id == !!locus_id)
+  anchor_id <- anchor_row %>% dplyr::pull(.data$susie_anchor_run_id)
+  baseline_id <- anchor_row %>% dplyr::pull(.data$baseline_run_id)
+  status <- if ("susie_anchor_status" %in% names(anchor_row) && nrow(anchor_row))
+    anchor_row$susie_anchor_status[[1]] else "ok"
+  err_msg <- if ("susie_anchor_error" %in% names(anchor_row) && nrow(anchor_row))
+    anchor_row$susie_anchor_error[[1]] else NA_character_
 
   overlay <- variant_posteriors %>%
     dplyr::filter(.data$run_id %in% c(anchor_id, baseline_id), .data$variant_id %in% agg_df$variant_id) %>%
@@ -198,6 +214,13 @@ plot_aggregated_lollipop <- function(locus_id) {
       x = "Variant",
       y = "Aggregated PIP"
     )
+
+  if (identical(status, "failed")) {
+    base_plot <- base_plot + labs(
+      subtitle = paste0("susieR anchor fit FAILED — no susieR overlay",
+                        if (!is.na(err_msg)) paste0(" (", err_msg, ")") else "")
+    )
+  }
 
   if (!nrow(overlay)) {
     return(base_plot)
@@ -289,4 +312,95 @@ ggsave(
 )
 
 multimodal_plot
+```
+
+# 6. Basin r² Drift From c = 0 (one panel per locus)
+
+Drift metric: weighted (1 - r²) on max-weight 1-1 matched per-effect coefficient
+vectors, weighted by `min(var_y_explained_a, var_y_explained_b)`. RSS analog of
+`weighted_r2_drift` from `effect_matching_drift_analysis_5arm.Rmd`. Uses the
+R-weighted cosine `(b_i' R b_j) / sqrt((b_i' R b_i)(b_j' R b_j))` since X is
+not available in the SS regime.
+
+```{r basin-r2-drift-compute, message=FALSE}
+# Need run_metrics to find fit_rds_paths and locus / sigma / c keys.
+run_metrics <- readr::read_csv(
+  file.path(aggregated_dir, "run_metrics_full.csv"),
+  show_col_types = FALSE
+)
+
+# Manifest path for load_real_data_locus_bundle. Read from the job_config that
+# real_case_slurm copies into run_history alongside the slurm output.
+job_config_path <- file.path(
+  here("output", "run_history", job_name, parent_job_id, "job_config.json")
+)
+job_cfg <- jsonlite::fromJSON(job_config_path, simplifyVector = FALSE)
+manifest_path <- job_cfg$job$manifest_path
+repo_root <- job_cfg$paths$repo_root %||% here()
+
+functional_runs_for_drift <- run_metrics %>%
+  dplyr::filter(.data$backend == "susine_rss",
+                .data$run_family == "functional_grid",
+                !is.na(.data$fit_rds_path)) %>%
+  dplyr::select(locus_id, run_id, c_value, sigma_0_2_scalar, fit_rds_path)
+
+basin_r2_drift_tbl <- purrr::map_dfr(
+  sort(unique(functional_runs_for_drift$locus_id)),
+  function(loc) {
+    runs_tbl <- dplyr::filter(functional_runs_for_drift, .data$locus_id == loc)
+    bundle <- tryCatch(
+      load_real_data_locus_bundle(loc, manifest_path = manifest_path, repo_root = repo_root),
+      error = function(e) NULL
+    )
+    if (is.null(bundle)) {
+      message("Skipping ", loc, ": bundle load failed.")
+      return(tibble::tibble())
+    }
+    drift <- real_data_basin_r2_drift_locus(bundle$R, runs_tbl)
+    if (!nrow(drift)) return(tibble::tibble())
+    drift %>% dplyr::mutate(locus_id = loc, .before = 1L)
+  }
+)
+
+readr::write_csv(basin_r2_drift_tbl, file.path(figure_dir, "basin_r2_drift.csv"))
+basin_r2_drift_tbl
+```
+
+```{r basin-r2-drift-plot, fig.width=10, fig.height=6}
+plot_basin_r2_drift <- function(loc) {
+  df <- dplyr::filter(basin_r2_drift_tbl, .data$locus_id == loc)
+  flag_row <- dataset_metrics_for_flag %>% dplyr::filter(.data$locus_id == loc)
+  flagged <- isTRUE(nrow(flag_row) == 1L &&
+                    isTRUE(flag_row$ld_z_inconsistency_flag[[1]]))
+  ggplot(df, aes(x = c_value, y = basin_r2_drift,
+                 color = factor(sigma_0_2_scalar))) +
+    geom_line() +
+    geom_point(size = 2) +
+    labs(
+      title = paste0("Basin r² Drift From c = 0: ", loc,
+                     if (flagged) "  [LD/z inconsistent]" else ""),
+      subtitle = "Weighted (1 - r²) on matched per-effect b_l, R-weighted cosine",
+      x = "Annotation scale c",
+      y = "Weighted (1 - r²) drift",
+      color = expression(sigma[0]^2)
+    )
+}
+
+# Optional: pull the inconsistency flag from dataset_metrics if present so we
+# can annotate flagged loci in the title.
+dataset_metrics_path <- file.path(aggregated_dir, "dataset_metrics_full.csv")
+dataset_metrics_for_flag <- if (file.exists(dataset_metrics_path)) {
+  readr::read_csv(dataset_metrics_path, show_col_types = FALSE)
+} else {
+  tibble::tibble(locus_id = character(), ld_z_inconsistency_flag = logical())
+}
+
+purrr::walk(sort(unique(basin_r2_drift_tbl$locus_id)), function(loc) {
+  p <- plot_basin_r2_drift(loc)
+  ggsave(
+    file.path(figure_dir, paste0(loc, "_basin_r2_drift.png")),
+    p, width = 9, height = 5, dpi = 150
+  )
+  print(p)
+})
 ```
