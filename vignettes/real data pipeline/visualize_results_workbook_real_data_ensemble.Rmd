@@ -348,8 +348,13 @@ basin_r2_drift_tbl <- purrr::map_dfr(
   sort(unique(functional_runs_for_drift$locus_id)),
   function(loc) {
     runs_tbl <- dplyr::filter(functional_runs_for_drift, .data$locus_id == loc)
+    # apply_sample_size_filter = FALSE so R matches the dimensions of fits
+    # produced before the filter was introduced. Set TRUE if you have re-run
+    # the SLURM job under the filter and want filter-consistent diagnostics.
     bundle <- tryCatch(
-      load_real_data_locus_bundle(loc, manifest_path = manifest_path, repo_root = repo_root),
+      load_real_data_locus_bundle(loc, manifest_path = manifest_path,
+                                  repo_root = repo_root,
+                                  apply_sample_size_filter = FALSE),
       error = function(e) NULL
     )
     if (is.null(bundle)) {

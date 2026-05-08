@@ -331,10 +331,15 @@ real_data_reconstruct_ld_matrix <- function(ld_long_tbl, p, locus_id) {
   R
 }
 
+#' @param apply_sample_size_filter If TRUE (default), drops variants with
+#'   per-variant effective n < 0.5 * max(n) and subsets z, R, annotations
+#'   together. Set FALSE to bypass the filter, e.g. when computing diagnostics
+#'   on fits produced before the filter was introduced.
 load_real_data_locus_bundle <- function(
     locus_id,
     manifest_path = real_data_default_manifest_path(),
-    repo_root = ensure_repo_root(getwd())
+    repo_root = ensure_repo_root(getwd()),
+    apply_sample_size_filter = TRUE
 ) {
   repo_root <- normalizePath(repo_root, winslash = "/", mustWork = TRUE)
   manifest_path <- normalizePath(manifest_path, winslash = "/", mustWork = TRUE)
@@ -417,9 +422,11 @@ load_real_data_locus_bundle <- function(
   # Sample-size filter: drop variants whose effective n is < 0.5 * max(n).
   # This bounds within-locus n spread to 2x so the single-n assumption used by
   # susie_rss / susine_rss is more honest, and pairs with `n = min(...)` below.
+  # Skipped when apply_sample_size_filter = FALSE (e.g. for post-hoc analysis
+  # of fits trained before the filter was introduced).
   ss_vec <- variant_map$sample_size
   ss_max <- suppressWarnings(max(ss_vec, na.rm = TRUE))
-  if (is.finite(ss_max) && ss_max > 0) {
+  if (apply_sample_size_filter && is.finite(ss_max) && ss_max > 0) {
     ss_threshold <- 0.5 * ss_max
     keep <- !is.na(ss_vec) & ss_vec >= ss_threshold
   } else {
@@ -1137,21 +1144,22 @@ real_data_ld_z_consistency <- function(R, z, n, lambda = 1e-4) {
   )
 }
 
-# Pull an L x p coefficient matrix b = alpha * mu from a fit object.
-# Handles both susine (fit$effect_fits$alpha / mu) and susieR (fit$alpha / mu)
-# shapes. Returns NULL if neither shape applies.
+# Pull an L x p coefficient matrix b = alpha * (posterior mean | inclusion)
+# from a fit. susine stores this directly as fit$effect_fits$b_hat (already
+# alpha-weighted; see real_data_backend_matrices()). susieR stores
+# fit$alpha (inclusion probs, L x p) and fit$mu (conditional posterior mean,
+# L x p) separately, so their product gives the same quantity.
 real_data_extract_b_matrix <- function(fit) {
-  if (!is.null(fit$effect_fits$alpha) && !is.null(fit$effect_fits$mu)) {
-    alpha <- as.matrix(fit$effect_fits$alpha)
-    mu    <- as.matrix(fit$effect_fits$mu)
-  } else if (!is.null(fit$alpha) && !is.null(fit$mu)) {
+  if (!is.null(fit$effect_fits$b_hat)) {
+    return(as.matrix(fit$effect_fits$b_hat))
+  }
+  if (!is.null(fit$alpha) && !is.null(fit$mu)) {
     alpha <- as.matrix(fit$alpha)
     mu    <- as.matrix(fit$mu)
-  } else {
-    return(NULL)
+    if (nrow(alpha) != nrow(mu) || ncol(alpha) != ncol(mu)) return(NULL)
+    return(alpha * mu)
   }
-  if (nrow(alpha) != nrow(mu) || ncol(alpha) != ncol(mu)) return(NULL)
-  alpha * mu
+  NULL
 }
 
 # Weighted (1 - r^2) drift between two fits' per-effect coefficient vectors,
