@@ -331,15 +331,19 @@ real_data_reconstruct_ld_matrix <- function(ld_long_tbl, p, locus_id) {
   R
 }
 
-#' @param apply_sample_size_filter If TRUE (default), drops variants with
+#' @param apply_sample_size_filter Opt-in flag. If TRUE, drops variants with
 #'   per-variant effective n < 0.5 * max(n) and subsets z, R, annotations
-#'   together. Set FALSE to bypass the filter, e.g. when computing diagnostics
-#'   on fits produced before the filter was introduced.
+#'   together. Default FALSE: keep all variants that survived the upstream
+#'   prep filter (`sample_size > 50` in `1_get_z_scores.ipynb`). Filtering on
+#'   n excises exactly the low-power variants where the directional prior is
+#'   most informative, so it is off by default; available for sensitivity
+#'   analyses or for loci where the within-locus n spread is so wide that the
+#'   single-n assumption in susie_rss becomes badly violated.
 load_real_data_locus_bundle <- function(
     locus_id,
     manifest_path = real_data_default_manifest_path(),
     repo_root = ensure_repo_root(getwd()),
-    apply_sample_size_filter = TRUE
+    apply_sample_size_filter = FALSE
 ) {
   repo_root <- normalizePath(repo_root, winslash = "/", mustWork = TRUE)
   manifest_path <- normalizePath(manifest_path, winslash = "/", mustWork = TRUE)
@@ -459,7 +463,8 @@ load_real_data_locus_bundle <- function(
     R = R,
     a = as.numeric(variant_map$annotation_a),
     variant_map = variant_map,
-    n_sample = as.numeric(min(variant_map$sample_size, na.rm = TRUE)),
+    n_sample = as.numeric(stats::median(variant_map$sample_size, na.rm = TRUE)),
+    n_sample_min = as.numeric(min(variant_map$sample_size, na.rm = TRUE)),
     n_sample_max = as.numeric(max(variant_map$sample_size, na.rm = TRUE)),
     n_sample_median = as.numeric(stats::median(variant_map$sample_size, na.rm = TRUE)),
     n_sample_threshold = as.numeric(ss_threshold),
@@ -1077,7 +1082,8 @@ compute_real_data_dataset_metrics <- function(bundle) {
     locus_id = as.character(bundle$locus_id),
     gene_name = as.character(bundle$gene_name),
     n_variants = length(bundle$z),
-    n_sample_min = as.numeric(bundle$n_sample),
+    n_sample_used = as.numeric(bundle$n_sample),
+    n_sample_min = as.numeric(bundle$n_sample_min %||% NA_real_),
     n_sample_max = as.numeric(bundle$n_sample_max %||% NA_real_),
     n_sample_median = as.numeric(bundle$n_sample_median %||% NA_real_),
     n_sample_threshold = as.numeric(bundle$n_sample_threshold %||% NA_real_),
