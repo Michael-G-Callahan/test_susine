@@ -51,9 +51,19 @@ set.seed(1)
 # 1. User Parameters
 
 ```{r params}
-job_name <- "baseline_sims_screen"
-parent_job_id <- "51509956"
+# Source: the 5-arm effect-matching study (one-off vignette pipeline).
+# This is the only baseline-sims job that has both cold and warm-from-annotated
+# fits broken out per dataset, which is what we need for the optimizer-barrier
+# regression.
+study_name <- "baseline_sims_5arm_effect_matching"
 output_root <- here("output")
+study_root <- file.path(output_root, "effect_matching_study", study_name)
+
+# Auxiliary data: matrix catalog. The 5-arm study uses scenario_1 matrices, the
+# same set the screening job uses, so we read the screening job's
+# data_matrices.csv as the canonical source.
+matrices_run_history_dir <- file.path(output_root, "run_history",
+                                      "baseline_sims_screen", "51509956")
 
 # Knobs
 mc_n_samples       <- 5000        # MC budget for M*, H, S_max
@@ -61,30 +71,41 @@ default_L_target   <- 5L          # used for T-free metrics where p_star unknown
 ridge_lambda       <- 1e-4        # ridge for chol of R[γ, γ]
 
 # Output
-out_dir <- file.path(output_root, "one_off_validations", "posterior_geometry_metrics",
-                     parent_job_id)
+out_dir <- file.path(output_root, "one_off_validations",
+                     "posterior_geometry_metrics", study_name)
 dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 ```
 
 # 2. Locate Aggregated Output
 
 ```{r locate}
-job_dir <- file.path(output_root, "slurm_output", job_name, parent_job_id)
-aggregated_dir <- file.path(job_dir, "aggregated")
-run_history_dir <- file.path(output_root, "run_history", job_name, parent_job_id)
+stopifnot(dir.exists(study_root), dir.exists(matrices_run_history_dir))
 
-stopifnot(dir.exists(aggregated_dir), dir.exists(run_history_dir))
+# Per-dataset AUPRC outcomes (cold + 4 alternative arms + deltas)
+auprc <- readr::read_csv(file.path(study_root, "auprc_per_dataset_5arm.csv"),
+                         show_col_types = FALSE)
 
-run_metrics    <- readr::read_csv(file.path(aggregated_dir, "model_metrics.csv"),
-                                  show_col_types = FALSE)
-dataset_metric <- readr::read_csv(file.path(aggregated_dir, "dataset_metrics.csv"),
-                                  show_col_types = FALSE)
-dataset_bundles <- readr::read_csv(file.path(run_history_dir, "dataset_bundles.csv"),
+# True per-dataset causal info: list of length 600, names "1".."600";
+# each entry has $causal_idx (integer T) and $beta_at_causal (numeric β at T).
+causal_truth <- readRDS(file.path(study_root, "causal_truth_5arm.rds"))
+
+# Bundle specs (matrix_id, phenotype_seed, architecture, ...)
+dataset_bundles <- readr::read_csv(file.path(study_root, "dataset_bundles.csv"),
                                    show_col_types = FALSE)
 
-cat("run_metrics rows:    ", nrow(run_metrics),    "\n")
-cat("dataset_metrics rows:", nrow(dataset_metric), "\n")
-cat("dataset_bundles rows:", nrow(dataset_bundles), "\n")
+# Matrix catalog: scenario_1 matrices, identical to those used by the
+# screening study. We just borrow that file rather than re-building.
+data_matrices <- readr::read_csv(file.path(matrices_run_history_dir, "data_matrices.csv"),
+                                 show_col_types = FALSE)
+job_config_json <- jsonlite::fromJSON(file.path(matrices_run_history_dir, "job_config.json"),
+                                      simplifyVector = FALSE)
+repo_root <- job_config_json$paths$repo_root %||% here()
+
+cat("auprc rows:           ", nrow(auprc),           "\n")
+cat("causal_truth length:  ", length(causal_truth),  "\n")
+cat("dataset_bundles rows: ", nrow(dataset_bundles), "\n")
+cat("data_matrices rows:   ", nrow(data_matrices),   "\n")
+cat("repo_root:            ", repo_root,             "\n")
 ```
 
 # 3. Posterior-Geometry Metrics — Helpers
@@ -259,14 +280,7 @@ Re-generate each simulated dataset from its bundle row + the cached
 genotype matrix. Cheaper than caching p×p matrices on disk.
 
 ```{r reconstruct}
-# 4a. Locate matrices and the repo root (matrix paths are relative to it).
-data_matrices <- readr::read_csv(file.path(run_history_dir, "data_matrices.csv"),
-                                 show_col_types = FALSE)
-job_config_json <- jsonlite::fromJSON(file.path(run_history_dir, "job_config.json"),
-                                      simplifyVector = FALSE)
-repo_root <- job_config_json$paths$repo_root %||% here()
-cat("repo_root:", repo_root, "\n")
-
+# 4a. Subset of matrices we actually need.
 needed_matrix_ids <- sort(unique(dataset_bundles$matrix_id))
 matrix_rows <- data_matrices %>%
   dplyr::filter(.data$matrix_id %in% needed_matrix_ids)
@@ -286,53 +300,43 @@ for (i in seq_len(nrow(matrix_rows))) {
                 as.numeric(difftime(Sys.time(), t_load, units = "secs"))))
 }
 
-# 4c. Per-bundle reconstruction. We only need X, β, y, σ², T for posterior-
-#     geometry metrics — mu_0 / a (the directional prior) is not relevant.
-#     Call the effect-size + phenotype steps directly and skip simulate_priors,
-#     which crashes on draw_centered_noise() when annotation_r2 isn't in the
-#     bundle (the screening study doesn't carry it).
-pgm_one_bundle <- function(bundle_row, X_cache) {
-  X <- X_cache[[as.character(bundle_row$matrix_id)]]
-  spec <- as.list(bundle_row)
-  seed <- spec$phenotype_seed %||% spec$base_seed %||% 1L
-  architecture <- as.character(spec$architecture %||% "sparse")
+# 4c. Per-bundle reconstruction.
+#  T and β come from causal_truth_5arm.rds (no regen needed).
+#  y comes from simulate_phenotype_h2(X, β, h2_total = 0.25, seed = phenotype_seed + 1L)
+#  — same call generate_simulation_data() makes for susie2_oligogenic.
+#  R = standardized X' X / n, z = X'y / sqrt(σ²·n).
+pgm_one_bundle <- function(bundle_row, X_cache, causal_truth) {
+  bid <- as.integer(bundle_row$dataset_bundle_id[[1]])
+  truth <- causal_truth[[as.character(bid)]]
+  if (is.null(truth)) stop("No causal_truth entry for dataset_bundle_id = ", bid)
+  T_idx <- as.integer(truth$causal_idx)
+  beta_at_T <- as.numeric(truth$beta_at_causal)
 
-  effects <- if (identical(architecture, "oligogenic")) {
-    simulate_effect_sizes_oligogenic(p = ncol(X),
-                                     p_star = spec$p_star %||% 5L,
-                                     effect_sd = spec$effect_sd %||% 1,
-                                     seed = seed)
-  } else if (identical(architecture, "susie2_sparse")) {
-    simulate_effect_sizes_susie2_sparse(p = ncol(X),
-                                        p_star = spec$p_star %||% 3L,
-                                        seed = seed)
+  X <- X_cache[[as.character(bundle_row$matrix_id)]]
+  p <- ncol(X)
+  beta <- numeric(p)
+  beta[T_idx] <- beta_at_T
+
+  architecture <- as.character(bundle_row$architecture[[1]])
+  seed <- bundle_row$phenotype_seed[[1]]
+  phenotype <- if (identical(architecture, "susie2_sparse")) {
+    simulate_phenotype_h2(X = X, beta = beta,
+                          h2_snp_per_causal = bundle_row$h2_snp_per_causal %||% 0.03,
+                          h2_total = NA_real_, seed = seed + 1L)
   } else if (identical(architecture, "susie2_oligogenic")) {
-    simulate_effect_sizes_susie2_oligogenic(p = ncol(X), seed = seed)
+    simulate_phenotype_h2(X = X, beta = beta,
+                          h2_snp_per_causal = NA_real_,
+                          h2_total = bundle_row$h2_total %||% 0.25, seed = seed + 1L)
   } else {
-    simulate_effect_sizes(p = ncol(X),
-                          p_star = spec$p_star %||% 5L,
-                          effect_sd = spec$effect_sd %||% 1,
-                          seed = seed)
-  }
-  phenotype <- if (architecture %in% c("susie2_sparse", "susie2_oligogenic")) {
-    simulate_phenotype_h2(
-      X = X, beta = effects$beta,
-      h2_snp_per_causal = if (identical(architecture, "susie2_sparse"))
-        spec$h2_snp_per_causal %||% 0.03 else NA_real_,
-      h2_total = if (identical(architecture, "susie2_oligogenic"))
-        spec$h2_total %||% 0.25 else NA_real_,
-      seed = seed + 1L)
-  } else {
-    simulate_phenotype(X = X, beta = effects$beta,
-                       noise_fraction = spec$y_noise %||% 0.5,
+    simulate_phenotype(X = X, beta = beta,
+                       noise_fraction = bundle_row$y_noise %||% 0.5,
                        seed = seed + 1L)
   }
 
-  T_idx <- as.integer(effects$causal_idx)
-  Xc <- standardize_x(X)                      # mean 0, sd 1 columns
+  Xc <- standardize_x(X)
   yc <- phenotype$y - mean(phenotype$y)
   n  <- nrow(Xc)
-  R  <- crossprod(Xc) / n                     # correlation matrix
+  R  <- crossprod(Xc) / n
   sigma2 <- as.numeric(phenotype$sigma2)
   if (!is.finite(sigma2) || sigma2 <= 0) sigma2 <- stats::var(yc)
   z  <- as.numeric(crossprod(Xc, yc) / sqrt(sigma2 * n))
@@ -340,22 +344,40 @@ pgm_one_bundle <- function(bundle_row, X_cache) {
        L_truth = length(T_idx), sigma2 = sigma2)
 }
 
-compute_for_bundle <- function(bundle_row, X_cache,
+# A small registry that stores existing comparator metrics alongside the new
+# ones so we don't re-load X in §6. LD-only metrics (M1, M2, ...) are
+# matrix-level so are cached by matrix_id; z-metrics are per-bundle.
+x_metric_cache <- new.env(parent = emptyenv())
+get_x_metrics_for_matrix <- function(R, mid) {
+  key <- as.character(mid)
+  if (exists(key, envir = x_metric_cache, inherits = FALSE))
+    return(get(key, envir = x_metric_cache))
+  m <- compute_x_metrics_from_R(R)
+  assign(key, m, envir = x_metric_cache)
+  m
+}
+
+compute_for_bundle <- function(bundle_row, X_cache, causal_truth,
                                L_target_stage2 = default_L_target) {
-  data <- pgm_one_bundle(bundle_row, X_cache)
+  data <- pgm_one_bundle(bundle_row, X_cache, causal_truth)
   if (length(data$T_idx) == 0L) {
     return(tibble::tibble(L_truth = 0L, sigma2 = data$sigma2))
   }
-  m <- pgm_compute_one(
+  pgm <- pgm_compute_one(
     R = data$R, z = data$z, T_idx = data$T_idx,
     L_target_stage1 = data$L_truth,
     L_target_stage2 = L_target_stage2,
     mc_n_samples_local = mc_n_samples,
-    seed = bundle_row$dataset_bundle_id[[1]]   # per-bundle reproducibility
+    seed = bundle_row$dataset_bundle_id[[1]]
   )
-  m$L_truth <- data$L_truth
-  m$sigma2  <- data$sigma2
-  m
+  x_metrics <- get_x_metrics_for_matrix(data$R, bundle_row$matrix_id[[1]])
+  z_metrics <- z_score_metrics(data$z, top_k = 10L) |> tibble::as_tibble()
+  dplyr::bind_cols(
+    pgm,
+    tibble::tibble(L_truth = data$L_truth, sigma2 = data$sigma2),
+    x_metrics,
+    z_metrics
+  )
 }
 
 # 4d. Default to a 20-bundle dry run. Bump n_bundles_to_run to the full
@@ -368,8 +390,9 @@ cat("Computing metrics for", nrow(sub), "bundles...\n")
 t0 <- Sys.time()
 metric_rows <- purrr::map_dfr(seq_len(nrow(sub)), function(i) {
   row <- sub[i, , drop = FALSE]
-  m <- compute_for_bundle(row, X_cache)
+  m <- compute_for_bundle(row, X_cache, causal_truth)
   m$dataset_bundle_id <- row$dataset_bundle_id[[1]]
+  m$matrix_id <- row$matrix_id[[1]]
   if (i %% 5 == 0 || i == nrow(sub))
     cat(sprintf("  %d / %d bundles (%.1f sec)\n",
                 i, nrow(sub),
@@ -391,59 +414,21 @@ For each dataset, the three AUPRC outcomes:
   any annotation_r2)
 
 ```{r outcomes}
-# Inspect what's available before filtering.
-cat("use_case_ids:\n"); print(sort(unique(run_metrics$use_case_id)))
-if ("filtering" %in% names(run_metrics))
-  cat("filtering values:", paste(sort(unique(run_metrics$filtering)), collapse = ", "), "\n")
-if ("warm_method" %in% names(run_metrics))
-  cat("warm_method values:", paste(sort(unique(stats::na.omit(run_metrics$warm_method))), collapse = ", "),
-      " (NAs:", sum(is.na(run_metrics$warm_method)), ")\n")
-
-# AUPRC is the same across `filtering = unfiltered/purity_filtered`
-# (CS-filtering doesn't change classification metrics), so collapse to one row.
-mm <- run_metrics
-if ("filtering" %in% names(mm)) {
-  mm <- mm %>% dplyr::filter(.data$filtering == "unfiltered" | is.na(.data$filtering))
-}
-
-# Cold baseline: vanilla SuSiE, no warm start.
-cold_runs <- mm %>% dplyr::filter(.data$use_case_id == "susie_vanilla")
-if ("warm_method" %in% names(cold_runs)) {
-  cold_runs <- cold_runs %>% dplyr::filter(is.na(.data$warm_method))
-}
-cold_per_bundle <- cold_runs %>%
-  dplyr::group_by(dataset_bundle_id) %>%
-  dplyr::summarise(auprc_cold = mean(.data$AUPRC, na.rm = TRUE), .groups = "drop")
-
-# Truth-warm: only present in jobs that include warm-start arms. Skip
-# gracefully if absent (e.g. baseline_sims_screen does only cold fits).
-has_warm <- "warm_method" %in% names(mm) &&
-  any(!is.na(mm$warm_method))
-warm_per_bundle <- if (has_warm) {
-  mm %>%
-    dplyr::filter(.data$use_case_id == "susie_vanilla", !is.na(.data$warm_method)) %>%
-    dplyr::group_by(dataset_bundle_id) %>%
-    dplyr::summarise(auprc_warm = mean(.data$AUPRC, na.rm = TRUE), .groups = "drop")
-} else {
-  cat("No truth-warm runs in this job; delta_warm regression will be skipped.\n")
-  tibble::tibble(dataset_bundle_id = integer(), auprc_warm = numeric())
-}
-
-# Best annotated: max AUPRC across any susine_functional_mu fit.
-annot_per_bundle <- mm %>%
-  dplyr::filter(.data$use_case_id == "susine_functional_mu") %>%
-  dplyr::group_by(dataset_bundle_id) %>%
-  dplyr::summarise(auprc_annotated = max(.data$AUPRC, na.rm = TRUE), .groups = "drop")
-
-outcomes <- cold_per_bundle %>%
-  dplyr::left_join(warm_per_bundle,  by = "dataset_bundle_id") %>%
-  dplyr::left_join(annot_per_bundle, by = "dataset_bundle_id") %>%
-  dplyr::mutate(
-    delta_warm      = if (has_warm) .data$auprc_warm - .data$auprc_cold else NA_real_,
-    delta_annotated = .data$auprc_annotated - .data$auprc_cold
+# All three outcomes come straight off the per-dataset 5-arm AUPRC table.
+# `auprc_delta_warm_mu_vs_vanilla` = warm-from-functional-μ minus cold; this
+# is the optimizer-barrier signal (vanilla finds the basin only when
+# initialized from the annotated-arm solution).
+outcomes <- auprc %>%
+  dplyr::transmute(
+    dataset_bundle_id,
+    auprc_cold      = .data$auprc_susie_vanilla,
+    auprc_warm      = .data$auprc_susie_vanilla_warm_from_mu,
+    auprc_annotated = .data$auprc_susine_functional_mu,
+    delta_warm      = .data$auprc_delta_warm_mu_vs_vanilla,
+    delta_annotated = .data$auprc_delta_mu
   )
 
-cat("Outcome rows (datasets with cold AUPRC):", nrow(outcomes), "\n")
+cat("Outcome rows:", nrow(outcomes), "\n")
 cat("  with non-NA warm:     ", sum(!is.na(outcomes$auprc_warm)), "\n")
 cat("  with non-NA annotated:", sum(!is.na(outcomes$auprc_annotated)), "\n")
 ```
@@ -456,25 +441,30 @@ plus everything `compute_x_metrics_from_R()` already emits (M1, M2, M1_dist,
 eigs summaries, off-diag means, row concentration, Toeplitz fit error).
 
 ```{r comparator-features}
+# Existing comparator metric set as used by the real-data stratified sampler:
+# `M1, M2, M4, z_count_abs_gt_3, z_eff_signals` (per
+# `0_2_phase1_dataset_metrics_screening.ipynb`), plus everything else
+# `compute_x_metrics_from_R()` and `z_score_metrics()` already emit. These
+# were computed alongside the new metrics in §4 and live as columns of
+# `metric_rows`.
 existing_cols <- c(
   # primary sampler metrics
   "M1", "M2", "M4", "z_count_abs_gt_3", "z_eff_signals",
-  # rest of the dataset-metric family present in dataset_metrics
-  "M1_dist", "z_topk_ratio", "z_max_abs",
-  "high_ld_count_095_per_snp", "high_ld_frac_095",
-  "annotation_corr_beta_hat_std", "annotation_corr_z"
+  # additional LD-only descriptors
+  "M1_dist", "z_topk_ratio", "z_max_abs"
 )
 requested <- existing_cols
-existing_cols <- intersect(existing_cols, names(dataset_metric))
+existing_cols <- intersect(existing_cols, names(metric_rows))
 missing_cols <- setdiff(requested, existing_cols)
-cat("Existing comparator features present in dataset_metric:\n")
+cat("Existing comparator features present in metric_rows:\n")
 print(existing_cols)
 if (length(missing_cols)) {
-  cat("Missing (skipped):\n")
+  cat("Missing (skipped — not emitted by current helpers):\n")
   print(missing_cols)
 }
 
-existing_features <- dataset_metric %>%
+# Comparator features already join cleanly because they live in metric_rows.
+existing_features <- metric_rows %>%
   dplyr::select(dplyr::any_of(c("dataset_bundle_id", existing_cols)))
 ```
 
@@ -486,9 +476,11 @@ For each outcome we fit three models:
 - **Existing + Stage 1 (T-aware)**: comparator + new T-aware metrics
 
 ```{r regressions}
+# Existing comparator features are already columns of metric_rows, so a
+# single join brings everything in. existing_features (defined in §6) is
+# kept around purely as a name list for the regressors.
 master <- outcomes %>%
-  dplyr::left_join(metric_rows,       by = "dataset_bundle_id") %>%
-  dplyr::left_join(existing_features, by = "dataset_bundle_id")
+  dplyr::left_join(metric_rows, by = "dataset_bundle_id")
 
 stage1_cols <- c("S_T", "D_1", "M_star_T", "M_star_T_mean", "G_top1")
 stage2_cols <- c("S_max", "D_1_free", "M_star_marg", "H", "H_mean", "G_pivot")
@@ -529,7 +521,9 @@ reg_targets <- list(
 )
 if (any(!is.na(master$delta_warm))) {
   reg_targets <- append(reg_targets,
-    list(list(col = "delta_warm", label = "ΔAUPRC truth-warm vs cold")), after = 1L)
+    list(list(col = "delta_warm",
+              label = "ΔAUPRC warm-from-μ vs cold (optimizer-barrier)")),
+    after = 1L)
 }
 reg_summary <- purrr::map_dfr(reg_targets,
                               function(t) run_three(t$col, t$label))
