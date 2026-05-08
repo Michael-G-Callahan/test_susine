@@ -51,26 +51,63 @@ set.seed(1)
 # 1. User Parameters
 
 ```{r params}
-# Source: the 5-arm effect-matching study (one-off vignette pipeline).
-# This is the only baseline-sims job that has both cold and warm-from-annotated
-# fits broken out per dataset, which is what we need for the optimizer-barrier
+# ---------------------------------------------------------------------------
+# All user-tweakable knobs for this workbook live in this chunk.
+# ---------------------------------------------------------------------------
+
+# --- Data sources ----------------------------------------------------------
+
+# Study to validate against. Source of AUPRC outcomes + true causal info.
+# The 5-arm effect-matching study has both cold and warm-from-annotated fits
+# broken out per dataset, which is what we need for the optimizer-barrier
 # regression.
 study_name <- "baseline_sims_5arm_effect_matching"
 output_root <- here("output")
 study_root <- file.path(output_root, "effect_matching_study", study_name)
 
-# Auxiliary data: matrix catalog. The 5-arm study uses scenario_1 matrices, the
-# same set the screening job uses, so we read the screening job's
-# data_matrices.csv as the canonical source.
+# Source of the matrix catalog. We re-use the screening job's
+# `data_matrices.csv` because the 5-arm study uses the same scenario_1
+# matrices. Change this if you point the workbook at a study with a
+# different matrix-id mapping.
 matrices_run_history_dir <- file.path(output_root, "run_history",
                                       "baseline_sims_screen", "51509956")
 
-# Knobs
-mc_n_samples       <- 5000        # MC budget for M*, H, S_max
-default_L_target   <- 5L          # used for T-free metrics where p_star unknown
-ridge_lambda       <- 1e-4        # ridge for chol of R[γ, γ]
+# --- Compute knobs ---------------------------------------------------------
 
-# Output
+# Subset of bundles to run. `nrow(dataset_bundles)` for the full 600.
+# Smaller value = quick wiring / sanity check.  Bump back up before drawing
+# any conclusion: with too few bundles, the regressions become rank-deficient
+# (predictors > observations).
+n_bundles_to_run <- 600L
+
+# MC budget per (M*, H, S_max) per dataset.  Cost scales linearly.
+mc_n_samples <- 5000L
+
+# L_target for the T-free Stage-2 metrics (M*_marg, H, S_max, G_pivot).  In
+# real-data application this is the L you'd run susie with (harness default
+# 10).  For sims with known p_star, 5 is a sensible default.
+default_L_target <- 5L
+
+# Ridge added to chol(R[γ, γ]) for numerical stability.  External LD
+# matrices may need lambda ≥ 1e-3 if chol() complains; in-sample LD is
+# fine at 1e-4.
+ridge_lambda <- 1e-4
+
+# --- Comparator metric set -------------------------------------------------
+
+# Existing comparator metrics to regress against, mirroring the real-data
+# stratified sampler in `0_2_phase1_dataset_metrics_screening.ipynb`.
+# Names that aren't emitted by `compute_x_metrics_from_R()` /
+# `z_score_metrics()` are silently dropped with a printout in §6.
+existing_cols <- c(
+  # primary sampler metrics
+  "M1", "M2", "M4", "z_count_abs_gt_3", "z_eff_signals",
+  # additional LD-only descriptors
+  "M1_dist", "z_topk_ratio", "z_max_abs"
+)
+
+# --- Output ----------------------------------------------------------------
+
 out_dir <- file.path(output_root, "one_off_validations",
                      "posterior_geometry_metrics", study_name)
 dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
@@ -380,11 +417,7 @@ compute_for_bundle <- function(bundle_row, X_cache, causal_truth,
   )
 }
 
-# 4d. Default to a 20-bundle dry run. Bump n_bundles_to_run to the full
-# number of rows once you've sanity-checked the output.
-n_bundles_to_run <- 20L
-# n_bundles_to_run <- nrow(dataset_bundles)
-
+# 4d. n_bundles_to_run is set in §1.
 sub <- dataset_bundles %>% dplyr::slice_head(n = n_bundles_to_run)
 cat("Computing metrics for", nrow(sub), "bundles...\n")
 t0 <- Sys.time()
@@ -441,18 +474,9 @@ plus everything `compute_x_metrics_from_R()` already emits (M1, M2, M1_dist,
 eigs summaries, off-diag means, row concentration, Toeplitz fit error).
 
 ```{r comparator-features}
-# Existing comparator metric set as used by the real-data stratified sampler:
-# `M1, M2, M4, z_count_abs_gt_3, z_eff_signals` (per
-# `0_2_phase1_dataset_metrics_screening.ipynb`), plus everything else
-# `compute_x_metrics_from_R()` and `z_score_metrics()` already emit. These
-# were computed alongside the new metrics in §4 and live as columns of
-# `metric_rows`.
-existing_cols <- c(
-  # primary sampler metrics
-  "M1", "M2", "M4", "z_count_abs_gt_3", "z_eff_signals",
-  # additional LD-only descriptors
-  "M1_dist", "z_topk_ratio", "z_max_abs"
-)
+# `existing_cols` is set in §1.  Comparator features were computed inline in
+# §4 alongside the new metrics, so they're already columns of `metric_rows`.
+# Filter to what's actually present and report what's missing.
 requested <- existing_cols
 existing_cols <- intersect(existing_cols, names(metric_rows))
 missing_cols <- setdiff(requested, existing_cols)
@@ -462,10 +486,6 @@ if (length(missing_cols)) {
   cat("Missing (skipped — not emitted by current helpers):\n")
   print(missing_cols)
 }
-
-# Comparator features already join cleanly because they live in metric_rows.
-existing_features <- metric_rows %>%
-  dplyr::select(dplyr::any_of(c("dataset_bundle_id", existing_cols)))
 ```
 
 # 7. Three Regressions
