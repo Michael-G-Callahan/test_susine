@@ -269,22 +269,25 @@ matrix_paths <- data_matrices %>%
   dplyr::distinct()
 stopifnot(all(needed_matrix_ids %in% matrix_paths$matrix_id))
 
-# Load each X once.
-load_X_cache <- function(matrix_paths) {
+# Load each X once. Matrices are TSVs with an optional participant_ID
+# column. Use the canonical loader from run_model.R so behavior matches
+# the pipeline.
+repo_root <- cfg$paths$repo_root %||% here()
+load_X_cache <- function(matrix_rows, repo_root) {
   out <- list()
-  for (i in seq_len(nrow(matrix_paths))) {
-    mid <- matrix_paths$matrix_id[i]
-    path <- file.path(here(), matrix_paths$matrix_path[i])
-    if (!file.exists(path)) {
-      stop("Genotype matrix not found: ", path)
-    }
-    obj <- readRDS(path)
-    out[[as.character(mid)]] <- as.matrix(obj)
+  for (i in seq_len(nrow(matrix_rows))) {
+    mid <- matrix_rows$matrix_id[i]
+    out[[as.character(mid)]] <- test_susine:::load_sampled_matrix(
+      matrix_rows[i, , drop = FALSE], repo_root = repo_root)
   }
   out
 }
 
-X_cache <- load_X_cache(matrix_paths)
+# Need data_scenario for the loader — pull it back from data_matrices.
+matrix_rows <- data_matrices %>%
+  dplyr::filter(.data$matrix_id %in% needed_matrix_ids)
+
+X_cache <- load_X_cache(matrix_rows, repo_root = repo_root)
 
 # Per-bundle: regenerate β, y, σ², compute z, T, R.
 pgm_one_bundle <- function(bundle_row, X_cache) {
