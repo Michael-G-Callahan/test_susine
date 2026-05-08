@@ -286,19 +286,54 @@ for (i in seq_len(nrow(matrix_rows))) {
                 as.numeric(difftime(Sys.time(), t_load, units = "secs"))))
 }
 
-# 4c. Per-bundle reconstruction. Use generate_simulation_data outputs directly
-#     (sim$sigma2, sim$causal_idx) and the package's standardize_x() so R is
-#     the same correlation matrix the pipeline's fits implicitly used.
+# 4c. Per-bundle reconstruction. We only need X, β, y, σ², T for posterior-
+#     geometry metrics — mu_0 / a (the directional prior) is not relevant.
+#     Call the effect-size + phenotype steps directly and skip simulate_priors,
+#     which crashes on draw_centered_noise() when annotation_r2 isn't in the
+#     bundle (the screening study doesn't carry it).
 pgm_one_bundle <- function(bundle_row, X_cache) {
   X <- X_cache[[as.character(bundle_row$matrix_id)]]
   spec <- as.list(bundle_row)
-  sim <- generate_simulation_data(spec, base_X = X)
-  T_idx <- as.integer(sim$causal_idx)
-  Xc <- standardize_x(sim$X)              # mean 0, sd 1 columns
-  yc <- sim$y - mean(sim$y)
+  seed <- spec$phenotype_seed %||% spec$base_seed %||% 1L
+  architecture <- as.character(spec$architecture %||% "sparse")
+
+  effects <- if (identical(architecture, "oligogenic")) {
+    simulate_effect_sizes_oligogenic(p = ncol(X),
+                                     p_star = spec$p_star %||% 5L,
+                                     effect_sd = spec$effect_sd %||% 1,
+                                     seed = seed)
+  } else if (identical(architecture, "susie2_sparse")) {
+    simulate_effect_sizes_susie2_sparse(p = ncol(X),
+                                        p_star = spec$p_star %||% 3L,
+                                        seed = seed)
+  } else if (identical(architecture, "susie2_oligogenic")) {
+    simulate_effect_sizes_susie2_oligogenic(p = ncol(X), seed = seed)
+  } else {
+    simulate_effect_sizes(p = ncol(X),
+                          p_star = spec$p_star %||% 5L,
+                          effect_sd = spec$effect_sd %||% 1,
+                          seed = seed)
+  }
+  phenotype <- if (architecture %in% c("susie2_sparse", "susie2_oligogenic")) {
+    simulate_phenotype_h2(
+      X = X, beta = effects$beta,
+      h2_snp_per_causal = if (identical(architecture, "susie2_sparse"))
+        spec$h2_snp_per_causal %||% 0.03 else NA_real_,
+      h2_total = if (identical(architecture, "susie2_oligogenic"))
+        spec$h2_total %||% 0.25 else NA_real_,
+      seed = seed + 1L)
+  } else {
+    simulate_phenotype(X = X, beta = effects$beta,
+                       noise_fraction = spec$y_noise %||% 0.5,
+                       seed = seed + 1L)
+  }
+
+  T_idx <- as.integer(effects$causal_idx)
+  Xc <- standardize_x(X)                      # mean 0, sd 1 columns
+  yc <- phenotype$y - mean(phenotype$y)
   n  <- nrow(Xc)
-  R  <- crossprod(Xc) / n                  # correlation matrix (1s on diag)
-  sigma2 <- as.numeric(sim$sigma2)
+  R  <- crossprod(Xc) / n                     # correlation matrix
+  sigma2 <- as.numeric(phenotype$sigma2)
   if (!is.finite(sigma2) || sigma2 <= 0) sigma2 <- stats::var(yc)
   z  <- as.numeric(crossprod(Xc, yc) / sqrt(sigma2 * n))
   list(R = R, z = z, T_idx = T_idx,
