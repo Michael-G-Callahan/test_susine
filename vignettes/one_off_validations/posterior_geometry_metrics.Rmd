@@ -258,9 +258,16 @@ Re-generate each simulated dataset from its bundle row + the cached
 genotype matrix. Cheaper than caching p×p matrices on disk.
 
 ```{r reconstruct}
-# Identify the unique X matrices we need to load.
+# Identify the unique X matrices we need to load. Matrix paths live in the
+# separate `data_matrices.csv` manifest, joined to bundles by matrix_id.
+data_matrices <- readr::read_csv(file.path(run_history_dir, "data_matrices.csv"),
+                                 show_col_types = FALSE)
 needed_matrix_ids <- sort(unique(dataset_bundles$matrix_id))
-matrix_paths <- dplyr::distinct(dataset_bundles, matrix_id, matrix_path)
+matrix_paths <- data_matrices %>%
+  dplyr::filter(.data$matrix_id %in% needed_matrix_ids) %>%
+  dplyr::select(matrix_id, matrix_path) %>%
+  dplyr::distinct()
+stopifnot(all(needed_matrix_ids %in% matrix_paths$matrix_id))
 
 # Load each X once.
 load_X_cache <- function(matrix_paths) {
