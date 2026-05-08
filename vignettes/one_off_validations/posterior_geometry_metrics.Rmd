@@ -225,29 +225,30 @@ pgm_G_pivot <- function(R, z, L_target = default_L_target,
 
 # ----- driver: compute every metric per dataset ---------------------------
 
-pgm_compute_one <- function(R, z, T_idx, L_target,
+pgm_compute_one <- function(R, z, T_idx,
+                            L_target_stage1, L_target_stage2,
                             mc_n_samples_local = mc_n_samples,
                             lambda = ridge_lambda, seed = 1L) {
   out <- list()
-  # Stage 1
+  # Stage 1: uses true T (length L_target_stage1).
   out$S_T   <- pgm_S_T(R, z, T_idx, lambda)
   out$D_1   <- pgm_D1(z, T_idx)
   m_T       <- pgm_M_star_T(R, T_idx, mc_n_samples_local, lambda, seed = seed)
   out$M_star_T       <- unname(m_T["M_star_T"])
   out$M_star_T_mean  <- unname(m_T["M_star_T_mean"])
   out$G_top1 <- pgm_G_top1(R, z, T_idx, lambda)
-  # Stage 2
+  # Stage 2: T-free, fixed L_target_stage2 (would be unknown in real data).
   out$D_1_free <- pgm_D1_free(z)
-  m_marg <- pgm_M_star_marg(R, L_target,
+  m_marg <- pgm_M_star_marg(R, L_target_stage2,
                             n_outer = max(50L, mc_n_samples_local %/% 100L),
                             n_inner = 100L, lambda = lambda, seed = seed + 1L)
   out$M_star_marg <- unname(m_marg["M_star_marg"])
-  h <- pgm_H(R, z, L_target, mc_n_samples_local, lambda, seed = seed + 2L)
+  h <- pgm_H(R, z, L_target_stage2, mc_n_samples_local, lambda, seed = seed + 2L)
   out$H        <- unname(h["H"])
   out$H_mean   <- unname(h["H_mean"])
-  s_max <- pgm_S_max(R, z, L_target, mc_n_samples_local, lambda, seed = seed + 3L)
+  s_max <- pgm_S_max(R, z, L_target_stage2, mc_n_samples_local, lambda, seed = seed + 3L)
   out$S_max    <- unname(s_max["S_max"])
-  out$G_pivot  <- pgm_G_pivot(R, z, L_target, lambda)
+  out$G_pivot  <- pgm_G_pivot(R, z, L_target_stage2, lambda)
   tibble::as_tibble(out)
 }
 ```
@@ -258,84 +259,89 @@ Re-generate each simulated dataset from its bundle row + the cached
 genotype matrix. Cheaper than caching p×p matrices on disk.
 
 ```{r reconstruct}
-# Identify the unique X matrices we need to load. Matrix paths live in the
-# separate `data_matrices.csv` manifest, joined to bundles by matrix_id.
+# 4a. Locate matrices and the repo root (matrix paths are relative to it).
 data_matrices <- readr::read_csv(file.path(run_history_dir, "data_matrices.csv"),
                                  show_col_types = FALSE)
+job_config_json <- jsonlite::fromJSON(file.path(run_history_dir, "job_config.json"),
+                                      simplifyVector = FALSE)
+repo_root <- job_config_json$paths$repo_root %||% here()
+cat("repo_root:", repo_root, "\n")
+
 needed_matrix_ids <- sort(unique(dataset_bundles$matrix_id))
-matrix_paths <- data_matrices %>%
-  dplyr::filter(.data$matrix_id %in% needed_matrix_ids) %>%
-  dplyr::select(matrix_id, matrix_path) %>%
-  dplyr::distinct()
-stopifnot(all(needed_matrix_ids %in% matrix_paths$matrix_id))
-
-# Load each X once. Matrices are TSVs with an optional participant_ID
-# column. Use the canonical loader from run_model.R so behavior matches
-# the pipeline.
-repo_root <- cfg$paths$repo_root %||% here()
-load_X_cache <- function(matrix_rows, repo_root) {
-  out <- list()
-  for (i in seq_len(nrow(matrix_rows))) {
-    mid <- matrix_rows$matrix_id[i]
-    out[[as.character(mid)]] <- test_susine:::load_sampled_matrix(
-      matrix_rows[i, , drop = FALSE], repo_root = repo_root)
-  }
-  out
-}
-
-# Need data_scenario for the loader — pull it back from data_matrices.
 matrix_rows <- data_matrices %>%
   dplyr::filter(.data$matrix_id %in% needed_matrix_ids)
+stopifnot(all(needed_matrix_ids %in% matrix_rows$matrix_id))
 
-X_cache <- load_X_cache(matrix_rows, repo_root = repo_root)
+# 4b. Load each X once via the canonical pipeline loader.
+cat("Loading", nrow(matrix_rows), "unique X matrices...\n")
+X_cache <- list()
+t_load <- Sys.time()
+for (i in seq_len(nrow(matrix_rows))) {
+  mid <- matrix_rows$matrix_id[i]
+  X_cache[[as.character(mid)]] <- test_susine:::load_sampled_matrix(
+    matrix_rows[i, , drop = FALSE], repo_root = repo_root)
+  if (i %% 25 == 0 || i == nrow(matrix_rows))
+    cat(sprintf("  %d / %d matrices (%.1f sec)\n",
+                i, nrow(matrix_rows),
+                as.numeric(difftime(Sys.time(), t_load, units = "secs"))))
+}
 
-# Per-bundle: regenerate β, y, σ², compute z, T, R.
+# 4c. Per-bundle reconstruction. Use generate_simulation_data outputs directly
+#     (sim$sigma2, sim$causal_idx) and the package's standardize_x() so R is
+#     the same correlation matrix the pipeline's fits implicitly used.
 pgm_one_bundle <- function(bundle_row, X_cache) {
   X <- X_cache[[as.character(bundle_row$matrix_id)]]
   spec <- as.list(bundle_row)
   sim <- generate_simulation_data(spec, base_X = X)
-  X_use <- sim$X
-  y <- as.numeric(sim$y)
-  beta <- as.numeric(sim$beta)
-  sigma2 <- stats::var(sim$residuals %||% (y - X_use %*% beta))
-  if (!is.finite(sigma2) || sigma2 <= 0) sigma2 <- 1
-  T_idx <- which(beta != 0)
-  L <- length(T_idx)
-  # Standardize columns of X (test_susine convention) and y for z/R consistency
-  Xc <- scale(X_use, center = TRUE, scale = TRUE)
-  yc <- y - mean(y)
+  T_idx <- as.integer(sim$causal_idx)
+  Xc <- standardize_x(sim$X)              # mean 0, sd 1 columns
+  yc <- sim$y - mean(sim$y)
   n  <- nrow(Xc)
-  R  <- crossprod(Xc) / n
+  R  <- crossprod(Xc) / n                  # correlation matrix (1s on diag)
+  sigma2 <- as.numeric(sim$sigma2)
+  if (!is.finite(sigma2) || sigma2 <= 0) sigma2 <- stats::var(yc)
   z  <- as.numeric(crossprod(Xc, yc) / sqrt(sigma2 * n))
-  list(R = R, z = z, T_idx = T_idx, L_truth = L, sigma2 = sigma2)
+  list(R = R, z = z, T_idx = T_idx,
+       L_truth = length(T_idx), sigma2 = sigma2)
 }
 
-# Per-bundle compute. Costs ~few seconds each (most is the regen + R).
-compute_for_bundle <- function(bundle_row, X_cache) {
+compute_for_bundle <- function(bundle_row, X_cache,
+                               L_target_stage2 = default_L_target) {
   data <- pgm_one_bundle(bundle_row, X_cache)
-  L_target <- max(data$L_truth, 1L)
-  m <- pgm_compute_one(data$R, data$z, data$T_idx, L_target,
-                       mc_n_samples_local = mc_n_samples)
+  if (length(data$T_idx) == 0L) {
+    return(tibble::tibble(L_truth = 0L, sigma2 = data$sigma2))
+  }
+  m <- pgm_compute_one(
+    R = data$R, z = data$z, T_idx = data$T_idx,
+    L_target_stage1 = data$L_truth,
+    L_target_stage2 = L_target_stage2,
+    mc_n_samples_local = mc_n_samples,
+    seed = bundle_row$dataset_bundle_id[[1]]   # per-bundle reproducibility
+  )
   m$L_truth <- data$L_truth
   m$sigma2  <- data$sigma2
   m
 }
 
-# Run across bundles. Use a small subset first to verify wiring before
-# running the full set.
-n_bundles_to_run <- nrow(dataset_bundles)
-# n_bundles_to_run <- 20L   # uncomment to dry-run a subset
-sub <- dataset_bundles %>% dplyr::slice_head(n = n_bundles_to_run)
+# 4d. Default to a 20-bundle dry run. Bump n_bundles_to_run to the full
+# number of rows once you've sanity-checked the output.
+n_bundles_to_run <- 20L
+# n_bundles_to_run <- nrow(dataset_bundles)
 
-cat("Computing posterior-geometry metrics for", nrow(sub), "bundles...\n")
+sub <- dataset_bundles %>% dplyr::slice_head(n = n_bundles_to_run)
+cat("Computing metrics for", nrow(sub), "bundles...\n")
 t0 <- Sys.time()
 metric_rows <- purrr::map_dfr(seq_len(nrow(sub)), function(i) {
   row <- sub[i, , drop = FALSE]
   m <- compute_for_bundle(row, X_cache)
   m$dataset_bundle_id <- row$dataset_bundle_id[[1]]
+  if (i %% 5 == 0 || i == nrow(sub))
+    cat(sprintf("  %d / %d bundles (%.1f sec)\n",
+                i, nrow(sub),
+                as.numeric(difftime(Sys.time(), t0, units = "secs"))))
   m
 })
-cat("Done in", round(as.numeric(difftime(Sys.time(), t0, units = "secs")), 1), "sec.\n")
+cat("Done.\n")
 
 readr::write_csv(metric_rows,
                  file.path(out_dir, "posterior_geometry_metrics.csv"))
@@ -423,9 +429,15 @@ existing_cols <- c(
   "high_ld_count_095_per_snp", "high_ld_frac_095",
   "annotation_corr_beta_hat_std", "annotation_corr_z"
 )
+requested <- existing_cols
 existing_cols <- intersect(existing_cols, names(dataset_metric))
-cat("Existing comparator features:\n")
+missing_cols <- setdiff(requested, existing_cols)
+cat("Existing comparator features present in dataset_metric:\n")
 print(existing_cols)
+if (length(missing_cols)) {
+  cat("Missing (skipped):\n")
+  print(missing_cols)
+}
 
 existing_features <- dataset_metric %>%
   dplyr::select(dplyr::any_of(c("dataset_bundle_id", existing_cols)))
