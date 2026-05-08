@@ -75,9 +75,9 @@ run_history_dir <- file.path(output_root, "run_history", job_name, parent_job_id
 
 stopifnot(dir.exists(aggregated_dir), dir.exists(run_history_dir))
 
-run_metrics    <- readr::read_csv(file.path(aggregated_dir, "run_metrics_full.csv"),
+run_metrics    <- readr::read_csv(file.path(aggregated_dir, "model_metrics.csv"),
                                   show_col_types = FALSE)
-dataset_metric <- readr::read_csv(file.path(aggregated_dir, "dataset_metrics_full.csv"),
+dataset_metric <- readr::read_csv(file.path(aggregated_dir, "dataset_metrics.csv"),
                                   show_col_types = FALSE)
 dataset_bundles <- readr::read_csv(file.path(run_history_dir, "dataset_bundles.csv"),
                                    show_col_types = FALSE)
@@ -340,53 +340,61 @@ For each dataset, the three AUPRC outcomes:
   any annotation_r2)
 
 ```{r outcomes}
-# Inspect what use_case ids and series_types are available.
-print(sort(unique(run_metrics$use_case_id)))
-if ("series_type" %in% names(run_metrics)) {
-  print(sort(unique(run_metrics$series_type)))
+# Inspect what's available before filtering.
+cat("use_case_ids:\n"); print(sort(unique(run_metrics$use_case_id)))
+if ("filtering" %in% names(run_metrics))
+  cat("filtering values:", paste(sort(unique(run_metrics$filtering)), collapse = ", "), "\n")
+if ("warm_method" %in% names(run_metrics))
+  cat("warm_method values:", paste(sort(unique(stats::na.omit(run_metrics$warm_method))), collapse = ", "),
+      " (NAs:", sum(is.na(run_metrics$warm_method)), ")\n")
+
+# AUPRC is the same across `filtering = unfiltered/purity_filtered`
+# (CS-filtering doesn't change classification metrics), so collapse to one row.
+mm <- run_metrics
+if ("filtering" %in% names(mm)) {
+  mm <- mm %>% dplyr::filter(.data$filtering == "unfiltered" | is.na(.data$filtering))
 }
 
-# Cold baseline: vanilla SuSiE single fit (no warm start).
-cold_runs <- run_metrics %>%
-  dplyr::filter(.data$use_case_id == "susie_vanilla")
-if ("series_type" %in% names(cold_runs)) {
-  cold_runs <- cold_runs %>% dplyr::filter(.data$series_type %in% c("baseline_single", NA))
+# Cold baseline: vanilla SuSiE, no warm start.
+cold_runs <- mm %>% dplyr::filter(.data$use_case_id == "susie_vanilla")
+if ("warm_method" %in% names(cold_runs)) {
+  cold_runs <- cold_runs %>% dplyr::filter(is.na(.data$warm_method))
 }
-
 cold_per_bundle <- cold_runs %>%
   dplyr::group_by(dataset_bundle_id) %>%
-  dplyr::summarise(auprc_cold = mean(.data$AUPRC, na.rm = TRUE),
-                   .groups = "drop")
+  dplyr::summarise(auprc_cold = mean(.data$AUPRC, na.rm = TRUE), .groups = "drop")
 
-# Truth-warm reference: same use_case but truth_warm series.
-warm_runs <- run_metrics %>%
-  dplyr::filter(.data$use_case_id == "susie_vanilla")
-if ("series_type" %in% names(warm_runs)) {
-  warm_runs <- warm_runs %>% dplyr::filter(.data$series_type == "truth_warm")
+# Truth-warm: only present in jobs that include warm-start arms. Skip
+# gracefully if absent (e.g. baseline_sims_screen does only cold fits).
+has_warm <- "warm_method" %in% names(mm) &&
+  any(!is.na(mm$warm_method))
+warm_per_bundle <- if (has_warm) {
+  mm %>%
+    dplyr::filter(.data$use_case_id == "susie_vanilla", !is.na(.data$warm_method)) %>%
+    dplyr::group_by(dataset_bundle_id) %>%
+    dplyr::summarise(auprc_warm = mean(.data$AUPRC, na.rm = TRUE), .groups = "drop")
+} else {
+  cat("No truth-warm runs in this job; delta_warm regression will be skipped.\n")
+  tibble::tibble(dataset_bundle_id = integer(), auprc_warm = numeric())
 }
-warm_per_bundle <- warm_runs %>%
-  dplyr::group_by(dataset_bundle_id) %>%
-  dplyr::summarise(auprc_warm = mean(.data$AUPRC, na.rm = TRUE),
-                   .groups = "drop")
 
 # Best annotated: max AUPRC across any susine_functional_mu fit.
-annot_per_bundle <- run_metrics %>%
+annot_per_bundle <- mm %>%
   dplyr::filter(.data$use_case_id == "susine_functional_mu") %>%
   dplyr::group_by(dataset_bundle_id) %>%
-  dplyr::summarise(auprc_annotated = max(.data$AUPRC, na.rm = TRUE),
-                   .groups = "drop")
+  dplyr::summarise(auprc_annotated = max(.data$AUPRC, na.rm = TRUE), .groups = "drop")
 
 outcomes <- cold_per_bundle %>%
   dplyr::left_join(warm_per_bundle,  by = "dataset_bundle_id") %>%
   dplyr::left_join(annot_per_bundle, by = "dataset_bundle_id") %>%
   dplyr::mutate(
-    delta_warm      = .data$auprc_warm      - .data$auprc_cold,
+    delta_warm      = if (has_warm) .data$auprc_warm - .data$auprc_cold else NA_real_,
     delta_annotated = .data$auprc_annotated - .data$auprc_cold
   )
 
-cat("Outcome rows (datasets with at least cold AUPRC):", nrow(outcomes), "\n")
-cat("With non-NA warm:     ",  sum(!is.na(outcomes$auprc_warm)),      "\n")
-cat("With non-NA annotated:",  sum(!is.na(outcomes$auprc_annotated)), "\n")
+cat("Outcome rows (datasets with cold AUPRC):", nrow(outcomes), "\n")
+cat("  with non-NA warm:     ", sum(!is.na(outcomes$auprc_warm)), "\n")
+cat("  with non-NA annotated:", sum(!is.na(outcomes$auprc_annotated)), "\n")
 ```
 
 # 6. Existing Comparator Metric Set
@@ -458,11 +466,16 @@ run_three <- function(target_col, label) {
   )
 }
 
-reg_summary <- dplyr::bind_rows(
-  run_three("auprc_cold",      "AUPRC cold (baseline)"),
-  run_three("delta_warm",      "ΔAUPRC truth-warm vs cold"),
-  run_three("delta_annotated", "ΔAUPRC best-annotated vs cold")
+reg_targets <- list(
+  list(col = "auprc_cold",      label = "AUPRC cold (baseline)"),
+  list(col = "delta_annotated", label = "ΔAUPRC best-annotated vs cold")
 )
+if (any(!is.na(master$delta_warm))) {
+  reg_targets <- append(reg_targets,
+    list(list(col = "delta_warm", label = "ΔAUPRC truth-warm vs cold")), after = 1L)
+}
+reg_summary <- purrr::map_dfr(reg_targets,
+                              function(t) run_three(t$col, t$label))
 
 knitr::kable(reg_summary, digits = 3)
 readr::write_csv(reg_summary, file.path(out_dir, "regression_summary.csv"))
@@ -482,11 +495,7 @@ report_coefs <- function(target_col) {
   s %>% dplyr::select(target, predictor, dplyr::everything())
 }
 
-coef_tbl <- dplyr::bind_rows(
-  report_coefs("auprc_cold"),
-  report_coefs("delta_warm"),
-  report_coefs("delta_annotated")
-)
+coef_tbl <- purrr::map_dfr(reg_targets, function(t) report_coefs(t$col))
 readr::write_csv(coef_tbl, file.path(out_dir, "regression_coefficients.csv"))
 knitr::kable(head(coef_tbl, 60), digits = 3)
 ```
@@ -501,7 +510,7 @@ make_scatter <- function(x_col, y_col, df, label) {
     labs(title = label, x = x_col, y = y_col)
 }
 
-scatter_targets <- c("auprc_cold", "delta_warm", "delta_annotated")
+scatter_targets <- vapply(reg_targets, `[[`, character(1), "col")
 scatter_metrics <- intersect(c("S_T", "D_1", "M_star_T", "G_top1",
                                "S_max", "D_1_free", "M_star_marg", "H", "G_pivot",
                                "M1"),
