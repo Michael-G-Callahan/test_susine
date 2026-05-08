@@ -33,7 +33,7 @@ devtools::load_all(".")
 
 ```{r config}
 job_name <- "real_data_ensemble_selected10"
-parent_job_id <- "REPLACE_WITH_SLURM_PARENT_ID"
+parent_job_id <- "52781424"
 output_root <- here("output")
 ```
 
