@@ -82,6 +82,10 @@ baseline_screening_summary_csv <- file.path(
   output_root, "slurm_output", baseline_job_name, baseline_parent_job_id,
   "consolidated", "screening_summary.csv"
 )
+baseline_cfg_path <- file.path(
+  output_root, "run_history", baseline_job_name, baseline_parent_job_id,
+  "job_config.json"
+)
 selected_settings_csv <- file.path(study_dir, "selected_5arm_settings.csv")
 
 max_iter <- max_iter_5arm
@@ -450,6 +454,7 @@ cfg_bundle <- build_5arm_cfg(
   here_root = here(),
   output_root = output_root,
   baseline_screening_csv = baseline_screening_summary_csv,
+  baseline_cfg_path = baseline_cfg_path,
   settings_cache_csv = selected_settings_csv,
   prefer_settings_cache = FALSE,
   allow_manual_fallback = FALSE
@@ -471,6 +476,7 @@ if (!is.finite(sigma_0_2_vanilla_value)) {
 
 readr::write_csv(selected_5arm_settings, selected_settings_csv)
 cat("Baseline settings source:", baseline_screening_summary_csv, "\n")
+cat("Baseline run config:", baseline_cfg_path, "\n")
 cat("Selected 5-arm settings cache:", selected_settings_csv, "\n")
 print(selected_5arm_settings)
 

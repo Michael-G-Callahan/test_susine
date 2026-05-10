@@ -120,8 +120,8 @@ pick_best_5arm_settings <- function(screening_summary,
     if (annotated) {
       rows <- rows %>%
         dplyr::filter(
-          abs(as.numeric(.data$annotation_r2) - annotation_r2) < 1e-8,
-          abs(as.numeric(.data$inflate_match) - inflate_match) < 1e-8
+          abs(as.numeric(.data$annotation_r2) - .env$annotation_r2) < 1e-8,
+          abs(as.numeric(.data$inflate_match) - .env$inflate_match) < 1e-8
         )
     }
     rows <- rows %>%
@@ -223,6 +223,100 @@ resolve_5arm_settings <- function(output_root,
   )
 }
 
+filter_baseline_runs_for_5arm <- function(base_runs, settings) {
+  required_cols <- c(
+    "dataset_bundle_id", "use_case_id", "annotation_r2", "inflate_match",
+    "sigma_0_2_scalar", "c_value", "tau_value", "annotation_seed"
+  )
+  missing_cols <- setdiff(required_cols, names(base_runs))
+  if (length(missing_cols)) {
+    stop("Baseline run table is missing required columns: ",
+         paste(missing_cols, collapse = ", "))
+  }
+
+  pick_method_runs <- function(method) {
+    setting <- settings %>%
+      dplyr::filter(.data$method_family == !!method)
+    if (nrow(setting) != 1L) {
+      stop("Expected exactly one selected setting for ", method,
+           "; found ", nrow(setting), ".")
+    }
+
+    rows <- base_runs %>%
+      dplyr::filter(.data$use_case_id == !!method) %>%
+      dplyr::filter(
+        abs(as.numeric(.data$sigma_0_2_scalar) -
+              as.numeric(setting$sigma_0_2_scalar[[1]])) < 1e-8
+      )
+
+    if (method == "susine_functional_mu") {
+      rows <- rows %>%
+        dplyr::filter(
+          abs(as.numeric(.data$annotation_r2) -
+                as.numeric(setting$annotation_r2[[1]])) < 1e-8,
+          abs(as.numeric(.data$inflate_match) -
+                as.numeric(setting$inflate_match[[1]])) < 1e-8,
+          abs(as.numeric(.data$c_value) -
+                as.numeric(setting$c_value[[1]])) < 1e-6
+        )
+    } else if (method == "susie_functional_pi") {
+      rows <- rows %>%
+        dplyr::filter(
+          abs(as.numeric(.data$annotation_r2) -
+                as.numeric(setting$annotation_r2[[1]])) < 1e-8,
+          abs(as.numeric(.data$inflate_match) -
+                as.numeric(setting$inflate_match[[1]])) < 1e-8,
+          abs(as.numeric(.data$tau_value) -
+                as.numeric(setting$tau_value[[1]])) < 1e-6
+        )
+    }
+
+    rows <- rows %>%
+      dplyr::mutate(
+        method_family = .data$use_case_id,
+        annotation_label = annotation_label_5arm(.data$annotation_r2,
+                                                 .data$inflate_match),
+        setting_label = settings_label_5arm(
+          .data$use_case_id, .data$c_value, .data$tau_value,
+          .data$sigma_0_2_scalar
+        )
+      )
+
+    if (!nrow(rows)) {
+      stop("No baseline run rows matched selected 5-arm setting for ", method,
+           ".")
+    }
+    rows
+  }
+
+  selected_runs <- dplyr::bind_rows(lapply(
+    cold_method_levels_5arm, pick_method_runs
+  )) %>%
+    dplyr::mutate(dataset_bundle_id = as.character(.data$dataset_bundle_id)) %>%
+    dplyr::arrange(.data$dataset_bundle_id, .data$use_case_id)
+
+  expected_n <- dplyr::n_distinct(selected_runs$dataset_bundle_id) *
+    length(cold_method_levels_5arm)
+  if (nrow(selected_runs) != expected_n) {
+    stop(
+      "Selected baseline run rows are not one row per dataset per cold method. ",
+      "Rows=", nrow(selected_runs), "; expected=", expected_n, "."
+    )
+  }
+
+  seed_check <- selected_runs %>%
+    dplyr::filter(.data$use_case_id %in%
+                    c("susine_functional_mu", "susie_functional_pi")) %>%
+    dplyr::count(.data$dataset_bundle_id, .data$use_case_id,
+                 name = "n_rows") %>%
+    dplyr::filter(.data$n_rows != 1L)
+  if (nrow(seed_check)) {
+    stop("Selected baseline annotation rows are not unique by dataset/method.")
+  }
+
+  selected_runs
+}
+
 # Build the job_config + selected run rows for the 5-arm refit grid.
 #
 # Args:
@@ -236,6 +330,7 @@ build_5arm_cfg <- function(here_root, output_root,
                            study_name = study_name_5arm,
                            settings = NULL,
                            baseline_screening_csv = NULL,
+                           baseline_cfg_path = NULL,
                            settings_cache_csv = NULL,
                            prefer_settings_cache = TRUE,
                            allow_manual_fallback = FALSE) {
@@ -247,6 +342,74 @@ build_5arm_cfg <- function(here_root, output_root,
     prefer_settings_cache = prefer_settings_cache,
     allow_manual_fallback = allow_manual_fallback
   )
+
+  if (is.null(baseline_cfg_path)) {
+    baseline_cfg_path <- file.path(
+      output_root, "run_history", baseline_job_name_5arm,
+      baseline_parent_job_id_5arm, "job_config.json"
+    )
+  }
+
+  if (file.exists(baseline_cfg_path)) {
+    base_cfg <- test_susine:::load_job_config(baseline_cfg_path)
+    base_runs <- base_cfg$tables$runs %>%
+      tibble::as_tibble()
+    selected_runs <- filter_baseline_runs_for_5arm(base_runs, settings)
+    dataset_ids <- sort(unique(as.character(selected_runs$dataset_bundle_id)))
+
+    cfg <- base_cfg
+    cfg$job$job_name <- study_name
+    cfg$job$output_root <- output_root
+    cfg$job$HPC <- FALSE
+    cfg$job$aggregation_methods <- character(0)
+    cfg$job$include_overall_pool <- FALSE
+    cfg$job$write_confusion_bins <- FALSE
+    cfg$job$write_snps_parquet <- FALSE
+    cfg$job$write_tier_cs_metrics <- TRUE
+    cfg$job$write_scaling_confusion_bins <- FALSE
+    cfg$five_arm_settings <- settings
+    cfg$five_arm_baseline_cfg_path <- baseline_cfg_path
+
+    cfg$tables$dataset_bundles <- cfg$tables$dataset_bundles %>%
+      tibble::as_tibble() %>%
+      dplyr::mutate(dataset_bundle_id = as.character(.data$dataset_bundle_id)) %>%
+      dplyr::filter(.data$dataset_bundle_id %in% dataset_ids) %>%
+      dplyr::arrange(as.numeric(.data$dataset_bundle_id))
+    cfg$tables$runs <- selected_runs
+
+    data_matrix_catalog <- NULL
+    if (!is.null(cfg$job$data_matrix_catalog)) {
+      data_matrix_catalog <- cfg$job$data_matrix_catalog
+    } else if (!is.null(cfg$tables$data_matrix_catalog)) {
+      data_matrix_catalog <- cfg$tables$data_matrix_catalog
+    } else {
+      matrix_ids <- unique(cfg$tables$dataset_bundles$matrix_id)
+      data_matrix_catalog <- test_susine:::build_data_matrix_catalog(
+        requested_scenarios = data_scenario_5arm,
+        repo_root = here_root,
+        summary_path = file.path(
+          here_root, "data", "sampled_simulated_genotypes",
+          "scenario_sampling_summary.csv"
+        )
+      ) %>%
+        dplyr::filter(.data$matrix_id %in% matrix_ids)
+    }
+
+    return(list(
+      cfg = cfg,
+      selected_runs = selected_runs,
+      data_matrix_catalog = data_matrix_catalog,
+      settings = settings
+    ))
+  }
+
+  if (!isTRUE(allow_manual_fallback)) {
+    stop(
+      "Cannot copy baseline run rows because baseline job_config.json was ",
+      "not found:\n", baseline_cfg_path,
+      "\nProvide baseline_cfg_path or rerun/sync the baseline run history."
+    )
+  }
 
   get_setting <- function(method, col) {
     val <- settings[[col]][match(method, settings$method_family)]
@@ -264,6 +427,24 @@ build_5arm_cfg <- function(here_root, output_root,
                                      "sigma_0_2_scalar"))
   c_mu <- as.numeric(get_setting("susine_functional_mu", "c_value"))
   tau_pi <- as.numeric(get_setting("susie_functional_pi", "tau_value"))
+  annotation_r2_mu <- as.numeric(get_setting("susine_functional_mu",
+                                             "annotation_r2"))
+  annotation_r2_pi <- as.numeric(get_setting("susie_functional_pi",
+                                             "annotation_r2"))
+  inflate_match_mu <- as.numeric(get_setting("susine_functional_mu",
+                                             "inflate_match"))
+  inflate_match_pi <- as.numeric(get_setting("susie_functional_pi",
+                                             "inflate_match"))
+
+  if (!isTRUE(all.equal(annotation_r2_mu, annotation_r2_pi, tolerance = 1e-8)) ||
+      !isTRUE(all.equal(inflate_match_mu, inflate_match_pi, tolerance = 1e-8))) {
+    stop(
+      "Selected functional-mu and functional-pi settings must use the same ",
+      "annotation regime. Got mu=(r2=", annotation_r2_mu,
+      ", inflate=", inflate_match_mu, ") and pi=(r2=", annotation_r2_pi,
+      ", inflate=", inflate_match_pi, ")."
+    )
+  }
 
   data_matrix_catalog_full <- test_susine:::build_data_matrix_catalog(
     requested_scenarios = data_scenario_5arm,
@@ -371,8 +552,8 @@ build_5arm_cfg <- function(here_root, output_root,
     architecture_grid = architecture_value_5arm,
     seeds = seeds_5arm,
     prior_quality = tibble::tibble(
-      annotation_r2 = annotation_r2_value_5arm,
-      inflate_match = inflate_match_value_5arm
+      annotation_r2 = annotation_r2_mu,
+      inflate_match = inflate_match_mu
     ),
     sigma_0_2_scalars = unique(c(sigma_vanilla, sigma_mu, sigma_pi)),
     data_scenarios = data_scenario_5arm,
