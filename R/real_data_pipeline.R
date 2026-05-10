@@ -13,7 +13,7 @@ real_data_required_annotation_cols <- function() {
 }
 
 real_data_study_root <- function(repo_root = ensure_repo_root(getwd())) {
-  file.path(repo_root, "data", "real_case_studies", "selected_10_loci")
+  file.path(repo_root, "data", "real_case_studies", "geometric_n20_loci")
 }
 
 real_data_default_manifest_path <- function(repo_root = ensure_repo_root(getwd())) {
@@ -57,7 +57,7 @@ real_data_source_paths <- function(source_repo_root, locus_id, gene_name) {
     annotations = file.path(
       source_repo_root,
       "output", "susine_mu0",
-      "representative_gene_sample_n10_annotation_selection",
+      "geometric_n20",
       "per_locus_annotations",
       paste0(gene_upper, "_mu0_variant_annotations.csv")
     )
@@ -104,7 +104,7 @@ sync_real_data_inputs <- function(
     source_repo_root = "/storage/work/mgc5166/Annotations/eQTL_annotations_for_susine",
     dest_root = real_data_study_root(),
     loci = NULL,
-    source_mu0_name = "representative_gene_sample_n10_annotation_selection",
+    source_mu0_name = "geometric_n20",
     source_annotation_summary = NULL
 ) {
   repo_root <- ensure_repo_root(getwd())
@@ -493,7 +493,7 @@ load_real_data_locus_bundle <- function(
 }
 
 build_real_data_job_config <- function(
-    job_name = "real_data_ensemble_selected10",
+    job_name = "real_data_ensemble_geometric_n20",
     manifest_path = real_data_default_manifest_path(),
     loci = NULL,
     output_root = "output",

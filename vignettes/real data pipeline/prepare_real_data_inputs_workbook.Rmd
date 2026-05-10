@@ -10,7 +10,7 @@ editor_options:
     wrap: 72
 ---
 
-This workbook syncs the selected 10 GTEx loci from the annotation repo into
+This workbook syncs the geometric N20 GTEx loci from the annotation repo into
 `test_susine`, rebuilds the manifest, and previews one aligned locus bundle.
 
 ```{r setup, message=FALSE}
@@ -33,8 +33,8 @@ devtools::load_all(".")
 
 ```{r config}
 source_repo_root <- "/storage/work/mgc5166/Annotations/eQTL_annotations_for_susine"
-dest_root <- here("data", "real_case_studies", "selected_10_loci")
-source_mu0_name <- "representative_gene_sample_n10_annotation_selection"
+dest_root <- here("data", "real_case_studies", "geometric_n20_loci")
+source_mu0_name <- "geometric_n20"
 source_annotation_summary <- NULL
 loci <- NULL
 ```

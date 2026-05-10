@@ -37,8 +37,12 @@ theme_set(theme_bw(base_size = 12))
 # 1. User Configuration
 
 ```{r config}
-job_name <- "real_data_ensemble_selected10"
-parent_job_id <- "52781424"
+job_name <- "real_data_ensemble_geometric_n20"
+parent_job_id <- "REPLACE_WITH_SLURM_JOB_ID"
+
+if (identical(parent_job_id, "REPLACE_WITH_SLURM_JOB_ID")) {
+  stop("Set parent_job_id to the SLURM job id returned by sbatch before visualizing.")
+}
 
 aggregated_dir <- here("output", "slurm_output", job_name, parent_job_id, "aggregated")
 figure_dir <- here("output", "slurm_output", job_name, parent_job_id, "figures", "real_data_ensemble")

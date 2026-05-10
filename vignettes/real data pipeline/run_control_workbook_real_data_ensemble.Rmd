@@ -10,7 +10,7 @@ editor_options:
     wrap: 72
 ---
 
-This workbook builds the real-data RSS ensemble job for the selected 10 loci
+This workbook builds the real-data RSS ensemble job for the geometric N20 loci
 and writes the SLURM-ready artifacts.
 
 ```{r setup, message=FALSE}
@@ -35,8 +35,8 @@ devtools::load_all(".")
 ```{r config}
 DRY_RUN <- TRUE
 
-job_name <- "real_data_ensemble_selected10"
-manifest_path <- here("data", "real_case_studies", "selected_10_loci", "locus_manifest.csv")
+job_name <- "real_data_ensemble_geometric_n20"
+manifest_path <- here("data", "real_case_studies", "geometric_n20_loci", "locus_manifest.csv")
 
 email <- "mgc5166@psu.edu"
 slurm_time <- "05:59:59"
