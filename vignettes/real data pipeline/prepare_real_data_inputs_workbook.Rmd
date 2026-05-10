@@ -34,6 +34,8 @@ devtools::load_all(".")
 ```{r config}
 source_repo_root <- "/storage/work/mgc5166/Annotations/eQTL_annotations_for_susine"
 dest_root <- here("data", "real_case_studies", "selected_10_loci")
+source_mu0_name <- "representative_gene_sample_n10_annotation_selection"
+source_annotation_summary <- NULL
 loci <- NULL
 ```
 
@@ -43,6 +45,8 @@ loci <- NULL
 synced <- test_susine::sync_real_data_inputs(
   source_repo_root = source_repo_root,
   dest_root = dest_root,
+  source_mu0_name = source_mu0_name,
+  source_annotation_summary = source_annotation_summary,
   loci = loci
 )
 

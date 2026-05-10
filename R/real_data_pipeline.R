@@ -103,7 +103,9 @@ real_data_bind_csv_files <- function(files) {
 sync_real_data_inputs <- function(
     source_repo_root = "/storage/work/mgc5166/Annotations/eQTL_annotations_for_susine",
     dest_root = real_data_study_root(),
-    loci = NULL
+    loci = NULL,
+    source_mu0_name = "representative_gene_sample_n10_annotation_selection",
+    source_annotation_summary = NULL
 ) {
   repo_root <- ensure_repo_root(getwd())
   source_repo_root <- normalizePath(source_repo_root, winslash = "/", mustWork = TRUE)
@@ -113,13 +115,13 @@ sync_real_data_inputs <- function(
   mu0_summary_path <- file.path(
     source_repo_root,
     "output", "susine_mu0",
-    "representative_gene_sample_n10_annotation_selection",
+    source_mu0_name,
     "mu0_locus_summary.csv"
   )
-  selection_summary_path <- file.path(
+  selection_summary_path <- source_annotation_summary %||% file.path(
     source_repo_root,
     "output", "annotation", "alphagenome",
-    "representative_gene_sample_n10_annotation_selection_summary.csv"
+    paste0(source_mu0_name, "_annotation_batch_summary.csv")
   )
   if (!file.exists(mu0_summary_path)) {
     stop("Missing mu0_locus_summary.csv at ", mu0_summary_path)
@@ -141,6 +143,13 @@ sync_real_data_inputs <- function(
     ensure_dir(locus_dir)
 
     src <- real_data_source_paths(source_repo_root, locus_id, gene_name)
+    src$annotations <- file.path(
+      source_repo_root,
+      "output", "susine_mu0",
+      source_mu0_name,
+      "per_locus_annotations",
+      paste0(gene_name, "_mu0_variant_annotations.csv")
+    )
     real_data_check_required_files(src, locus_id)
 
     dest_files <- list(
