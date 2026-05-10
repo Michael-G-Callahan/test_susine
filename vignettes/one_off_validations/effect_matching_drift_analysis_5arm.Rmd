@@ -1927,7 +1927,13 @@ if (file.exists(causal_truth_rds)) {
 } else {
   cfg_bundle <- build_5arm_cfg(
     here_root = here(),
-    output_root = output_root
+    output_root = output_root,
+    baseline_screening_csv = file.path(
+      output_root, "slurm_output", baseline_job_name_5arm,
+      baseline_parent_job_id_5arm, "consolidated", "screening_summary.csv"
+    ),
+    settings_cache_csv = file.path(study_dir, "selected_5arm_settings.csv"),
+    prefer_settings_cache = TRUE
   )
   cfg_for_pr <- cfg_bundle$cfg
 
@@ -1995,10 +2001,9 @@ pip_records_for_pr <- readRDS(pip_records_rds) %>%
 
 # Pool PIPs and binary positive labels across all (dataset, variant)
 # observations, separately for each of the 5 methods. Positives are the
-# top pr_top_k causal positions per dataset, ranked by |beta|; the
-# remaining causals are excluded from the negative set so that polygenic
-# background variants are not counted as false positives. (This matches
-# the baseline-sims AUPRC convention.)
+# top pr_top_k causal positions per dataset, ranked by |beta|. All other
+# variants, including non-top causal variants, are negatives; this matches
+# the baseline-sims confusion-bin AUPRC convention.
 pooled_rows <- list()
 for (i in seq_len(nrow(pip_records_for_pr))) {
   ds_id <- pip_records_for_pr$dataset_bundle_id[[i]]
@@ -2010,18 +2015,13 @@ for (i in seq_len(nrow(pip_records_for_pr))) {
   }
   p_len <- length(pip_vec)
   top_idx <- truth$top_idx[truth$top_idx >= 1L & truth$top_idx <= p_len]
-  causal <- truth$causal_idx[truth$causal_idx >= 1L &
-                              truth$causal_idx <= p_len]
   is_top <- integer(p_len)
   is_top[top_idx] <- 1L
-  is_other_causal <- integer(p_len)
-  is_other_causal[setdiff(causal, top_idx)] <- 1L
-  keep <- is_other_causal == 0L  # drop polygenic-background causals
   pooled_rows[[length(pooled_rows) + 1L]] <- tibble::tibble(
     dataset_bundle_id = ds_id,
     model_method = method,
-    pip = as.numeric(pip_vec[keep]),
-    is_causal = is_top[keep]
+    pip = as.numeric(pip_vec),
+    is_causal = is_top
   )
 }
 pooled_df <- dplyr::bind_rows(pooled_rows)

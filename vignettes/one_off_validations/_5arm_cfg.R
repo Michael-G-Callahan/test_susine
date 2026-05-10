@@ -20,12 +20,20 @@ p_star_value_5arm      <- NA_integer_
 architecture_value_5arm <- "susie2_oligogenic"
 data_scenario_5arm     <- "scenario_1"
 
-# Treatment-arm settings (high-quality annotation calibration point).
+# Baseline screening result used to lock the 5-arm treatment settings.
+baseline_job_name_5arm <- "baseline_sims_screen"
+baseline_parent_job_id_5arm <- "51509956"
+
+# Treatment-arm annotation regime. The scalar settings below are only a
+# manual fallback for exploratory use; production 5-arm reruns should select
+# from the locked baseline screening_summary.csv.
 annotation_r2_value_5arm <- 0.5
 inflate_match_value_5arm <- 0.9
-c_value_mu_5arm    <- 0.6
-tau_value_pi_5arm  <- 0.464
-sigma_0_2_value_5arm <- 0.01
+c_value_mu_5arm <- 0.6
+tau_value_pi_5arm <- 0.464
+sigma_0_2_vanilla_value_5arm <- 0.2
+sigma_0_2_mu_value_5arm <- 0.01
+sigma_0_2_pi_value_5arm <- 0.2
 max_iter_5arm        <- 100L
 credible_set_rho_5arm <- 0.95
 purity_threshold_5arm <- 0.50
@@ -38,6 +46,182 @@ warm_method_levels_5arm <- c(
 )
 all_method_levels_5arm <- c(cold_method_levels_5arm, warm_method_levels_5arm)
 
+fmt_num_5arm <- function(x, digits = 3) {
+  format(signif(as.numeric(x), digits), trim = TRUE, scientific = FALSE)
+}
+
+annotation_label_5arm <- function(annotation_r2, inflate_match) {
+  ifelse(
+    is.na(annotation_r2) | is.na(inflate_match),
+    "no_annotation",
+    paste0("r2=", fmt_num_5arm(annotation_r2, 2),
+           " | inflate=", fmt_num_5arm(inflate_match, 2))
+  )
+}
+
+settings_label_5arm <- function(method_family, c_value, tau_value,
+                                sigma_0_2_scalar) {
+  dplyr::case_when(
+    method_family == "susie_vanilla" ~
+      paste0("susie_vanilla | sigma=", sigma_0_2_scalar),
+    method_family == "susine_functional_mu" ~
+      paste0("susine_functional_mu | c=", fmt_num_5arm(c_value, 3),
+             " | sigma=", sigma_0_2_scalar),
+    method_family == "susie_functional_pi" ~
+      paste0("susie_functional_pi | tau=", fmt_num_5arm(tau_value, 3),
+             " | sigma=", sigma_0_2_scalar),
+    TRUE ~ method_family
+  )
+}
+
+manual_5arm_settings <- function() {
+  tibble::tibble(
+    method_family = cold_method_levels_5arm,
+    annotation_r2 = c(NA_real_, annotation_r2_value_5arm,
+                      annotation_r2_value_5arm),
+    inflate_match = c(NA_real_, inflate_match_value_5arm,
+                      inflate_match_value_5arm),
+    c_value = c(NA_real_, c_value_mu_5arm, NA_real_),
+    tau_value = c(NA_real_, NA_real_, tau_value_pi_5arm),
+    sigma_0_2_scalar = as.character(c(
+      sigma_0_2_vanilla_value_5arm,
+      sigma_0_2_mu_value_5arm,
+      sigma_0_2_pi_value_5arm
+    )),
+    AUPRC = NA_real_,
+    setting_source = "manual_fallback"
+  ) %>%
+    dplyr::mutate(
+      annotation_label = annotation_label_5arm(.data$annotation_r2,
+                                               .data$inflate_match),
+      setting_label = settings_label_5arm(
+        .data$method_family, .data$c_value, .data$tau_value,
+        .data$sigma_0_2_scalar
+      )
+    )
+}
+
+pick_best_5arm_settings <- function(screening_summary,
+                                    annotation_r2 = annotation_r2_value_5arm,
+                                    inflate_match = inflate_match_value_5arm) {
+  required_cols <- c(
+    "method_family", "annotation_r2", "inflate_match",
+    "sigma_0_2_scalar", "c_value", "tau_value", "AUPRC"
+  )
+  missing_cols <- setdiff(required_cols, names(screening_summary))
+  if (length(missing_cols)) {
+    stop("Baseline screening summary is missing required columns: ",
+         paste(missing_cols, collapse = ", "))
+  }
+
+  pick_one <- function(method, annotated) {
+    rows <- screening_summary %>%
+      dplyr::filter(.data$method_family == !!method)
+    if (annotated) {
+      rows <- rows %>%
+        dplyr::filter(
+          abs(as.numeric(.data$annotation_r2) - annotation_r2) < 1e-8,
+          abs(as.numeric(.data$inflate_match) - inflate_match) < 1e-8
+        )
+    }
+    rows <- rows %>%
+      dplyr::filter(is.finite(.data$AUPRC)) %>%
+      dplyr::arrange(dplyr::desc(.data$AUPRC))
+    if (!nrow(rows)) {
+      stop("No baseline-screening row found for ", method,
+           if (annotated) {
+             paste0(" at annotation_r2=", annotation_r2,
+                    ", inflate_match=", inflate_match)
+           } else {
+             ""
+           })
+    }
+    rows[1, , drop = FALSE]
+  }
+
+  dplyr::bind_rows(
+    pick_one("susie_vanilla", annotated = FALSE),
+    pick_one("susine_functional_mu", annotated = TRUE),
+    pick_one("susie_functional_pi", annotated = TRUE)
+  ) %>%
+    dplyr::mutate(
+      method_family = as.character(.data$method_family),
+      annotation_r2 = as.numeric(.data$annotation_r2),
+      inflate_match = as.numeric(.data$inflate_match),
+      c_value = as.numeric(.data$c_value),
+      tau_value = as.numeric(.data$tau_value),
+      sigma_0_2_scalar = as.character(.data$sigma_0_2_scalar),
+      annotation_label = annotation_label_5arm(.data$annotation_r2,
+                                               .data$inflate_match),
+      setting_label = settings_label_5arm(
+        .data$method_family, .data$c_value, .data$tau_value,
+        .data$sigma_0_2_scalar
+      ),
+      setting_source = "baseline_screening_summary"
+    ) %>%
+    dplyr::select(dplyr::all_of(c(
+      "method_family", "setting_label", "annotation_label",
+      "annotation_r2", "inflate_match", "sigma_0_2_scalar",
+      "c_value", "tau_value", "AUPRC", "setting_source"
+    )))
+}
+
+resolve_5arm_settings <- function(output_root,
+                                  settings = NULL,
+                                  baseline_screening_csv = NULL,
+                                  settings_cache_csv = NULL,
+                                  prefer_settings_cache = TRUE,
+                                  allow_manual_fallback = FALSE) {
+  if (!is.null(settings)) {
+    return(settings)
+  }
+
+  if (isTRUE(prefer_settings_cache) &&
+      !is.null(settings_cache_csv) &&
+      file.exists(settings_cache_csv)) {
+    return(readr::read_csv(settings_cache_csv, show_col_types = FALSE))
+  }
+
+  if (is.null(baseline_screening_csv)) {
+    baseline_screening_csv <- file.path(
+      output_root, "slurm_output", baseline_job_name_5arm,
+      baseline_parent_job_id_5arm, "consolidated", "screening_summary.csv"
+    )
+  }
+  if (file.exists(baseline_screening_csv)) {
+    out <- pick_best_5arm_settings(
+      readr::read_csv(baseline_screening_csv, show_col_types = FALSE)
+    )
+    if (!is.null(settings_cache_csv)) {
+      dir.create(dirname(settings_cache_csv), recursive = TRUE,
+                 showWarnings = FALSE)
+      readr::write_csv(out, settings_cache_csv)
+    }
+    return(out)
+  }
+
+  if (!isTRUE(prefer_settings_cache) &&
+      !is.null(settings_cache_csv) &&
+      file.exists(settings_cache_csv)) {
+    return(readr::read_csv(settings_cache_csv, show_col_types = FALSE))
+  }
+
+  if (isTRUE(allow_manual_fallback)) {
+    warning(
+      "Baseline screening summary not found; using manual fallback 5-arm ",
+      "settings. This is not recommended for production reruns.\nMissing: ",
+      baseline_screening_csv
+    )
+    return(manual_5arm_settings())
+  }
+
+  stop(
+    "Cannot resolve 5-arm settings. Expected locked baseline summary at:\n",
+    baseline_screening_csv,
+    "\nRun collect_results_workbook_baseline_sims.Rmd first, or provide ",
+    "settings_cache_csv/settings explicitly."
+  )
+}
 
 # Build the job_config + selected run rows for the 5-arm refit grid.
 #
@@ -49,7 +233,38 @@ all_method_levels_5arm <- c(cold_method_levels_5arm, warm_method_levels_5arm)
 #
 # Returns a list with cfg, selected_runs, data_matrix_catalog.
 build_5arm_cfg <- function(here_root, output_root,
-                           study_name = study_name_5arm) {
+                           study_name = study_name_5arm,
+                           settings = NULL,
+                           baseline_screening_csv = NULL,
+                           settings_cache_csv = NULL,
+                           prefer_settings_cache = TRUE,
+                           allow_manual_fallback = FALSE) {
+  settings <- resolve_5arm_settings(
+    output_root = output_root,
+    settings = settings,
+    baseline_screening_csv = baseline_screening_csv,
+    settings_cache_csv = settings_cache_csv,
+    prefer_settings_cache = prefer_settings_cache,
+    allow_manual_fallback = allow_manual_fallback
+  )
+
+  get_setting <- function(method, col) {
+    val <- settings[[col]][match(method, settings$method_family)]
+    if (!length(val) || is.na(val[[1]])) {
+      return(NA)
+    }
+    val[[1]]
+  }
+
+  sigma_vanilla <- as.numeric(get_setting("susie_vanilla",
+                                          "sigma_0_2_scalar"))
+  sigma_mu <- as.numeric(get_setting("susine_functional_mu",
+                                     "sigma_0_2_scalar"))
+  sigma_pi <- as.numeric(get_setting("susie_functional_pi",
+                                     "sigma_0_2_scalar"))
+  c_mu <- as.numeric(get_setting("susine_functional_mu", "c_value"))
+  tau_pi <- as.numeric(get_setting("susie_functional_pi", "tau_value"))
+
   data_matrix_catalog_full <- test_susine:::build_data_matrix_catalog(
     requested_scenarios = data_scenario_5arm,
     repo_root = here_root,
@@ -114,7 +329,7 @@ build_5arm_cfg <- function(here_root, output_root,
     exploration_methods = "sigma_0_2_grid",
     exploration_mode = "separate",
     K = 1L,
-    sigma_0_2_grid_values = sigma_0_2_value_5arm
+    sigma_0_2_grid_values = sigma_vanilla
   )
 
   spec_susine_functional_mu <- list(
@@ -123,8 +338,8 @@ build_5arm_cfg <- function(here_root, output_root,
     exploration_methods = c("c_grid", "sigma_0_2_grid"),
     exploration_mode = "intersect",
     K = 1L,
-    c_grid_values = c_value_mu_5arm,
-    sigma_0_2_grid_values = sigma_0_2_value_5arm
+    c_grid_values = c_mu,
+    sigma_0_2_grid_values = sigma_mu
   )
 
   spec_susie_functional_pi <- list(
@@ -133,8 +348,8 @@ build_5arm_cfg <- function(here_root, output_root,
     exploration_methods = c("tau_grid", "sigma_0_2_grid"),
     exploration_mode = "intersect",
     K = 1L,
-    tau_grid_values = tau_value_pi_5arm,
-    sigma_0_2_grid_values = sigma_0_2_value_5arm
+    tau_grid_values = tau_pi,
+    sigma_0_2_grid_values = sigma_pi
   )
 
   cfg <- test_susine::make_job_config(
@@ -159,7 +374,7 @@ build_5arm_cfg <- function(here_root, output_root,
       annotation_r2 = annotation_r2_value_5arm,
       inflate_match = inflate_match_value_5arm
     ),
-    sigma_0_2_scalars = sigma_0_2_value_5arm,
+    sigma_0_2_scalars = unique(c(sigma_vanilla, sigma_mu, sigma_pi)),
     data_scenarios = data_scenario_5arm,
     repo_root = here_root,
     data_matrix_catalog = data_matrix_catalog,
@@ -185,6 +400,7 @@ build_5arm_cfg <- function(here_root, output_root,
       jsd_threshold = 0.15
     )
   )
+  cfg$five_arm_settings <- settings
 
   run_table <- cfg$tables$runs %>%
     tibble::as_tibble() %>%
@@ -193,19 +409,11 @@ build_5arm_cfg <- function(here_root, output_root,
       annotation_label = dplyr::if_else(
         is.na(.data$annotation_r2) | is.na(.data$inflate_match),
         "no_annotation",
-        paste0("r2=", .data$annotation_r2,
-               " | inflate=", .data$inflate_match)
+        annotation_label_5arm(.data$annotation_r2, .data$inflate_match)
       ),
-      setting_label = dplyr::case_when(
-        .data$use_case_id == "susie_vanilla" ~
-          paste0("susie_vanilla | sigma=", .data$sigma_0_2_scalar),
-        .data$use_case_id == "susine_functional_mu" ~
-          paste0("susine_functional_mu | c=", .data$c_value,
-                 " | sigma=", .data$sigma_0_2_scalar),
-        .data$use_case_id == "susie_functional_pi" ~
-          paste0("susie_functional_pi | tau=", .data$tau_value,
-                 " | sigma=", .data$sigma_0_2_scalar),
-        TRUE ~ .data$use_case_id
+      setting_label = settings_label_5arm(
+        .data$use_case_id, .data$c_value, .data$tau_value,
+        .data$sigma_0_2_scalar
       )
     )
   cfg$tables$runs <- run_table
@@ -217,6 +425,7 @@ build_5arm_cfg <- function(here_root, output_root,
   list(
     cfg = cfg,
     selected_runs = selected_runs,
-    data_matrix_catalog = data_matrix_catalog
+    data_matrix_catalog = data_matrix_catalog,
+    settings = settings
   )
 }

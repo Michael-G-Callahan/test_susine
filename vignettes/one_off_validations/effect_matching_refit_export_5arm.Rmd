@@ -14,14 +14,16 @@ Extends the 3-arm refit study with two warm-started vanilla refits — one
 chained off each treatment fit. Per dataset, fits these arms in this order
 (so each warm refit has its source fit live in memory):
 
-1. `susie_vanilla` (cold)
-2. `susine_functional_mu` (cold, c = 0.6, annotation_r2 = 0.5)
+1. `susie_vanilla` (cold, best baseline-screening sigma)
+2. `susine_functional_mu` (cold, best baseline-screening c/sigma at
+   annotation_r2 = 0.5, inflate_match = 0.9)
 3. `susie_vanilla_warm_from_mu` (vanilla prior, warm-started from arm 2's fit)
-4. `susie_functional_pi` (cold, tau = 0.464, annotation_r2 = 0.5)
+4. `susie_functional_pi` (cold, best baseline-screening tau/sigma at
+   annotation_r2 = 0.5, inflate_match = 0.9)
 5. `susie_vanilla_warm_from_pi` (vanilla prior, warm-started from arm 4's fit)
 
-Warm refits use `mu_0 = 0`, `sigma_0_2 = 0.01` (matched to cold vanilla, NOT
-the harness default 0.2), uniform inclusion weights, and `init_effect_fits`
+Warm refits use `mu_0 = 0`, `sigma_0_2` matched to the selected cold vanilla
+arm, uniform inclusion weights, and `init_effect_fits`
 synthesized from the source fit's `(alpha, b_hat, b_2_hat)` slots — the
 same mechanism `run_default_prior_refit()` uses in the production harness
 ([R/run_model.R:1587-1619](R/run_model.R#L1587)).
@@ -45,12 +47,14 @@ library(readr)
 library(tidyr)
 library(purrr)
 library(knitr)
+
+source(here("vignettes", "one_off_validations", "_5arm_cfg.R"))
 ```
 
 # 1. User Parameters
 
 ```{r user-parameters}
-study_name <- "baseline_sims_5arm_effect_matching"
+study_name <- study_name_5arm
 output_root <- here("output")
 study_dir <- file.path(output_root, "effect_matching_study", study_name)
 dir.create(study_dir, recursive = TRUE, showWarnings = FALSE)
@@ -60,31 +64,35 @@ max_datasets <- Inf
 force_refit <- TRUE
 checkpoint_every <- 25L
 
-# Baseline-sims dataset recipe (must match the 3-arm refit so dataset bundle
-# ids align across studies for cross-study comparison).
-n_matrices_target <- 150L
-seeds <- 1:4
-L_value <- 10L
-y_noise_value <- NA_real_
-p_star_value <- NA_integer_
-architecture_value <- "susie2_oligogenic"
-data_scenario <- "scenario_1"
+# Baseline-sims dataset recipe. These come from `_5arm_cfg.R` so the refit
+# and downstream drift/PR regeneration use identical bundle definitions.
+n_matrices_target <- n_matrices_target_5arm
+seeds <- seeds_5arm
+L_value <- L_value_5arm
+y_noise_value <- y_noise_value_5arm
+p_star_value <- p_star_value_5arm
+architecture_value <- architecture_value_5arm
+data_scenario <- data_scenario_5arm
 
-# Treatment-arm settings (harmonized annotations; only prior mechanism differs).
-annotation_r2_value <- 0.5
-inflate_match_value <- 0.9
-c_value_mu <- 0.6
-tau_value_pi <- 0.464
-sigma_0_2_value <- 0.01
-max_iter <- 100L
-credible_set_rho <- 0.95
-purity_threshold <- 0.50
+# Treatment-arm settings are selected from the locked baseline screening
+# summary at runtime and written to `selected_5arm_settings.csv`.
+baseline_job_name <- baseline_job_name_5arm
+baseline_parent_job_id <- baseline_parent_job_id_5arm
+baseline_screening_summary_csv <- file.path(
+  output_root, "slurm_output", baseline_job_name, baseline_parent_job_id,
+  "consolidated", "screening_summary.csv"
+)
+selected_settings_csv <- file.path(study_dir, "selected_5arm_settings.csv")
+
+max_iter <- max_iter_5arm
+credible_set_rho <- credible_set_rho_5arm
+purity_threshold <- purity_threshold_5arm
 
 # Method ordering. The two warm-refit method labels are NOT in the use_case
 # catalog; they're handled by the bespoke fit_warm_refit() helper below.
-cold_method_levels <- c("susie_vanilla", "susine_functional_mu", "susie_functional_pi")
-warm_method_levels <- c("susie_vanilla_warm_from_mu", "susie_vanilla_warm_from_pi")
-all_method_levels  <- c(cold_method_levels, warm_method_levels)
+cold_method_levels <- cold_method_levels_5arm
+warm_method_levels <- warm_method_levels_5arm
+all_method_levels <- all_method_levels_5arm
 n_methods_expected <- length(all_method_levels)
 
 # Offset added to source run_id to make warm-refit run_ids globally unique.
@@ -384,7 +392,7 @@ fit_warm_refit <- function(source_fit, source_run_row, data_bundle, job_config,
     X = data_bundle$X,
     y = data_bundle$y,
     mu_0 = 0,
-    sigma_0_2 = sigma_0_2_value,             # match cold vanilla, NOT 0.2
+    sigma_0_2 = sigma_0_2_vanilla_value,
     prior_inclusion_weights = rep(1 / p, p),
     prior_update_method = "none",
     max_iter = iter_max,
@@ -413,14 +421,14 @@ fit_warm_refit <- function(source_fit, source_run_row, data_bundle, job_config,
   warm_run_row$spec_name <- paste0("warm_refit_from_", source_run_row$method_family[[1]])
   warm_run_row$setting_label <- paste0(
     model_method_label, " | warm-from=", source_run_row$method_family[[1]],
-    " | sigma=", sigma_0_2_value
+    " | sigma=", sigma_0_2_vanilla_value
   )
   warm_run_row$annotation_label <- "no_annotation"
   warm_run_row$annotation_r2 <- NA_real_
   warm_run_row$inflate_match <- NA_real_
   warm_run_row$c_value <- NA_real_
   warm_run_row$tau_value <- NA_real_
-  warm_run_row$sigma_0_2_scalar <- as.character(sigma_0_2_value)
+  warm_run_row$sigma_0_2_scalar <- as.character(sigma_0_2_vanilla_value)
 
   records <- extract_effect_records(
     fit = fit,
@@ -435,168 +443,36 @@ fit_warm_refit <- function(source_fit, source_run_row, data_bundle, job_config,
 }
 ```
 
-# 3. Build Standalone Baseline Dataset Grid
+# 3. Build Baseline-Locked Dataset Grid
 
 ```{r build-standalone-config}
-data_matrix_catalog_full <- test_susine:::build_data_matrix_catalog(
-  requested_scenarios = data_scenario,
-  repo_root = here(),
-  summary_path = here(
-    "data", "sampled_simulated_genotypes", "scenario_sampling_summary.csv"
-  )
-)
-
-m1_summary_path <- here(
-  "data", "sampled_simulated_genotypes", "scenario_sampling_summary_with_m1.csv"
-)
-if (file.exists(m1_summary_path)) {
-  catalog_with_m1 <- readr::read_csv(m1_summary_path, show_col_types = FALSE)
-} else {
-  m1_tbl <- test_susine::build_x_metrics_table(
-    matrix_paths_df = data_matrix_catalog_full %>%
-      dplyr::select(.data$matrix_id, .data$matrix_path),
-    base_dir = here()
-  ) %>%
-    dplyr::select(.data$matrix_id, .data$M1)
-  catalog_with_m1 <- data_matrix_catalog_full %>%
-    dplyr::left_join(m1_tbl, by = "matrix_id")
-  readr::write_csv(catalog_with_m1, m1_summary_path)
-}
-
-if (!"matrix_id" %in% names(catalog_with_m1)) {
-  if ("gene" %in% names(catalog_with_m1)) {
-    catalog_with_m1 <- dplyr::rename(catalog_with_m1, dataset_label = .data$gene)
-  }
-  join_col <- intersect(c("dataset_label", "matrix_path"), names(catalog_with_m1))[[1L]]
-  catalog_with_m1 <- catalog_with_m1 %>%
-    dplyr::left_join(
-      data_matrix_catalog_full %>%
-        dplyr::select(.data$matrix_id, dplyr::all_of(join_col)),
-      by = join_col
-    )
-}
-
-catalog_with_m1 <- catalog_with_m1 %>%
-  dplyr::filter(!is.na(.data$M1)) %>%
-  dplyr::arrange(.data$M1)
-
-n_target <- min(n_matrices_target, nrow(catalog_with_m1))
-idx <- unique(round(seq(1, nrow(catalog_with_m1), length.out = n_target)))
-selected_matrices <- catalog_with_m1[idx, , drop = FALSE]
-
-data_matrix_catalog <- data_matrix_catalog_full %>%
-  dplyr::semi_join(
-    selected_matrices %>% dplyr::select(.data$matrix_id),
-    by = "matrix_id"
-  )
-
-spec_susie_vanilla <- list(
-  name = "effect_match_susie_vanilla",
-  use_case_ids = "susie_vanilla",
-  exploration_methods = "sigma_0_2_grid",
-  exploration_mode = "separate",
-  K = 1L,
-  sigma_0_2_grid_values = sigma_0_2_value
-)
-
-spec_susine_functional_mu <- list(
-  name = "effect_match_susine_functional_mu",
-  use_case_ids = "susine_functional_mu",
-  exploration_methods = c("c_grid", "sigma_0_2_grid"),
-  exploration_mode = "intersect",
-  K = 1L,
-  c_grid_values = c_value_mu,
-  sigma_0_2_grid_values = sigma_0_2_value
-)
-
-spec_susie_functional_pi <- list(
-  name = "effect_match_susie_functional_pi",
-  use_case_ids = "susie_functional_pi",
-  exploration_methods = c("tau_grid", "sigma_0_2_grid"),
-  exploration_mode = "intersect",
-  K = 1L,
-  tau_grid_values = tau_value_pi,
-  sigma_0_2_grid_values = sigma_0_2_value
-)
-
-cfg <- test_susine::make_job_config(
-  job_name = study_name,
-  HPC = FALSE,
-  time = "02:00:00",
-  mem = "8G",
+cfg_bundle <- build_5arm_cfg(
+  here_root = here(),
   output_root = output_root,
-  grid_mode = "full",
-  use_case_ids = cold_method_levels,
-  exploration_specs = list(
-    spec_susie_vanilla,
-    spec_susine_functional_mu,
-    spec_susie_functional_pi
-  ),
-  L_grid = L_value,
-  y_noise_grid = y_noise_value,
-  p_star_grid = p_star_value,
-  architecture_grid = architecture_value,
-  seeds = seeds,
-  prior_quality = tibble::tibble(
-    annotation_r2 = annotation_r2_value,
-    inflate_match = inflate_match_value
-  ),
-  sigma_0_2_scalars = sigma_0_2_value,
-  data_scenarios = data_scenario,
-  repo_root = here(),
-  data_matrix_catalog = data_matrix_catalog,
-  sampled_scenario_summary = here(
-    "data", "sampled_simulated_genotypes", "scenario_sampling_summary.csv"
-  ),
-  task_unit = "dataset",
-  bundles_per_task = 1L,
-  task_assignment_seed = 42L,
-  max_iter = max_iter,
-  aggregation_methods = character(0),
-  include_overall_pool = FALSE,
-  credible_set_rho = credible_set_rho,
-  purity_threshold = purity_threshold,
-  verbose_file_output = FALSE,
-  write_snps_parquet = FALSE,
-  write_confusion_bins = FALSE,
-  write_tier_cs_metrics = TRUE,
-  write_scaling_confusion_bins = FALSE,
-  metrics_settings = list(
-    z_top_k = 10L,
-    jsd_threshold = 0.15
-  )
+  baseline_screening_csv = baseline_screening_summary_csv,
+  settings_cache_csv = selected_settings_csv,
+  prefer_settings_cache = FALSE,
+  allow_manual_fallback = FALSE
 )
 
-run_table <- cfg$tables$runs %>%
-  tibble::as_tibble() %>%
-  dplyr::mutate(
-    method_family = .data$use_case_id,
-    annotation_label = dplyr::if_else(
-      is.na(.data$annotation_r2) | is.na(.data$inflate_match),
-      "no_annotation",
-      paste0("r2=", .data$annotation_r2, " | inflate=", .data$inflate_match)
-    ),
-    setting_label = dplyr::case_when(
-      .data$use_case_id == "susie_vanilla" ~
-        paste0("susie_vanilla | sigma=", .data$sigma_0_2_scalar),
-      .data$use_case_id == "susine_functional_mu" ~
-        paste0(
-          "susine_functional_mu | c=", .data$c_value,
-          " | sigma=", .data$sigma_0_2_scalar
-        ),
-      .data$use_case_id == "susie_functional_pi" ~
-        paste0(
-          "susie_functional_pi | tau=", .data$tau_value,
-          " | sigma=", .data$sigma_0_2_scalar
-        ),
-      TRUE ~ .data$use_case_id
-    )
-  )
-cfg$tables$runs <- run_table
+cfg <- cfg_bundle$cfg
+selected_runs <- cfg_bundle$selected_runs
+data_matrix_catalog <- cfg_bundle$data_matrix_catalog
+selected_5arm_settings <- cfg_bundle$settings
 
-selected_runs <- run_table %>%
-  dplyr::filter(.data$use_case_id %in% cold_method_levels) %>%
-  dplyr::arrange(.data$dataset_bundle_id, .data$use_case_id)
+sigma_0_2_vanilla_value <- as.numeric(
+  selected_5arm_settings$sigma_0_2_scalar[
+    match("susie_vanilla", selected_5arm_settings$method_family)
+  ]
+)
+if (!is.finite(sigma_0_2_vanilla_value)) {
+  stop("Could not resolve selected cold-vanilla sigma for warm refits.")
+}
+
+readr::write_csv(selected_5arm_settings, selected_settings_csv)
+cat("Baseline settings source:", baseline_screening_summary_csv, "\n")
+cat("Selected 5-arm settings cache:", selected_settings_csv, "\n")
+print(selected_5arm_settings)
 
 readr::write_csv(selected_runs, selected_runs_csv)
 readr::write_csv(cfg$tables$dataset_bundles, dataset_bundles_csv)
@@ -605,8 +481,7 @@ cat("Matrices selected:", nrow(data_matrix_catalog), "\n")
 cat("Dataset bundles:", nrow(cfg$tables$dataset_bundles), "\n")
 cat("Selected (cold) run rows:", nrow(selected_runs), "\n")
 cat("Cold methods:", paste(sort(unique(selected_runs$use_case_id)), collapse = ", "), "\n")
-cat("Annotation r2:", annotation_r2_value, " | inflate_match:", inflate_match_value, "\n")
-cat("Mu c:", c_value_mu, " | Pi tau:", tau_value_pi, " | sigma_0_2:", sigma_0_2_value, "\n")
+cat("Warm refit sigma_0_2:", sigma_0_2_vanilla_value, "\n")
 
 stopifnot(nrow(cfg$tables$dataset_bundles) == n_matrices_target * length(seeds))
 stopifnot(nrow(selected_runs) == length(cold_method_levels) * nrow(cfg$tables$dataset_bundles))
@@ -648,7 +523,7 @@ if (!force_refit && file.exists(pip_records_rds)) {
   cat("Loaded existing pip_records:", nrow(pip_records), "\n")
 }
 progress_rows <- list()
-if (file.exists(progress_csv)) {
+if (!force_refit && file.exists(progress_csv)) {
   old_progress <- readr::read_csv(progress_csv, show_col_types = FALSE) %>%
     dplyr::mutate(
       dataset_bundle_id = as.character(.data$dataset_bundle_id),

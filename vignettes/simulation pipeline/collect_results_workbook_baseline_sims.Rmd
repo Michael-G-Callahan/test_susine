@@ -137,7 +137,11 @@ derive_baseline_identifiers <- function(df) {
         .data$method_family %in% c("susie_vanilla", "susine_vanilla", "susie_inf", "susie_ash_fixed") ~
           paste0(.data$method_family, " | sigma=", .data$sigma_0_2_scalar),
         .data$method_family == "susie_functional_pi" ~
-          paste0(.data$method_family, " | tau=", fmt_num(.data$tau_value, 3)),
+          paste0(
+            .data$method_family,
+            " | tau=", fmt_num(.data$tau_value, 3),
+            " | sigma=", .data$sigma_0_2_scalar
+          ),
         .data$method_family == "susine_functional_mu" ~
           paste0(
             .data$method_family,
