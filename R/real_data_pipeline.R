@@ -506,6 +506,7 @@ build_real_data_job_config <- function(
     cs_min_purity = 0.5,
     jsd_threshold = 0.15,
     softmax_temperature = 1,
+    estimate_residual_variance = FALSE,
     email = "mgc5166@psu.edu",
     time = "05:59:59",
     mem = "8G",
@@ -605,6 +606,7 @@ build_real_data_job_config <- function(
       cs_min_purity = as.numeric(cs_min_purity),
       jsd_threshold = as.numeric(jsd_threshold),
       softmax_temperature = as.numeric(softmax_temperature),
+      estimate_residual_variance = isTRUE(estimate_residual_variance),
       c_grid_values = as.numeric(c_grid_values),
       sigma_grid_values = as.numeric(sigma_grid_values),
       HPC = isTRUE(HPC),
@@ -1418,7 +1420,11 @@ real_data_run_susie_anchor <- function(bundle, run_row, job_config) {
     args$estimate_prior_variance <- FALSE
   }
   if ("estimate_residual_variance" %in% fn_formals) {
-    args$estimate_residual_variance <- TRUE
+    args$estimate_residual_variance <- isTRUE(job_config$job$estimate_residual_variance)
+  }
+  if (!isTRUE(job_config$job$estimate_residual_variance) &&
+      "residual_variance" %in% fn_formals) {
+    args$residual_variance <- 1
   }
   if ("check_prior" %in% fn_formals) {
     args$check_prior <- FALSE
@@ -1509,6 +1515,7 @@ run_real_data_task <- function(job_name, task_id, job_root = "output", config_pa
             mu_0 = as.numeric(run_row$c_value[[1]]) * bundle$a,
             sigma_0_2 = as.numeric(run_row$sigma_0_2_scalar[[1]]),
             prior_update_method = "none",
+            estimate_residual_variance = isTRUE(job_config$job$estimate_residual_variance),
             verbose = FALSE,
             convergence_method = "elbo",
             tol = as.numeric(job_config$job$tol),

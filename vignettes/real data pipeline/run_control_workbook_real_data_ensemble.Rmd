@@ -52,6 +52,7 @@ cs_coverage <- 0.95
 cs_min_purity <- 0.5
 jsd_threshold <- 0.15
 softmax_temperature <- 1
+estimate_residual_variance <- FALSE
 
 c_grid_8 <- seq(0, 1.5, length.out = 8)
 sigma_grid_8 <- c(0.01, 0.03, 0.07, 0.1, 0.2, 0.4, 0.7, 1.0)
@@ -90,6 +91,7 @@ job_config <- test_susine::build_real_data_job_config(
   cs_min_purity = cs_min_purity,
   jsd_threshold = jsd_threshold,
   softmax_temperature = softmax_temperature,
+  estimate_residual_variance = estimate_residual_variance,
   email = email,
   time = slurm_time,
   mem = slurm_mem,

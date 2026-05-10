@@ -52,10 +52,13 @@ if (use_dev) {
     options(test_susine.local_susine_path = normalizePath(susine_path, winslash = "/", mustWork = TRUE))
     reload_local_packages(susine_path, repo_root)
     susine_fn <- getExportedValue("susine", "susine_rss")
-    if (!"prior_update_method" %in% names(formals(susine_fn))) {
+    required_susine_rss_args <- c("prior_update_method", "estimate_residual_variance")
+    missing_susine_rss_args <- setdiff(required_susine_rss_args, names(formals(susine_fn)))
+    if (length(missing_susine_rss_args)) {
       stop(
         "Local dev susine was loaded from ", susine_path,
-        " but susine::susine_rss() lacks the expected prior_update_method argument. ",
+        " but susine::susine_rss() lacks expected argument(s): ",
+        paste(missing_susine_rss_args, collapse = ", "), ". ",
         "That sibling checkout is stale or not the expected branch."
       )
     }
