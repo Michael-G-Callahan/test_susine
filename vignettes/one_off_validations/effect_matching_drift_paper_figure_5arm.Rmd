@@ -1454,7 +1454,10 @@ if (!file.exists(truth_drift_csv)) {
     scale_color_manual(values = c(mu = "#2b8cbe", pi = "#74c476"),
                        labels = c(mu = "mu chain", pi = "pi chain")) +
     labs(
-      x = "Delta truth chord drift (baseline - treatment, positive = toward truth)",
+      x = sprintf(
+        "Delta truth drift (baseline - treatment, positive = toward truth) [%s]",
+        truth_drift_column
+      ),
       y = "Delta AUPRC vs cold vanilla",
       color = NULL,
       title = "Truth-drift sanity: does movement toward truth track AUPRC gain?"
@@ -1466,5 +1469,212 @@ if (!file.exists(truth_drift_csv)) {
     p_sanity, width = 8.4, height = 4.2, dpi = 220, bg = "white"
   )
   print(p_sanity)
+}
+```
+
+```{r truth-drift-sanity-marginals, fig.width=10, fig.height=4.8}
+# Re-render the sanity scatter with squashed marginal histograms on top
+# (delta_truth) and right side (auprc_delta), chain-split. ggExtra::ggMarginal
+# wraps a single ggplot, so we build one marginal-wrapped panel per pair_kind
+# and combine via patchwork.
+if (file.exists(truth_drift_csv) &&
+    requireNamespace("ggExtra", quietly = TRUE)) {
+  build_marginal_panel <- function(sub_df, panel_title) {
+    base_p <- ggplot(
+      sub_df,
+      aes(x = .data$delta_truth, y = .data$auprc_delta,
+          color = .data$chain)
+    ) +
+      geom_hline(yintercept = 0, color = "grey60", linewidth = 0.25) +
+      geom_vline(xintercept = 0, color = "grey60", linewidth = 0.25) +
+      geom_point(alpha = 0.55, size = 1.4, stroke = 0) +
+      geom_smooth(method = "lm", se = FALSE, linewidth = 0.5) +
+      scale_color_manual(
+        values = c(mu = "#2b8cbe", pi = "#74c476"),
+        labels = c(mu = "mu chain", pi = "pi chain")
+      ) +
+      labs(
+        x = sprintf("Delta truth drift [%s]", truth_drift_column),
+        y = "Delta AUPRC vs cold vanilla",
+        color = NULL,
+        title = panel_title
+      ) +
+      theme_effect_paper(base_size = 10) +
+      theme(legend.position = "bottom")
+
+    ggExtra::ggMarginal(
+      base_p, type = "histogram",
+      groupColour = TRUE, groupFill = TRUE,
+      bins = 40,
+      size = 8  # larger = thinner marginals; "squashed" feel
+    )
+  }
+
+  p_marg_ann <- build_marginal_panel(
+    sanity_join %>% dplyr::filter(.data$pair_kind == "cold_ann"),
+    "cold -> annotated"
+  )
+  p_marg_warm <- build_marginal_panel(
+    sanity_join %>% dplyr::filter(.data$pair_kind == "cold_warm"),
+    "cold -> warm vanilla"
+  )
+
+  combined_marg <- patchwork::wrap_elements(p_marg_ann) |
+    patchwork::wrap_elements(p_marg_warm)
+  ggsave(
+    file.path(diagnostic_dir, "truth_drift_sanity_scatter_marginal.png"),
+    combined_marg, width = 10, height = 4.8, dpi = 220, bg = "white"
+  )
+  print(combined_marg)
+} else if (!file.exists(truth_drift_csv)) {
+  message("Skipping marginal scatter; truth_drift_summary not cached yet.")
+} else {
+  message(
+    "ggExtra not installed; skipping marginal histograms. ",
+    "Install via install.packages('ggExtra')."
+  )
+}
+```
+
+# Truth Drift Trajectory (cold -> annotated -> warm)
+
+```{r truth-drift-trajectory, fig.width=10, fig.height=4.8}
+# Per-dataset trajectories on the (truth_drift, AUPRC) plane. Each dataset
+# contributes three points per chain (cold, annotated, warm) connected by
+# a path. Faded individual paths show the cloud; bold centroid arrows show
+# the mean trajectory per chain.
+if (file.exists(truth_drift_csv)) {
+  # AUPRC at each state per chain. auprc_per_dataset already has raw
+  # per-method AUPRC columns from the analysis workbook.
+  trajectory_auprc <- dplyr::bind_rows(
+    auprc_per_dataset %>%
+      dplyr::transmute(
+        dataset_bundle_id = .data$dataset_bundle_id,
+        chain = "mu",
+        cold = .data$auprc_susie_vanilla,
+        annotated = .data$auprc_susine_functional_mu,
+        warm = .data$auprc_susie_vanilla_warm_from_mu
+      ),
+    auprc_per_dataset %>%
+      dplyr::transmute(
+        dataset_bundle_id = .data$dataset_bundle_id,
+        chain = "pi",
+        cold = .data$auprc_susie_vanilla,
+        annotated = .data$auprc_susie_functional_pi,
+        warm = .data$auprc_susie_vanilla_warm_from_pi
+      )
+  ) %>%
+    tidyr::pivot_longer(
+      cols = c(cold, annotated, warm),
+      names_to = "state",
+      values_to = "auprc"
+    )
+
+  # Truth drift at each state per chain, using the same metric as the
+  # sanity scatter (controlled by truth_drift_column above).
+  state_method_map <- tibble::tribble(
+    ~chain, ~state,       ~model_method,
+    "mu",   "cold",       baseline_method,
+    "mu",   "annotated",  mu_method,
+    "mu",   "warm",       warm_mu_method,
+    "pi",   "cold",       baseline_method,
+    "pi",   "annotated",  pi_method,
+    "pi",   "warm",       warm_pi_method
+  )
+
+  trajectory_drift <- truth_drift_summary %>%
+    dplyr::select(.data$dataset_bundle_id, .data$model_method,
+                  dplyr::all_of(truth_drift_column)) %>%
+    dplyr::rename(truth_drift = dplyr::all_of(truth_drift_column)) %>%
+    dplyr::inner_join(state_method_map, by = "model_method",
+                      relationship = "many-to-many")
+
+  trajectory_long <- trajectory_auprc %>%
+    dplyr::inner_join(
+      trajectory_drift %>%
+        dplyr::select(.data$dataset_bundle_id, .data$chain, .data$state,
+                      .data$truth_drift),
+      by = c("dataset_bundle_id", "chain", "state")
+    ) %>%
+    dplyr::mutate(
+      state = factor(.data$state, levels = c("cold", "annotated", "warm")),
+      chain = factor(.data$chain, levels = c("mu", "pi"))
+    )
+
+  # Centroid trajectory per chain (mean across datasets at each state).
+  centroids <- trajectory_long %>%
+    dplyr::group_by(.data$chain, .data$state) %>%
+    dplyr::summarise(
+      truth_drift = mean(.data$truth_drift, na.rm = TRUE),
+      auprc = mean(.data$auprc, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    dplyr::arrange(.data$chain, .data$state)
+
+  chain_color_diag2 <- c(mu = "#2b8cbe", pi = "#74c476")
+  state_fill <- c(cold = "grey20", annotated = "#c44e52", warm = "#4c72b0")
+  state_shape <- c(cold = 21, annotated = 22, warm = 23)
+
+  p_trajectory <- ggplot() +
+    geom_path(
+      data = trajectory_long,
+      aes(x = .data$truth_drift, y = .data$auprc,
+          group = interaction(.data$dataset_bundle_id, .data$chain),
+          color = .data$chain),
+      alpha = 0.05, linewidth = 0.2
+    ) +
+    geom_point(
+      data = trajectory_long,
+      aes(x = .data$truth_drift, y = .data$auprc,
+          color = .data$chain, shape = .data$state),
+      alpha = 0.10, size = 0.7, stroke = 0
+    ) +
+    geom_path(
+      data = centroids,
+      aes(x = .data$truth_drift, y = .data$auprc, group = .data$chain),
+      arrow = grid::arrow(length = grid::unit(2.5, "mm"), type = "closed"),
+      linewidth = 0.9, color = "black"
+    ) +
+    geom_point(
+      data = centroids,
+      aes(x = .data$truth_drift, y = .data$auprc,
+          fill = .data$state, shape = .data$state),
+      size = 3.2, color = "black", stroke = 0.4
+    ) +
+    facet_wrap(~ chain, nrow = 1,
+               labeller = labeller(chain = c(mu = "mu chain",
+                                             pi = "pi chain"))) +
+    scale_color_manual(values = chain_color_diag2, guide = "none") +
+    scale_fill_manual(values = state_fill, name = "State (centroid)") +
+    scale_shape_manual(values = state_shape, name = "State") +
+    labs(
+      x = sprintf("Truth drift to top-K causal basis [%s]",
+                  truth_drift_column),
+      y = "AUPRC",
+      title = "Per-dataset trajectories on (truth drift, AUPRC)",
+      subtitle = paste(
+        "Faded paths = individual datasets (cold -> annotated -> warm);",
+        "black arrow = chain centroid trajectory"
+      )
+    ) +
+    theme_effect_paper(base_size = 10) +
+    theme(legend.position = "bottom")
+
+  ggsave(
+    file.path(diagnostic_dir, "truth_drift_trajectory_static.png"),
+    p_trajectory, width = 10, height = 4.8, dpi = 220, bg = "white"
+  )
+  print(p_trajectory)
+
+  # Centroid coordinates printed so the directional reading is unambiguous
+  # without zooming on the plot.
+  cat("Centroid (truth_drift, AUPRC) per (chain, state):\n")
+  print(centroids %>%
+          dplyr::mutate(
+            truth_drift = round(.data$truth_drift, 4),
+            auprc = round(.data$auprc, 4)
+          ))
+} else {
+  message("Skipping trajectory plot; truth_drift_summary not cached yet.")
 }
 ```
