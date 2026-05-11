@@ -954,22 +954,7 @@ metric_axis_labels <- c(
 )
 
 make_metric_triangle_plot <- function(df, x_metric, y_metric, color_metric,
-                                      filename, color_diverging = FALSE) {
-  color_values <- df[[color_metric]]
-  color_values <- color_values[is.finite(color_values)]
-
-  if (color_diverging) {
-    color_scale <- scale_color_gradient2(
-      low = "#2166ac", mid = "grey96", high = "#b2182b",
-      midpoint = 0,
-      limits = c(-max(abs(color_values), na.rm = TRUE),
-                 max(abs(color_values), na.rm = TRUE)),
-      oob = scales::squish
-    )
-  } else {
-    color_scale <- scale_color_viridis_c(option = "C")
-  }
-
+                                      filename) {
   p <- ggplot(
     df,
     aes(x = .data[[x_metric]], y = .data[[y_metric]],
@@ -987,7 +972,7 @@ make_metric_triangle_plot <- function(df, x_metric, y_metric, color_metric,
     ) +
     geom_point(alpha = 0.70, size = 1.55, stroke = 0) +
     facet_grid(chain ~ comparison) +
-    color_scale +
+    scale_color_viridis_c(option = "C", oob = scales::squish) +
     labs(
       x = metric_axis_labels[[x_metric]],
       y = metric_axis_labels[[y_metric]],
@@ -1019,8 +1004,7 @@ make_metric_triangle_plot(
   x_metric = "basin_drift",
   y_metric = "pip_jsd",
   color_metric = "auprc_delta",
-  filename = "panel_c_metric_triangle_color_auprc_delta.png",
-  color_diverging = TRUE
+  filename = "panel_c_metric_triangle_color_auprc_delta.png"
 )
 
 make_metric_triangle_plot(
@@ -1036,8 +1020,7 @@ make_metric_triangle_plot(
   x_metric = "auprc_delta",
   y_metric = "basin_drift",
   color_metric = "pip_jsd",
-  filename = "panel_c_metric_triangle_color_pip_jsd.png",
-  color_diverging = FALSE
+  filename = "panel_c_metric_triangle_color_pip_jsd.png"
 )
 
 representative_datasets <- panel_c_diag %>%
