@@ -1091,6 +1091,87 @@ if (file.exists(pip_records_rds) && file.exists(causal_truth_rds)) {
   message("Skipping representative top-PIP table; missing PIP/truth RDS cache.")
 }
 
+# ---- Swap-pair plots: basin chord drift vs PIP JSD ----
+# Two complementary views of the same (basin, JSD) plane.
+#   facet = pair_kind, color = chain   -> chain difference within transition
+#   facet = chain,     color = pair_kind -> transition difference within chain
+# Together these visualize the four basin/JSD coupling cells from the
+# pairwise correlation heatmap (mu/pi x annotated/warm).
+swap_pair_long <- joined_pf %>%
+  dplyr::transmute(
+    dataset_bundle_id = .data$dataset_bundle_id,
+    pair_kind = .data$pair_kind,
+    chain_mu_basin = .data$basin_mu, chain_mu_jsd = .data$jsd_mu,
+    chain_pi_basin = .data$basin_pi, chain_pi_jsd = .data$jsd_pi
+  ) %>%
+  tidyr::pivot_longer(
+    cols = dplyr::starts_with("chain_"),
+    names_to = c("chain", ".value"),
+    names_pattern = "chain_(mu|pi)_(basin|jsd)"
+  ) %>%
+  dplyr::mutate(
+    chain = factor(.data$chain, levels = c("mu", "pi")),
+    pair_kind = factor(
+      .data$pair_kind, levels = c("cold_ann", "cold_warm"),
+      labels = c("cold -> annotated", "cold -> warm vanilla")
+    )
+  )
+
+chain_color_diag <- c(mu = "#2b8cbe", pi = "#74c476")
+pair_color_diag  <- c(`cold -> annotated`     = "#c44e52",
+                      `cold -> warm vanilla`  = "#4c72b0")
+axis_lim_swap <- c(0, max(swap_pair_long$basin, swap_pair_long$jsd,
+                          na.rm = TRUE) + 0.01)
+
+p_swap_facet_pair <- ggplot(
+  swap_pair_long,
+  aes(x = .data$basin, y = .data$jsd, color = .data$chain)
+) +
+  geom_abline(slope = 1, intercept = 0, color = "grey50",
+              linetype = "dashed", linewidth = 0.3) +
+  geom_point(alpha = 0.55, size = 1.6, stroke = 0) +
+  geom_smooth(method = "lm", se = FALSE, linewidth = 0.5) +
+  facet_wrap(~ pair_kind, nrow = 1) +
+  scale_color_manual(values = chain_color_diag,
+                     labels = c(mu = "mu chain", pi = "pi chain")) +
+  coord_cartesian(xlim = axis_lim_swap, ylim = axis_lim_swap) +
+  labs(
+    x = "Basin chord drift", y = "PIP JSD", color = NULL,
+    title = "Panel C diagnostic: basin/JSD coupling by chain within transition"
+  ) +
+  theme_effect_paper(base_size = 10) +
+  theme(legend.position = "bottom")
+ggsave(
+  file.path(diagnostic_dir, "panel_c_swap_facet_pair_color_chain.png"),
+  p_swap_facet_pair, width = 8.4, height = 4.2, dpi = 220, bg = "white"
+)
+print(p_swap_facet_pair)
+
+p_swap_facet_chain <- ggplot(
+  swap_pair_long,
+  aes(x = .data$basin, y = .data$jsd, color = .data$pair_kind)
+) +
+  geom_abline(slope = 1, intercept = 0, color = "grey50",
+              linetype = "dashed", linewidth = 0.3) +
+  geom_point(alpha = 0.55, size = 1.6, stroke = 0) +
+  geom_smooth(method = "lm", se = FALSE, linewidth = 0.5) +
+  facet_wrap(~ chain, nrow = 1,
+             labeller = labeller(chain = c(mu = "mu chain",
+                                           pi = "pi chain"))) +
+  scale_color_manual(values = pair_color_diag) +
+  coord_cartesian(xlim = axis_lim_swap, ylim = axis_lim_swap) +
+  labs(
+    x = "Basin chord drift", y = "PIP JSD", color = NULL,
+    title = "Panel C diagnostic: basin/JSD coupling by transition within chain"
+  ) +
+  theme_effect_paper(base_size = 10) +
+  theme(legend.position = "bottom")
+ggsave(
+  file.path(diagnostic_dir, "panel_c_swap_facet_chain_color_pair.png"),
+  p_swap_facet_chain, width = 8.4, height = 4.2, dpi = 220, bg = "white"
+)
+print(p_swap_facet_chain)
+
 cat("Wrote Panel C ad hoc diagnostics to ", diagnostic_dir, "\n", sep = "")
 ```
 
@@ -1261,4 +1342,123 @@ ggsave(
   width = 9.6, height = 4.2, dpi = 220, bg = "white"
 )
 print(p_partial_cor)
+```
+
+# Truth-Referenced Drift Sanity Check
+
+```{r truth-drift-sanity, fig.width=9, fig.height=4.4}
+truth_drift_csv <- file.path(study_dir, "truth_drift_summary_5arm.csv")
+
+if (!file.exists(truth_drift_csv)) {
+  message(
+    "truth_drift_summary_5arm.csv not yet cached. Run the truth-drift ",
+    "section of effect_matching_drift_analysis_5arm.Rmd to generate it."
+  )
+} else {
+  truth_drift_summary <- readr::read_csv(truth_drift_csv,
+                                         show_col_types = FALSE) %>%
+    dplyr::mutate(dataset_bundle_id = as.character(.data$dataset_bundle_id))
+
+  # delta_truth per (dataset, chain, pair_kind): baseline truth-drift minus
+  # treatment truth-drift. Positive = treatment moved the fit closer to the
+  # top-k truth basin.
+  delta_truth_for_pair <- function(treat_method, chain_label, pair_kind_label) {
+    truth_drift_summary %>%
+      dplyr::filter(.data$model_method %in% c(baseline_method, treat_method)) %>%
+      tidyr::pivot_wider(
+        id_cols = dataset_bundle_id,
+        names_from = model_method,
+        values_from = truth_chord_drift
+      ) %>%
+      dplyr::transmute(
+        dataset_bundle_id = .data$dataset_bundle_id,
+        chain = chain_label,
+        pair_kind = pair_kind_label,
+        delta_truth = .data[[baseline_method]] - .data[[treat_method]]
+      )
+  }
+
+  delta_truth_long <- dplyr::bind_rows(
+    delta_truth_for_pair(mu_method,      "mu", "cold_ann"),
+    delta_truth_for_pair(warm_mu_method, "mu", "cold_warm"),
+    delta_truth_for_pair(pi_method,      "pi", "cold_ann"),
+    delta_truth_for_pair(warm_pi_method, "pi", "cold_warm")
+  )
+
+  # Pair up against per-dataset AUPRC delta from panel_c_diag.
+  panel_c_diag_sanity <- panel_c_diag %>%
+    dplyr::transmute(
+      dataset_bundle_id = .data$dataset_bundle_id,
+      pair_kind = dplyr::recode(
+        as.character(.data$comparison),
+        `cold -> annotated` = "cold_ann",
+        `cold -> warm vanilla` = "cold_warm"
+      ),
+      delta_mu = .data$delta_mu,
+      delta_pi = .data$delta_pi
+    ) %>%
+    tidyr::pivot_longer(
+      cols = c(delta_mu, delta_pi),
+      names_to = "chain",
+      values_to = "auprc_delta",
+      names_prefix = "delta_"
+    )
+
+  sanity_join <- delta_truth_long %>%
+    dplyr::inner_join(panel_c_diag_sanity,
+                      by = c("dataset_bundle_id", "pair_kind", "chain"))
+
+  sanity_corr <- sanity_join %>%
+    dplyr::group_by(.data$chain, .data$pair_kind) %>%
+    dplyr::summarise(
+      r = stats::cor(.data$delta_truth, .data$auprc_delta,
+                     use = "complete.obs"),
+      n = sum(is.finite(.data$delta_truth) & is.finite(.data$auprc_delta)),
+      .groups = "drop"
+    )
+  readr::write_csv(
+    sanity_corr,
+    file.path(diagnostic_dir, "truth_drift_sanity_correlations.csv")
+  )
+  cat("Truth-drift vs AUPRC-delta sanity correlations:\n")
+  print(sanity_corr)
+  cat(
+    "\nDecision rule:\n",
+    "  mu cold_ann r > 0.95 -> truth-drift is a reparameterization of AUPRC; abandon\n",
+    "  mu cold_ann r in [0.6, 0.85] -> proceed to directionality scatter\n",
+    "  mu cold_ann r < 0.5 -> carries independent information; verify per-dataset\n",
+    "                          truth-drift distribution for pathological values\n",
+    sep = ""
+  )
+
+  p_sanity <- ggplot(
+    sanity_join,
+    aes(x = .data$delta_truth, y = .data$auprc_delta,
+        color = .data$chain)
+  ) +
+    geom_hline(yintercept = 0, color = "grey60", linewidth = 0.25) +
+    geom_vline(xintercept = 0, color = "grey60", linewidth = 0.25) +
+    geom_point(alpha = 0.55, size = 1.5, stroke = 0) +
+    geom_smooth(method = "lm", se = FALSE, linewidth = 0.5) +
+    facet_wrap(~ pair_kind, nrow = 1,
+               labeller = labeller(pair_kind = c(
+                 cold_ann  = "cold -> annotated",
+                 cold_warm = "cold -> warm vanilla"
+               ))) +
+    scale_color_manual(values = c(mu = "#2b8cbe", pi = "#74c476"),
+                       labels = c(mu = "mu chain", pi = "pi chain")) +
+    labs(
+      x = "Delta truth chord drift (baseline - treatment, positive = toward truth)",
+      y = "Delta AUPRC vs cold vanilla",
+      color = NULL,
+      title = "Truth-drift sanity: does movement toward truth track AUPRC gain?"
+    ) +
+    theme_effect_paper(base_size = 10) +
+    theme(legend.position = "bottom")
+  ggsave(
+    file.path(diagnostic_dir, "truth_drift_sanity_scatter.png"),
+    p_sanity, width = 8.4, height = 4.2, dpi = 220, bg = "white"
+  )
+  print(p_sanity)
+}
 ```
