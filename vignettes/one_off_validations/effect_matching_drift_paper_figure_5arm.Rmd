@@ -1606,6 +1606,75 @@ if (file.exists(truth_drift_csv)) {
 }
 ```
 
+```{r truth-drift-baseline-boxplot, fig.width=6.8, fig.height=4.4}
+# Cold vanilla AUPRC distribution stratified into three basis-divergence bins.
+# Bin edges match the bins used for centroid stratification in the quadrant
+# trajectory plot below.
+if (exists("baseline_points")) {
+  divergence_breaks <- c(-Inf, 0.05, 0.10, Inf)
+  divergence_labels <- c("[0, 0.05]", "(0.05, 0.10]", "(0.10, inf)")
+
+  baseline_binned <- baseline_points %>%
+    dplyr::mutate(
+      divergence_bin = cut(
+        .data$truth_drift,
+        breaks = divergence_breaks,
+        labels = divergence_labels,
+        right = TRUE
+      )
+    )
+
+  bin_counts <- baseline_binned %>%
+    dplyr::count(.data$divergence_bin, name = "n")
+  bin_stats <- baseline_binned %>%
+    dplyr::group_by(.data$divergence_bin) %>%
+    dplyr::summarise(
+      n = dplyr::n(),
+      median = stats::median(.data$auprc, na.rm = TRUE),
+      mean = mean(.data$auprc, na.rm = TRUE),
+      q25 = stats::quantile(.data$auprc, 0.25, na.rm = TRUE,
+                            names = FALSE),
+      q75 = stats::quantile(.data$auprc, 0.75, na.rm = TRUE,
+                            names = FALSE),
+      .groups = "drop"
+    )
+  cat("Cold baseline AUPRC by basis divergence bin:\n")
+  print(bin_stats)
+
+  y_label_top <- max(baseline_binned$auprc, na.rm = TRUE) * 1.06
+  p_baseline_boxplot <- ggplot(
+    baseline_binned,
+    aes(x = .data$divergence_bin, y = .data$auprc,
+        fill = .data$divergence_bin)
+  ) +
+    geom_boxplot(alpha = 0.7, outlier.size = 0.7, width = 0.6) +
+    geom_text(
+      data = bin_counts,
+      aes(x = .data$divergence_bin, y = y_label_top,
+          label = sprintf("n=%d", .data$n)),
+      inherit.aes = FALSE, size = 3.2, color = "grey25"
+    ) +
+    scale_fill_brewer(palette = "Blues", guide = "none") +
+    labs(
+      x = sprintf("Basis divergence from truth bin [%s]",
+                  truth_drift_column),
+      y = "AUPRC (cold SuSiE-vanilla)",
+      title = "Cold vanilla AUPRC by basis divergence bin",
+      subtitle = "Bins match the centroid stratification in the quadrant trajectory plot"
+    ) +
+    theme_effect_paper(base_size = 10)
+
+  ggsave(
+    file.path(diagnostic_dir, "truth_drift_baseline_boxplot.png"),
+    p_baseline_boxplot, width = 6.8, height = 4.4, dpi = 220,
+    bg = "white"
+  )
+  print(p_baseline_boxplot)
+} else {
+  message("Skipping baseline boxplot; baseline_points not built yet.")
+}
+```
+
 # Truth Drift Trajectory (cold -> annotated -> warm)
 
 ```{r truth-drift-trajectory, fig.width=10, fig.height=4.8}
@@ -1746,5 +1815,167 @@ if (file.exists(truth_drift_csv)) {
           ))
 } else {
   message("Skipping trajectory plot; truth_drift_summary not cached yet.")
+}
+```
+
+```{r truth-drift-trajectory-quadrant, fig.width=11.5, fig.height=5.2}
+# Revised trajectory plot:
+#   - thicker, less faded per-dataset paths
+#   - paths colored by the cold -> warm net (AUPRC, divergence) quadrant
+#   - centroid arrows stratified by the dataset's cold (baseline) basis
+#     divergence bin (3 centroid trajectories per chain facet)
+if (exists("trajectory_long")) {
+  divergence_breaks <- c(-Inf, 0.05, 0.10, Inf)
+  divergence_labels <- c("[0, 0.05]", "(0.05, 0.10]", "(0.10, inf)")
+
+  # Per (dataset, chain): the cold -> warm net (AUPRC, divergence) quadrant
+  # and the dataset's baseline (cold) divergence bin.
+  net_movement <- trajectory_long %>%
+    dplyr::filter(.data$state %in% c("cold", "warm")) %>%
+    dplyr::select(.data$dataset_bundle_id, .data$chain, .data$state,
+                  .data$truth_drift, .data$auprc) %>%
+    tidyr::pivot_wider(
+      names_from = .data$state,
+      values_from = c(.data$truth_drift, .data$auprc)
+    ) %>%
+    dplyr::mutate(
+      delta_auprc = .data$auprc_warm - .data$auprc_cold,
+      delta_divergence = .data$truth_drift_warm - .data$truth_drift_cold,
+      quadrant = dplyr::case_when(
+        .data$delta_auprc >= 0 & .data$delta_divergence <= 0 ~
+          "+AUPRC, -divergence",
+        .data$delta_auprc >= 0 & .data$delta_divergence > 0  ~
+          "+AUPRC, +divergence",
+        .data$delta_auprc < 0  & .data$delta_divergence <= 0 ~
+          "-AUPRC, -divergence",
+        .data$delta_auprc < 0  & .data$delta_divergence > 0  ~
+          "-AUPRC, +divergence"
+      ),
+      baseline_bin = cut(
+        .data$truth_drift_cold,
+        breaks = divergence_breaks,
+        labels = divergence_labels,
+        right = TRUE
+      )
+    )
+
+  trajectory_long_q <- trajectory_long %>%
+    dplyr::inner_join(
+      net_movement %>%
+        dplyr::select(.data$dataset_bundle_id, .data$chain,
+                      .data$quadrant, .data$baseline_bin),
+      by = c("dataset_bundle_id", "chain")
+    ) %>%
+    dplyr::mutate(
+      quadrant = factor(.data$quadrant, levels = c(
+        "+AUPRC, -divergence", "+AUPRC, +divergence",
+        "-AUPRC, -divergence", "-AUPRC, +divergence"
+      ))
+    )
+
+  # Quadrant counts per (chain, baseline_bin).
+  quad_bin_counts <- trajectory_long_q %>%
+    dplyr::filter(.data$state == "cold") %>%
+    dplyr::count(.data$chain, .data$baseline_bin, .data$quadrant)
+  cat("Quadrant counts per (chain, baseline_bin) [cold -> warm net]:\n")
+  print(quad_bin_counts)
+
+  # Centroid trajectory per (chain, baseline_bin).
+  centroids_binned <- trajectory_long_q %>%
+    dplyr::group_by(.data$chain, .data$baseline_bin, .data$state) %>%
+    dplyr::summarise(
+      truth_drift = mean(.data$truth_drift, na.rm = TRUE),
+      auprc = mean(.data$auprc, na.rm = TRUE),
+      n = dplyr::n(),
+      .groups = "drop"
+    ) %>%
+    dplyr::arrange(.data$chain, .data$baseline_bin, .data$state)
+
+  quadrant_palette <- c(
+    "+AUPRC, -divergence" = "#1b9e77",
+    "+AUPRC, +divergence" = "#7570b3",
+    "-AUPRC, -divergence" = "#e7298a",
+    "-AUPRC, +divergence" = "#d95f02"
+  )
+  bin_linetype <- c(
+    "[0, 0.05]"    = "solid",
+    "(0.05, 0.10]" = "longdash",
+    "(0.10, inf)"  = "dotted"
+  )
+  state_fill <- c(cold = "grey20", annotated = "#c44e52",
+                  warm = "#4c72b0")
+
+  p_trajectory_quadrant <- ggplot() +
+    # Per-dataset paths, colored by cold->warm quadrant
+    geom_path(
+      data = trajectory_long_q,
+      aes(x = .data$truth_drift, y = .data$auprc,
+          group = interaction(.data$dataset_bundle_id, .data$chain),
+          color = .data$quadrant),
+      alpha = 0.18, linewidth = 0.5
+    ) +
+    scale_color_manual(values = quadrant_palette,
+                       name = "Cold -> warm quadrant") +
+    # Centroid arrows per baseline_bin (linetype distinguishes bin so the
+    # color channel stays reserved for the quadrant scale above).
+    geom_path(
+      data = centroids_binned,
+      aes(x = .data$truth_drift, y = .data$auprc,
+          group = .data$baseline_bin,
+          linetype = .data$baseline_bin),
+      arrow = grid::arrow(length = grid::unit(2.5, "mm"),
+                          type = "closed"),
+      linewidth = 0.95,
+      color = "black"
+    ) +
+    scale_linetype_manual(values = bin_linetype,
+                          name = "Baseline bin (centroid)") +
+    # Centroid points: shape = state, fill = state
+    geom_point(
+      data = centroids_binned,
+      aes(x = .data$truth_drift, y = .data$auprc,
+          fill = .data$state),
+      size = 3.0, shape = 21, color = "black", stroke = 0.4
+    ) +
+    scale_fill_manual(values = state_fill, name = "State (centroid)") +
+    facet_wrap(~ chain, nrow = 1,
+               labeller = labeller(chain = c(mu = "mu chain",
+                                             pi = "pi chain"))) +
+    labs(
+      x = sprintf("Basis divergence from truth [%s]",
+                  truth_drift_column),
+      y = "AUPRC",
+      title = paste(
+        "Trajectories colored by cold->warm quadrant;",
+        "centroids stratified by baseline divergence bin"
+      ),
+      subtitle = paste(
+        "Faded paths: per-dataset cold -> annotated -> warm, colored by",
+        "net (AUPRC, divergence) sign.",
+        "Black arrows: chain centroid trajectory per baseline bin (linetype)."
+      )
+    ) +
+    theme_effect_paper(base_size = 10) +
+    theme(legend.position = "right",
+          legend.box = "vertical")
+
+  ggsave(
+    file.path(diagnostic_dir, "truth_drift_trajectory_quadrant.png"),
+    p_trajectory_quadrant, width = 11.5, height = 5.2, dpi = 220,
+    bg = "white"
+  )
+  print(p_trajectory_quadrant)
+
+  cat("Centroid coords per (chain, baseline_bin, state):\n")
+  print(centroids_binned %>%
+          dplyr::mutate(
+            truth_drift = round(.data$truth_drift, 4),
+            auprc = round(.data$auprc, 4)
+          ))
+} else {
+  message(
+    "Skipping quadrant trajectory; trajectory_long not in scope. ",
+    "Run the truth-drift-trajectory chunk first."
+  )
 }
 ```
