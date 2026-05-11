@@ -2888,20 +2888,21 @@ cat("Truth-drift summary rows: ", nrow(truth_drift_summary), "\n", sep = "")
 
 ```{r truth-drift-by-method-summary}
 # Quick per-method distribution check before handing the cache to the
-# plotting workbook. Smaller is better (closer to truth basin).
+# plotting workbook. Smaller is better (closer to truth basin). Both
+# weighted_r2_drift (matches main paper figure / joined_pf) and
+# weighted_chord_drift (matches manuscript Eq. 9) are reported so the
+# choice of metric for downstream plots is informed.
 truth_drift_by_method <- truth_drift_summary %>%
   dplyr::group_by(.data$model_method) %>%
   dplyr::summarise(
     n = dplyr::n(),
-    median = stats::median(.data$truth_chord_drift, na.rm = TRUE),
-    mean = mean(.data$truth_chord_drift, na.rm = TRUE),
-    q25 = stats::quantile(.data$truth_chord_drift, 0.25, na.rm = TRUE,
-                          names = FALSE),
-    q75 = stats::quantile(.data$truth_chord_drift, 0.75, na.rm = TRUE,
-                          names = FALSE),
+    median_r2 = stats::median(.data$truth_r2_drift, na.rm = TRUE),
+    mean_r2 = mean(.data$truth_r2_drift, na.rm = TRUE),
+    median_chord = stats::median(.data$truth_chord_drift, na.rm = TRUE),
+    mean_chord = mean(.data$truth_chord_drift, na.rm = TRUE),
     .groups = "drop"
   ) %>%
-  dplyr::arrange(.data$median)
+  dplyr::arrange(.data$median_r2)
 print(truth_drift_by_method)
 ```
 

@@ -1136,7 +1136,7 @@ p_swap_facet_pair <- ggplot(
                      labels = c(mu = "mu chain", pi = "pi chain")) +
   coord_cartesian(xlim = axis_lim_swap, ylim = axis_lim_swap) +
   labs(
-    x = "Basin chord drift", y = "PIP JSD", color = NULL,
+    x = "Basin drift (weighted_r2_drift)", y = "PIP JSD", color = NULL,
     title = "Panel C diagnostic: basin/JSD coupling by chain within transition"
   ) +
   theme_effect_paper(base_size = 10) +
@@ -1161,7 +1161,7 @@ p_swap_facet_chain <- ggplot(
   scale_color_manual(values = pair_color_diag) +
   coord_cartesian(xlim = axis_lim_swap, ylim = axis_lim_swap) +
   labs(
-    x = "Basin chord drift", y = "PIP JSD", color = NULL,
+    x = "Basin drift (weighted_r2_drift)", y = "PIP JSD", color = NULL,
     title = "Panel C diagnostic: basin/JSD coupling by transition within chain"
   ) +
   theme_effect_paper(base_size = 10) +
@@ -1359,6 +1359,12 @@ if (!file.exists(truth_drift_csv)) {
                                          show_col_types = FALSE) %>%
     dplyr::mutate(dataset_bundle_id = as.character(.data$dataset_bundle_id))
 
+  # The main paper figure (joined_pf / panel_c_diag) uses weighted_r2_drift,
+  # not weighted_chord_drift, so the apples-to-apples sanity comparison
+  # against auprc_delta is on the r2 axis. The CSV exposes both columns; swap
+  # to truth_chord_drift below if you want to compare on chord instead.
+  truth_drift_column <- "truth_r2_drift"
+
   # delta_truth per (dataset, chain, pair_kind): baseline truth-drift minus
   # treatment truth-drift. Positive = treatment moved the fit closer to the
   # top-k truth basin.
@@ -1368,7 +1374,7 @@ if (!file.exists(truth_drift_csv)) {
       tidyr::pivot_wider(
         id_cols = dataset_bundle_id,
         names_from = model_method,
-        values_from = truth_chord_drift
+        values_from = dplyr::all_of(truth_drift_column)
       ) %>%
       dplyr::transmute(
         dataset_bundle_id = .data$dataset_bundle_id,
