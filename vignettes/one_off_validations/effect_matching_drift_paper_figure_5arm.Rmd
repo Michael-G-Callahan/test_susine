@@ -908,6 +908,138 @@ ggsave(
 )
 print(p_delta_diff_basin)
 
+metric_triangle_long <- basin_long_pf %>%
+  dplyr::inner_join(
+    jsd_long_pf,
+    by = c("dataset_bundle_id", "chain", "pair_kind")
+  ) %>%
+  dplyr::left_join(auprc_lookup_pf, by = "dataset_bundle_id") %>%
+  dplyr::mutate(
+    auprc_delta = dplyr::case_when(
+      .data$chain == "mu" & .data$pair_kind == "cold_ann" ~
+        .data$delta_mu_treat,
+      .data$chain == "mu" & .data$pair_kind == "cold_warm" ~
+        .data$delta_mu_warm,
+      .data$chain == "pi" & .data$pair_kind == "cold_ann" ~
+        .data$delta_pi_treat,
+      .data$chain == "pi" & .data$pair_kind == "cold_warm" ~
+        .data$delta_pi_warm,
+      TRUE ~ NA_real_
+    ),
+    chain = factor(.data$chain, levels = c("mu", "pi"),
+                   labels = c("mu chain", "pi chain")),
+    comparison = factor(
+      dplyr::recode(
+        .data$pair_kind,
+        cold_ann = "cold -> annotated",
+        cold_warm = "cold -> warm vanilla"
+      ),
+      levels = c("cold -> annotated", "cold -> warm vanilla")
+    )
+  ) %>%
+  dplyr::select(
+    .data$dataset_bundle_id, .data$chain, .data$comparison,
+    .data$basin_drift, .data$pip_jsd, .data$auprc_delta
+  )
+
+readr::write_csv(
+  metric_triangle_long,
+  file.path(diagnostic_dir, "panel_c_metric_triangle_long.csv")
+)
+
+metric_axis_labels <- c(
+  basin_drift = "Basin drift",
+  pip_jsd = "PIP JSD",
+  auprc_delta = "AUPRC delta vs cold vanilla"
+)
+
+make_metric_triangle_plot <- function(df, x_metric, y_metric, color_metric,
+                                      filename, color_diverging = FALSE) {
+  color_values <- df[[color_metric]]
+  color_values <- color_values[is.finite(color_values)]
+
+  if (color_diverging) {
+    color_scale <- scale_color_gradient2(
+      low = "#2166ac", mid = "grey96", high = "#b2182b",
+      midpoint = 0,
+      limits = c(-max(abs(color_values), na.rm = TRUE),
+                 max(abs(color_values), na.rm = TRUE)),
+      oob = scales::squish
+    )
+  } else {
+    color_scale <- scale_color_viridis_c(option = "C")
+  }
+
+  p <- ggplot(
+    df,
+    aes(x = .data[[x_metric]], y = .data[[y_metric]],
+        color = .data[[color_metric]])
+  ) +
+    geom_hline(
+      yintercept = 0,
+      color = if (y_metric == "auprc_delta") "grey70" else NA,
+      linewidth = 0.25
+    ) +
+    geom_vline(
+      xintercept = 0,
+      color = if (x_metric == "auprc_delta") "grey70" else NA,
+      linewidth = 0.25
+    ) +
+    geom_point(alpha = 0.70, size = 1.55, stroke = 0) +
+    facet_grid(chain ~ comparison) +
+    color_scale +
+    labs(
+      x = metric_axis_labels[[x_metric]],
+      y = metric_axis_labels[[y_metric]],
+      color = metric_axis_labels[[color_metric]],
+      title = paste(
+        "Panel C diagnostic:",
+        metric_axis_labels[[x_metric]], "vs",
+        metric_axis_labels[[y_metric]],
+        "colored by", metric_axis_labels[[color_metric]]
+      )
+    ) +
+    theme_effect_paper(base_size = 9) +
+    theme(
+      legend.position = "right",
+      panel.grid.minor = element_line(color = "grey95", linewidth = 0.18)
+    )
+
+  ggsave(
+    file.path(diagnostic_dir, filename),
+    p,
+    width = 8.8, height = 5.4, dpi = 220, bg = "white"
+  )
+  print(p)
+  invisible(p)
+}
+
+make_metric_triangle_plot(
+  metric_triangle_long,
+  x_metric = "basin_drift",
+  y_metric = "pip_jsd",
+  color_metric = "auprc_delta",
+  filename = "panel_c_metric_triangle_color_auprc_delta.png",
+  color_diverging = TRUE
+)
+
+make_metric_triangle_plot(
+  metric_triangle_long,
+  x_metric = "pip_jsd",
+  y_metric = "auprc_delta",
+  color_metric = "basin_drift",
+  filename = "panel_c_metric_triangle_color_basin_drift.png"
+)
+
+make_metric_triangle_plot(
+  metric_triangle_long,
+  x_metric = "auprc_delta",
+  y_metric = "basin_drift",
+  color_metric = "pip_jsd",
+  filename = "panel_c_metric_triangle_color_pip_jsd.png",
+  color_diverging = FALSE
+)
+
 representative_datasets <- panel_c_diag %>%
   dplyr::mutate(
     representative_score = abs(.data$delta_mu_minus_pi) +
