@@ -952,15 +952,19 @@ if (file.exists(pip_records_rds) && file.exists(causal_truth_rds)) {
           dplyr::arrange(dplyr::desc(.data$pip)) %>%
           dplyr::slice_head(n = 12L)
       }) %>%
-      dplyr::ungroup()
+      dplyr::ungroup() %>%
+      dplyr::mutate(dataset_bundle_id = ds_id, .before = 1L)
   }) %>%
     dplyr::bind_rows() %>%
-    dplyr::left_join(representative_datasets, by = "dataset_bundle_id") %>%
-    dplyr::relocate(
-      .data$dataset_bundle_id, .data$comparison, .data$basin_quadrant,
-      .data$model_method, .data$snp_index, .data$pip,
-      .data$is_top8_causal, .data$is_any_causal
-    )
+    dplyr::left_join(representative_datasets, by = "dataset_bundle_id")
+  if (nrow(top_pip_rows) > 0L) {
+    top_pip_rows <- top_pip_rows %>%
+      dplyr::relocate(
+        .data$dataset_bundle_id, .data$comparison, .data$basin_quadrant,
+        .data$model_method, .data$snp_index, .data$pip,
+        .data$is_top8_causal, .data$is_any_causal
+      )
+  }
   readr::write_csv(
     top_pip_rows,
     file.path(diagnostic_dir, "panel_c_representative_top_pips.csv")
