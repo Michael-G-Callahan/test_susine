@@ -1093,3 +1093,172 @@ if (file.exists(pip_records_rds) && file.exists(causal_truth_rds)) {
 
 cat("Wrote Panel C ad hoc diagnostics to ", diagnostic_dir, "\n", sep = "")
 ```
+
+```{r panel-c-correlation-diagnostics, fig.width=9, fig.height=4.6}
+correlation_dir <- file.path(diagnostic_dir, "correlation_summaries")
+dir.create(correlation_dir, recursive = TRUE, showWarnings = FALSE)
+
+metric_pairs <- tibble::tribble(
+  ~metric_x,       ~metric_y,      ~pair_label,
+  "basin_drift",  "pip_jsd",      "basin drift vs PIP JSD",
+  "basin_drift",  "auprc_delta",  "basin drift vs AUPRC delta",
+  "pip_jsd",      "auprc_delta",  "PIP JSD vs AUPRC delta"
+)
+
+pairwise_cor_rows <- metric_triangle_long %>%
+  tidyr::nest(data = -c(chain, comparison)) %>%
+  tidyr::expand_grid(metric_pairs) %>%
+  dplyr::mutate(
+    stats = purrr::pmap(
+      list(data, metric_x, metric_y),
+      function(d, metric_x, metric_y) {
+        complete <- is.finite(d[[metric_x]]) & is.finite(d[[metric_y]])
+        n_complete <- sum(complete)
+        if (n_complete < 3L) {
+          return(tibble::tibble(n = n_complete, pearson_r = NA_real_,
+                                p_value = NA_real_))
+        }
+        test <- stats::cor.test(
+          d[[metric_x]][complete],
+          d[[metric_y]][complete],
+          method = "pearson"
+        )
+        tibble::tibble(
+          n = n_complete,
+          pearson_r = unname(test$estimate),
+          p_value = test$p.value
+        )
+      }
+    )
+  ) %>%
+  dplyr::select(-data) %>%
+  tidyr::unnest(cols = stats) %>%
+  dplyr::mutate(
+    pair_label = factor(
+      .data$pair_label,
+      levels = metric_pairs$pair_label
+    )
+  )
+
+readr::write_csv(
+  pairwise_cor_rows,
+  file.path(correlation_dir, "panel_c_pairwise_correlations.csv")
+)
+print(pairwise_cor_rows)
+
+cor_lim <- max(abs(pairwise_cor_rows$pearson_r), na.rm = TRUE)
+if (!is.finite(cor_lim) || cor_lim <= 0) cor_lim <- 1
+p_pairwise_cor <- ggplot(
+  pairwise_cor_rows,
+  aes(x = .data$pair_label, y = .data$chain, fill = .data$pearson_r)
+) +
+  geom_tile(color = "white", linewidth = 0.6) +
+  geom_text(
+    aes(label = sprintf("r=%.2f\nn=%d", .data$pearson_r, .data$n)),
+    size = 3.0,
+    lineheight = 0.9,
+    color = "grey12"
+  ) +
+  facet_wrap(~comparison, nrow = 1) +
+  scale_fill_gradient2(
+    low = "#2166ac", mid = "grey96", high = "#b2182b",
+    midpoint = 0, limits = c(-cor_lim, cor_lim), oob = scales::squish
+  ) +
+  labs(
+    x = NULL,
+    y = NULL,
+    fill = "Pearson r",
+    title = "Panel C diagnostic: pairwise metric correlations"
+  ) +
+  theme_effect_paper(base_size = 10) +
+  theme(
+    axis.text.x = element_text(angle = 25, hjust = 1),
+    panel.grid = element_blank()
+  )
+ggsave(
+  file.path(correlation_dir, "panel_c_pairwise_correlations.png"),
+  p_pairwise_cor,
+  width = 8.8, height = 4.2, dpi = 220, bg = "white"
+)
+print(p_pairwise_cor)
+
+partial_cor_one <- function(d, x, y, z) {
+  d <- d %>%
+    dplyr::filter(
+      is.finite(.data[[x]]),
+      is.finite(.data[[y]]),
+      is.finite(.data[[z]])
+    )
+  if (nrow(d) < 4L) return(tibble::tibble(n = nrow(d), partial_r = NA_real_))
+  rx <- stats::resid(stats::lm(d[[x]] ~ d[[z]]))
+  ry <- stats::resid(stats::lm(d[[y]] ~ d[[z]]))
+  tibble::tibble(n = nrow(d), partial_r = stats::cor(rx, ry))
+}
+
+partial_cor_specs <- tibble::tribble(
+  ~metric_x,       ~metric_y,      ~control_metric, ~partial_label,
+  "auprc_delta",  "pip_jsd",      "basin_drift",  "AUPRC delta vs PIP JSD | basin drift",
+  "auprc_delta",  "basin_drift",  "pip_jsd",      "AUPRC delta vs basin drift | PIP JSD",
+  "basin_drift",  "pip_jsd",      "auprc_delta",  "basin drift vs PIP JSD | AUPRC delta"
+)
+
+partial_cor_rows <- metric_triangle_long %>%
+  tidyr::nest(data = -c(chain, comparison)) %>%
+  tidyr::expand_grid(partial_cor_specs) %>%
+  dplyr::mutate(
+    stats = purrr::pmap(
+      list(data, metric_x, metric_y, control_metric),
+      partial_cor_one
+    )
+  ) %>%
+  dplyr::select(-data) %>%
+  tidyr::unnest(cols = stats) %>%
+  dplyr::mutate(
+    partial_label = factor(
+      .data$partial_label,
+      levels = partial_cor_specs$partial_label
+    )
+  )
+
+readr::write_csv(
+  partial_cor_rows,
+  file.path(correlation_dir, "panel_c_partial_correlations.csv")
+)
+print(partial_cor_rows)
+
+partial_lim <- max(abs(partial_cor_rows$partial_r), na.rm = TRUE)
+if (!is.finite(partial_lim) || partial_lim <= 0) partial_lim <- 1
+p_partial_cor <- ggplot(
+  partial_cor_rows,
+  aes(x = .data$partial_label, y = .data$chain, fill = .data$partial_r)
+) +
+  geom_tile(color = "white", linewidth = 0.6) +
+  geom_text(
+    aes(label = sprintf("r=%.2f\nn=%d", .data$partial_r, .data$n)),
+    size = 2.8,
+    lineheight = 0.9,
+    color = "grey12"
+  ) +
+  facet_wrap(~comparison, nrow = 1) +
+  scale_fill_gradient2(
+    low = "#2166ac", mid = "grey96", high = "#b2182b",
+    midpoint = 0, limits = c(-partial_lim, partial_lim), oob = scales::squish
+  ) +
+  labs(
+    x = NULL,
+    y = NULL,
+    fill = "Partial r",
+    title = "Panel C diagnostic: partial metric correlations"
+  ) +
+  theme_effect_paper(base_size = 9) +
+  theme(
+    axis.text.x = element_text(angle = 25, hjust = 1),
+    panel.grid = element_blank()
+  )
+ggsave(
+  file.path(correlation_dir, "panel_c_partial_correlations.png"),
+  p_partial_cor,
+  width = 9.6, height = 4.2, dpi = 220, bg = "white"
+)
+print(p_partial_cor)
+```
