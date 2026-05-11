@@ -43,6 +43,8 @@ pr_curves_pooled_csv <- file.path(study_dir, "pr_curves_pooled_top8_5arm.csv")
 pr_auc_pooled_csv <- file.path(study_dir, "pr_auc_pooled_top8_5arm.csv")
 effect_quality_pair_rows_csv <- file.path(study_dir, "effect_quality_pair_rows_5arm.csv")
 effect_quality_density_shift_csv <- file.path(study_dir, "effect_quality_density_shift_5arm.csv")
+pip_records_rds <- file.path(study_dir, "pip_records_5arm.rds")
+causal_truth_rds <- file.path(study_dir, "causal_truth_5arm.rds")
 
 paper_figure_png <- file.path(plot_dir, "paper_figure_effect_drift.png")
 
@@ -747,4 +749,228 @@ ggsave(
 )
 cat("Wrote combined paper figure to ", paper_figure_png, "\n", sep = "")
 print(combined_fig)
+```
+
+# Ad Hoc Diagnostics For Panel C
+
+```{r panel-c-ad-hoc-diagnostics, fig.width=10, fig.height=4.8}
+diagnostic_dir <- file.path(plot_dir, "panel_c_ad_hoc_diagnostics")
+dir.create(diagnostic_dir, recursive = TRUE, showWarnings = FALSE)
+
+basin_quadrant_threshold <- 0.10
+
+classify_basin_quadrant <- function(basin_mu, basin_pi,
+                                    threshold = basin_quadrant_threshold) {
+  dplyr::case_when(
+    basin_mu >= threshold & basin_pi >= threshold ~ "both",
+    basin_mu >= threshold & basin_pi <  threshold ~ "mu_only",
+    basin_mu <  threshold & basin_pi >= threshold ~ "pi_only",
+    TRUE ~ "neither"
+  )
+}
+
+panel_c_diag <- joined_pf %>%
+  dplyr::left_join(auprc_lookup_pf, by = "dataset_bundle_id") %>%
+  dplyr::mutate(
+    comparison = dplyr::recode(
+      .data$pair_kind,
+      cold_ann = "cold -> annotated",
+      cold_warm = "cold -> warm vanilla"
+    ),
+    delta_mu = dplyr::if_else(.data$pair_kind == "cold_ann",
+                             .data$delta_mu_treat, .data$delta_mu_warm),
+    delta_pi = dplyr::if_else(.data$pair_kind == "cold_ann",
+                             .data$delta_pi_treat, .data$delta_pi_warm),
+    delta_mu_minus_pi = .data$delta_mu - .data$delta_pi,
+    basin_quadrant = classify_basin_quadrant(.data$basin_mu, .data$basin_pi),
+    basin_quadrant = factor(
+      .data$basin_quadrant,
+      levels = c("neither", "mu_only", "pi_only", "both")
+    ),
+    comparison = factor(
+      .data$comparison,
+      levels = c("cold -> annotated", "cold -> warm vanilla")
+    )
+  )
+
+quadrant_summary <- panel_c_diag %>%
+  dplyr::group_by(.data$comparison, .data$basin_quadrant) %>%
+  dplyr::summarise(
+    n = dplyr::n(),
+    mean_basin_mu = mean(.data$basin_mu, na.rm = TRUE),
+    mean_basin_pi = mean(.data$basin_pi, na.rm = TRUE),
+    mean_jsd_mu = mean(.data$jsd_mu, na.rm = TRUE),
+    mean_jsd_pi = mean(.data$jsd_pi, na.rm = TRUE),
+    mean_delta_mu = mean(.data$delta_mu, na.rm = TRUE),
+    mean_delta_pi = mean(.data$delta_pi, na.rm = TRUE),
+    mean_delta_mu_minus_pi = mean(.data$delta_mu_minus_pi, na.rm = TRUE),
+    median_delta_mu_minus_pi = median(.data$delta_mu_minus_pi, na.rm = TRUE),
+    .groups = "drop"
+  )
+readr::write_csv(
+  quadrant_summary,
+  file.path(diagnostic_dir, "panel_c_basin_quadrant_summary.csv")
+)
+print(quadrant_summary)
+
+quadrant_membership <- panel_c_diag %>%
+  dplyr::select(
+    .data$dataset_bundle_id, .data$pair_kind, .data$basin_quadrant
+  ) %>%
+  tidyr::pivot_wider(names_from = .data$pair_kind,
+                     values_from = .data$basin_quadrant) %>%
+  dplyr::rename(
+    cold_annotated_quadrant = .data$cold_ann,
+    cold_warm_quadrant = .data$cold_warm
+  )
+readr::write_csv(
+  quadrant_membership,
+  file.path(diagnostic_dir, "panel_c_basin_quadrant_membership.csv")
+)
+
+quadrant_transition <- quadrant_membership %>%
+  dplyr::count(.data$cold_annotated_quadrant, .data$cold_warm_quadrant,
+               name = "n") %>%
+  tidyr::complete(
+    cold_annotated_quadrant = factor(
+      c("neither", "mu_only", "pi_only", "both"),
+      levels = c("neither", "mu_only", "pi_only", "both")
+    ),
+    cold_warm_quadrant = factor(
+      c("neither", "mu_only", "pi_only", "both"),
+      levels = c("neither", "mu_only", "pi_only", "both")
+    ),
+    fill = list(n = 0L)
+  )
+readr::write_csv(
+  quadrant_transition,
+  file.path(diagnostic_dir, "panel_c_basin_quadrant_transition.csv")
+)
+
+p_quadrant_transition <- ggplot(
+  quadrant_transition,
+  aes(x = .data$cold_annotated_quadrant,
+      y = .data$cold_warm_quadrant,
+      fill = .data$n)
+) +
+  geom_tile(color = "white", linewidth = 0.6) +
+  geom_text(aes(label = .data$n), size = 3.2, color = "grey15") +
+  scale_fill_gradient(low = "grey96", high = "#2b6cb0") +
+  labs(
+    x = "Basin quadrant: cold -> annotated",
+    y = "Basin quadrant: cold -> warm vanilla",
+    fill = "datasets",
+    title = "Panel C diagnostic: basin-drift quadrant membership"
+  ) +
+  coord_equal() +
+  theme_effect_paper(base_size = 10) +
+  theme(axis.text.x = element_text(angle = 25, hjust = 1))
+ggsave(
+  file.path(diagnostic_dir, "panel_c_basin_quadrant_transition.png"),
+  p_quadrant_transition,
+  width = 6.2, height = 5.0, dpi = 220, bg = "white"
+)
+print(p_quadrant_transition)
+
+delta_diff_lim <- max(abs(panel_c_diag$delta_mu_minus_pi), na.rm = TRUE)
+p_delta_diff_basin <- ggplot(
+  panel_c_diag,
+  aes(x = .data$basin_mu, y = .data$basin_pi,
+      color = .data$delta_mu_minus_pi)
+) +
+  geom_abline(slope = 1, intercept = 0, color = "grey50",
+              linetype = "dashed", linewidth = 0.35) +
+  geom_hline(yintercept = basin_quadrant_threshold, color = "grey75",
+             linewidth = 0.25) +
+  geom_vline(xintercept = basin_quadrant_threshold, color = "grey75",
+             linewidth = 0.25) +
+  geom_point(alpha = 0.72, size = 1.9) +
+  facet_wrap(~comparison, nrow = 1) +
+  scale_color_gradient2(
+    low = "#2166ac", mid = "grey96", high = "#b2182b",
+    midpoint = 0, limits = c(-delta_diff_lim, delta_diff_lim),
+    oob = scales::squish
+  ) +
+  coord_cartesian(xlim = c(-0.02, basin_max_pf),
+                  ylim = c(-0.01, basin_max_pf),
+                  expand = FALSE) +
+  labs(
+    x = expr_basin_x,
+    y = expr_basin_y,
+    color = expression(Delta * "AUPRC"[mu] - Delta * "AUPRC"[pi]),
+    title = "Panel C diagnostic: relative AUPRC gain over basin-drift geometry"
+  ) +
+  theme_effect_paper(base_size = 10)
+ggsave(
+  file.path(diagnostic_dir, "panel_c_basin_scatter_delta_mu_minus_pi.png"),
+  p_delta_diff_basin,
+  width = 9.5, height = 4.3, dpi = 220, bg = "white"
+)
+print(p_delta_diff_basin)
+
+representative_datasets <- panel_c_diag %>%
+  dplyr::mutate(
+    representative_score = abs(.data$delta_mu_minus_pi) +
+      0.05 * (.data$basin_mu + .data$basin_pi)
+  ) %>%
+  dplyr::group_by(.data$comparison, .data$basin_quadrant) %>%
+  dplyr::slice_max(.data$representative_score, n = 2L, with_ties = FALSE) %>%
+  dplyr::ungroup() %>%
+  dplyr::arrange(.data$comparison, .data$basin_quadrant,
+                 dplyr::desc(.data$representative_score)) %>%
+  dplyr::select(
+    .data$dataset_bundle_id, .data$comparison, .data$basin_quadrant,
+    .data$basin_mu, .data$basin_pi, .data$jsd_mu, .data$jsd_pi,
+    .data$delta_mu, .data$delta_pi, .data$delta_mu_minus_pi
+  )
+readr::write_csv(
+  representative_datasets,
+  file.path(diagnostic_dir, "panel_c_representative_datasets.csv")
+)
+print(representative_datasets)
+
+if (file.exists(pip_records_rds) && file.exists(causal_truth_rds)) {
+  pip_records_diag <- readRDS(pip_records_rds) %>%
+    dplyr::mutate(dataset_bundle_id = as.character(.data$dataset_bundle_id))
+  causal_truth_diag <- readRDS(causal_truth_rds)
+  rep_ids <- unique(representative_datasets$dataset_bundle_id)
+  top_pip_rows <- lapply(rep_ids, function(ds_id) {
+    truth_i <- causal_truth_diag[[as.character(ds_id)]]
+    if (is.null(truth_i)) return(NULL)
+    pip_records_diag %>%
+      dplyr::filter(.data$dataset_bundle_id == !!ds_id) %>%
+      dplyr::filter(.data$model_method %in% methods_in_order) %>%
+      dplyr::group_by(.data$model_method) %>%
+      dplyr::group_modify(function(.x, .y) {
+        pip_vec <- as.numeric(.x$pip[[1]])
+        tibble::tibble(
+          snp_index = seq_along(pip_vec),
+          pip = pip_vec,
+          is_top8_causal = seq_along(pip_vec) %in% truth_i$top_idx,
+          is_any_causal = seq_along(pip_vec) %in% truth_i$causal_idx
+        ) %>%
+          dplyr::arrange(dplyr::desc(.data$pip)) %>%
+          dplyr::slice_head(n = 12L)
+      }) %>%
+      dplyr::ungroup()
+  }) %>%
+    dplyr::bind_rows() %>%
+    dplyr::left_join(representative_datasets, by = "dataset_bundle_id") %>%
+    dplyr::relocate(
+      .data$dataset_bundle_id, .data$comparison, .data$basin_quadrant,
+      .data$model_method, .data$snp_index, .data$pip,
+      .data$is_top8_causal, .data$is_any_causal
+    )
+  readr::write_csv(
+    top_pip_rows,
+    file.path(diagnostic_dir, "panel_c_representative_top_pips.csv")
+  )
+  cat("Wrote representative top-PIP table to ",
+      file.path(diagnostic_dir, "panel_c_representative_top_pips.csv"),
+      "\n", sep = "")
+} else {
+  message("Skipping representative top-PIP table; missing PIP/truth RDS cache.")
+}
+
+cat("Wrote Panel C ad hoc diagnostics to ", diagnostic_dir, "\n", sep = "")
 ```
