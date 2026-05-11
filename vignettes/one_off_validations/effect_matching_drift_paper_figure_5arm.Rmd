@@ -1536,6 +1536,76 @@ if (file.exists(truth_drift_csv) &&
 }
 ```
 
+# Baseline Cold Vanilla on (truth_drift, AUPRC)
+
+```{r truth-drift-baseline-only, fig.width=6.4, fig.height=4.4}
+# Foundation plot for the trajectory and curve-residual analyses: cold
+# SuSiE-vanilla AUPRC vs truth drift, one point per dataset. The LOESS
+# smoother previews the curve that step 3 would fit for the residual
+# reparameterization.
+if (file.exists(truth_drift_csv)) {
+  baseline_points <- truth_drift_summary %>%
+    dplyr::filter(.data$model_method == baseline_method) %>%
+    dplyr::transmute(
+      dataset_bundle_id = .data$dataset_bundle_id,
+      truth_drift = .data[[truth_drift_column]]
+    ) %>%
+    dplyr::inner_join(
+      auprc_per_dataset %>%
+        dplyr::transmute(
+          dataset_bundle_id = .data$dataset_bundle_id,
+          auprc = .data$auprc_susie_vanilla
+        ),
+      by = "dataset_bundle_id"
+    )
+
+  cat("Baseline (cold vanilla) points: ", nrow(baseline_points), "\n", sep = "")
+  cat(sprintf(
+    "  truth_drift: median %.3f, mean %.3f, range [%.3f, %.3f]\n",
+    stats::median(baseline_points$truth_drift, na.rm = TRUE),
+    mean(baseline_points$truth_drift, na.rm = TRUE),
+    min(baseline_points$truth_drift, na.rm = TRUE),
+    max(baseline_points$truth_drift, na.rm = TRUE)
+  ))
+  cat(sprintf(
+    "  auprc:       median %.3f, mean %.3f, range [%.3f, %.3f]\n",
+    stats::median(baseline_points$auprc, na.rm = TRUE),
+    mean(baseline_points$auprc, na.rm = TRUE),
+    min(baseline_points$auprc, na.rm = TRUE),
+    max(baseline_points$auprc, na.rm = TRUE)
+  ))
+
+  p_baseline_truth <- ggplot(
+    baseline_points,
+    aes(x = .data$truth_drift, y = .data$auprc)
+  ) +
+    geom_point(alpha = 0.45, size = 1.5, stroke = 0, color = "grey25") +
+    geom_smooth(method = "loess", se = TRUE, span = 0.6,
+                color = "#c44e52", fill = "#c44e52", alpha = 0.15,
+                linewidth = 0.6) +
+    labs(
+      x = sprintf("Truth drift to top-K causal basis [%s]",
+                  truth_drift_column),
+      y = "AUPRC (cold SuSiE-vanilla)",
+      title = "Baseline: cold vanilla AUPRC vs truth drift",
+      subtitle = paste(
+        "One point per dataset (n =", nrow(baseline_points), ").",
+        "LOESS smoother previews the curve used in residual-based",
+        "reparameterization."
+      )
+    ) +
+    theme_effect_paper(base_size = 10)
+
+  ggsave(
+    file.path(diagnostic_dir, "truth_drift_baseline_only.png"),
+    p_baseline_truth, width = 6.4, height = 4.4, dpi = 220, bg = "white"
+  )
+  print(p_baseline_truth)
+} else {
+  message("Skipping baseline-only plot; truth_drift_summary not cached yet.")
+}
+```
+
 # Truth Drift Trajectory (cold -> annotated -> warm)
 
 ```{r truth-drift-trajectory, fig.width=10, fig.height=4.8}
