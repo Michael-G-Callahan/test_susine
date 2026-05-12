@@ -1,5 +1,5 @@
 ---
-title: "PR, Model PVE, and Effect Quality Figure (5-arm)"
+title: "PR, Heritability, AUPRC Gain, and Effect Quality Figure (5-arm)"
 output:
   html_document:
     toc: true
@@ -20,12 +20,15 @@ Streamlined cached plotting workbook for a 5-arm paper figure with:
 here::i_am("vignettes/one_off_validations/effect_matching_pr_pve_quality_figure_5arm.Rmd")
 
 library(here)
+library(devtools)
 library(dplyr)
 library(readr)
 library(tidyr)
 library(ggplot2)
 library(patchwork)
 library(scales)
+
+source(here("vignettes", "one_off_validations", "_5arm_cfg.R"))
 ```
 
 # Inputs
@@ -43,6 +46,16 @@ pr_curves_pooled_csv <- file.path(study_dir, "pr_curves_pooled_top8_5arm.csv")
 pr_auc_pooled_csv <- file.path(study_dir, "pr_auc_pooled_top8_5arm.csv")
 effect_quality_pair_rows_csv <- file.path(study_dir, "effect_quality_pair_rows_5arm.csv")
 effect_quality_density_shift_csv <- file.path(study_dir, "effect_quality_density_shift_5arm.csv")
+dataset_y_var_csv <- file.path(study_dir, "dataset_y_variance_5arm.csv")
+
+baseline_screening_summary_csv <- file.path(
+  output_root, "slurm_output", baseline_job_name_5arm,
+  baseline_parent_job_id_5arm, "consolidated", "screening_summary.csv"
+)
+baseline_cfg_path <- file.path(
+  output_root, "run_history", baseline_job_name_5arm,
+  baseline_parent_job_id_5arm, "job_config.json"
+)
 
 paper_figure_pr_pve_quality_png <- file.path(
   plot_dir, "paper_figure_pr_pve_effect_quality.png"
@@ -241,6 +254,42 @@ records <- readRDS(records_rds) %>%
   ) %>%
   dplyr::filter(!is.na(.data$model_method))
 
+if (file.exists(dataset_y_var_csv)) {
+  dataset_y_var <- readr::read_csv(dataset_y_var_csv, show_col_types = FALSE) %>%
+    dplyr::mutate(dataset_bundle_id = as.character(.data$dataset_bundle_id))
+} else {
+  suppressMessages(devtools::load_all(here()))
+  cfg_bundle <- build_5arm_cfg(
+    here_root = here(),
+    output_root = output_root,
+    baseline_screening_csv = baseline_screening_summary_csv,
+    baseline_cfg_path = baseline_cfg_path,
+    settings_cache_csv = file.path(study_dir, "selected_5arm_settings.csv"),
+    prefer_settings_cache = TRUE
+  )
+  cfg_for_hg2 <- cfg_bundle$cfg
+  bundle_rows_all <- cfg_for_hg2$tables$dataset_bundles %>%
+    tibble::as_tibble() %>%
+    dplyr::mutate(dataset_bundle_id = as.character(.data$dataset_bundle_id))
+  ds_ids_for_hg2 <- sort(unique(records$dataset_bundle_id))
+  dataset_y_var <- lapply(ds_ids_for_hg2, function(ds_id) {
+    bundle_row <- bundle_rows_all %>%
+      dplyr::filter(.data$dataset_bundle_id == !!ds_id)
+    if (nrow(bundle_row) != 1L) {
+      stop("Expected one bundle row for ", ds_id, "; got ", nrow(bundle_row))
+    }
+    data_bundle <- test_susine:::generate_data_for_bundle(
+      bundle_row, cfg_for_hg2
+    )
+    tibble::tibble(
+      dataset_bundle_id = ds_id,
+      y_var = stats::var(as.numeric(data_bundle$y))
+    )
+  }) %>%
+    dplyr::bind_rows()
+  readr::write_csv(dataset_y_var, dataset_y_var_csv)
+}
+
 auprc_per_dataset <- readr::read_csv(
   auprc_per_dataset_csv, show_col_types = FALSE
 ) %>%
@@ -391,31 +440,16 @@ hg2_df <- records %>%
       function(fy) length(fy) > 1L && all(is.finite(fy)),
       logical(1)
     )
-    var_fy <- vapply(
-      fy_list,
-      function(fy) if (length(fy) > 1L) stats::var(as.numeric(fy)) else NA_real_,
-      numeric(1)
-    )
-    var_frac <- as.numeric(df$var_y_explained_frac)
-    var_y_candidates <- var_fy / var_frac
-    var_y_hat <- stats::median(
-      var_y_candidates[
-        finite_fy &
-          is.finite(var_y_candidates) &
-          is.finite(var_frac) &
-          var_frac > 0 &
-          is.finite(var_fy) &
-          var_fy > 0
-      ],
-      na.rm = TRUE
-    )
-    if (!is.finite(var_y_hat) || var_y_hat <= 0 || !any(finite_fy)) {
-      return(tibble::tibble(hg2_hat = NA_real_, y_var_hat = NA_real_))
+    y_var <- dataset_y_var$y_var[
+      match(as.character(key$dataset_bundle_id[[1]]), dataset_y_var$dataset_bundle_id)
+    ]
+    if (!is.finite(y_var) || y_var <= 0 || !any(finite_fy)) {
+      return(tibble::tibble(hg2_hat = NA_real_, y_var = y_var))
     }
     fitted_total <- Reduce(`+`, lapply(fy_list[finite_fy], as.numeric))
     tibble::tibble(
-      hg2_hat = stats::var(fitted_total) / var_y_hat,
-      y_var_hat = var_y_hat
+      hg2_hat = max(0, min(1, stats::var(fitted_total) / y_var)),
+      y_var = y_var
     )
   }) %>%
   dplyr::ungroup()
@@ -430,7 +464,7 @@ panel_B <- ggplot(hg2_df,
   annotate(
     "text", x = warm_pi_method, y = 0.25,
     label = "true h_g^2 = 0.25",
-    hjust = 1.03, vjust = -0.55, size = 2.35, color = "grey20"
+    hjust = 1.03, vjust = 1.45, size = 2.35, color = "grey20"
   ) +
   scale_x_discrete(labels = method_legend_short[methods_in_order], drop = FALSE) +
   scale_fill_manual(values = method_color, guide = "none") +
@@ -473,6 +507,28 @@ delta_lim <- max(abs(c(panel_C_df$delta_mu, panel_C_df$delta_pi)),
                  na.rm = TRUE)
 delta_lim <- max(delta_lim, 0.01, na.rm = TRUE)
 
+panel_C_count_df <- panel_C_df %>%
+  dplyr::group_by(.data$transition) %>%
+  dplyr::summarise(
+    above = sum(.data$delta_mu > .data$delta_pi, na.rm = TRUE),
+    below = sum(.data$delta_mu < .data$delta_pi, na.rm = TRUE),
+    .groups = "drop"
+  )
+panel_C_above_labels <- panel_C_count_df %>%
+  dplyr::transmute(
+    .data$transition,
+    x = -0.94 * delta_lim,
+    y = 0.94 * delta_lim,
+    label = paste0("above diagonal: n = ", .data$above)
+  )
+panel_C_below_labels <- panel_C_count_df %>%
+  dplyr::transmute(
+    .data$transition,
+    x = 0.94 * delta_lim,
+    y = -0.94 * delta_lim,
+    label = paste0("below diagonal: n = ", .data$below)
+  )
+
 panel_C <- ggplot(panel_C_df,
                   aes(x = .data$delta_pi, y = .data$delta_mu)) +
   geom_hline(yintercept = 0, linewidth = 0.25, color = "grey70") +
@@ -480,6 +536,18 @@ panel_C <- ggplot(panel_C_df,
   geom_abline(slope = 1, intercept = 0, linetype = "dashed",
               color = "grey35", linewidth = 0.35) +
   geom_point(alpha = 0.38, size = 0.85, color = "grey20") +
+  geom_text(
+    data = panel_C_above_labels,
+    aes(x = .data$x, y = .data$y, label = .data$label),
+    inherit.aes = FALSE, hjust = 0, vjust = 1,
+    size = 2.45, color = "grey20"
+  ) +
+  geom_text(
+    data = panel_C_below_labels,
+    aes(x = .data$x, y = .data$y, label = .data$label),
+    inherit.aes = FALSE, hjust = 1, vjust = 0,
+    size = 2.45, color = "grey20"
+  ) +
   facet_wrap(~ transition, nrow = 1) +
   coord_equal(xlim = c(-delta_lim, delta_lim),
               ylim = c(-delta_lim, delta_lim)) +
