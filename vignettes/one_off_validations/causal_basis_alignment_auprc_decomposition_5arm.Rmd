@@ -137,7 +137,12 @@ theme_alignment <- function(base_size = 9) {
 }
 
 safe_corr <- function(x) {
-  pmax(-1, pmin(1, x))
+  out <- pmax(-1, pmin(1, x))
+  if (!is.null(dim(x))) {
+    dim(out) <- dim(x)
+    dimnames(out) <- dimnames(x)
+  }
+  out
 }
 
 records_to_fitted_y_matrix <- function(rows) {
