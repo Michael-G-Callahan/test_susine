@@ -1473,14 +1473,45 @@ if (!file.exists(truth_drift_csv)) {
 ```
 
 ```{r truth-drift-sanity-3col-scatter, fig.width=12, fig.height=6.8}
-# 2-row x 3-col diagnostic. Rows = pair_kind (cold->annotated, cold->warm).
-# Columns:
-#   1. Truth-drift vs AUPRC scatter, chain-colored (the original sanity view)
-#   2. Per-dataset mu-vs-pi scatter of delta AUPRC (paired within dataset)
-#   3. Per-dataset mu-vs-pi scatter of delta truth drift (paired within dataset)
-# Cols 2 and 3 carry the within-dataset chain comparison that the marginal
-# histograms tried to convey but did poorly.
+# 2-row x 3-col diagnostic with the following additions over the prior
+# version, to handle the heavy mass at origin and skewed tails:
+#   - dashed lines at sign + magnitude bin thresholds
+#     (delta_truth at +/- 0.05, delta_AUPRC at +/- 0.02)
+#   - geom_label cell-count annotations in each of the 9 zones per facet
+#   - col 1 keeps chain coloring (mu/pi)
+#   - cols 2 and 3 color by the dataset's cold baseline divergence bin
+#     (matches the bins used in the centroid trajectory plot)
 if (file.exists(truth_drift_csv) && exists("sanity_join")) {
+  delta_truth_thresh <- 0.05
+  delta_auprc_thresh <- 0.02
+  divergence_breaks <- c(-Inf, 0.05, 0.10, Inf)
+  divergence_labels <- c("[0, 0.05]", "(0.05, 0.10]", "(0.10, inf)")
+  baseline_bin_palette <- c(
+    "[0, 0.05]"    = "#08519c",
+    "(0.05, 0.10]" = "#3182bd",
+    "(0.10, inf)"  = "#9ecae1"
+  )
+
+  baseline_bin_lookup <- truth_drift_summary %>%
+    dplyr::filter(.data$model_method == baseline_method) %>%
+    dplyr::transmute(
+      dataset_bundle_id = as.character(.data$dataset_bundle_id),
+      baseline_bin = cut(
+        .data[[truth_drift_column]],
+        breaks = divergence_breaks,
+        labels = divergence_labels,
+        right = TRUE
+      )
+    )
+
+  sanity_join_lab <- sanity_join %>%
+    dplyr::mutate(
+      pair_kind = factor(.data$pair_kind,
+                         levels = c("cold_ann", "cold_warm"),
+                         labels = c("cold -> annotated",
+                                    "cold -> warm vanilla"))
+    )
+
   pair_within_dataset <- sanity_join %>%
     dplyr::select(.data$dataset_bundle_id, .data$pair_kind, .data$chain,
                   .data$delta_truth, .data$auprc_delta) %>%
@@ -1493,27 +1524,93 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
                          levels = c("cold_ann", "cold_warm"),
                          labels = c("cold -> annotated",
                                     "cold -> warm vanilla"))
+    ) %>%
+    dplyr::inner_join(baseline_bin_lookup, by = "dataset_bundle_id")
+
+  # Zone assignment + label position helpers (zone center placed at a
+  # multiple of the threshold so labels sit in the interior of each cell
+  # rather than at the threshold edge).
+  zone_label <- function(x, t) {
+    dplyr::case_when(
+      x <= -t ~ "neg",
+      x <=  t ~ "mid",
+      TRUE    ~ "pos"
+    )
+  }
+  zone_pos <- function(zone, t, mult = 4) {
+    dplyr::case_when(
+      zone == "neg" ~ -mult * t,
+      zone == "mid" ~ 0,
+      zone == "pos" ~  mult * t
+    )
+  }
+
+  col1_counts <- sanity_join_lab %>%
+    dplyr::mutate(
+      x_zone = zone_label(.data$delta_truth, delta_truth_thresh),
+      y_zone = zone_label(.data$auprc_delta, delta_auprc_thresh)
+    ) %>%
+    dplyr::count(.data$pair_kind, .data$x_zone, .data$y_zone) %>%
+    dplyr::mutate(
+      x_pos = zone_pos(.data$x_zone, delta_truth_thresh, mult = 4),
+      y_pos = zone_pos(.data$y_zone, delta_auprc_thresh, mult = 4)
     )
 
-  sanity_join_lab <- sanity_join %>%
+  col2_counts <- pair_within_dataset %>%
     dplyr::mutate(
-      pair_kind = factor(.data$pair_kind,
-                         levels = c("cold_ann", "cold_warm"),
-                         labels = c("cold -> annotated",
-                                    "cold -> warm vanilla"))
+      x_zone = zone_label(.data$auprc_delta_pi, delta_auprc_thresh),
+      y_zone = zone_label(.data$auprc_delta_mu, delta_auprc_thresh)
+    ) %>%
+    dplyr::count(.data$pair_kind, .data$x_zone, .data$y_zone) %>%
+    dplyr::mutate(
+      x_pos = zone_pos(.data$x_zone, delta_auprc_thresh, mult = 4),
+      y_pos = zone_pos(.data$y_zone, delta_auprc_thresh, mult = 4)
+    )
+
+  col3_counts <- pair_within_dataset %>%
+    dplyr::mutate(
+      x_zone = zone_label(.data$delta_truth_pi, delta_truth_thresh),
+      y_zone = zone_label(.data$delta_truth_mu, delta_truth_thresh)
+    ) %>%
+    dplyr::count(.data$pair_kind, .data$x_zone, .data$y_zone) %>%
+    dplyr::mutate(
+      x_pos = zone_pos(.data$x_zone, delta_truth_thresh, mult = 4),
+      y_pos = zone_pos(.data$y_zone, delta_truth_thresh, mult = 4)
     )
 
   chain_color_3col <- c(mu = "#2b8cbe", pi = "#74c476")
+
+  threshold_lines <- function(x_t, y_t) {
+    list(
+      geom_vline(xintercept = c(-x_t, x_t), color = "grey45",
+                 linetype = "dashed", linewidth = 0.3),
+      geom_hline(yintercept = c(-y_t, y_t), color = "grey45",
+                 linetype = "dashed", linewidth = 0.3),
+      geom_vline(xintercept = 0, color = "grey20", linewidth = 0.3),
+      geom_hline(yintercept = 0, color = "grey20", linewidth = 0.3)
+    )
+  }
+
+  count_label_layer <- function(count_df) {
+    geom_label(
+      data = count_df,
+      aes(x = .data$x_pos, y = .data$y_pos, label = .data$n),
+      inherit.aes = FALSE,
+      size = 2.7, color = "grey15", fill = "white",
+      alpha = 0.85, label.size = 0.15,
+      label.padding = grid::unit(1.2, "pt")
+    )
+  }
 
   p_col1 <- ggplot(
     sanity_join_lab,
     aes(x = .data$delta_truth, y = .data$auprc_delta,
         color = .data$chain)
   ) +
-    geom_hline(yintercept = 0, color = "grey60", linewidth = 0.25) +
-    geom_vline(xintercept = 0, color = "grey60", linewidth = 0.25) +
-    geom_point(alpha = 0.5, size = 1.2, stroke = 0) +
+    threshold_lines(delta_truth_thresh, delta_auprc_thresh) +
+    geom_point(alpha = 0.4, size = 1.0, stroke = 0) +
     geom_smooth(method = "lm", se = FALSE, linewidth = 0.5) +
+    count_label_layer(col1_counts) +
     facet_wrap(~ pair_kind, ncol = 1) +
     scale_color_manual(values = chain_color_3col,
                        labels = c(mu = "mu chain", pi = "pi chain")) +
@@ -1527,14 +1624,17 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
 
   p_col2 <- ggplot(
     pair_within_dataset,
-    aes(x = .data$auprc_delta_pi, y = .data$auprc_delta_mu)
+    aes(x = .data$auprc_delta_pi, y = .data$auprc_delta_mu,
+        color = .data$baseline_bin)
   ) +
-    geom_hline(yintercept = 0, color = "grey60", linewidth = 0.25) +
-    geom_vline(xintercept = 0, color = "grey60", linewidth = 0.25) +
+    threshold_lines(delta_auprc_thresh, delta_auprc_thresh) +
     geom_abline(slope = 1, intercept = 0, color = "grey45",
-                linetype = "dashed", linewidth = 0.3) +
-    geom_point(alpha = 0.45, size = 1.2, stroke = 0, color = "grey25") +
+                linetype = "dotted", linewidth = 0.3) +
+    geom_point(alpha = 0.5, size = 1.0, stroke = 0) +
+    count_label_layer(col2_counts) +
     facet_wrap(~ pair_kind, ncol = 1) +
+    scale_color_manual(values = baseline_bin_palette,
+                       name = "Baseline bin") +
     labs(
       x = "Delta AUPRC (pi)",
       y = "Delta AUPRC (mu)",
@@ -1544,14 +1644,17 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
 
   p_col3 <- ggplot(
     pair_within_dataset,
-    aes(x = .data$delta_truth_pi, y = .data$delta_truth_mu)
+    aes(x = .data$delta_truth_pi, y = .data$delta_truth_mu,
+        color = .data$baseline_bin)
   ) +
-    geom_hline(yintercept = 0, color = "grey60", linewidth = 0.25) +
-    geom_vline(xintercept = 0, color = "grey60", linewidth = 0.25) +
+    threshold_lines(delta_truth_thresh, delta_truth_thresh) +
     geom_abline(slope = 1, intercept = 0, color = "grey45",
-                linetype = "dashed", linewidth = 0.3) +
-    geom_point(alpha = 0.45, size = 1.2, stroke = 0, color = "grey25") +
+                linetype = "dotted", linewidth = 0.3) +
+    geom_point(alpha = 0.5, size = 1.0, stroke = 0) +
+    count_label_layer(col3_counts) +
     facet_wrap(~ pair_kind, ncol = 1) +
+    scale_color_manual(values = baseline_bin_palette,
+                       name = "Baseline bin") +
     labs(
       x = sprintf("Delta truth drift (pi) [%s]", truth_drift_column),
       y = sprintf("Delta truth drift (mu) [%s]", truth_drift_column),
@@ -1568,6 +1671,13 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
     combined_3col, width = 12, height = 6.8, dpi = 220, bg = "white"
   )
   print(combined_3col)
+
+  cat("Cell counts (col 1: truth_drift x AUPRC, chain pooled):\n")
+  print(col1_counts %>% dplyr::select(-.data$x_pos, -.data$y_pos))
+  cat("Cell counts (col 2: mu vs pi delta AUPRC):\n")
+  print(col2_counts %>% dplyr::select(-.data$x_pos, -.data$y_pos))
+  cat("Cell counts (col 3: mu vs pi delta truth drift):\n")
+  print(col3_counts %>% dplyr::select(-.data$x_pos, -.data$y_pos))
 } else {
   message("Skipping 3-col scatter; sanity_join not yet built.")
 }

@@ -2150,6 +2150,89 @@ readr::write_csv(
 cat("Wrote pooled PR AUC rows:", nrow(pr_auc_df), "->", pr_auc_pooled_csv, "\n")
 print(pr_auc_df)
 
+# ---------------------------------------------------------------------------
+# Overwrite auprc_per_dataset with TOP-8 per-(dataset, method) AUPRC.
+#
+# Previously this CSV held model_AUPRC from evaluate_model(), which scores
+# against the FULL causal set (all 23 oligogenic causals). That convention
+# does not match Panel A of Figure 5 (pooled PR over top-8 by |beta|) or
+# the baseline-sims confusion-bin AUPRC. Plotting downstream chunks
+# (trajectory, sanity scatter, 3-col scatter, baseline-only) were therefore
+# reading a different metric than the headline PR figure.
+#
+# Fix: recompute per-(dataset, method) AUPRC from pooled_df, which carries
+# the same top-8 is_causal labels Panel A uses. Keep column names identical
+# to the legacy schema so the plotting workbook needs no changes.
+# ---------------------------------------------------------------------------
+per_dataset_top8 <- pooled_df %>%
+  dplyr::group_by(.data$dataset_bundle_id, .data$model_method) %>%
+  dplyr::summarise(
+    auprc_top8 = if (sum(.data$is_causal) > 0L && length(.data$pip) > 0L) {
+      pr <- PRROC::pr.curve(
+        scores.class0 = .data$pip,
+        weights.class0 = .data$is_causal,
+        curve = FALSE,
+        sorted = FALSE,
+        rand.compute = FALSE
+      )
+      as.numeric(pr$auc.integral)
+    } else {
+      NA_real_
+    },
+    .groups = "drop"
+  )
+
+per_dataset_top8_wide <- per_dataset_top8 %>%
+  tidyr::pivot_wider(
+    names_from = .data$model_method,
+    values_from = .data$auprc_top8,
+    names_prefix = "auprc_"
+  )
+
+# Re-derive the wide auprc_per_dataset frame using top-8 values, preserving
+# the legacy column structure (auprc_<method>, auprc_delta_*, auprc_round_trip_*).
+auprc_per_dataset <- per_dataset_top8_wide %>%
+  dplyr::mutate(
+    auprc_delta_mu = .data$auprc_susine_functional_mu - .data$auprc_susie_vanilla,
+    auprc_delta_pi = .data$auprc_susie_functional_pi - .data$auprc_susie_vanilla,
+    auprc_delta_warm_mu_vs_vanilla =
+      .data$auprc_susie_vanilla_warm_from_mu - .data$auprc_susie_vanilla,
+    auprc_delta_warm_pi_vs_vanilla =
+      .data$auprc_susie_vanilla_warm_from_pi - .data$auprc_susie_vanilla,
+    auprc_round_trip_mu =
+      .data$auprc_susie_vanilla_warm_from_mu - .data$auprc_susine_functional_mu,
+    auprc_round_trip_pi =
+      .data$auprc_susie_vanilla_warm_from_pi - .data$auprc_susie_functional_pi
+  )
+
+readr::write_csv(auprc_per_dataset, auprc_per_dataset_csv)
+cat("Re-wrote auprc_per_dataset CSV with top-8 AUPRC values (",
+    nrow(auprc_per_dataset), " rows)\n", sep = "")
+
+# Sanity: per-dataset mean top-8 AUPRC should be in the same ballpark as the
+# pooled top-8 AUPRC from Panel A. They are not equal in general (pooled
+# integrates one PR curve over all variants; per-dataset averages 600
+# locus-specific curves), but they should rank methods identically.
+top8_method_summary <- per_dataset_top8 %>%
+  dplyr::group_by(.data$model_method) %>%
+  dplyr::summarise(
+    n = dplyr::n(),
+    mean_per_dataset = mean(.data$auprc_top8, na.rm = TRUE),
+    median_per_dataset = stats::median(.data$auprc_top8, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  dplyr::left_join(
+    pr_auc_df %>%
+      dplyr::transmute(
+        model_method = as.character(.data$model_method),
+        pooled_panel_a = .data$auprc_integral
+      ),
+    by = "model_method"
+  ) %>%
+  dplyr::arrange(dplyr::desc(.data$mean_per_dataset))
+cat("Per-method top-8 AUPRC (per-dataset mean/median vs pooled Panel A):\n")
+print(top8_method_summary)
+
 method_legend_short <- c(
   susie_vanilla = "Vanilla cold",
   susine_functional_mu = "Functional-mu",
