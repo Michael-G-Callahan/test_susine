@@ -1472,67 +1472,185 @@ if (!file.exists(truth_drift_csv)) {
 }
 ```
 
-```{r truth-drift-sanity-marginals, fig.width=10, fig.height=4.8}
-# Re-render the sanity scatter with squashed marginal histograms on top
-# (delta_truth) and right side (auprc_delta), chain-split. ggExtra::ggMarginal
-# wraps a single ggplot, so we build one marginal-wrapped panel per pair_kind
-# and combine via patchwork.
-if (file.exists(truth_drift_csv) &&
-    requireNamespace("ggExtra", quietly = TRUE)) {
-  build_marginal_panel <- function(sub_df, panel_title) {
-    base_p <- ggplot(
-      sub_df,
-      aes(x = .data$delta_truth, y = .data$auprc_delta,
-          color = .data$chain)
-    ) +
-      geom_hline(yintercept = 0, color = "grey60", linewidth = 0.25) +
-      geom_vline(xintercept = 0, color = "grey60", linewidth = 0.25) +
-      geom_point(alpha = 0.55, size = 1.4, stroke = 0) +
-      geom_smooth(method = "lm", se = FALSE, linewidth = 0.5) +
-      scale_color_manual(
-        values = c(mu = "#2b8cbe", pi = "#74c476"),
-        labels = c(mu = "mu chain", pi = "pi chain")
-      ) +
-      labs(
-        x = sprintf("Delta truth drift [%s]", truth_drift_column),
-        y = "Delta AUPRC vs cold vanilla",
-        color = NULL,
-        title = panel_title
-      ) +
-      theme_effect_paper(base_size = 10) +
-      theme(legend.position = "bottom")
-
-    ggExtra::ggMarginal(
-      base_p, type = "histogram",
-      groupColour = TRUE, groupFill = TRUE,
-      bins = 40,
-      size = 8  # larger = thinner marginals; "squashed" feel
+```{r truth-drift-sanity-3col-scatter, fig.width=12, fig.height=6.8}
+# 2-row x 3-col diagnostic. Rows = pair_kind (cold->annotated, cold->warm).
+# Columns:
+#   1. Truth-drift vs AUPRC scatter, chain-colored (the original sanity view)
+#   2. Per-dataset mu-vs-pi scatter of delta AUPRC (paired within dataset)
+#   3. Per-dataset mu-vs-pi scatter of delta truth drift (paired within dataset)
+# Cols 2 and 3 carry the within-dataset chain comparison that the marginal
+# histograms tried to convey but did poorly.
+if (file.exists(truth_drift_csv) && exists("sanity_join")) {
+  pair_within_dataset <- sanity_join %>%
+    dplyr::select(.data$dataset_bundle_id, .data$pair_kind, .data$chain,
+                  .data$delta_truth, .data$auprc_delta) %>%
+    tidyr::pivot_wider(
+      names_from = .data$chain,
+      values_from = c(.data$delta_truth, .data$auprc_delta)
+    ) %>%
+    dplyr::mutate(
+      pair_kind = factor(.data$pair_kind,
+                         levels = c("cold_ann", "cold_warm"),
+                         labels = c("cold -> annotated",
+                                    "cold -> warm vanilla"))
     )
-  }
 
-  p_marg_ann <- build_marginal_panel(
-    sanity_join %>% dplyr::filter(.data$pair_kind == "cold_ann"),
-    "cold -> annotated"
-  )
-  p_marg_warm <- build_marginal_panel(
-    sanity_join %>% dplyr::filter(.data$pair_kind == "cold_warm"),
-    "cold -> warm vanilla"
-  )
+  sanity_join_lab <- sanity_join %>%
+    dplyr::mutate(
+      pair_kind = factor(.data$pair_kind,
+                         levels = c("cold_ann", "cold_warm"),
+                         labels = c("cold -> annotated",
+                                    "cold -> warm vanilla"))
+    )
 
-  combined_marg <- patchwork::wrap_elements(p_marg_ann) |
-    patchwork::wrap_elements(p_marg_warm)
+  chain_color_3col <- c(mu = "#2b8cbe", pi = "#74c476")
+
+  p_col1 <- ggplot(
+    sanity_join_lab,
+    aes(x = .data$delta_truth, y = .data$auprc_delta,
+        color = .data$chain)
+  ) +
+    geom_hline(yintercept = 0, color = "grey60", linewidth = 0.25) +
+    geom_vline(xintercept = 0, color = "grey60", linewidth = 0.25) +
+    geom_point(alpha = 0.5, size = 1.2, stroke = 0) +
+    geom_smooth(method = "lm", se = FALSE, linewidth = 0.5) +
+    facet_wrap(~ pair_kind, ncol = 1) +
+    scale_color_manual(values = chain_color_3col,
+                       labels = c(mu = "mu chain", pi = "pi chain")) +
+    labs(
+      x = sprintf("Delta truth drift [%s]", truth_drift_column),
+      y = "Delta AUPRC vs cold vanilla",
+      color = NULL,
+      title = "Truth drift vs AUPRC"
+    ) +
+    theme_effect_paper(base_size = 9)
+
+  p_col2 <- ggplot(
+    pair_within_dataset,
+    aes(x = .data$auprc_delta_pi, y = .data$auprc_delta_mu)
+  ) +
+    geom_hline(yintercept = 0, color = "grey60", linewidth = 0.25) +
+    geom_vline(xintercept = 0, color = "grey60", linewidth = 0.25) +
+    geom_abline(slope = 1, intercept = 0, color = "grey45",
+                linetype = "dashed", linewidth = 0.3) +
+    geom_point(alpha = 0.45, size = 1.2, stroke = 0, color = "grey25") +
+    facet_wrap(~ pair_kind, ncol = 1) +
+    labs(
+      x = "Delta AUPRC (pi)",
+      y = "Delta AUPRC (mu)",
+      title = "Mu vs pi: delta AUPRC"
+    ) +
+    theme_effect_paper(base_size = 9)
+
+  p_col3 <- ggplot(
+    pair_within_dataset,
+    aes(x = .data$delta_truth_pi, y = .data$delta_truth_mu)
+  ) +
+    geom_hline(yintercept = 0, color = "grey60", linewidth = 0.25) +
+    geom_vline(xintercept = 0, color = "grey60", linewidth = 0.25) +
+    geom_abline(slope = 1, intercept = 0, color = "grey45",
+                linetype = "dashed", linewidth = 0.3) +
+    geom_point(alpha = 0.45, size = 1.2, stroke = 0, color = "grey25") +
+    facet_wrap(~ pair_kind, ncol = 1) +
+    labs(
+      x = sprintf("Delta truth drift (pi) [%s]", truth_drift_column),
+      y = sprintf("Delta truth drift (mu) [%s]", truth_drift_column),
+      title = "Mu vs pi: delta truth drift"
+    ) +
+    theme_effect_paper(base_size = 9)
+
+  combined_3col <- (p_col1 | p_col2 | p_col3) +
+    plot_layout(guides = "collect") &
+    theme(legend.position = "bottom")
+
   ggsave(
-    file.path(diagnostic_dir, "truth_drift_sanity_scatter_marginal.png"),
-    combined_marg, width = 10, height = 4.8, dpi = 220, bg = "white"
+    file.path(diagnostic_dir, "truth_drift_sanity_3col_scatter.png"),
+    combined_3col, width = 12, height = 6.8, dpi = 220, bg = "white"
   )
-  print(combined_marg)
-} else if (!file.exists(truth_drift_csv)) {
-  message("Skipping marginal scatter; truth_drift_summary not cached yet.")
+  print(combined_3col)
 } else {
-  message(
-    "ggExtra not installed; skipping marginal histograms. ",
-    "Install via install.packages('ggExtra')."
+  message("Skipping 3-col scatter; sanity_join not yet built.")
+}
+```
+
+```{r truth-drift-sanity-3col-violin, fig.width=12, fig.height=6.8}
+# Variant of the 3-col layout above. Col 1 unchanged; cols 2 and 3 swap the
+# per-dataset paired scatters for violin + boxplot summaries by chain. Loses
+# pairing info, gains a cleaner read on per-chain marginal distributions.
+if (file.exists(truth_drift_csv) && exists("sanity_join")) {
+  sanity_join_lab2 <- sanity_join %>%
+    dplyr::mutate(
+      pair_kind = factor(.data$pair_kind,
+                         levels = c("cold_ann", "cold_warm"),
+                         labels = c("cold -> annotated",
+                                    "cold -> warm vanilla")),
+      chain = factor(.data$chain, levels = c("mu", "pi"))
+    )
+
+  chain_color_3col <- c(mu = "#2b8cbe", pi = "#74c476")
+
+  p_col1_v <- ggplot(
+    sanity_join_lab2,
+    aes(x = .data$delta_truth, y = .data$auprc_delta,
+        color = .data$chain)
+  ) +
+    geom_hline(yintercept = 0, color = "grey60", linewidth = 0.25) +
+    geom_vline(xintercept = 0, color = "grey60", linewidth = 0.25) +
+    geom_point(alpha = 0.5, size = 1.2, stroke = 0) +
+    geom_smooth(method = "lm", se = FALSE, linewidth = 0.5) +
+    facet_wrap(~ pair_kind, ncol = 1) +
+    scale_color_manual(values = chain_color_3col,
+                       labels = c(mu = "mu chain", pi = "pi chain")) +
+    labs(
+      x = sprintf("Delta truth drift [%s]", truth_drift_column),
+      y = "Delta AUPRC vs cold vanilla",
+      color = NULL,
+      title = "Truth drift vs AUPRC"
+    ) +
+    theme_effect_paper(base_size = 9)
+
+  p_col2_v <- ggplot(
+    sanity_join_lab2,
+    aes(x = .data$chain, y = .data$auprc_delta, fill = .data$chain)
+  ) +
+    geom_hline(yintercept = 0, color = "grey60", linewidth = 0.25) +
+    geom_violin(alpha = 0.55, color = NA, scale = "width") +
+    geom_boxplot(width = 0.18, alpha = 0.4, fill = "white",
+                 color = "grey20", outlier.size = 0.4) +
+    facet_wrap(~ pair_kind, ncol = 1) +
+    scale_fill_manual(values = chain_color_3col, guide = "none") +
+    scale_x_discrete(labels = c(mu = "mu", pi = "pi")) +
+    labs(x = NULL, y = "Delta AUPRC vs cold vanilla",
+         title = "Delta AUPRC by chain") +
+    theme_effect_paper(base_size = 9)
+
+  p_col3_v <- ggplot(
+    sanity_join_lab2,
+    aes(x = .data$chain, y = .data$delta_truth, fill = .data$chain)
+  ) +
+    geom_hline(yintercept = 0, color = "grey60", linewidth = 0.25) +
+    geom_violin(alpha = 0.55, color = NA, scale = "width") +
+    geom_boxplot(width = 0.18, alpha = 0.4, fill = "white",
+                 color = "grey20", outlier.size = 0.4) +
+    facet_wrap(~ pair_kind, ncol = 1) +
+    scale_fill_manual(values = chain_color_3col, guide = "none") +
+    scale_x_discrete(labels = c(mu = "mu", pi = "pi")) +
+    labs(x = NULL,
+         y = sprintf("Delta truth drift [%s]", truth_drift_column),
+         title = "Delta truth drift by chain") +
+    theme_effect_paper(base_size = 9)
+
+  combined_3col_v <- (p_col1_v | p_col2_v | p_col3_v) +
+    plot_layout(guides = "collect") &
+    theme(legend.position = "bottom")
+
+  ggsave(
+    file.path(diagnostic_dir, "truth_drift_sanity_3col_violin.png"),
+    combined_3col_v, width = 12, height = 6.8, dpi = 220, bg = "white"
   )
+  print(combined_3col_v)
+} else {
+  message("Skipping 3-col violin; sanity_join not yet built.")
 }
 ```
 
