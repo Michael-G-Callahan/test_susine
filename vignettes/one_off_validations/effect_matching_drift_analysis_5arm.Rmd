@@ -2783,15 +2783,55 @@ against per-dataset AUPRC delta, before deciding whether the metric
 earns a figure slot.
 
 ```{r truth-drift-paths}
-truth_fitted_y_rds <- file.path(study_dir, "truth_fitted_y_5arm.rds")
-truth_drift_summary_csv <- file.path(study_dir, "truth_drift_summary_5arm.csv")
-truth_drift_edges_csv <- file.path(study_dir, "truth_drift_assignments_5arm.csv")
+# truth_drift_top_k controls how many top-|beta| causals define the truth
+# basin used by the basin-drift metric. Decoupled from pr_top_k (the PR /
+# AUPRC scoring K, locked at 8 to match Panel A) so the truth-basin reference
+# can be swept independently. Cache filenames are K-suffixed so toggling K
+# does not clobber prior runs.
+truth_drift_top_k <- 23L
+
+truth_drift_suffix <- sprintf("_top%d", truth_drift_top_k)
+truth_fitted_y_rds <- file.path(
+  study_dir, sprintf("truth_fitted_y_5arm%s.rds", truth_drift_suffix)
+)
+truth_drift_summary_csv <- file.path(
+  study_dir, sprintf("truth_drift_summary_5arm%s.csv", truth_drift_suffix)
+)
+truth_drift_edges_csv <- file.path(
+  study_dir, sprintf("truth_drift_assignments_5arm%s.csv", truth_drift_suffix)
+)
+
+# Backward-compat: if the user already has a K=8 cache under the legacy
+# (un-suffixed) filenames, auto-migrate it to the suffixed names so we
+# don't force a regeneration.
+if (truth_drift_top_k == 8L) {
+  legacy_rds <- file.path(study_dir, "truth_fitted_y_5arm.rds")
+  legacy_summary_csv <- file.path(study_dir, "truth_drift_summary_5arm.csv")
+  legacy_edges_csv <- file.path(study_dir, "truth_drift_assignments_5arm.csv")
+  for (pair in list(
+    list(legacy_rds, truth_fitted_y_rds),
+    list(legacy_summary_csv, truth_drift_summary_csv),
+    list(legacy_edges_csv, truth_drift_edges_csv)
+  )) {
+    if (file.exists(pair[[1]]) && !file.exists(pair[[2]])) {
+      file.rename(pair[[1]], pair[[2]])
+      cat("Migrated legacy ", basename(pair[[1]]), " -> ",
+          basename(pair[[2]]), "\n", sep = "")
+    }
+  }
+}
+
+cat("truth_drift_top_k = ", truth_drift_top_k, "\n", sep = "")
+cat("truth_drift cache files:\n  ",
+    truth_fitted_y_rds, "\n  ",
+    truth_drift_summary_csv, "\n  ",
+    truth_drift_edges_csv, "\n", sep = "")
 ```
 
 ```{r build-truth-fitted-y}
 # Build (or load) one synthetic truth fit per dataset: each "effect component"
-# is X[, j] * beta[j] for one of the top-pr_top_k true causals by |beta|.
-# var_y_explained_frac matches the per-fit convention: var(fy_l) / var(y).
+# is X[, j] * beta[j] for one of the top-truth_drift_top_k true causals by
+# |beta|. var_y_explained_frac matches the per-fit convention: var(fy_l) / var(y).
 if (file.exists(truth_fitted_y_rds)) {
   truth_fitted_y_lookup <- readRDS(truth_fitted_y_rds)
   cat("Loaded cached truth_fitted_y for ", length(truth_fitted_y_lookup),
@@ -2843,7 +2883,7 @@ if (file.exists(truth_fitted_y_rds)) {
     }
     abs_beta_at_causals <- abs(beta[causal])
     ord <- order(abs_beta_at_causals, decreasing = TRUE)
-    top_k <- min(pr_top_k, length(causal))
+    top_k <- min(truth_drift_top_k, length(causal))
     top_idx <- causal[ord[seq_len(top_k)]]
 
     var_y <- stats::var(data_bundle$y)
@@ -2883,32 +2923,56 @@ if (file.exists(truth_fitted_y_rds)) {
 # Hungarian assignment matrix is square. Padding components have
 # var_y_explained_frac = 0 and therefore weight 0 in the chord summary, so
 # they affect the assignment but not the weighted drift.
+#
+# target_dim = max(truth_drift_top_k, records_L). When truth_drift_top_k > L
+# (e.g., K=23 vs L=10 fits), we pad the FIT side rather than truncating the
+# truth side, so the metric is honestly anchored against the full K-causal
+# truth basis. In this regime the 13 fit-pad-to-truth pairs contribute zero
+# weight (min(0, truth_var) = 0), so the drift value is dominated by the
+# 10 real-fit-to-best-matched-truth pairs.
 records_L <- max(records$effect, na.rm = TRUE)
-cat("Truth-drift padding to L = ", records_L, "\n", sep = "")
+target_dim <- max(truth_drift_top_k, records_L)
+cat("Truth-drift target_dim = ", target_dim,
+    " (truth_drift_top_k = ", truth_drift_top_k,
+    ", records_L = ", records_L, ")\n", sep = "")
 
 methods_for_truth <- c(baseline_method, mu_method, warm_mu_method,
                        pi_method, warm_pi_method)
 
-build_truth_rows_padded <- function(ds_id, L) {
+# Generic zero-pad helper. Works on any (effect, fitted_y_effect,
+# var_y_explained_frac) rows tibble; pads with zero vectors and zero weight
+# up to target_dim, or truncates (preserving order) if rows exceed it.
+pad_rows_to_dim <- function(rows, target_dim, n_obs) {
+  rows <- rows %>% dplyr::arrange(.data$effect)
+  current_dim <- nrow(rows)
+  if (current_dim >= target_dim) {
+    rows %>%
+      dplyr::slice_head(n = target_dim) %>%
+      dplyr::mutate(effect = seq_len(target_dim))
+  } else {
+    pad_n <- target_dim - current_dim
+    pad_rows <- tibble::tibble(
+      effect = (current_dim + 1L):target_dim,
+      fitted_y_effect = replicate(pad_n, numeric(n_obs), simplify = FALSE),
+      var_y_explained_frac = rep(0, pad_n)
+    )
+    dplyr::bind_rows(
+      rows %>% dplyr::select(.data$effect, .data$fitted_y_effect,
+                             .data$var_y_explained_frac),
+      pad_rows
+    )
+  }
+}
+
+build_truth_rows_padded <- function(ds_id, target_dim) {
   tfy <- truth_fitted_y_lookup[[ds_id]]
   if (is.null(tfy)) return(NULL)
-  k <- length(tfy$fitted_y_effect)
-  n_obs <- tfy$n_obs
-  pad_n <- max(0L, L - k)
-  fy_list <- c(
-    tfy$fitted_y_effect,
-    replicate(pad_n, numeric(n_obs), simplify = FALSE)
+  truth_tib <- tibble::tibble(
+    effect = seq_along(tfy$fitted_y_effect),
+    fitted_y_effect = tfy$fitted_y_effect,
+    var_y_explained_frac = tfy$var_y_explained_frac
   )
-  var_frac <- c(tfy$var_y_explained_frac, rep(0, pad_n))
-  if (length(fy_list) > L) {
-    fy_list <- fy_list[seq_len(L)]
-    var_frac <- var_frac[seq_len(L)]
-  }
-  tibble::tibble(
-    effect = seq_len(L),
-    fitted_y_effect = fy_list,
-    var_y_explained_frac = var_frac
-  )
+  pad_rows_to_dim(truth_tib, target_dim, tfy$n_obs)
 }
 
 ds_ids_truth <- intersect(datasets_complete, names(truth_fitted_y_lookup))
@@ -2924,14 +2988,20 @@ for (ds_idx in seq_along(ds_ids_truth)) {
   matrix_id_i <- dataset_meta$matrix_id[
     match(ds_id, dataset_meta$dataset_bundle_id)
   ]
-  truth_rows <- build_truth_rows_padded(ds_id, records_L)
+  truth_rows <- build_truth_rows_padded(ds_id, target_dim)
   if (is.null(truth_rows)) next
+  n_obs_for_ds <- truth_fitted_y_lookup[[ds_id]]$n_obs
   for (m in methods_for_truth) {
     counter <- counter + 1L
     fit_rows <- records_by_dataset_method[[paste(ds_id, m, sep = ".")]]
     if (is.null(fit_rows)) next
+    fit_rows_padded <- if (nrow(fit_rows) < target_dim) {
+      pad_rows_to_dim(fit_rows, target_dim, n_obs_for_ds)
+    } else {
+      fit_rows
+    }
     truth_edges_chunks[[length(truth_edges_chunks) + 1L]] <- compute_drift_pair(
-      rows_a = fit_rows, rows_b = truth_rows,
+      rows_a = fit_rows_padded, rows_b = truth_rows,
       method_a = m, method_b = "truth_top_k",
       dataset_bundle_id = ds_id,
       matrix_id = matrix_id_i
