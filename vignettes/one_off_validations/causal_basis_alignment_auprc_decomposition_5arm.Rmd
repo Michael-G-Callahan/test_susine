@@ -15,15 +15,17 @@ Hungarian truth-basis drift with a truth-audited causal basis alignment score:
 for each top-K causal explanatory signal, find the fitted model effect that
 best covers it, then average the coverage over causal signals.
 
-The goal is to separate three mean-level channels:
+The goal is to separate two mean-level channels:
 
-1. explanatory basis size: model percent variation explained relative to the
-   top-K causal signal percent variation explained;
-2. explanatory basis alignment: whether the model contains fitted effects that
+1. explanatory basis alignment: whether the model contains fitted effects that
    cover each top-K causal explanatory signal;
-3. residual AUPRC movement: the AUPRC delta not predicted by the baseline
-   mean surface over size and alignment. This is a proxy for within-basis or
-   SNP-ranking confusion, not a causal variance decomposition.
+2. residual AUPRC movement: the AUPRC delta not predicted by the baseline
+   alignment curve. This is a proxy for within-basis or SNP-ranking confusion,
+   not a causal variance decomposition.
+
+The workbook still plots explanatory basis size as context, but the main
+decomposition uses causal basis alignment only because cross-validation showed
+that size adds little reliable baseline AUPRC signal.
 
 ```{r setup, message=FALSE}
 here::i_am("vignettes/one_off_validations/causal_basis_alignment_auprc_decomposition_5arm.Rmd")
@@ -107,10 +109,8 @@ method_labels <- c(
 )
 chain_colors <- c("mu chain" = "#2b8cbe", "pi chain" = "#74c476")
 
-# This is intentionally smoother than a high-flexibility GAM. We want a
-# baseline mean surface, not an individual-dataset predictor.
-baseline_surface_span <- 0.85
-baseline_surface_degree <- 1L
+# This is intentionally smooth. We want a baseline mean curve, not an
+# individual-dataset predictor.
 baseline_curve_spline_df <- 5
 ```
 
@@ -473,26 +473,20 @@ baseline_alignment <- alignment_scores %>%
     is.finite(.data$pve_log2_ratio_model_to_truth)
   )
 
-baseline_surface_fit <- stats::loess(
-  auprc ~ causal_basis_alignment_score + pve_log2_ratio_model_to_truth,
-  data = baseline_alignment,
-  span = baseline_surface_span,
-  degree = baseline_surface_degree,
-  control = stats::loess.control(surface = "direct")
-)
 alignment_range <- range(
   baseline_alignment$causal_basis_alignment_score, na.rm = TRUE
 )
-size_range <- range(
-  baseline_alignment$pve_log2_ratio_model_to_truth, na.rm = TRUE
+baseline_alignment_curve_fit <- stats::smooth.spline(
+  x = baseline_alignment$causal_basis_alignment_score,
+  y = baseline_alignment$auprc,
+  df = baseline_curve_spline_df
 )
-
-predict_baseline_auprc_surface <- function(alignment_score, size_log2_ratio) {
-  pred_df <- tibble::tibble(
-    causal_basis_alignment_score = clamp(alignment_score, alignment_range),
-    pve_log2_ratio_model_to_truth = clamp(size_log2_ratio, size_range)
-  )
-  clip01(as.numeric(stats::predict(baseline_surface_fit, newdata = pred_df)))
+predict_baseline_auprc_from_alignment <- function(alignment_score) {
+  alignment_score <- clamp(alignment_score, alignment_range)
+  clip01(stats::predict(
+    baseline_alignment_curve_fit,
+    x = alignment_score
+  )$y)
 }
 
 misalignment_curve <- smooth_line_df(
@@ -505,6 +499,18 @@ size_curve <- smooth_line_df(
   x_col = "pve_log2_ratio_model_to_truth",
   y_col = "auprc"
 )
+alignment_curve <- tibble::tibble(
+  causal_basis_alignment_score = seq(
+    alignment_range[[1]], alignment_range[[2]], length.out = 300L
+  )
+) %>%
+  dplyr::mutate(
+    causal_basis_misalignment = 1 - .data$causal_basis_alignment_score,
+    auprc_hat = predict_baseline_auprc_from_alignment(
+      .data$causal_basis_alignment_score
+    )
+  ) %>%
+  dplyr::arrange(.data$causal_basis_misalignment)
 
 p_baseline_misalignment <- ggplot(
   baseline_alignment,
@@ -513,8 +519,8 @@ p_baseline_misalignment <- ggplot(
 ) +
   geom_point(alpha = 0.48, size = 1.45, stroke = 0) +
   geom_line(
-    data = misalignment_curve,
-    aes(x = .data$x, y = .data$y),
+    data = alignment_curve,
+    aes(x = .data$causal_basis_misalignment, y = .data$auprc_hat),
     inherit.aes = FALSE,
     color = "#c44e52", linewidth = 0.75
   ) +
@@ -598,8 +604,6 @@ transition_rows <- dplyr::bind_rows(
       end_alignment = .data$alignment_annotated,
       start_misalignment = .data$misalignment_cold,
       end_misalignment = .data$misalignment_annotated,
-      start_size = .data$size_log2_ratio_cold,
-      end_size = .data$size_log2_ratio_annotated,
       start_auprc = .data$auprc_cold,
       end_auprc = .data$auprc_annotated
     ),
@@ -612,36 +616,18 @@ transition_rows <- dplyr::bind_rows(
       end_alignment = .data$alignment_warm,
       start_misalignment = .data$misalignment_cold,
       end_misalignment = .data$misalignment_warm,
-      start_size = .data$size_log2_ratio_cold,
-      end_size = .data$size_log2_ratio_warm,
       start_auprc = .data$auprc_cold,
       end_auprc = .data$auprc_warm
     )
 ) %>%
   dplyr::mutate(
-    f_start = predict_baseline_auprc_surface(.data$start_alignment,
-                                             .data$start_size),
-    f_end = predict_baseline_auprc_surface(.data$end_alignment,
-                                           .data$end_size),
-    f_align_then = predict_baseline_auprc_surface(.data$end_alignment,
-                                                  .data$start_size),
-    f_size_then = predict_baseline_auprc_surface(.data$start_alignment,
-                                                 .data$end_size),
+    f_start = predict_baseline_auprc_from_alignment(.data$start_alignment),
+    f_end = predict_baseline_auprc_from_alignment(.data$end_alignment),
     observed_delta = .data$end_auprc - .data$start_auprc,
-    structural_pred_delta = .data$f_end - .data$f_start,
-    alignment_component = 0.5 * (
-      (.data$f_align_then - .data$f_start) +
-        (.data$f_end - .data$f_size_then)
-    ),
-    size_component = 0.5 * (
-      (.data$f_size_then - .data$f_start) +
-        (.data$f_end - .data$f_align_then)
-    ),
-    residual_component = .data$observed_delta -
-      .data$alignment_component - .data$size_component,
+    alignment_pred_delta = .data$f_end - .data$f_start,
+    residual_component = .data$observed_delta - .data$alignment_pred_delta,
     delta_alignment = .data$end_alignment - .data$start_alignment,
     delta_misalignment = .data$end_misalignment - .data$start_misalignment,
-    delta_size = .data$end_size - .data$start_size,
     chain = factor(.data$chain, levels = c("mu", "pi"),
                    labels = c("mu chain", "pi chain")),
     transition = factor(
@@ -652,7 +638,7 @@ transition_rows <- dplyr::bind_rows(
   ) %>%
   dplyr::filter(
     is.finite(.data$observed_delta),
-    is.finite(.data$structural_pred_delta),
+    is.finite(.data$alignment_pred_delta),
     is.finite(.data$residual_component)
   )
 
@@ -661,14 +647,11 @@ transition_summary <- transition_rows %>%
   dplyr::summarise(
     n = dplyr::n(),
     observed_mean = mean(.data$observed_delta, na.rm = TRUE),
-    structural_pred_mean = mean(.data$structural_pred_delta, na.rm = TRUE),
-    alignment_mean = mean(.data$alignment_component, na.rm = TRUE),
-    size_mean = mean(.data$size_component, na.rm = TRUE),
+    alignment_pred_mean = mean(.data$alignment_pred_delta, na.rm = TRUE),
     residual_mean = mean(.data$residual_component, na.rm = TRUE),
-    structural_share_of_mean = .data$structural_pred_mean /
+    alignment_share_of_mean = .data$alignment_pred_mean /
       .data$observed_mean,
     mean_delta_alignment = mean(.data$delta_alignment, na.rm = TRUE),
-    mean_delta_size = mean(.data$delta_size, na.rm = TRUE),
     .groups = "drop"
   )
 
@@ -679,13 +662,13 @@ print(transition_summary)
 
 decomp_lim <- max(abs(c(
   transition_rows$observed_delta,
-  transition_rows$structural_pred_delta
+  transition_rows$alignment_pred_delta
 )), na.rm = TRUE)
 decomp_lim <- max(0.05, decomp_lim)
 
-p_structural_scatter <- ggplot(
+p_alignment_scatter <- ggplot(
   transition_rows,
-  aes(x = .data$structural_pred_delta, y = .data$observed_delta,
+  aes(x = .data$alignment_pred_delta, y = .data$observed_delta,
       color = .data$start_misalignment)
 ) +
   geom_hline(yintercept = 0, color = "grey65", linewidth = 0.25) +
@@ -698,27 +681,27 @@ p_structural_scatter <- ggplot(
   coord_cartesian(xlim = c(-decomp_lim, decomp_lim),
                   ylim = c(-decomp_lim, decomp_lim)) +
   labs(
-    x = "AUPRC delta predicted from alignment + size",
+    x = "AUPRC delta predicted from causal basis alignment",
     y = "Observed AUPRC delta",
-    title = "How much observed AUPRC gain is predicted by basis alignment and size?"
+    title = "How much observed AUPRC gain is predicted by causal basis alignment?"
   ) +
   theme_alignment(base_size = 9) +
   theme(legend.position = "right")
 
 decomp_components <- transition_summary %>%
   dplyr::select(.data$chain, .data$transition,
-                .data$alignment_mean, .data$size_mean,
+                .data$alignment_pred_mean,
                 .data$residual_mean) %>%
   tidyr::pivot_longer(
-    cols = c("alignment_mean", "size_mean", "residual_mean"),
+    cols = c("alignment_pred_mean", "residual_mean"),
     names_to = "component",
     values_to = "mean_delta"
   ) %>%
   dplyr::mutate(
     component = factor(
       .data$component,
-      levels = c("alignment_mean", "size_mean", "residual_mean"),
-      labels = c("Basis alignment", "Basis size", "Within-basis / residual")
+      levels = c("alignment_pred_mean", "residual_mean"),
+      labels = c("Causal basis alignment", "Residual / within-basis")
     )
   )
 
@@ -738,28 +721,26 @@ p_decomp_bar <- ggplot(
   facet_wrap(~ transition, nrow = 1) +
   scale_fill_manual(
     values = c(
-      "Basis alignment" = "#4c72b0",
-      "Basis size" = "#55a868",
-      "Within-basis / residual" = "#dd8452"
+      "Causal basis alignment" = "#4c72b0",
+      "Residual / within-basis" = "#dd8452"
     )
   ) +
   labs(
     x = NULL,
     y = "Mean AUPRC delta",
     fill = NULL,
-    title = "Mean observed gain split by the baseline AUPRC mean surface",
-    subtitle = "White dot marks observed mean delta. Residual is not explained by alignment + size."
+    title = "Mean observed gain split by the baseline alignment curve",
+    subtitle = "White dot marks observed mean delta. Residual is not predicted by causal basis alignment."
   ) +
   theme_alignment(base_size = 9) +
   theme(legend.position = "bottom")
 
 p_metric_shift <- ggplot(
   transition_rows,
-  aes(x = .data$delta_alignment, y = .data$delta_size,
+  aes(x = .data$start_misalignment, y = -.data$delta_misalignment,
       color = .data$observed_delta)
 ) +
   geom_hline(yintercept = 0, color = "grey65", linewidth = 0.25) +
-  geom_vline(xintercept = 0, color = "grey65", linewidth = 0.25) +
   geom_point(alpha = 0.58, size = 1.45, stroke = 0) +
   facet_grid(chain ~ transition) +
   scale_color_gradient2(
@@ -767,14 +748,14 @@ p_metric_shift <- ggplot(
     midpoint = 0, name = "Observed\nAUPRC delta"
   ) +
   labs(
-    x = "Delta causal basis alignment",
-    y = "Delta log2(model PVE / truth PVE)",
-    title = "Transition movement in basis-alignment and basis-size coordinates"
+    x = "Baseline causal basis misalignment",
+    y = "Improvement in causal basis misalignment",
+    title = "Where alignment improves across each transition"
   ) +
   theme_alignment(base_size = 9) +
   theme(legend.position = "right")
 
-p_decomp_combined <- p_structural_scatter /
+p_decomp_combined <- p_alignment_scatter /
   (p_decomp_bar | p_metric_shift) +
   plot_layout(heights = c(1.18, 1))
 
@@ -802,17 +783,18 @@ that is why the decomposition should be read as a diagnostic for explanatory
 basis alignment, not as an oracle causal mechanism.
 
 The attribution is a mean-shift calculation. It fits the cold-vanilla baseline
-mean surface
+mean curve
 
 ```text
-E[AUPRC | causal basis alignment, log2(model PVE / truth PVE)]
+E[AUPRC | causal basis alignment]
 ```
 
-and asks how much each transition moves along that surface. The residual term
+and asks how much each transition moves along that curve. The residual term
 contains within-basis SNP-ranking effects, model-specific effects not present
-in the cold baseline surface, and noise.
+in the cold baseline curve, and noise.
 
 The PVE totals are component-wise sums of `var(fitted_y_component) / var(y)`.
-They are size diagnostics, not joint variance decompositions. When fitted or
-causal components are non-orthogonal, the summed component PVE can differ from
-the variance explained by the span of the components.
+They remain in the baseline context plot as size diagnostics, not joint
+variance decompositions. When fitted or causal components are non-orthogonal,
+the summed component PVE can differ from the variance explained by the span of
+the components.
