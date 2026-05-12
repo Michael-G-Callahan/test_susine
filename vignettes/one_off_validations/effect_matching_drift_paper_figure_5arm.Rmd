@@ -1904,9 +1904,9 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
 
 ```{r explanatory-basis-divergence-baseline-only, fig.width=6.4, fig.height=4.4}
 # Foundation plot for the trajectory and curve-residual analyses: cold
-# SuSiE-vanilla AUPRC vs explanatory basis divergence, one point per dataset. The LOESS
-# smoother previews the curve that step 3 would fit for the residual
-# reparameterization.
+# SuSiE-vanilla AUPRC vs explanatory basis divergence, one point per dataset.
+# The low-df smoothing spline is reused below to ask how much AUPRC movement
+# is predicted by movement along the baseline divergence -> AUPRC curve.
 if (file.exists(truth_drift_csv)) {
   baseline_points <- truth_drift_summary %>%
     dplyr::filter(.data$model_method == baseline_method) %>%
@@ -1939,14 +1939,41 @@ if (file.exists(truth_drift_csv)) {
     max(baseline_points$auprc, na.rm = TRUE)
   ))
 
+  baseline_curve_df <- baseline_points %>%
+    dplyr::filter(is.finite(.data$truth_drift), is.finite(.data$auprc)) %>%
+    dplyr::arrange(.data$truth_drift)
+  baseline_curve_spline_df <- 5
+  baseline_curve_fit <- stats::smooth.spline(
+    x = baseline_curve_df$truth_drift,
+    y = baseline_curve_df$auprc,
+    df = baseline_curve_spline_df
+  )
+  predict_baseline_auprc_from_divergence <- function(x) {
+    pred <- stats::predict(baseline_curve_fit, x = x)$y
+    pmin(pmax(pred, 0), 1)
+  }
+  baseline_curve_grid <- tibble::tibble(
+    truth_drift = seq(
+      min(baseline_curve_df$truth_drift, na.rm = TRUE),
+      max(baseline_curve_df$truth_drift, na.rm = TRUE),
+      length.out = 400L
+    )
+  ) %>%
+    dplyr::mutate(
+      auprc_hat = predict_baseline_auprc_from_divergence(.data$truth_drift)
+    )
+
   p_baseline_truth <- ggplot(
     baseline_points,
     aes(x = .data$truth_drift, y = .data$auprc)
   ) +
     geom_point(alpha = 0.45, size = 1.5, stroke = 0, color = "grey25") +
-    geom_smooth(method = "loess", se = TRUE, span = 0.6,
-                color = "#c44e52", fill = "#c44e52", alpha = 0.15,
-                linewidth = 0.6) +
+    geom_line(
+      data = baseline_curve_grid,
+      aes(x = .data$truth_drift, y = .data$auprc_hat),
+      inherit.aes = FALSE,
+      color = "#c44e52", linewidth = 0.7
+    ) +
     labs(
       x = sprintf("Explanatory basis divergence from top-K causal basis [%s]",
                   truth_drift_column),
@@ -1954,8 +1981,8 @@ if (file.exists(truth_drift_csv)) {
       title = "Baseline: cold vanilla AUPRC vs explanatory basis divergence",
       subtitle = paste(
         "One point per dataset (n =", nrow(baseline_points), ").",
-        "LOESS smoother previews the curve used in residual-based",
-        "reparameterization."
+        sprintf("Red line: smoothing spline (df=%s) reused for nonlinear calibration.",
+                baseline_curve_spline_df)
       )
     ) +
     theme_effect_paper(base_size = 10)
@@ -2179,6 +2206,222 @@ if (file.exists(truth_drift_csv)) {
           ))
 } else {
   message("Skipping trajectory plot; truth_drift_summary not cached yet.")
+}
+```
+
+```{r explanatory-basis-divergence-auprc-decomposition, fig.width=11.5, fig.height=7.2}
+# Nonlinear decomposition of AUPRC changes. The basis-driven component is the
+# AUPRC change predicted by moving along the cold-vanilla baseline curve:
+#   f(end divergence) - f(cold divergence).
+# The residual is the remaining AUPRC delta after that nonlinear baseline
+# relationship is accounted for.
+if (exists("trajectory_long") &&
+    exists("predict_baseline_auprc_from_divergence")) {
+  trajectory_wide <- trajectory_long %>%
+    dplyr::select(.data$dataset_bundle_id, .data$chain, .data$state,
+                  .data$truth_drift, .data$auprc) %>%
+    tidyr::pivot_wider(
+      names_from = .data$state,
+      values_from = c(.data$truth_drift, .data$auprc)
+    )
+
+  auprc_basis_decomp <- dplyr::bind_rows(
+    trajectory_wide %>%
+      dplyr::transmute(
+        dataset_bundle_id = .data$dataset_bundle_id,
+        chain = .data$chain,
+        transition = "cold_ann",
+        start_divergence = .data$truth_drift_cold,
+        end_divergence = .data$truth_drift_annotated,
+        start_auprc = .data$auprc_cold,
+        end_auprc = .data$auprc_annotated
+      ),
+    trajectory_wide %>%
+      dplyr::transmute(
+        dataset_bundle_id = .data$dataset_bundle_id,
+        chain = .data$chain,
+        transition = "cold_warm",
+        start_divergence = .data$truth_drift_cold,
+        end_divergence = .data$truth_drift_warm,
+        start_auprc = .data$auprc_cold,
+        end_auprc = .data$auprc_warm
+      )
+  ) %>%
+    dplyr::mutate(
+      observed_delta = .data$end_auprc - .data$start_auprc,
+      divergence_improvement = .data$start_divergence - .data$end_divergence,
+      curve_start = predict_baseline_auprc_from_divergence(
+        .data$start_divergence
+      ),
+      curve_end = predict_baseline_auprc_from_divergence(
+        .data$end_divergence
+      ),
+      basis_pred_delta = .data$curve_end - .data$curve_start,
+      residual_delta = .data$observed_delta - .data$basis_pred_delta,
+      basis_share = dplyr::if_else(
+        abs(.data$observed_delta) >= 0.01,
+        .data$basis_pred_delta / .data$observed_delta,
+        NA_real_
+      ),
+      chain = factor(.data$chain, levels = c("mu", "pi"),
+                     labels = c("mu chain", "pi chain")),
+      transition = factor(
+        .data$transition,
+        levels = c("cold_ann", "cold_warm"),
+        labels = c("Cold -> annotated", "Cold -> warm vanilla")
+      )
+    ) %>%
+    dplyr::filter(
+      is.finite(.data$observed_delta),
+      is.finite(.data$basis_pred_delta),
+      is.finite(.data$residual_delta)
+    )
+
+  auprc_basis_decomp_summary <- auprc_basis_decomp %>%
+    dplyr::group_by(.data$chain, .data$transition) %>%
+    dplyr::summarise(
+      n = dplyr::n(),
+      observed_mean = mean(.data$observed_delta, na.rm = TRUE),
+      basis_mean = mean(.data$basis_pred_delta, na.rm = TRUE),
+      residual_mean = mean(.data$residual_delta, na.rm = TRUE),
+      basis_share_of_mean = .data$basis_mean / .data$observed_mean,
+      median_basis_share_when_gain = stats::median(
+        .data$basis_share[.data$observed_delta >= 0.01],
+        na.rm = TRUE
+      ),
+      mean_divergence_improvement = mean(
+        .data$divergence_improvement,
+        na.rm = TRUE
+      ),
+      .groups = "drop"
+    )
+  readr::write_csv(
+    auprc_basis_decomp,
+    file.path(diagnostic_dir,
+              "truth_drift_auprc_basis_decomposition_rows.csv")
+  )
+  readr::write_csv(
+    auprc_basis_decomp_summary,
+    file.path(diagnostic_dir,
+              "truth_drift_auprc_basis_decomposition_summary.csv")
+  )
+  cat("AUPRC decomposition using baseline nonlinear divergence curve:\n")
+  print(auprc_basis_decomp_summary)
+
+  decomp_lim <- max(abs(c(
+    auprc_basis_decomp$observed_delta,
+    auprc_basis_decomp$basis_pred_delta
+  )), na.rm = TRUE)
+  decomp_lim <- max(0.05, decomp_lim)
+
+  p_basis_explain_scatter <- ggplot(
+    auprc_basis_decomp,
+    aes(x = .data$basis_pred_delta, y = .data$observed_delta,
+        color = .data$start_divergence)
+  ) +
+    geom_hline(yintercept = 0, color = "grey65", linewidth = 0.25) +
+    geom_vline(xintercept = 0, color = "grey65", linewidth = 0.25) +
+    geom_abline(slope = 1, intercept = 0, color = "grey35",
+                linetype = "dashed", linewidth = 0.35) +
+    geom_point(alpha = 0.58, size = 1.45, stroke = 0) +
+    facet_grid(chain ~ transition) +
+    scale_color_viridis_c(
+      option = "C",
+      name = "Baseline explanatory\nbasis divergence"
+    ) +
+    coord_cartesian(xlim = c(-decomp_lim, decomp_lim),
+                    ylim = c(-decomp_lim, decomp_lim)) +
+    labs(
+      x = "AUPRC delta predicted from divergence change",
+      y = "Observed AUPRC delta",
+      title = "How much observed AUPRC gain is predicted by basis divergence?"
+    ) +
+    theme_effect_paper(base_size = 9) +
+    theme(legend.position = "right")
+
+  decomp_components <- auprc_basis_decomp_summary %>%
+    dplyr::select(.data$chain, .data$transition,
+                  .data$basis_mean, .data$residual_mean) %>%
+    tidyr::pivot_longer(
+      cols = c(.data$basis_mean, .data$residual_mean),
+      names_to = "component",
+      values_to = "mean_delta"
+    ) %>%
+    dplyr::mutate(
+      component = factor(
+        .data$component,
+        levels = c("basis_mean", "residual_mean"),
+        labels = c("Basis-predicted", "Residual / non-basis")
+      )
+    )
+
+  p_basis_decomp_bar <- ggplot(
+    decomp_components,
+    aes(x = .data$chain, y = .data$mean_delta, fill = .data$component)
+  ) +
+    geom_hline(yintercept = 0, color = "grey45", linewidth = 0.25) +
+    geom_col(width = 0.62) +
+    geom_point(
+      data = auprc_basis_decomp_summary,
+      aes(x = .data$chain, y = .data$observed_mean),
+      inherit.aes = FALSE,
+      shape = 21, fill = "white", color = "black", size = 2.3,
+      stroke = 0.35
+    ) +
+    facet_wrap(~ transition, nrow = 1) +
+    scale_fill_manual(
+      values = c("Basis-predicted" = "#4c72b0",
+                 "Residual / non-basis" = "#dd8452")
+    ) +
+    labs(
+      x = NULL,
+      y = "Mean AUPRC delta",
+      fill = NULL,
+      title = "Mean observed gain split into nonlinear basis-predicted and residual parts",
+      subtitle = "White dot marks the observed mean delta."
+    ) +
+    theme_effect_paper(base_size = 9) +
+    theme(legend.position = "bottom")
+
+  p_basis_share <- auprc_basis_decomp %>%
+    dplyr::filter(.data$observed_delta >= 0.01,
+                  is.finite(.data$basis_share)) %>%
+    ggplot(aes(x = .data$chain, y = .data$basis_share,
+               fill = .data$chain)) +
+    geom_hline(yintercept = 0, color = "grey65", linewidth = 0.25) +
+    geom_hline(yintercept = 1, color = "grey35", linetype = "dashed",
+               linewidth = 0.3) +
+    geom_boxplot(width = 0.55, alpha = 0.75, outlier.size = 0.45) +
+    facet_wrap(~ transition, nrow = 1) +
+    scale_fill_manual(values = c("mu chain" = "#2b8cbe",
+                                 "pi chain" = "#74c476"),
+                      guide = "none") +
+    scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+    coord_cartesian(ylim = c(-0.5, 1.5)) +
+    labs(
+      x = NULL,
+      y = "Basis-predicted / observed delta",
+      title = "Per-dataset explained share among observed improvements",
+      subtitle = "Filtered to observed AUPRC gain >= 0.01; dashed line = 100%."
+    ) +
+    theme_effect_paper(base_size = 9)
+
+  p_basis_decomp_combined <- p_basis_explain_scatter /
+    (p_basis_decomp_bar | p_basis_share) +
+    plot_layout(heights = c(1.25, 1))
+
+  ggsave(
+    file.path(diagnostic_dir,
+              "truth_drift_auprc_basis_decomposition.png"),
+    p_basis_decomp_combined, width = 11.5, height = 7.2, dpi = 220,
+    bg = "white"
+  )
+  print(p_basis_decomp_combined)
+} else {
+  message(
+    "Skipping AUPRC basis decomposition; need trajectory_long and ",
+    "baseline divergence smoother."
+  )
 }
 ```
 
