@@ -83,6 +83,13 @@ delta_alignment_mupi_png <- file.path(
 delta_auprc_vs_alignment_png <- file.path(
   alignment_plot_dir, "causal_basis_alignment_delta_auprc_vs_delta_alignment.png"
 )
+metric_competition_png <- file.path(
+  alignment_plot_dir, "causal_basis_alignment_metric_competition.png"
+)
+metric_competition_csv <- file.path(
+  study_dir,
+  sprintf("causal_basis_alignment_metric_competition_top%d.csv", truth_top_k)
+)
 
 required_files <- c(records_rds, auprc_per_dataset_csv, dataset_bundles_csv)
 missing_files <- required_files[!file.exists(required_files)]
@@ -188,6 +195,19 @@ clip01 <- function(x) {
 
 clamp <- function(x, lim) {
   pmin(pmax(x, lim[[1]]), lim[[2]])
+}
+
+weighted_mean_or_na <- function(x, w = NULL) {
+  x <- as.numeric(x)
+  if (is.null(w)) {
+    return(mean(x, na.rm = TRUE))
+  }
+  w <- as.numeric(w)
+  keep <- is.finite(x) & is.finite(w) & w > 0
+  if (!any(keep)) {
+    return(NA_real_)
+  }
+  sum(w[keep] * x[keep]) / sum(w[keep])
 }
 
 smooth_line_df <- function(df, x_col, y_col, out_x = NULL,
@@ -379,8 +399,44 @@ compute_alignment_one_fit <- function(rows, truth_obj) {
   colnames(truth_mat) <- paste0("truth_", seq_len(ncol(truth_mat)))
 
   cor_mat <- safe_cor_matrix(fit_mat, truth_mat)
-  coverage_by_truth <- apply(safe_corr(cor_mat)^2, 2L, max, na.rm = TRUE)
+  cor2_mat <- safe_corr(cor_mat)^2
+  coverage_by_truth <- apply(cor2_mat, 2L, max, na.rm = TRUE)
   coverage_by_truth[!is.finite(coverage_by_truth)] <- 0
+
+  sorted_cor2 <- apply(cor2_mat, 2L, sort, decreasing = TRUE)
+  if (is.null(dim(sorted_cor2))) {
+    sorted_cor2 <- matrix(sorted_cor2, ncol = 1L)
+  }
+  best_cor2 <- sorted_cor2[1L, ]
+  second_cor2 <- if (nrow(sorted_cor2) >= 2L) {
+    sorted_cor2[2L, ]
+  } else {
+    rep(0, length(best_cor2))
+  }
+  ownership_margin_by_truth <- pmax(0, best_cor2 - second_cor2)
+
+  cor2_colsum <- colSums(cor2_mat, na.rm = TRUE)
+  owner_prob <- sweep(cor2_mat, 2L, cor2_colsum, `/`)
+  owner_prob[, !is.finite(cor2_colsum) | cor2_colsum <= 0] <- 0
+  owner_prob[!is.finite(owner_prob)] <- 0
+  owner_eff_n_by_truth <- 1 / colSums(owner_prob^2, na.rm = TRUE)
+  owner_eff_n_by_truth[!is.finite(owner_eff_n_by_truth)] <- NA_real_
+  owner_concentration_by_truth <- 1 / owner_eff_n_by_truth
+  owner_concentration_by_truth[!is.finite(owner_concentration_by_truth)] <- 0
+  owner_entropy_by_truth <- -colSums(
+    ifelse(owner_prob > 0, owner_prob * log(owner_prob), 0),
+    na.rm = TRUE
+  )
+  owner_entropy_norm_by_truth <- if (nrow(cor2_mat) > 1L) {
+    owner_entropy_by_truth / log(nrow(cor2_mat))
+  } else {
+    rep(0, length(owner_entropy_by_truth))
+  }
+  owner_specificity_by_truth <- 1 - owner_entropy_norm_by_truth
+  owner_specificity_by_truth <- pmin(pmax(owner_specificity_by_truth, 0), 1)
+
+  best_owner <- apply(cor2_mat, 2L, which.max)
+  unique_owner_fraction <- dplyr::n_distinct(best_owner) / length(best_owner)
 
   truth_w <- pmax(tidyr::replace_na(
     as.numeric(truth_obj$var_y_explained_frac), 0
@@ -396,6 +452,16 @@ compute_alignment_one_fit <- function(rows, truth_obj) {
   } else {
     NA_real_
   }
+  ownership_margin_weighted <- weighted_mean_or_na(
+    ownership_margin_by_truth, truth_w
+  )
+  owner_eff_n_weighted <- weighted_mean_or_na(owner_eff_n_by_truth, truth_w)
+  owner_concentration_weighted <- weighted_mean_or_na(
+    owner_concentration_by_truth, truth_w
+  )
+  owner_specificity_weighted <- weighted_mean_or_na(
+    owner_specificity_by_truth, truth_w
+  )
 
   tibble::tibble(
     dataset_bundle_id = as.character(rows$dataset_bundle_id[[1]]),
@@ -407,6 +473,19 @@ compute_alignment_one_fit <- function(rows, truth_obj) {
     causal_basis_misalignment = 1 - alignment_weighted,
     causal_basis_alignment_unweighted = mean(coverage_by_truth, na.rm = TRUE),
     min_causal_signal_coverage = min(coverage_by_truth, na.rm = TRUE),
+    causal_basis_ownership_margin = ownership_margin_weighted,
+    causal_basis_ownership_margin_unweighted =
+      mean(ownership_margin_by_truth, na.rm = TRUE),
+    causal_basis_owner_effective_n = owner_eff_n_weighted,
+    causal_basis_owner_effective_n_unweighted =
+      mean(owner_eff_n_by_truth, na.rm = TRUE),
+    causal_basis_owner_concentration = owner_concentration_weighted,
+    causal_basis_owner_concentration_unweighted =
+      mean(owner_concentration_by_truth, na.rm = TRUE),
+    causal_basis_owner_specificity = owner_specificity_weighted,
+    causal_basis_owner_specificity_unweighted =
+      mean(owner_specificity_by_truth, na.rm = TRUE),
+    causal_basis_unique_owner_fraction = unique_owner_fraction,
     model_pve_frac = model_pve,
     truth_topk_pve_frac = truth_pve,
     pve_ratio_model_to_truth = model_pve / truth_pve,
@@ -415,14 +494,39 @@ compute_alignment_one_fit <- function(rows, truth_obj) {
   )
 }
 
+required_alignment_cols <- c(
+  "causal_basis_alignment_score",
+  "causal_basis_alignment_unweighted",
+  "causal_basis_ownership_margin",
+  "causal_basis_ownership_margin_unweighted",
+  "causal_basis_owner_concentration",
+  "causal_basis_owner_concentration_unweighted",
+  "causal_basis_owner_specificity",
+  "causal_basis_owner_specificity_unweighted",
+  "causal_basis_unique_owner_fraction"
+)
+
+recompute_alignment_scores <- TRUE
 if (file.exists(alignment_scores_csv)) {
   alignment_scores <- readr::read_csv(
     alignment_scores_csv, show_col_types = FALSE
   ) %>%
     dplyr::mutate(dataset_bundle_id = as.character(.data$dataset_bundle_id))
-  cat("Loaded cached causal basis alignment scores from ",
-      alignment_scores_csv, "\n", sep = "")
-} else {
+  missing_alignment_cols <- setdiff(required_alignment_cols,
+                                    names(alignment_scores))
+  if (length(missing_alignment_cols)) {
+    cat(
+      "Cached alignment scores are missing new metric columns; recomputing: ",
+      paste(missing_alignment_cols, collapse = ", "), "\n", sep = ""
+    )
+  } else {
+    recompute_alignment_scores <- FALSE
+    cat("Loaded cached causal basis alignment scores from ",
+        alignment_scores_csv, "\n", sep = "")
+  }
+}
+
+if (isTRUE(recompute_alignment_scores)) {
   rows_out <- list()
   ds_ids <- intersect(
     sort(unique(records$dataset_bundle_id)),
@@ -919,6 +1023,206 @@ if (exists("transition_rows")) {
   print(fit_summary)
 } else {
   message("Skipping delta AUPRC vs delta alignment plot; transition_rows missing.")
+}
+```
+
+```{r metric-competition, fig.width=10.5, fig.height=5.2}
+if (exists("state_method_map")) {
+  metric_specs <- tibble::tribble(
+    ~metric_col, ~metric_label,
+    "causal_basis_alignment_score",
+    "Weighted coverage",
+    "causal_basis_alignment_unweighted",
+    "Unweighted coverage",
+    "causal_basis_ownership_margin",
+    "Weighted best-second margin",
+    "causal_basis_ownership_margin_unweighted",
+    "Unweighted best-second margin",
+    "causal_basis_owner_concentration",
+    "Weighted owner concentration",
+    "causal_basis_owner_concentration_unweighted",
+    "Unweighted owner concentration",
+    "causal_basis_owner_specificity",
+    "Weighted owner specificity",
+    "causal_basis_owner_specificity_unweighted",
+    "Unweighted owner specificity",
+    "causal_basis_unique_owner_fraction",
+    "Unique owner fraction"
+  )
+
+  metric_shift_for_one <- function(metric_col, metric_label) {
+    baseline_metric <- alignment_scores %>%
+      dplyr::filter(.data$model_method == baseline_method) %>%
+      dplyr::transmute(
+        dataset_bundle_id = .data$dataset_bundle_id,
+        metric_value = .data[[metric_col]],
+        auprc = .data$auprc
+      ) %>%
+      dplyr::filter(is.finite(.data$metric_value), is.finite(.data$auprc))
+    if (nrow(baseline_metric) < baseline_curve_spline_df + 2L) {
+      return(NULL)
+    }
+    metric_range <- range(baseline_metric$metric_value, na.rm = TRUE)
+    fit <- tryCatch(
+      stats::smooth.spline(
+        x = baseline_metric$metric_value,
+        y = baseline_metric$auprc,
+        df = baseline_curve_spline_df
+      ),
+      error = function(e) NULL
+    )
+    if (is.null(fit)) {
+      return(NULL)
+    }
+    pred_fun <- function(x) {
+      x <- clamp(x, metric_range)
+      clip01(stats::predict(fit, x = x)$y)
+    }
+
+    state_metric <- alignment_scores %>%
+      dplyr::inner_join(state_method_map, by = "model_method",
+                        relationship = "many-to-many") %>%
+      dplyr::transmute(
+        dataset_bundle_id = .data$dataset_bundle_id,
+        chain = .data$chain,
+        state = .data$state,
+        metric_value = .data[[metric_col]],
+        auprc = .data$auprc
+      )
+    state_metric_wide <- state_metric %>%
+      tidyr::pivot_wider(
+        names_from = .data$state,
+        values_from = c(.data$metric_value, .data$auprc)
+      )
+
+    dplyr::bind_rows(
+      state_metric_wide %>%
+        dplyr::transmute(
+          dataset_bundle_id = .data$dataset_bundle_id,
+          chain = .data$chain,
+          transition = "cold_ann",
+          start_metric = .data$metric_value_cold,
+          end_metric = .data$metric_value_annotated,
+          start_auprc = .data$auprc_cold,
+          end_auprc = .data$auprc_annotated
+        ),
+      state_metric_wide %>%
+        dplyr::transmute(
+          dataset_bundle_id = .data$dataset_bundle_id,
+          chain = .data$chain,
+          transition = "cold_warm",
+          start_metric = .data$metric_value_cold,
+          end_metric = .data$metric_value_warm,
+          start_auprc = .data$auprc_cold,
+          end_auprc = .data$auprc_warm
+        )
+    ) %>%
+      dplyr::mutate(
+        metric_col = metric_col,
+        metric_label = metric_label,
+        observed_delta = .data$end_auprc - .data$start_auprc,
+        metric_delta = .data$end_metric - .data$start_metric,
+        pred_delta = pred_fun(.data$end_metric) - pred_fun(.data$start_metric),
+        chain = factor(.data$chain, levels = c("mu", "pi"),
+                       labels = c("mu chain", "pi chain")),
+        transition = factor(
+          .data$transition,
+          levels = c("cold_ann", "cold_warm"),
+          labels = c("Cold -> annotated", "Cold -> warm vanilla")
+        )
+      ) %>%
+      dplyr::filter(
+        is.finite(.data$observed_delta),
+        is.finite(.data$pred_delta),
+        is.finite(.data$metric_delta)
+      )
+  }
+
+  metric_competition_rows <- dplyr::bind_rows(lapply(
+    seq_len(nrow(metric_specs)),
+    function(i) {
+      metric_shift_for_one(metric_specs$metric_col[[i]],
+                           metric_specs$metric_label[[i]])
+    }
+  ))
+
+  metric_competition_summary <- metric_competition_rows %>%
+    dplyr::group_by(.data$metric_col, .data$metric_label,
+                    .data$chain, .data$transition) %>%
+    dplyr::summarise(
+      n = dplyr::n(),
+      observed_mean = mean(.data$observed_delta, na.rm = TRUE),
+      predicted_mean = mean(.data$pred_delta, na.rm = TRUE),
+      mean_metric_delta = mean(.data$metric_delta, na.rm = TRUE),
+      abs_mean_error = abs(.data$predicted_mean - .data$observed_mean),
+      share_of_mean = .data$predicted_mean / .data$observed_mean,
+      delta_rmse = sqrt(mean(
+        (.data$observed_delta - .data$pred_delta)^2,
+        na.rm = TRUE
+      )),
+      .groups = "drop"
+    )
+  readr::write_csv(metric_competition_summary, metric_competition_csv)
+
+  cat("Metric competition, cold -> warm ranking by absolute mean-shift error:\n")
+  print(
+    metric_competition_summary %>%
+      dplyr::filter(.data$transition == "Cold -> warm vanilla") %>%
+      dplyr::arrange(.data$chain, .data$abs_mean_error)
+  )
+
+  plot_comp <- metric_competition_summary %>%
+    dplyr::filter(.data$transition == "Cold -> warm vanilla") %>%
+    dplyr::group_by(.data$metric_label) %>%
+    dplyr::mutate(order_score = mean(.data$abs_mean_error, na.rm = TRUE)) %>%
+    dplyr::ungroup() %>%
+    tidyr::pivot_longer(
+      cols = c(.data$observed_mean, .data$predicted_mean),
+      names_to = "quantity",
+      values_to = "mean_delta"
+    ) %>%
+    dplyr::mutate(
+      quantity = factor(
+        .data$quantity,
+        levels = c("observed_mean", "predicted_mean"),
+        labels = c("Observed", "Predicted by metric")
+      ),
+      metric_label = stats::reorder(.data$metric_label,
+                                    -.data$order_score)
+    )
+
+  p_metric_competition <- ggplot(
+    plot_comp,
+    aes(x = .data$mean_delta, y = .data$metric_label,
+        color = .data$quantity)
+  ) +
+    geom_vline(xintercept = 0, color = "grey65", linewidth = 0.25) +
+    geom_line(aes(group = interaction(.data$metric_label, .data$chain)),
+              color = "grey72", linewidth = 0.35) +
+    geom_point(size = 2.2, alpha = 0.9) +
+    facet_wrap(~ chain, nrow = 1) +
+    scale_color_manual(
+      values = c("Observed" = "black",
+                 "Predicted by metric" = "#c44e52")
+    ) +
+    labs(
+      x = "Mean AUPRC delta, cold -> warm vanilla",
+      y = NULL,
+      color = NULL,
+      title = "Metric competition for explaining mean cold -> warm AUPRC gain",
+      subtitle = "Each metric is calibrated on cold-vanilla baseline AUPRC, then applied per dataset."
+    ) +
+    theme_alignment(base_size = 9) +
+    theme(legend.position = "bottom")
+
+  ggsave(
+    metric_competition_png,
+    p_metric_competition, width = 10.5, height = 5.2, dpi = 220,
+    bg = "white"
+  )
+  print(p_metric_competition)
+} else {
+  message("Skipping metric competition; state_method_map missing.")
 }
 ```
 
