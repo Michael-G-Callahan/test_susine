@@ -1473,17 +1473,28 @@ if (!file.exists(truth_drift_csv)) {
 ```
 
 ```{r truth-drift-sanity-3col-scatter, fig.width=12, fig.height=6.8}
-# 2-row x 3-col diagnostic with the following additions over the prior
-# version, to handle the heavy mass at origin and skewed tails:
-#   - dashed lines at sign + magnitude bin thresholds
-#     (delta_truth at +/- 0.05, delta_AUPRC at +/- 0.02)
-#   - geom_label cell-count annotations in each of the 9 zones per facet
-#   - col 1 keeps chain coloring (mu/pi)
-#   - cols 2 and 3 color by the dataset's cold baseline divergence bin
-#     (matches the bins used in the centroid trajectory plot)
+# 2-row x 3-col diagnostic. Refinements:
+#   - Robust regression (MASS::rlm, Huber M-estimator) instead of OLS so the
+#     col-1 slope isn't dominated by 1-2 extreme-leverage outliers.
+#   - Axes trimmed to 0.5%/99.5% quantiles per column with oob = squish, so
+#     extreme outliers stack at the edge of the panel (visible but not
+#     stretching the scale).
+#   - Cell-count labels positioned at the OUTER corner of each zone within
+#     the trimmed limits (3x3 grid mirroring the data layout: corner cells
+#     at panel corners, edge cells at panel edges, center cell near origin).
+#   - Bigger dots (size 1.0 -> 1.7) for visibility through the overplotted
+#     center.
+#   - Col 1 keeps chain color; cols 2/3 color by baseline divergence bin.
 if (file.exists(truth_drift_csv) && exists("sanity_join")) {
+  if (!requireNamespace("MASS", quietly = TRUE)) {
+    stop("MASS package required for robust regression. Install via ",
+         "install.packages('MASS').")
+  }
+
   delta_truth_thresh <- 0.05
   delta_auprc_thresh <- 0.02
+  trim_q <- c(0.005, 0.995)
+  label_inset <- 0.92  # fraction of trimmed limit at which corner labels sit
   divergence_breaks <- c(-Inf, 0.05, 0.10, Inf)
   divergence_labels <- c("[0, 0.05]", "(0.05, 0.10]", "(0.10, inf)")
   baseline_bin_palette <- c(
@@ -1527,9 +1538,20 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
     ) %>%
     dplyr::inner_join(baseline_bin_lookup, by = "dataset_bundle_id")
 
-  # Zone assignment + label position helpers (zone center placed at a
-  # multiple of the threshold so labels sit in the interior of each cell
-  # rather than at the threshold edge).
+  # Compute trimmed axis limits pooled across both pair_kinds so rows share
+  # scales. Symmetric (around 0) so the y=x diagonal sits across the panel.
+  symm_trim <- function(x) {
+    q <- stats::quantile(abs(x), trim_q[[2]], na.rm = TRUE, names = FALSE)
+    c(-q, q)
+  }
+  col1_xlim <- symm_trim(sanity_join_lab$delta_truth)
+  col1_ylim <- symm_trim(sanity_join_lab$auprc_delta)
+  col2_axislim <- symm_trim(c(pair_within_dataset$auprc_delta_pi,
+                              pair_within_dataset$auprc_delta_mu))
+  col3_axislim <- symm_trim(c(pair_within_dataset$delta_truth_pi,
+                              pair_within_dataset$delta_truth_mu))
+
+  # Zone assignment by sign + magnitude threshold.
   zone_label <- function(x, t) {
     dplyr::case_when(
       x <= -t ~ "neg",
@@ -1537,11 +1559,14 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
       TRUE    ~ "pos"
     )
   }
-  zone_pos <- function(zone, t, mult = 4) {
+  # Position each cell's count label at the outer corner of its zone within
+  # the trimmed plot limits: corner cells -> panel corners, edge cells ->
+  # panel edges, center cell -> origin.
+  corner_pos <- function(zone, axis_lim, inset = label_inset) {
     dplyr::case_when(
-      zone == "neg" ~ -mult * t,
+      zone == "neg" ~ axis_lim[[1]] * inset,
       zone == "mid" ~ 0,
-      zone == "pos" ~  mult * t
+      zone == "pos" ~ axis_lim[[2]] * inset
     )
   }
 
@@ -1552,8 +1577,8 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
     ) %>%
     dplyr::count(.data$pair_kind, .data$x_zone, .data$y_zone) %>%
     dplyr::mutate(
-      x_pos = zone_pos(.data$x_zone, delta_truth_thresh, mult = 4),
-      y_pos = zone_pos(.data$y_zone, delta_auprc_thresh, mult = 4)
+      x_pos = corner_pos(.data$x_zone, col1_xlim),
+      y_pos = corner_pos(.data$y_zone, col1_ylim)
     )
 
   col2_counts <- pair_within_dataset %>%
@@ -1563,8 +1588,8 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
     ) %>%
     dplyr::count(.data$pair_kind, .data$x_zone, .data$y_zone) %>%
     dplyr::mutate(
-      x_pos = zone_pos(.data$x_zone, delta_auprc_thresh, mult = 4),
-      y_pos = zone_pos(.data$y_zone, delta_auprc_thresh, mult = 4)
+      x_pos = corner_pos(.data$x_zone, col2_axislim),
+      y_pos = corner_pos(.data$y_zone, col2_axislim)
     )
 
   col3_counts <- pair_within_dataset %>%
@@ -1574,8 +1599,8 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
     ) %>%
     dplyr::count(.data$pair_kind, .data$x_zone, .data$y_zone) %>%
     dplyr::mutate(
-      x_pos = zone_pos(.data$x_zone, delta_truth_thresh, mult = 4),
-      y_pos = zone_pos(.data$y_zone, delta_truth_thresh, mult = 4)
+      x_pos = corner_pos(.data$x_zone, col3_axislim),
+      y_pos = corner_pos(.data$y_zone, col3_axislim)
     )
 
   chain_color_3col <- c(mu = "#2b8cbe", pi = "#74c476")
@@ -1596,9 +1621,9 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
       data = count_df,
       aes(x = .data$x_pos, y = .data$y_pos, label = .data$n),
       inherit.aes = FALSE,
-      size = 2.7, color = "grey15", fill = "white",
-      alpha = 0.85, label.size = 0.15,
-      label.padding = grid::unit(1.2, "pt")
+      size = 2.8, color = "grey15", fill = "white",
+      alpha = 0.88, label.size = 0.18,
+      label.padding = grid::unit(1.4, "pt")
     )
   }
 
@@ -1608,17 +1633,20 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
         color = .data$chain)
   ) +
     threshold_lines(delta_truth_thresh, delta_auprc_thresh) +
-    geom_point(alpha = 0.4, size = 1.0, stroke = 0) +
-    geom_smooth(method = "lm", se = FALSE, linewidth = 0.5) +
+    geom_point(alpha = 0.45, size = 1.7, stroke = 0) +
+    geom_smooth(method = MASS::rlm, se = FALSE, linewidth = 0.6,
+                method.args = list(maxit = 50)) +
     count_label_layer(col1_counts) +
     facet_wrap(~ pair_kind, ncol = 1) +
+    scale_x_continuous(limits = col1_xlim, oob = scales::squish) +
+    scale_y_continuous(limits = col1_ylim, oob = scales::squish) +
     scale_color_manual(values = chain_color_3col,
                        labels = c(mu = "mu chain", pi = "pi chain")) +
     labs(
       x = sprintf("Delta truth drift [%s]", truth_drift_column),
       y = "Delta AUPRC vs cold vanilla",
       color = NULL,
-      title = "Truth drift vs AUPRC"
+      title = "Truth drift vs AUPRC (rlm)"
     ) +
     theme_effect_paper(base_size = 9)
 
@@ -1630,9 +1658,11 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
     threshold_lines(delta_auprc_thresh, delta_auprc_thresh) +
     geom_abline(slope = 1, intercept = 0, color = "grey45",
                 linetype = "dotted", linewidth = 0.3) +
-    geom_point(alpha = 0.5, size = 1.0, stroke = 0) +
+    geom_point(alpha = 0.55, size = 1.7, stroke = 0) +
     count_label_layer(col2_counts) +
     facet_wrap(~ pair_kind, ncol = 1) +
+    scale_x_continuous(limits = col2_axislim, oob = scales::squish) +
+    scale_y_continuous(limits = col2_axislim, oob = scales::squish) +
     scale_color_manual(values = baseline_bin_palette,
                        name = "Baseline bin") +
     labs(
@@ -1650,9 +1680,11 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
     threshold_lines(delta_truth_thresh, delta_truth_thresh) +
     geom_abline(slope = 1, intercept = 0, color = "grey45",
                 linetype = "dotted", linewidth = 0.3) +
-    geom_point(alpha = 0.5, size = 1.0, stroke = 0) +
+    geom_point(alpha = 0.55, size = 1.7, stroke = 0) +
     count_label_layer(col3_counts) +
     facet_wrap(~ pair_kind, ncol = 1) +
+    scale_x_continuous(limits = col3_axislim, oob = scales::squish) +
+    scale_y_continuous(limits = col3_axislim, oob = scales::squish) +
     scale_color_manual(values = baseline_bin_palette,
                        name = "Baseline bin") +
     labs(
@@ -1672,6 +1704,15 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
   )
   print(combined_3col)
 
+  cat("Trimmed axis limits (symmetric, 99.5% of |value|):\n")
+  cat(sprintf("  col 1 x (delta_truth): [%.3f, %.3f]\n",
+              col1_xlim[1], col1_xlim[2]))
+  cat(sprintf("  col 1 y (delta_AUPRC): [%.3f, %.3f]\n",
+              col1_ylim[1], col1_ylim[2]))
+  cat(sprintf("  col 2 axes (delta_AUPRC): [%.3f, %.3f]\n",
+              col2_axislim[1], col2_axislim[2]))
+  cat(sprintf("  col 3 axes (delta_truth): [%.3f, %.3f]\n",
+              col3_axislim[1], col3_axislim[2]))
   cat("Cell counts (col 1: truth_drift x AUPRC, chain pooled):\n")
   print(col1_counts %>% dplyr::select(-.data$x_pos, -.data$y_pos))
   cat("Cell counts (col 2: mu vs pi delta AUPRC):\n")
