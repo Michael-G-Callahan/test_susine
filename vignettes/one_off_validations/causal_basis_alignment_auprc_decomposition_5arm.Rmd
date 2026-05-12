@@ -80,6 +80,9 @@ decomposition_png <- file.path(
 delta_alignment_mupi_png <- file.path(
   alignment_plot_dir, "causal_basis_alignment_delta_mu_vs_pi.png"
 )
+delta_auprc_vs_alignment_png <- file.path(
+  alignment_plot_dir, "causal_basis_alignment_delta_auprc_vs_delta_alignment.png"
+)
 
 required_files <- c(records_rds, auprc_per_dataset_csv, dataset_bundles_csv)
 missing_files <- required_files[!file.exists(required_files)]
@@ -862,6 +865,60 @@ if (exists("transition_rows")) {
   )
 } else {
   message("Skipping mu-vs-pi delta alignment plot; transition_rows missing.")
+}
+```
+
+```{r delta-auprc-vs-delta-alignment, fig.width=8.8, fig.height=4.6}
+if (exists("transition_rows")) {
+  p_delta_auprc_vs_alignment <- ggplot(
+    transition_rows,
+    aes(x = .data$delta_alignment, y = .data$observed_delta,
+        color = .data$chain, fill = .data$chain)
+  ) +
+    geom_hline(yintercept = 0, color = "grey65", linewidth = 0.25) +
+    geom_vline(xintercept = 0, color = "grey65", linewidth = 0.25) +
+    geom_point(alpha = 0.48, size = 1.45, stroke = 0) +
+    geom_smooth(method = "lm", se = TRUE, linewidth = 0.7, alpha = 0.16) +
+    facet_wrap(~ transition, nrow = 1) +
+    scale_color_manual(values = chain_colors, name = NULL) +
+    scale_fill_manual(values = chain_colors, name = NULL) +
+    labs(
+      x = "Delta causal basis alignment",
+      y = "Delta AUPRC vs cold vanilla",
+      title = "AUPRC change vs causal-basis-alignment change",
+      subtitle = "Linear fits and confidence bands are fit separately by chain within each transition."
+    ) +
+    theme_alignment(base_size = 9) +
+    theme(legend.position = "bottom")
+
+  ggsave(
+    delta_auprc_vs_alignment_png,
+    p_delta_auprc_vs_alignment, width = 8.8, height = 4.6, dpi = 220,
+    bg = "white"
+  )
+  print(p_delta_auprc_vs_alignment)
+
+  cat("Delta AUPRC ~ delta alignment linear fits:\n")
+  fit_summary <- transition_rows %>%
+    dplyr::group_by(.data$chain, .data$transition) %>%
+    dplyr::group_modify(~ {
+      fit <- stats::lm(observed_delta ~ delta_alignment, data = .x)
+      sm <- summary(fit)
+      coef_tbl <- as.data.frame(sm$coefficients)
+      tibble::tibble(
+        n = stats::nobs(fit),
+        intercept = coef_tbl["(Intercept)", "Estimate"],
+        slope = coef_tbl["delta_alignment", "Estimate"],
+        slope_se = coef_tbl["delta_alignment", "Std. Error"],
+        slope_p = coef_tbl["delta_alignment", "Pr(>|t|)"],
+        r2 = sm$r.squared,
+        adj_r2 = sm$adj.r.squared
+      )
+    }) %>%
+    dplyr::ungroup()
+  print(fit_summary)
+} else {
+  message("Skipping delta AUPRC vs delta alignment plot; transition_rows missing.")
 }
 ```
 
