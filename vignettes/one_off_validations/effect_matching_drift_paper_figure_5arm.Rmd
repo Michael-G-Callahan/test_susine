@@ -1350,9 +1350,9 @@ ggsave(
 print(p_partial_cor)
 ```
 
-# Truth-Referenced Drift Sanity Check
+# Explanatory Basis Divergence Sanity Check
 
-```{r truth-drift-sanity, fig.width=9, fig.height=4.4}
+```{r explanatory-basis-divergence-sanity, fig.width=9, fig.height=4.4}
 truth_drift_csv <- file.path(
   study_dir,
   sprintf("truth_drift_summary_5arm_top%d.csv", truth_drift_top_k)
@@ -1371,7 +1371,7 @@ if (!file.exists(truth_drift_csv) &&
 
 if (!file.exists(truth_drift_csv)) {
   message(
-    "truth_drift_summary_5arm.csv not yet cached. Run the truth-drift ",
+    "truth_drift_summary_5arm.csv not yet cached. Run the explanatory-basis ",
     "section of effect_matching_drift_analysis_5arm.Rmd to generate it."
   )
 } else {
@@ -1385,9 +1385,9 @@ if (!file.exists(truth_drift_csv)) {
   # to truth_chord_drift below if you want to compare on chord instead.
   truth_drift_column <- "truth_r2_drift"
 
-  # delta_truth per (dataset, chain, pair_kind): baseline truth-drift minus
-  # treatment truth-drift. Positive = treatment moved the fit closer to the
-  # top-k truth basin.
+  # delta_truth per (dataset, chain, pair_kind): baseline explanatory-basis
+  # divergence minus treatment divergence. Positive = treatment moved the fit
+  # closer to the top-k truth basis.
   delta_truth_for_pair <- function(treat_method, chain_label, pair_kind_label) {
     truth_drift_summary %>%
       dplyr::filter(.data$model_method %in% c(baseline_method, treat_method)) %>%
@@ -1446,14 +1446,14 @@ if (!file.exists(truth_drift_csv)) {
     sanity_corr,
     file.path(diagnostic_dir, "truth_drift_sanity_correlations.csv")
   )
-  cat("Truth-drift vs AUPRC-delta sanity correlations:\n")
+  cat("Explanatory-basis-divergence vs AUPRC-delta sanity correlations:\n")
   print(sanity_corr)
   cat(
     "\nDecision rule:\n",
-    "  mu cold_ann r > 0.95 -> truth-drift is a reparameterization of AUPRC; abandon\n",
+    "  mu cold_ann r > 0.95 -> divergence is a reparameterization of AUPRC; abandon\n",
     "  mu cold_ann r in [0.6, 0.85] -> proceed to directionality scatter\n",
     "  mu cold_ann r < 0.5 -> carries independent information; verify per-dataset\n",
-    "                          truth-drift distribution for pathological values\n",
+    "                          divergence distribution for pathological values\n",
     sep = ""
   )
 
@@ -1475,12 +1475,12 @@ if (!file.exists(truth_drift_csv)) {
                        labels = c(mu = "mu chain", pi = "pi chain")) +
     labs(
       x = sprintf(
-        "Delta truth drift (baseline - treatment, positive = toward truth) [%s]",
+        "Delta explanatory basis divergence (baseline - treatment; positive = toward truth) [%s]",
         truth_drift_column
       ),
       y = "Delta AUPRC vs cold vanilla",
       color = NULL,
-      title = "Truth-drift sanity: does movement toward truth track AUPRC gain?"
+      title = "Explanatory basis divergence sanity: does movement toward truth track AUPRC gain?"
     ) +
     theme_effect_paper(base_size = 10) +
     theme(legend.position = "bottom")
@@ -1492,24 +1492,27 @@ if (!file.exists(truth_drift_csv)) {
 }
 ```
 
-```{r truth-drift-sanity-3col-scatter, fig.width=12, fig.height=6.8}
+```{r explanatory-basis-divergence-sanity-3col-scatter, fig.width=12, fig.height=6.8}
 # 2-row x 3-col diagnostic. Refinements:
 #   - Robust regression (MASS::rlm, Huber M-estimator) instead of OLS so the
 #     col-1 slope isn't dominated by 1-2 extreme-leverage outliers.
-#   - Axes trimmed to 1%/99% quantiles per column with oob = squish, so
-#     extreme outliers stack at the edge of the panel (visible but not
-#     stretching the scale).
-#   - Cell-count labels positioned at the OUTER corner of each zone within
-#     the trimmed limits (3x3 grid mirroring the data layout: corner cells
-#     at panel corners, edge cells at panel edges, center cell near origin).
+#   - Axes trimmed to 1%/99% quantiles per column, then expanded with an
+#     annotation gutter. Dots are winsorized to the inner trim limits; count
+#     labels sit just outside those inner limits, so the labels do not cover
+#     dots.
+#   - Cell-count labels positioned at the outer edge of each zone. The center
+#     cell is moved into the top annotation gutter because its natural position
+#     at the origin would sit on top of the densest points.
 #   - Bigger dots (size 1.0 -> 1.7) for visibility through the overplotted
 #     center.
-#   - Col 1 keeps chain color; cols 2/3 color by baseline divergence bin.
+#   - Col 1 keeps chain color; col 2 colors by baseline AUPRC; col 3 colors
+#     by baseline explanatory-basis divergence bin.
 if (file.exists(truth_drift_csv) && exists("sanity_join")) {
   delta_truth_thresh <- 0.05
   delta_auprc_thresh <- 0.02
   trim_q <- c(0.01, 0.99)
-  label_inset <- 0.92  # fraction of trimmed limit at which corner labels sit
+  label_edge_mult <- 1.12
+  annotation_axis_mult <- 1.24
   divergence_breaks <- c(-Inf, 0.05, 0.10, Inf)
   divergence_labels <- c("[0, 0.05]", "(0.05, 0.10]", "(0.10, inf)")
   baseline_bin_palette <- c(
@@ -1518,16 +1521,25 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
     "(0.10, inf)"  = "#08519c"
   )
 
-  baseline_bin_lookup <- truth_drift_summary %>%
+  baseline_context_lookup <- truth_drift_summary %>%
     dplyr::filter(.data$model_method == baseline_method) %>%
     dplyr::transmute(
       dataset_bundle_id = as.character(.data$dataset_bundle_id),
+      baseline_basis_divergence = .data[[truth_drift_column]],
       baseline_bin = cut(
         .data[[truth_drift_column]],
         breaks = divergence_breaks,
         labels = divergence_labels,
         right = TRUE
       )
+    ) %>%
+    dplyr::inner_join(
+      auprc_per_dataset %>%
+        dplyr::transmute(
+          dataset_bundle_id = as.character(.data$dataset_bundle_id),
+          baseline_auprc = .data$auprc_susie_vanilla
+        ),
+      by = "dataset_bundle_id"
     )
 
   sanity_join_lab <- sanity_join %>%
@@ -1551,7 +1563,7 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
                          labels = c("cold -> annotated",
                                     "cold -> warm vanilla"))
     ) %>%
-    dplyr::inner_join(baseline_bin_lookup, by = "dataset_bundle_id")
+    dplyr::inner_join(baseline_context_lookup, by = "dataset_bundle_id")
 
   # Compute trimmed axis limits pooled across both pair_kinds so rows share
   # scales. Symmetric (around 0) so the y=x diagonal sits across the panel.
@@ -1565,6 +1577,14 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
                               pair_within_dataset$auprc_delta_mu))
   col3_axislim <- symm_trim(c(pair_within_dataset$delta_truth_pi,
                               pair_within_dataset$delta_truth_mu))
+
+  expand_lim <- function(lim, mult = annotation_axis_mult) {
+    lim * mult
+  }
+  col1_plot_xlim <- expand_lim(col1_xlim)
+  col1_plot_ylim <- expand_lim(col1_ylim)
+  col2_plot_axislim <- expand_lim(col2_axislim)
+  col3_plot_axislim <- expand_lim(col3_axislim)
 
   # Winsorize col-1 data to the trim limits before fitting OLS. The smoother
   # is then fit on the same values that are visually shown at the panel
@@ -1580,6 +1600,13 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
       delta_truth = winsorize(.data$delta_truth, col1_xlim),
       auprc_delta = winsorize(.data$auprc_delta, col1_ylim)
     )
+  pair_within_dataset_wins <- pair_within_dataset %>%
+    dplyr::mutate(
+      auprc_delta_pi_plot = winsorize(.data$auprc_delta_pi, col2_axislim),
+      auprc_delta_mu_plot = winsorize(.data$auprc_delta_mu, col2_axislim),
+      delta_truth_pi_plot = winsorize(.data$delta_truth_pi, col3_axislim),
+      delta_truth_mu_plot = winsorize(.data$delta_truth_mu, col3_axislim)
+    )
 
   # Zone assignment by sign + magnitude threshold.
   zone_label <- function(x, t) {
@@ -1589,15 +1616,32 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
       TRUE    ~ "pos"
     )
   }
-  # Position each cell's count label at the outer corner of its zone within
-  # the trimmed plot limits: corner cells -> panel corners, edge cells ->
-  # panel edges, center cell -> origin.
-  corner_pos <- function(zone, axis_lim, inset = label_inset) {
+  # Position each count in the annotation gutter just outside the winsorized
+  # dot cloud. The mid/mid cell is nudged to the top gutter so it also avoids
+  # covering points.
+  edge_pos <- function(zone, axis_lim, mult = label_edge_mult) {
     dplyr::case_when(
-      zone == "neg" ~ axis_lim[[1]] * inset,
+      zone == "neg" ~ axis_lim[[1]] * mult,
       zone == "mid" ~ 0,
-      zone == "pos" ~ axis_lim[[2]] * inset
+      zone == "pos" ~ axis_lim[[2]] * mult
     )
+  }
+  add_count_positions <- function(count_df, x_lim, y_lim) {
+    count_df %>%
+      dplyr::mutate(
+        x_pos = edge_pos(.data$x_zone, x_lim),
+        y_pos = edge_pos(.data$y_zone, y_lim),
+        x_pos = dplyr::if_else(
+          .data$x_zone == "mid" & .data$y_zone == "mid",
+          x_lim[[1]] * 0.55,
+          .data$x_pos
+        ),
+        y_pos = dplyr::if_else(
+          .data$x_zone == "mid" & .data$y_zone == "mid",
+          y_lim[[2]] * label_edge_mult,
+          .data$y_pos
+        )
+      )
   }
 
   col1_counts <- sanity_join_lab %>%
@@ -1606,10 +1650,7 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
       y_zone = zone_label(.data$auprc_delta, delta_auprc_thresh)
     ) %>%
     dplyr::count(.data$pair_kind, .data$x_zone, .data$y_zone) %>%
-    dplyr::mutate(
-      x_pos = corner_pos(.data$x_zone, col1_xlim),
-      y_pos = corner_pos(.data$y_zone, col1_ylim)
-    )
+    add_count_positions(col1_xlim, col1_ylim)
 
   col2_counts <- pair_within_dataset %>%
     dplyr::mutate(
@@ -1617,10 +1658,7 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
       y_zone = zone_label(.data$auprc_delta_mu, delta_auprc_thresh)
     ) %>%
     dplyr::count(.data$pair_kind, .data$x_zone, .data$y_zone) %>%
-    dplyr::mutate(
-      x_pos = corner_pos(.data$x_zone, col2_axislim),
-      y_pos = corner_pos(.data$y_zone, col2_axislim)
-    )
+    add_count_positions(col2_axislim, col2_axislim)
 
   col3_counts <- pair_within_dataset %>%
     dplyr::mutate(
@@ -1628,10 +1666,7 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
       y_zone = zone_label(.data$delta_truth_mu, delta_truth_thresh)
     ) %>%
     dplyr::count(.data$pair_kind, .data$x_zone, .data$y_zone) %>%
-    dplyr::mutate(
-      x_pos = corner_pos(.data$x_zone, col3_axislim),
-      y_pos = corner_pos(.data$y_zone, col3_axislim)
-    )
+    add_count_positions(col3_axislim, col3_axislim)
 
   chain_color_3col <- c(mu = "#2b8cbe", pi = "#74c476")
 
@@ -1668,22 +1703,24 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
                 fill = "grey75", alpha = 0.18) +
     count_label_layer(col1_counts) +
     facet_wrap(~ pair_kind, ncol = 1) +
-    scale_x_continuous(limits = col1_xlim, oob = scales::squish) +
-    scale_y_continuous(limits = col1_ylim, oob = scales::squish) +
+    scale_x_continuous(limits = col1_plot_xlim, oob = scales::squish,
+                       expand = expansion(mult = 0)) +
+    scale_y_continuous(limits = col1_plot_ylim, oob = scales::squish,
+                       expand = expansion(mult = 0)) +
     scale_color_manual(values = chain_color_3col,
                        labels = c(mu = "mu chain", pi = "pi chain")) +
     labs(
-      x = sprintf("Delta truth drift [%s]", truth_drift_column),
+      x = sprintf("Delta explanatory basis divergence [%s]", truth_drift_column),
       y = "Delta AUPRC vs cold vanilla",
       color = NULL,
-      title = "Truth drift vs AUPRC (OLS on winsorized data)"
+      title = "Explanatory basis divergence vs AUPRC (OLS on winsorized data)"
     ) +
     theme_effect_paper(base_size = 9)
 
   p_col2 <- ggplot(
-    pair_within_dataset,
-    aes(x = .data$auprc_delta_pi, y = .data$auprc_delta_mu,
-        color = .data$baseline_bin)
+    pair_within_dataset_wins,
+    aes(x = .data$auprc_delta_pi_plot, y = .data$auprc_delta_mu_plot,
+        color = .data$baseline_auprc)
   ) +
     threshold_lines(delta_auprc_thresh, delta_auprc_thresh) +
     geom_abline(slope = 1, intercept = 0, color = "grey45",
@@ -1691,10 +1728,22 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
     geom_point(alpha = 0.55, size = 1.7, stroke = 0) +
     count_label_layer(col2_counts) +
     facet_wrap(~ pair_kind, ncol = 1) +
-    scale_x_continuous(limits = col2_axislim, oob = scales::squish) +
-    scale_y_continuous(limits = col2_axislim, oob = scales::squish) +
-    scale_color_manual(values = baseline_bin_palette,
-                       name = "Baseline bin") +
+    scale_x_continuous(limits = col2_plot_axislim, oob = scales::squish,
+                       expand = expansion(mult = 0)) +
+    scale_y_continuous(limits = col2_plot_axislim, oob = scales::squish,
+                       expand = expansion(mult = 0)) +
+    scale_color_viridis_c(
+      option = "C",
+      name = "Baseline AUPRC (vanilla SuSiE)",
+      guide = guide_colorbar(
+        title.position = "top",
+        title.hjust = 0.5,
+        label.position = "bottom",
+        barwidth = grid::unit(2.5, "cm"),
+        barheight = grid::unit(0.24, "cm"),
+        direction = "horizontal"
+      )
+    ) +
     labs(
       x = "Delta AUPRC (pi)",
       y = "Delta AUPRC (mu)",
@@ -1703,8 +1752,8 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
     theme_effect_paper(base_size = 9)
 
   p_col3 <- ggplot(
-    pair_within_dataset,
-    aes(x = .data$delta_truth_pi, y = .data$delta_truth_mu,
+    pair_within_dataset_wins,
+    aes(x = .data$delta_truth_pi_plot, y = .data$delta_truth_mu_plot,
         color = .data$baseline_bin)
   ) +
     threshold_lines(delta_truth_thresh, delta_truth_thresh) +
@@ -1713,20 +1762,34 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
     geom_point(alpha = 0.55, size = 1.7, stroke = 0) +
     count_label_layer(col3_counts) +
     facet_wrap(~ pair_kind, ncol = 1) +
-    scale_x_continuous(limits = col3_axislim, oob = scales::squish) +
-    scale_y_continuous(limits = col3_axislim, oob = scales::squish) +
-    scale_color_manual(values = baseline_bin_palette,
-                       name = "Baseline bin") +
+    scale_x_continuous(limits = col3_plot_axislim, oob = scales::squish,
+                       expand = expansion(mult = 0)) +
+    scale_y_continuous(limits = col3_plot_axislim, oob = scales::squish,
+                       expand = expansion(mult = 0)) +
+    scale_color_manual(
+      values = baseline_bin_palette,
+      name = "Explanatory basis divergence from truth at baseline (vanilla SuSiE)",
+      guide = guide_legend(title.position = "top", nrow = 1)
+    ) +
     labs(
-      x = sprintf("Delta truth drift (pi) [%s]", truth_drift_column),
-      y = sprintf("Delta truth drift (mu) [%s]", truth_drift_column),
-      title = "Mu vs pi: delta truth drift"
+      x = sprintf("Delta explanatory basis divergence (pi) [%s]",
+                  truth_drift_column),
+      y = sprintf("Delta explanatory basis divergence (mu) [%s]",
+                  truth_drift_column),
+      title = "Mu vs pi: delta explanatory basis divergence"
     ) +
     theme_effect_paper(base_size = 9)
 
-  combined_3col <- (p_col1 | p_col2 | p_col3) +
+  first_col_3col <- p_col1 +
+    theme(legend.position = "bottom",
+          legend.justification = "center")
+  mu_pi_cols_3col <- (p_col2 | p_col3) +
     plot_layout(guides = "collect") &
-    theme(legend.position = "bottom")
+    theme(legend.position = "bottom",
+          legend.justification = "center",
+          legend.box = "horizontal")
+  combined_3col <- (first_col_3col | mu_pi_cols_3col) +
+    plot_layout(widths = c(1, 2))
 
   ggsave(
     file.path(diagnostic_dir, "truth_drift_sanity_3col_scatter.png"),
@@ -1734,27 +1797,27 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
   )
   print(combined_3col)
 
-  cat("Trimmed axis limits (symmetric, 99% of |value|):\n")
-  cat(sprintf("  col 1 x (delta_truth): [%.3f, %.3f]\n",
+  cat("Inner winsorization limits (symmetric, 99% of |value|):\n")
+  cat(sprintf("  col 1 x (delta_explanatory_basis_divergence): [%.3f, %.3f]\n",
               col1_xlim[1], col1_xlim[2]))
   cat(sprintf("  col 1 y (delta_AUPRC): [%.3f, %.3f]\n",
               col1_ylim[1], col1_ylim[2]))
   cat(sprintf("  col 2 axes (delta_AUPRC): [%.3f, %.3f]\n",
               col2_axislim[1], col2_axislim[2]))
-  cat(sprintf("  col 3 axes (delta_truth): [%.3f, %.3f]\n",
+  cat(sprintf("  col 3 axes (delta_explanatory_basis_divergence): [%.3f, %.3f]\n",
               col3_axislim[1], col3_axislim[2]))
-  cat("Cell counts (col 1: truth_drift x AUPRC, chain pooled):\n")
+  cat("Cell counts (col 1: explanatory-basis-divergence x AUPRC, chain pooled):\n")
   print(col1_counts %>% dplyr::select(-.data$x_pos, -.data$y_pos))
   cat("Cell counts (col 2: mu vs pi delta AUPRC):\n")
   print(col2_counts %>% dplyr::select(-.data$x_pos, -.data$y_pos))
-  cat("Cell counts (col 3: mu vs pi delta truth drift):\n")
+  cat("Cell counts (col 3: mu vs pi delta explanatory basis divergence):\n")
   print(col3_counts %>% dplyr::select(-.data$x_pos, -.data$y_pos))
 } else {
   message("Skipping 3-col scatter; sanity_join not yet built.")
 }
 ```
 
-```{r truth-drift-sanity-3col-violin, fig.width=12, fig.height=6.8}
+```{r explanatory-basis-divergence-sanity-3col-violin, fig.width=12, fig.height=6.8}
 # Variant of the 3-col layout above. Col 1 unchanged; cols 2 and 3 swap the
 # per-dataset paired scatters for violin + boxplot summaries by chain. Loses
 # pairing info, gains a cleaner read on per-chain marginal distributions.
@@ -1783,10 +1846,11 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
     scale_color_manual(values = chain_color_3col,
                        labels = c(mu = "mu chain", pi = "pi chain")) +
     labs(
-      x = sprintf("Delta truth drift [%s]", truth_drift_column),
+      x = sprintf("Delta explanatory basis divergence [%s]",
+                  truth_drift_column),
       y = "Delta AUPRC vs cold vanilla",
       color = NULL,
-      title = "Truth drift vs AUPRC"
+      title = "Explanatory basis divergence vs AUPRC"
     ) +
     theme_effect_paper(base_size = 9)
 
@@ -1817,8 +1881,9 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
     scale_fill_manual(values = chain_color_3col, guide = "none") +
     scale_x_discrete(labels = c(mu = "mu", pi = "pi")) +
     labs(x = NULL,
-         y = sprintf("Delta truth drift [%s]", truth_drift_column),
-         title = "Delta truth drift by chain") +
+         y = sprintf("Delta explanatory basis divergence [%s]",
+                     truth_drift_column),
+         title = "Delta explanatory basis divergence by chain") +
     theme_effect_paper(base_size = 9)
 
   combined_3col_v <- (p_col1_v | p_col2_v | p_col3_v) +
@@ -1835,11 +1900,11 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
 }
 ```
 
-# Baseline Cold Vanilla on (truth_drift, AUPRC)
+# Baseline Cold Vanilla on (explanatory basis divergence, AUPRC)
 
-```{r truth-drift-baseline-only, fig.width=6.4, fig.height=4.4}
+```{r explanatory-basis-divergence-baseline-only, fig.width=6.4, fig.height=4.4}
 # Foundation plot for the trajectory and curve-residual analyses: cold
-# SuSiE-vanilla AUPRC vs truth drift, one point per dataset. The LOESS
+# SuSiE-vanilla AUPRC vs explanatory basis divergence, one point per dataset. The LOESS
 # smoother previews the curve that step 3 would fit for the residual
 # reparameterization.
 if (file.exists(truth_drift_csv)) {
@@ -1860,7 +1925,7 @@ if (file.exists(truth_drift_csv)) {
 
   cat("Baseline (cold vanilla) points: ", nrow(baseline_points), "\n", sep = "")
   cat(sprintf(
-    "  truth_drift: median %.3f, mean %.3f, range [%.3f, %.3f]\n",
+    "  explanatory_basis_divergence: median %.3f, mean %.3f, range [%.3f, %.3f]\n",
     stats::median(baseline_points$truth_drift, na.rm = TRUE),
     mean(baseline_points$truth_drift, na.rm = TRUE),
     min(baseline_points$truth_drift, na.rm = TRUE),
@@ -1883,10 +1948,10 @@ if (file.exists(truth_drift_csv)) {
                 color = "#c44e52", fill = "#c44e52", alpha = 0.15,
                 linewidth = 0.6) +
     labs(
-      x = sprintf("Truth drift to top-K causal basis [%s]",
+      x = sprintf("Explanatory basis divergence from top-K causal basis [%s]",
                   truth_drift_column),
       y = "AUPRC (cold SuSiE-vanilla)",
-      title = "Baseline: cold vanilla AUPRC vs truth drift",
+      title = "Baseline: cold vanilla AUPRC vs explanatory basis divergence",
       subtitle = paste(
         "One point per dataset (n =", nrow(baseline_points), ").",
         "LOESS smoother previews the curve used in residual-based",
@@ -1905,7 +1970,7 @@ if (file.exists(truth_drift_csv)) {
 }
 ```
 
-```{r truth-drift-baseline-boxplot, fig.width=6.8, fig.height=4.4}
+```{r explanatory-basis-divergence-baseline-boxplot, fig.width=6.8, fig.height=4.4}
 # Cold vanilla AUPRC distribution stratified into three basis-divergence bins.
 # Bin edges match the bins used for centroid stratification in the quadrant
 # trajectory plot below.
@@ -1955,7 +2020,7 @@ if (exists("baseline_points")) {
     ) +
     scale_fill_brewer(palette = "Blues", guide = "none") +
     labs(
-      x = sprintf("Basis divergence from truth bin [%s]",
+      x = sprintf("Explanatory basis divergence from truth bin [%s]",
                   truth_drift_column),
       y = "AUPRC (cold SuSiE-vanilla)",
       title = "Cold vanilla AUPRC by basis divergence bin",
@@ -1974,10 +2039,10 @@ if (exists("baseline_points")) {
 }
 ```
 
-# Truth Drift Trajectory (cold -> annotated -> warm)
+# Explanatory Basis Divergence Trajectory (cold -> annotated -> warm)
 
-```{r truth-drift-trajectory, fig.width=10, fig.height=4.8}
-# Per-dataset trajectories on the (truth_drift, AUPRC) plane. Each dataset
+```{r explanatory-basis-divergence-trajectory, fig.width=10, fig.height=4.8}
+# Per-dataset trajectories on the (explanatory basis divergence, AUPRC) plane. Each dataset
 # contributes three points per chain (cold, annotated, warm) connected by
 # a path. Faded individual paths show the cloud; bold centroid arrows show
 # the mean trajectory per chain.
@@ -2008,7 +2073,7 @@ if (file.exists(truth_drift_csv)) {
       values_to = "auprc"
     )
 
-  # Truth drift at each state per chain, using the same metric as the
+  # Explanatory basis divergence at each state per chain, using the same metric as the
   # sanity scatter (controlled by truth_drift_column above).
   state_method_map <- tibble::tribble(
     ~chain, ~state,       ~model_method,
@@ -2086,10 +2151,10 @@ if (file.exists(truth_drift_csv)) {
     scale_fill_manual(values = state_fill, name = "State (centroid)") +
     scale_shape_manual(values = state_shape, name = "State") +
     labs(
-      x = sprintf("Truth drift to top-K causal basis [%s]",
+      x = sprintf("Explanatory basis divergence from top-K causal basis [%s]",
                   truth_drift_column),
       y = "AUPRC",
-      title = "Per-dataset trajectories on (truth drift, AUPRC)",
+      title = "Per-dataset trajectories on (explanatory basis divergence, AUPRC)",
       subtitle = paste(
         "Faded paths = individual datasets (cold -> annotated -> warm);",
         "black arrow = chain centroid trajectory"
@@ -2106,7 +2171,7 @@ if (file.exists(truth_drift_csv)) {
 
   # Centroid coordinates printed so the directional reading is unambiguous
   # without zooming on the plot.
-  cat("Centroid (truth_drift, AUPRC) per (chain, state):\n")
+  cat("Centroid (explanatory_basis_divergence, AUPRC) per (chain, state):\n")
   print(centroids %>%
           dplyr::mutate(
             truth_drift = round(.data$truth_drift, 4),
@@ -2117,7 +2182,7 @@ if (file.exists(truth_drift_csv)) {
 }
 ```
 
-```{r truth-drift-trajectory-quadrant, fig.width=11.5, fig.height=5.2}
+```{r explanatory-basis-divergence-trajectory-quadrant, fig.width=11.5, fig.height=5.2}
 # Revised trajectory plot:
 #   - thicker, less faded per-dataset paths
 #   - paths colored by the cold -> warm net (AUPRC, divergence) quadrant
@@ -2241,7 +2306,7 @@ if (exists("trajectory_long")) {
                labeller = labeller(chain = c(mu = "mu chain",
                                              pi = "pi chain"))) +
     labs(
-      x = sprintf("Basis divergence from truth [%s]",
+      x = sprintf("Explanatory basis divergence from truth [%s]",
                   truth_drift_column),
       y = "AUPRC",
       title = paste(
@@ -2274,7 +2339,7 @@ if (exists("trajectory_long")) {
 } else {
   message(
     "Skipping quadrant trajectory; trajectory_long not in scope. ",
-    "Run the truth-drift-trajectory chunk first."
+    "Run the explanatory-basis-divergence trajectory chunk first."
   )
 }
 ```
