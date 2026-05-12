@@ -1,0 +1,813 @@
+---
+title: "Causal Basis Alignment vs AUPRC Decomposition (5-arm)"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+This workbook is a sibling to
+`effect_matching_drift_paper_figure_5arm.Rmd`. It replaces one-to-one
+Hungarian truth-basis drift with a truth-audited causal basis alignment score:
+for each top-K causal explanatory signal, find the fitted model effect that
+best covers it, then average the coverage over causal signals.
+
+The goal is to separate three mean-level channels:
+
+1. explanatory basis size: model percent variation explained relative to the
+   top-K causal signal percent variation explained;
+2. explanatory basis alignment: whether the model contains fitted effects that
+   cover each top-K causal explanatory signal;
+3. residual AUPRC movement: the AUPRC delta not predicted by the baseline
+   mean surface over size and alignment. This is a proxy for within-basis or
+   SNP-ranking confusion, not a causal variance decomposition.
+
+```{r setup, message=FALSE}
+here::i_am("vignettes/one_off_validations/causal_basis_alignment_auprc_decomposition_5arm.Rmd")
+
+library(here)
+library(dplyr)
+library(readr)
+library(tidyr)
+library(ggplot2)
+library(patchwork)
+library(scales)
+library(tibble)
+```
+
+# Inputs
+
+```{r paths}
+output_root <- here("output")
+study_name <- "baseline_sims_5arm_effect_matching"
+study_dir <- file.path(output_root, "effect_matching_study", study_name)
+plot_dir <- file.path(study_dir, "drift_analysis_plots")
+alignment_plot_dir <- file.path(plot_dir, "causal_basis_alignment")
+dir.create(alignment_plot_dir, recursive = TRUE, showWarnings = FALSE)
+
+records_rds <- file.path(study_dir, "effect_refit_records.rds")
+auprc_per_dataset_csv <- file.path(study_dir, "auprc_per_dataset_5arm.csv")
+dataset_bundles_csv <- file.path(study_dir, "dataset_bundles.csv")
+
+truth_top_k <- 23L
+truth_fitted_y_rds <- file.path(
+  study_dir, sprintf("causal_basis_truth_fitted_y_5arm_top%d.rds", truth_top_k)
+)
+alignment_scores_csv <- file.path(
+  study_dir, sprintf("causal_basis_alignment_scores_5arm_top%d.csv", truth_top_k)
+)
+decomp_rows_csv <- file.path(
+  study_dir, sprintf("causal_basis_alignment_auprc_decomposition_rows_top%d.csv",
+                     truth_top_k)
+)
+decomp_summary_csv <- file.path(
+  study_dir,
+  sprintf("causal_basis_alignment_auprc_decomposition_summary_top%d.csv",
+          truth_top_k)
+)
+
+baseline_alignment_png <- file.path(
+  alignment_plot_dir, "causal_basis_alignment_baseline_only.png"
+)
+decomposition_png <- file.path(
+  alignment_plot_dir, "causal_basis_alignment_auprc_basis_decomposition.png"
+)
+
+required_files <- c(records_rds, auprc_per_dataset_csv, dataset_bundles_csv)
+missing_files <- required_files[!file.exists(required_files)]
+if (length(missing_files)) {
+  stop("Missing required inputs:\n", paste(missing_files, collapse = "\n"))
+}
+
+cat("Study dir:", study_dir, "\n")
+cat("Alignment plot dir:", alignment_plot_dir, "\n")
+```
+
+# Options
+
+```{r options}
+baseline_method <- "susie_vanilla"
+mu_method <- "susine_functional_mu"
+pi_method <- "susie_functional_pi"
+warm_mu_method <- "susie_vanilla_warm_from_mu"
+warm_pi_method <- "susie_vanilla_warm_from_pi"
+
+methods_in_order <- c(
+  baseline_method, mu_method, warm_mu_method, pi_method, warm_pi_method
+)
+method_labels <- c(
+  susie_vanilla = "Cold vanilla",
+  susine_functional_mu = "Annotated mu",
+  susie_vanilla_warm_from_mu = "Warm vanilla from mu",
+  susie_functional_pi = "Annotated pi",
+  susie_vanilla_warm_from_pi = "Warm vanilla from pi"
+)
+chain_colors <- c("mu chain" = "#2b8cbe", "pi chain" = "#74c476")
+
+# This is intentionally smoother than a high-flexibility GAM. We want a
+# baseline mean surface, not an individual-dataset predictor.
+baseline_surface_span <- 0.85
+baseline_surface_degree <- 1L
+baseline_curve_spline_df <- 5
+```
+
+# Helpers
+
+```{r helpers}
+theme_alignment <- function(base_size = 9) {
+  theme_bw(base_size = base_size) +
+    theme(
+      panel.grid.major = element_line(color = "grey91", linewidth = 0.22),
+      panel.grid.minor = element_blank(),
+      panel.border = element_rect(color = "grey35", fill = NA, linewidth = 0.35),
+      axis.title = element_text(size = base_size),
+      axis.text = element_text(size = base_size - 1, color = "grey25"),
+      plot.title = element_text(face = "bold", size = base_size + 1.1,
+                                margin = margin(b = 3)),
+      strip.background = element_rect(fill = "grey88", color = "grey35",
+                                      linewidth = 0.35),
+      strip.text = element_text(size = base_size - 0.8, color = "grey20"),
+      legend.title = element_text(size = base_size - 0.6),
+      legend.text = element_text(size = base_size - 1.2),
+      plot.margin = margin(3, 3, 3, 3)
+    )
+}
+
+safe_corr <- function(x) {
+  pmax(-1, pmin(1, x))
+}
+
+records_to_fitted_y_matrix <- function(rows) {
+  rows <- rows %>% dplyr::arrange(.data$effect)
+  mat <- do.call(cbind, rows$fitted_y_effect)
+  storage.mode(mat) <- "double"
+  colnames(mat) <- as.character(rows$effect)
+  mat
+}
+
+safe_cor_matrix <- function(mat_a, mat_b, sd_eps = 1e-12) {
+  if (nrow(mat_a) != nrow(mat_b)) {
+    stop("Mismatched n (", nrow(mat_a), " vs ", nrow(mat_b), ").")
+  }
+  sd_a <- apply(mat_a, 2L, stats::sd)
+  sd_b <- apply(mat_b, 2L, stats::sd)
+  active_a <- is.finite(sd_a) & sd_a > sd_eps
+  active_b <- is.finite(sd_b) & sd_b > sd_eps
+
+  cor_mat <- matrix(0, nrow = ncol(mat_a), ncol = ncol(mat_b),
+                    dimnames = list(colnames(mat_a), colnames(mat_b)))
+  if (any(active_a) && any(active_b)) {
+    sub <- suppressWarnings(stats::cor(
+      mat_a[, active_a, drop = FALSE],
+      mat_b[, active_b, drop = FALSE],
+      use = "pairwise.complete.obs"
+    ))
+    sub[!is.finite(sub)] <- 0
+    cor_mat[active_a, active_b] <- sub
+  }
+  cor_mat
+}
+
+clip01 <- function(x) {
+  pmin(pmax(x, 0), 1)
+}
+
+clamp <- function(x, lim) {
+  pmin(pmax(x, lim[[1]]), lim[[2]])
+}
+
+smooth_line_df <- function(df, x_col, y_col, out_x = NULL,
+                           spline_df = baseline_curve_spline_df) {
+  d <- df %>%
+    dplyr::filter(is.finite(.data[[x_col]]), is.finite(.data[[y_col]])) %>%
+    dplyr::arrange(.data[[x_col]])
+  if (nrow(d) < spline_df + 2L) {
+    return(tibble::tibble())
+  }
+  fit <- stats::smooth.spline(
+    x = d[[x_col]],
+    y = d[[y_col]],
+    df = spline_df
+  )
+  if (is.null(out_x)) {
+    out_x <- seq(min(d[[x_col]], na.rm = TRUE),
+                 max(d[[x_col]], na.rm = TRUE),
+                 length.out = 300L)
+  }
+  tibble::tibble(
+    x = out_x,
+    y = clip01(stats::predict(fit, x = out_x)$y)
+  )
+}
+```
+
+# Read Cached Fits
+
+```{r read-cache}
+records <- readRDS(records_rds) %>%
+  dplyr::mutate(
+    dataset_bundle_id = as.character(.data$dataset_bundle_id),
+    matrix_id = as.character(.data$matrix_id),
+    effect = as.integer(.data$effect),
+    model_method = as.character(.data$model_method)
+  ) %>%
+  dplyr::filter(.data$model_method %in% methods_in_order)
+
+auprc_per_dataset <- readr::read_csv(
+  auprc_per_dataset_csv, show_col_types = FALSE
+) %>%
+  dplyr::mutate(dataset_bundle_id = as.character(.data$dataset_bundle_id))
+
+auprc_long <- auprc_per_dataset %>%
+  dplyr::transmute(
+    dataset_bundle_id = .data$dataset_bundle_id,
+    !!baseline_method := .data$auprc_susie_vanilla,
+    !!mu_method := .data$auprc_susine_functional_mu,
+    !!warm_mu_method := .data$auprc_susie_vanilla_warm_from_mu,
+    !!pi_method := .data$auprc_susie_functional_pi,
+    !!warm_pi_method := .data$auprc_susie_vanilla_warm_from_pi
+  ) %>%
+  tidyr::pivot_longer(
+    cols = dplyr::all_of(methods_in_order),
+    names_to = "model_method",
+    values_to = "auprc"
+  )
+
+dataset_bundles <- readr::read_csv(
+  dataset_bundles_csv, show_col_types = FALSE
+) %>%
+  dplyr::mutate(dataset_bundle_id = as.character(.data$dataset_bundle_id))
+
+records_by_dataset_method <- records %>%
+  split(list(.$dataset_bundle_id, .$model_method))
+
+cat("Effect records:", nrow(records), "\n")
+cat("Datasets:", dplyr::n_distinct(records$dataset_bundle_id), "\n")
+cat("Methods:", paste(sort(unique(records$model_method)), collapse = ", "), "\n")
+```
+
+# Build Top-K Causal Fitted-y Signals
+
+```{r build-truth-fitted-y}
+if (file.exists(truth_fitted_y_rds)) {
+  truth_fitted_y_lookup <- readRDS(truth_fitted_y_rds)
+  cat("Loaded cached top-K causal fitted-y lookup from ",
+      truth_fitted_y_rds, "\n", sep = "")
+} else {
+  if (!requireNamespace("devtools", quietly = TRUE)) {
+    stop("devtools is needed to regenerate top-K causal fitted-y signals.")
+  }
+  suppressMessages(devtools::load_all(here()))
+
+  susine_sister_path <- here("..", "susine")
+  if (file.exists(file.path(susine_sister_path, "DESCRIPTION"))) {
+    options(test_susine.local_susine_path = normalizePath(
+      susine_sister_path, winslash = "/", mustWork = TRUE
+    ))
+    suppressMessages(devtools::load_all(susine_sister_path))
+  }
+
+  source(here("vignettes", "one_off_validations", "_5arm_cfg.R"))
+  cfg_bundle <- build_5arm_cfg(
+    here_root = here(),
+    output_root = output_root,
+    baseline_screening_csv = file.path(
+      output_root, "slurm_output", baseline_job_name_5arm,
+      baseline_parent_job_id_5arm, "consolidated", "screening_summary.csv"
+    ),
+    baseline_cfg_path = file.path(
+      output_root, "run_history", baseline_job_name_5arm,
+      baseline_parent_job_id_5arm, "job_config.json"
+    ),
+    settings_cache_csv = file.path(study_dir, "selected_5arm_settings.csv"),
+    prefer_settings_cache = TRUE,
+    allow_manual_fallback = TRUE
+  )
+  cfg_for_truth <- cfg_bundle$cfg
+
+  ds_ids <- sort(unique(records$dataset_bundle_id))
+  truth_fitted_y_lookup <- vector("list", length(ds_ids))
+  names(truth_fitted_y_lookup) <- ds_ids
+  started <- proc.time()[["elapsed"]]
+
+  for (i in seq_along(ds_ids)) {
+    ds_id <- ds_ids[[i]]
+    bundle_row <- dataset_bundles %>%
+      dplyr::filter(.data$dataset_bundle_id == !!ds_id)
+    if (nrow(bundle_row) != 1L) {
+      stop("Expected one dataset bundle row for ", ds_id,
+           "; found ", nrow(bundle_row), ".")
+    }
+
+    data_bundle <- test_susine:::generate_data_for_bundle(
+      bundle_row, cfg_for_truth
+    )
+    causal <- as.integer(data_bundle$causal_idx)
+    beta <- as.numeric(data_bundle$beta)
+    if (!length(causal)) {
+      truth_fitted_y_lookup[[ds_id]] <- NULL
+      next
+    }
+
+    abs_beta_at_causals <- abs(beta[causal])
+    ord <- order(abs_beta_at_causals, decreasing = TRUE)
+    top_k_i <- min(truth_top_k, length(causal))
+    top_idx <- causal[ord[seq_len(top_k_i)]]
+
+    var_y <- stats::var(data_bundle$y)
+    fitted_y_effect <- lapply(top_idx, function(j) {
+      as.numeric(data_bundle$X[, j] * beta[j])
+    })
+    var_y_explained_frac <- vapply(
+      fitted_y_effect,
+      function(v) stats::var(v) / var_y,
+      numeric(1)
+    )
+
+    truth_fitted_y_lookup[[ds_id]] <- list(
+      top_idx = as.integer(top_idx),
+      beta_top = as.numeric(beta[top_idx]),
+      fitted_y_effect = fitted_y_effect,
+      var_y_explained_frac = as.numeric(var_y_explained_frac),
+      n_obs = length(data_bundle$y)
+    )
+
+    if (i %% 50L == 0L || i == length(ds_ids)) {
+      elapsed <- proc.time()[["elapsed"]] - started
+      cat(sprintf("Built truth fitted-y %d/%d | elapsed %.1fs\n",
+                  i, length(ds_ids), elapsed))
+    }
+  }
+
+  truth_fitted_y_lookup <- truth_fitted_y_lookup[
+    !vapply(truth_fitted_y_lookup, is.null, logical(1))
+  ]
+  saveRDS(truth_fitted_y_lookup, truth_fitted_y_rds)
+  cat("Saved top-K causal fitted-y lookup to ",
+      truth_fitted_y_rds, "\n", sep = "")
+}
+```
+
+# Causal Basis Alignment Score
+
+```{r compute-alignment}
+# For each top-K causal signal t_j, score coverage_j = max_l corr(t_j, f_l)^2,
+# where f_l ranges over fitted model effects. The weighted score audits the
+# truth side directly and does not require a one-to-one effect assignment.
+compute_alignment_one_fit <- function(rows, truth_obj) {
+  if (is.null(rows) || !nrow(rows) || is.null(truth_obj)) {
+    return(NULL)
+  }
+
+  fit_mat <- records_to_fitted_y_matrix(rows)
+  truth_mat <- do.call(cbind, truth_obj$fitted_y_effect)
+  storage.mode(truth_mat) <- "double"
+  colnames(truth_mat) <- paste0("truth_", seq_len(ncol(truth_mat)))
+
+  cor_mat <- safe_cor_matrix(fit_mat, truth_mat)
+  coverage_by_truth <- apply(safe_corr(cor_mat)^2, 2L, max, na.rm = TRUE)
+  coverage_by_truth[!is.finite(coverage_by_truth)] <- 0
+
+  truth_w <- pmax(tidyr::replace_na(
+    as.numeric(truth_obj$var_y_explained_frac), 0
+  ), 0)
+  model_w <- pmax(tidyr::replace_na(
+    as.numeric(rows$var_y_explained_frac), 0
+  ), 0)
+
+  truth_pve <- sum(truth_w, na.rm = TRUE)
+  model_pve <- sum(model_w, na.rm = TRUE)
+  alignment_weighted <- if (truth_pve > 0) {
+    sum(truth_w * coverage_by_truth, na.rm = TRUE) / truth_pve
+  } else {
+    NA_real_
+  }
+
+  tibble::tibble(
+    dataset_bundle_id = as.character(rows$dataset_bundle_id[[1]]),
+    matrix_id = as.character(rows$matrix_id[[1]]),
+    model_method = as.character(rows$model_method[[1]]),
+    n_model_effects = nrow(rows),
+    n_truth_signals = length(truth_w),
+    causal_basis_alignment_score = alignment_weighted,
+    causal_basis_misalignment = 1 - alignment_weighted,
+    causal_basis_alignment_unweighted = mean(coverage_by_truth, na.rm = TRUE),
+    min_causal_signal_coverage = min(coverage_by_truth, na.rm = TRUE),
+    model_pve_frac = model_pve,
+    truth_topk_pve_frac = truth_pve,
+    pve_ratio_model_to_truth = model_pve / truth_pve,
+    pve_log2_ratio_model_to_truth = log2(model_pve / truth_pve),
+    pve_abs_log2_ratio_model_to_truth = abs(log2(model_pve / truth_pve))
+  )
+}
+
+if (file.exists(alignment_scores_csv)) {
+  alignment_scores <- readr::read_csv(
+    alignment_scores_csv, show_col_types = FALSE
+  ) %>%
+    dplyr::mutate(dataset_bundle_id = as.character(.data$dataset_bundle_id))
+  cat("Loaded cached causal basis alignment scores from ",
+      alignment_scores_csv, "\n", sep = "")
+} else {
+  rows_out <- list()
+  ds_ids <- intersect(
+    sort(unique(records$dataset_bundle_id)),
+    names(truth_fitted_y_lookup)
+  )
+  started <- proc.time()[["elapsed"]]
+  counter <- 0L
+  for (ds_id in ds_ids) {
+    truth_obj <- truth_fitted_y_lookup[[ds_id]]
+    for (m in methods_in_order) {
+      rows <- records_by_dataset_method[[paste(ds_id, m, sep = ".")]]
+      res <- compute_alignment_one_fit(rows, truth_obj)
+      if (!is.null(res)) {
+        rows_out[[length(rows_out) + 1L]] <- res
+      }
+      counter <- counter + 1L
+    }
+    if (length(rows_out) %% 250L == 0L) {
+      elapsed <- proc.time()[["elapsed"]] - started
+      cat(sprintf("Computed alignment for %d fits | elapsed %.1fs\n",
+                  length(rows_out), elapsed))
+    }
+  }
+
+  alignment_scores <- dplyr::bind_rows(rows_out) %>%
+    dplyr::left_join(auprc_long, by = c("dataset_bundle_id", "model_method"))
+  readr::write_csv(alignment_scores, alignment_scores_csv)
+  cat("Wrote causal basis alignment scores to ",
+      alignment_scores_csv, "\n", sep = "")
+}
+
+print(
+  alignment_scores %>%
+    dplyr::group_by(.data$model_method) %>%
+    dplyr::summarise(
+      n = dplyr::n(),
+      mean_alignment = mean(.data$causal_basis_alignment_score, na.rm = TRUE),
+      mean_misalignment = mean(.data$causal_basis_misalignment, na.rm = TRUE),
+      mean_pve_ratio = mean(.data$pve_ratio_model_to_truth, na.rm = TRUE),
+      mean_auprc = mean(.data$auprc, na.rm = TRUE),
+      .groups = "drop"
+    )
+)
+```
+
+# Baseline Relationships
+
+```{r baseline-relationships, fig.width=10.2, fig.height=4.8}
+baseline_alignment <- alignment_scores %>%
+  dplyr::filter(.data$model_method == baseline_method) %>%
+  dplyr::filter(
+    is.finite(.data$auprc),
+    is.finite(.data$causal_basis_alignment_score),
+    is.finite(.data$pve_log2_ratio_model_to_truth)
+  )
+
+baseline_surface_fit <- stats::loess(
+  auprc ~ causal_basis_alignment_score + pve_log2_ratio_model_to_truth,
+  data = baseline_alignment,
+  span = baseline_surface_span,
+  degree = baseline_surface_degree,
+  control = stats::loess.control(surface = "direct")
+)
+alignment_range <- range(
+  baseline_alignment$causal_basis_alignment_score, na.rm = TRUE
+)
+size_range <- range(
+  baseline_alignment$pve_log2_ratio_model_to_truth, na.rm = TRUE
+)
+
+predict_baseline_auprc_surface <- function(alignment_score, size_log2_ratio) {
+  pred_df <- tibble::tibble(
+    causal_basis_alignment_score = clamp(alignment_score, alignment_range),
+    pve_log2_ratio_model_to_truth = clamp(size_log2_ratio, size_range)
+  )
+  clip01(as.numeric(stats::predict(baseline_surface_fit, newdata = pred_df)))
+}
+
+misalignment_curve <- smooth_line_df(
+  baseline_alignment,
+  x_col = "causal_basis_misalignment",
+  y_col = "auprc"
+)
+size_curve <- smooth_line_df(
+  baseline_alignment,
+  x_col = "pve_log2_ratio_model_to_truth",
+  y_col = "auprc"
+)
+
+p_baseline_misalignment <- ggplot(
+  baseline_alignment,
+  aes(x = .data$causal_basis_misalignment, y = .data$auprc,
+      color = .data$pve_log2_ratio_model_to_truth)
+) +
+  geom_point(alpha = 0.48, size = 1.45, stroke = 0) +
+  geom_line(
+    data = misalignment_curve,
+    aes(x = .data$x, y = .data$y),
+    inherit.aes = FALSE,
+    color = "#c44e52", linewidth = 0.75
+  ) +
+  scale_color_viridis_c(option = "C", name = "log2(model PVE /\ntruth PVE)") +
+  labs(
+    x = "Causal basis misalignment (1 - weighted coverage)",
+    y = "AUPRC (cold vanilla)",
+    title = "Baseline AUPRC vs causal basis misalignment"
+  ) +
+  theme_alignment(base_size = 9)
+
+p_baseline_size <- ggplot(
+  baseline_alignment,
+  aes(x = .data$pve_log2_ratio_model_to_truth, y = .data$auprc,
+      color = .data$causal_basis_alignment_score)
+) +
+  geom_vline(xintercept = 0, color = "grey60", linewidth = 0.25) +
+  geom_point(alpha = 0.48, size = 1.45, stroke = 0) +
+  geom_line(
+    data = size_curve,
+    aes(x = .data$x, y = .data$y),
+    inherit.aes = FALSE,
+    color = "#c44e52", linewidth = 0.75
+  ) +
+  scale_color_viridis_c(option = "D", name = "Causal basis\nalignment") +
+  labs(
+    x = "log2(model PVE / top-K causal PVE)",
+    y = "AUPRC (cold vanilla)",
+    title = "Baseline AUPRC vs explanatory basis size"
+  ) +
+  theme_alignment(base_size = 9)
+
+p_baseline_combined <- p_baseline_misalignment | p_baseline_size
+ggsave(
+  baseline_alignment_png,
+  p_baseline_combined, width = 10.2, height = 4.8, dpi = 220, bg = "white"
+)
+print(p_baseline_combined)
+```
+
+# Mean Delta Attribution
+
+```{r transition-decomposition, fig.width=11.5, fig.height=7.2}
+state_method_map <- tibble::tribble(
+  ~chain, ~state,       ~model_method,
+  "mu",   "cold",       baseline_method,
+  "mu",   "annotated",  mu_method,
+  "mu",   "warm",       warm_mu_method,
+  "pi",   "cold",       baseline_method,
+  "pi",   "annotated",  pi_method,
+  "pi",   "warm",       warm_pi_method
+)
+
+state_metrics <- alignment_scores %>%
+  dplyr::inner_join(state_method_map, by = "model_method",
+                    relationship = "many-to-many") %>%
+  dplyr::transmute(
+    dataset_bundle_id = .data$dataset_bundle_id,
+    chain = .data$chain,
+    state = .data$state,
+    alignment = .data$causal_basis_alignment_score,
+    misalignment = .data$causal_basis_misalignment,
+    size_log2_ratio = .data$pve_log2_ratio_model_to_truth,
+    auprc = .data$auprc
+  )
+
+state_wide <- state_metrics %>%
+  tidyr::pivot_wider(
+    names_from = .data$state,
+    values_from = c(.data$alignment, .data$misalignment,
+                    .data$size_log2_ratio, .data$auprc)
+  )
+
+transition_rows <- dplyr::bind_rows(
+  state_wide %>%
+    dplyr::transmute(
+      dataset_bundle_id = .data$dataset_bundle_id,
+      chain = .data$chain,
+      transition = "cold_ann",
+      start_alignment = .data$alignment_cold,
+      end_alignment = .data$alignment_annotated,
+      start_misalignment = .data$misalignment_cold,
+      end_misalignment = .data$misalignment_annotated,
+      start_size = .data$size_log2_ratio_cold,
+      end_size = .data$size_log2_ratio_annotated,
+      start_auprc = .data$auprc_cold,
+      end_auprc = .data$auprc_annotated
+    ),
+  state_wide %>%
+    dplyr::transmute(
+      dataset_bundle_id = .data$dataset_bundle_id,
+      chain = .data$chain,
+      transition = "cold_warm",
+      start_alignment = .data$alignment_cold,
+      end_alignment = .data$alignment_warm,
+      start_misalignment = .data$misalignment_cold,
+      end_misalignment = .data$misalignment_warm,
+      start_size = .data$size_log2_ratio_cold,
+      end_size = .data$size_log2_ratio_warm,
+      start_auprc = .data$auprc_cold,
+      end_auprc = .data$auprc_warm
+    )
+) %>%
+  dplyr::mutate(
+    f_start = predict_baseline_auprc_surface(.data$start_alignment,
+                                             .data$start_size),
+    f_end = predict_baseline_auprc_surface(.data$end_alignment,
+                                           .data$end_size),
+    f_align_then = predict_baseline_auprc_surface(.data$end_alignment,
+                                                  .data$start_size),
+    f_size_then = predict_baseline_auprc_surface(.data$start_alignment,
+                                                 .data$end_size),
+    observed_delta = .data$end_auprc - .data$start_auprc,
+    structural_pred_delta = .data$f_end - .data$f_start,
+    alignment_component = 0.5 * (
+      (.data$f_align_then - .data$f_start) +
+        (.data$f_end - .data$f_size_then)
+    ),
+    size_component = 0.5 * (
+      (.data$f_size_then - .data$f_start) +
+        (.data$f_end - .data$f_align_then)
+    ),
+    residual_component = .data$observed_delta -
+      .data$alignment_component - .data$size_component,
+    delta_alignment = .data$end_alignment - .data$start_alignment,
+    delta_misalignment = .data$end_misalignment - .data$start_misalignment,
+    delta_size = .data$end_size - .data$start_size,
+    chain = factor(.data$chain, levels = c("mu", "pi"),
+                   labels = c("mu chain", "pi chain")),
+    transition = factor(
+      .data$transition,
+      levels = c("cold_ann", "cold_warm"),
+      labels = c("Cold -> annotated", "Cold -> warm vanilla")
+    )
+  ) %>%
+  dplyr::filter(
+    is.finite(.data$observed_delta),
+    is.finite(.data$structural_pred_delta),
+    is.finite(.data$residual_component)
+  )
+
+transition_summary <- transition_rows %>%
+  dplyr::group_by(.data$chain, .data$transition) %>%
+  dplyr::summarise(
+    n = dplyr::n(),
+    observed_mean = mean(.data$observed_delta, na.rm = TRUE),
+    structural_pred_mean = mean(.data$structural_pred_delta, na.rm = TRUE),
+    alignment_mean = mean(.data$alignment_component, na.rm = TRUE),
+    size_mean = mean(.data$size_component, na.rm = TRUE),
+    residual_mean = mean(.data$residual_component, na.rm = TRUE),
+    structural_share_of_mean = .data$structural_pred_mean /
+      .data$observed_mean,
+    mean_delta_alignment = mean(.data$delta_alignment, na.rm = TRUE),
+    mean_delta_size = mean(.data$delta_size, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+readr::write_csv(transition_rows, decomp_rows_csv)
+readr::write_csv(transition_summary, decomp_summary_csv)
+cat("Causal basis alignment decomposition summary:\n")
+print(transition_summary)
+
+decomp_lim <- max(abs(c(
+  transition_rows$observed_delta,
+  transition_rows$structural_pred_delta
+)), na.rm = TRUE)
+decomp_lim <- max(0.05, decomp_lim)
+
+p_structural_scatter <- ggplot(
+  transition_rows,
+  aes(x = .data$structural_pred_delta, y = .data$observed_delta,
+      color = .data$start_misalignment)
+) +
+  geom_hline(yintercept = 0, color = "grey65", linewidth = 0.25) +
+  geom_vline(xintercept = 0, color = "grey65", linewidth = 0.25) +
+  geom_abline(slope = 1, intercept = 0, color = "grey35",
+              linetype = "dashed", linewidth = 0.35) +
+  geom_point(alpha = 0.58, size = 1.45, stroke = 0) +
+  facet_grid(chain ~ transition) +
+  scale_color_viridis_c(option = "C", name = "Baseline causal\nbasis misalignment") +
+  coord_cartesian(xlim = c(-decomp_lim, decomp_lim),
+                  ylim = c(-decomp_lim, decomp_lim)) +
+  labs(
+    x = "AUPRC delta predicted from alignment + size",
+    y = "Observed AUPRC delta",
+    title = "How much observed AUPRC gain is predicted by basis alignment and size?"
+  ) +
+  theme_alignment(base_size = 9) +
+  theme(legend.position = "right")
+
+decomp_components <- transition_summary %>%
+  dplyr::select(.data$chain, .data$transition,
+                .data$alignment_mean, .data$size_mean,
+                .data$residual_mean) %>%
+  tidyr::pivot_longer(
+    cols = c("alignment_mean", "size_mean", "residual_mean"),
+    names_to = "component",
+    values_to = "mean_delta"
+  ) %>%
+  dplyr::mutate(
+    component = factor(
+      .data$component,
+      levels = c("alignment_mean", "size_mean", "residual_mean"),
+      labels = c("Basis alignment", "Basis size", "Within-basis / residual")
+    )
+  )
+
+p_decomp_bar <- ggplot(
+  decomp_components,
+  aes(x = .data$chain, y = .data$mean_delta, fill = .data$component)
+) +
+  geom_hline(yintercept = 0, color = "grey45", linewidth = 0.25) +
+  geom_col(width = 0.62) +
+  geom_point(
+    data = transition_summary,
+    aes(x = .data$chain, y = .data$observed_mean),
+    inherit.aes = FALSE,
+    shape = 21, fill = "white", color = "black", size = 2.3,
+    stroke = 0.35
+  ) +
+  facet_wrap(~ transition, nrow = 1) +
+  scale_fill_manual(
+    values = c(
+      "Basis alignment" = "#4c72b0",
+      "Basis size" = "#55a868",
+      "Within-basis / residual" = "#dd8452"
+    )
+  ) +
+  labs(
+    x = NULL,
+    y = "Mean AUPRC delta",
+    fill = NULL,
+    title = "Mean observed gain split by the baseline AUPRC mean surface",
+    subtitle = "White dot marks observed mean delta. Residual is not explained by alignment + size."
+  ) +
+  theme_alignment(base_size = 9) +
+  theme(legend.position = "bottom")
+
+p_metric_shift <- ggplot(
+  transition_rows,
+  aes(x = .data$delta_alignment, y = .data$delta_size,
+      color = .data$observed_delta)
+) +
+  geom_hline(yintercept = 0, color = "grey65", linewidth = 0.25) +
+  geom_vline(xintercept = 0, color = "grey65", linewidth = 0.25) +
+  geom_point(alpha = 0.58, size = 1.45, stroke = 0) +
+  facet_grid(chain ~ transition) +
+  scale_color_gradient2(
+    low = "#2b6cb0", mid = "white", high = "#c53030",
+    midpoint = 0, name = "Observed\nAUPRC delta"
+  ) +
+  labs(
+    x = "Delta causal basis alignment",
+    y = "Delta log2(model PVE / truth PVE)",
+    title = "Transition movement in basis-alignment and basis-size coordinates"
+  ) +
+  theme_alignment(base_size = 9) +
+  theme(legend.position = "right")
+
+p_decomp_combined <- p_structural_scatter /
+  (p_decomp_bar | p_metric_shift) +
+  plot_layout(heights = c(1.18, 1))
+
+ggsave(
+  decomposition_png,
+  p_decomp_combined, width = 11.5, height = 7.2, dpi = 220, bg = "white"
+)
+print(p_decomp_combined)
+```
+
+# Interpretation Notes
+
+The alignment score is deliberately truth-side:
+
+```text
+coverage_j = max_l cor(top-K causal signal j, fitted effect l)^2
+alignment = weighted mean_j coverage_j
+```
+
+This differs from one-to-one effect matching because every top-K causal signal
+is audited directly, and several causal signals may select the same fitted
+effect if the model has merged or rotated components. The score is still
+correlation-based, so correlated causal signals can inflate apparent coverage;
+that is why the decomposition should be read as a diagnostic for explanatory
+basis alignment, not as an oracle causal mechanism.
+
+The attribution is a mean-shift calculation. It fits the cold-vanilla baseline
+mean surface
+
+```text
+E[AUPRC | causal basis alignment, log2(model PVE / truth PVE)]
+```
+
+and asks how much each transition moves along that surface. The residual term
+contains within-basis SNP-ranking effects, model-specific effects not present
+in the cold baseline surface, and noise.
+
+The PVE totals are component-wise sums of `var(fitted_y_component) / var(y)`.
+They are size diagnostics, not joint variance decompositions. When fitted or
+causal components are non-orthogonal, the summed component PVE can differ from
+the variance explained by the span of the components.
