@@ -1486,11 +1486,6 @@ if (!file.exists(truth_drift_csv)) {
 #     center.
 #   - Col 1 keeps chain color; cols 2/3 color by baseline divergence bin.
 if (file.exists(truth_drift_csv) && exists("sanity_join")) {
-  if (!requireNamespace("MASS", quietly = TRUE)) {
-    stop("MASS package required for robust regression. Install via ",
-         "install.packages('MASS').")
-  }
-
   delta_truth_thresh <- 0.05
   delta_auprc_thresh <- 0.02
   trim_q <- c(0.005, 0.995)
@@ -1498,9 +1493,9 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
   divergence_breaks <- c(-Inf, 0.05, 0.10, Inf)
   divergence_labels <- c("[0, 0.05]", "(0.05, 0.10]", "(0.10, inf)")
   baseline_bin_palette <- c(
-    "[0, 0.05]"    = "#08519c",
+    "[0, 0.05]"    = "#9ecae1",
     "(0.05, 0.10]" = "#3182bd",
-    "(0.10, inf)"  = "#9ecae1"
+    "(0.10, inf)"  = "#08519c"
   )
 
   baseline_bin_lookup <- truth_drift_summary %>%
@@ -1550,6 +1545,21 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
                               pair_within_dataset$auprc_delta_mu))
   col3_axislim <- symm_trim(c(pair_within_dataset$delta_truth_pi,
                               pair_within_dataset$delta_truth_mu))
+
+  # Winsorize col-1 data to the trim limits before fitting OLS. The smoother
+  # is then fit on the same values that are visually shown at the panel
+  # edges; isolated high-leverage outliers (sparse density) get pulled to
+  # the trim boundary and lose their disproportionate pull on the slope,
+  # while the dense upper-tail points (which already sit inside the limits)
+  # retain full influence.
+  winsorize <- function(x, lim) {
+    pmin(pmax(x, lim[[1]]), lim[[2]])
+  }
+  sanity_join_lab_wins <- sanity_join_lab %>%
+    dplyr::mutate(
+      delta_truth = winsorize(.data$delta_truth, col1_xlim),
+      auprc_delta = winsorize(.data$auprc_delta, col1_ylim)
+    )
 
   # Zone assignment by sign + magnitude threshold.
   zone_label <- function(x, t) {
@@ -1628,14 +1638,14 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
   }
 
   p_col1 <- ggplot(
-    sanity_join_lab,
+    sanity_join_lab_wins,
     aes(x = .data$delta_truth, y = .data$auprc_delta,
         color = .data$chain)
   ) +
     threshold_lines(delta_truth_thresh, delta_auprc_thresh) +
     geom_point(alpha = 0.45, size = 1.7, stroke = 0) +
-    geom_smooth(method = MASS::rlm, se = FALSE, linewidth = 0.6,
-                method.args = list(maxit = 50)) +
+    geom_smooth(method = "lm", se = TRUE, linewidth = 0.6,
+                fill = "grey75", alpha = 0.18) +
     count_label_layer(col1_counts) +
     facet_wrap(~ pair_kind, ncol = 1) +
     scale_x_continuous(limits = col1_xlim, oob = scales::squish) +
@@ -1646,7 +1656,7 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
       x = sprintf("Delta truth drift [%s]", truth_drift_column),
       y = "Delta AUPRC vs cold vanilla",
       color = NULL,
-      title = "Truth drift vs AUPRC (rlm)"
+      title = "Truth drift vs AUPRC (OLS on winsorized data)"
     ) +
     theme_effect_paper(base_size = 9)
 
