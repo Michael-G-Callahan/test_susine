@@ -77,6 +77,9 @@ baseline_alignment_png <- file.path(
 decomposition_png <- file.path(
   alignment_plot_dir, "causal_basis_alignment_auprc_basis_decomposition.png"
 )
+delta_alignment_mupi_png <- file.path(
+  alignment_plot_dir, "causal_basis_alignment_delta_mu_vs_pi.png"
+)
 
 required_files <- c(records_rds, auprc_per_dataset_csv, dataset_bundles_csv)
 missing_files <- required_files[!file.exists(required_files)]
@@ -764,6 +767,102 @@ ggsave(
   p_decomp_combined, width = 11.5, height = 7.2, dpi = 220, bg = "white"
 )
 print(p_decomp_combined)
+```
+
+```{r delta-alignment-mu-vs-pi, fig.width=8.8, fig.height=4.2}
+if (exists("transition_rows")) {
+  delta_alignment_mupi <- transition_rows %>%
+    dplyr::mutate(
+      chain = as.character(.data$chain),
+      transition = as.character(.data$transition)
+    ) %>%
+    dplyr::select(.data$dataset_bundle_id, .data$chain, .data$transition,
+                  .data$delta_alignment, .data$observed_delta,
+                  .data$start_misalignment) %>%
+    tidyr::pivot_wider(
+      names_from = .data$chain,
+      values_from = c(.data$delta_alignment, .data$observed_delta,
+                      .data$start_misalignment)
+    ) %>%
+    dplyr::mutate(
+      delta_alignment_mu_minus_pi =
+        .data$`delta_alignment_mu chain` -
+        .data$`delta_alignment_pi chain`,
+      observed_delta_mu_minus_pi =
+        .data$`observed_delta_mu chain` -
+        .data$`observed_delta_pi chain`,
+      baseline_misalignment = rowMeans(
+        cbind(.data$`start_misalignment_mu chain`,
+              .data$`start_misalignment_pi chain`),
+        na.rm = TRUE
+      ),
+      transition = factor(
+        .data$transition,
+        levels = c("Cold -> annotated", "Cold -> warm vanilla")
+      )
+    )
+
+  alignment_lim <- max(abs(c(
+    delta_alignment_mupi$`delta_alignment_mu chain`,
+    delta_alignment_mupi$`delta_alignment_pi chain`
+  )), na.rm = TRUE)
+  alignment_lim <- max(0.01, alignment_lim)
+
+  p_delta_alignment_mupi <- ggplot(
+    delta_alignment_mupi,
+    aes(x = .data$`delta_alignment_pi chain`,
+        y = .data$`delta_alignment_mu chain`,
+        color = .data$observed_delta_mu_minus_pi)
+  ) +
+    geom_hline(yintercept = 0, color = "grey65", linewidth = 0.25) +
+    geom_vline(xintercept = 0, color = "grey65", linewidth = 0.25) +
+    geom_abline(slope = 1, intercept = 0, color = "grey35",
+                linetype = "dashed", linewidth = 0.35) +
+    geom_point(alpha = 0.62, size = 1.55, stroke = 0) +
+    facet_wrap(~ transition, nrow = 1) +
+    scale_color_gradient2(
+      low = "#2b6cb0", mid = "white", high = "#c53030",
+      midpoint = 0,
+      name = expression(Delta * "AUPRC"[mu] - Delta * "AUPRC"[pi])
+    ) +
+    coord_fixed(xlim = c(-alignment_lim, alignment_lim),
+                ylim = c(-alignment_lim, alignment_lim)) +
+    labs(
+      x = "Delta causal basis alignment (pi chain)",
+      y = "Delta causal basis alignment (mu chain)",
+      title = "Mu vs pi movement in causal basis alignment",
+      subtitle = "Dashed line: equal alignment movement. Positive delta means better causal signal coverage."
+    ) +
+    theme_alignment(base_size = 9) +
+    theme(legend.position = "right")
+
+  ggsave(
+    delta_alignment_mupi_png,
+    p_delta_alignment_mupi, width = 8.8, height = 4.2, dpi = 220,
+    bg = "white"
+  )
+  print(p_delta_alignment_mupi)
+
+  cat("Mu vs pi delta-alignment summary:\n")
+  print(
+    delta_alignment_mupi %>%
+      dplyr::group_by(.data$transition) %>%
+      dplyr::summarise(
+        n = dplyr::n(),
+        mean_delta_alignment_mu =
+          mean(.data$`delta_alignment_mu chain`, na.rm = TRUE),
+        mean_delta_alignment_pi =
+          mean(.data$`delta_alignment_pi chain`, na.rm = TRUE),
+        mean_mu_minus_pi =
+          mean(.data$delta_alignment_mu_minus_pi, na.rm = TRUE),
+        frac_mu_gt_pi =
+          mean(.data$delta_alignment_mu_minus_pi > 0, na.rm = TRUE),
+        .groups = "drop"
+      )
+  )
+} else {
+  message("Skipping mu-vs-pi delta alignment plot; transition_rows missing.")
+}
 ```
 
 # Interpretation Notes
