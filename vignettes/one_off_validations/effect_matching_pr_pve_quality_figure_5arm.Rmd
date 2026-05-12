@@ -12,8 +12,9 @@ editor_options:
 Streamlined cached plotting workbook for a 5-arm paper figure with:
 
 1. pooled top-8 precision-recall curves,
-2. total model PVE by method,
-3. pooled per-effect quality density shifts.
+2. model-level heritability estimates by method,
+3. mu-chain vs pi-chain AUPRC gains,
+4. pooled per-effect quality density shifts.
 
 ```{r setup, message=FALSE}
 here::i_am("vignettes/one_off_validations/effect_matching_pr_pve_quality_figure_5arm.Rmd")
@@ -37,6 +38,7 @@ plot_dir <- file.path(study_dir, "drift_analysis_plots")
 dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
 
 records_rds <- file.path(study_dir, "effect_refit_records.rds")
+auprc_per_dataset_csv <- file.path(study_dir, "auprc_per_dataset_5arm.csv")
 pr_curves_pooled_csv <- file.path(study_dir, "pr_curves_pooled_top8_5arm.csv")
 pr_auc_pooled_csv <- file.path(study_dir, "pr_auc_pooled_top8_5arm.csv")
 effect_quality_pair_rows_csv <- file.path(study_dir, "effect_quality_pair_rows_5arm.csv")
@@ -48,6 +50,7 @@ paper_figure_pr_pve_quality_png <- file.path(
 
 required_cache_files <- c(
   records_rds,
+  auprc_per_dataset_csv,
   pr_curves_pooled_csv,
   effect_quality_pair_rows_csv
 )
@@ -238,6 +241,11 @@ records <- readRDS(records_rds) %>%
   ) %>%
   dplyr::filter(!is.na(.data$model_method))
 
+auprc_per_dataset <- readr::read_csv(
+  auprc_per_dataset_csv, show_col_types = FALSE
+) %>%
+  dplyr::mutate(dataset_bundle_id = as.character(.data$dataset_bundle_id))
+
 pr_curve_df <- readr::read_csv(pr_curves_pooled_csv, show_col_types = FALSE) %>%
   dplyr::mutate(
     model_method = factor(.data$model_method, levels = methods_in_order)
@@ -374,28 +382,63 @@ panel_A <- ggplot(pr_curve_df,
     panel.grid.minor = element_line(color = "grey95", linewidth = 0.18)
   )
 
-pve_df <- records %>%
+hg2_df <- records %>%
   dplyr::group_by(.data$dataset_bundle_id, .data$model_method) %>%
-  dplyr::summarise(
-    total_model_pve = sum(
-      pmax(tidyr::replace_na(.data$var_y_explained_frac, 0), 0),
+  dplyr::group_modify(function(df, key) {
+    fy_list <- df$fitted_y_effect
+    finite_fy <- vapply(
+      fy_list,
+      function(fy) length(fy) > 1L && all(is.finite(fy)),
+      logical(1)
+    )
+    var_fy <- vapply(
+      fy_list,
+      function(fy) if (length(fy) > 1L) stats::var(as.numeric(fy)) else NA_real_,
+      numeric(1)
+    )
+    var_frac <- as.numeric(df$var_y_explained_frac)
+    var_y_candidates <- var_fy / var_frac
+    var_y_hat <- stats::median(
+      var_y_candidates[
+        finite_fy &
+          is.finite(var_y_candidates) &
+          is.finite(var_frac) &
+          var_frac > 0 &
+          is.finite(var_fy) &
+          var_fy > 0
+      ],
       na.rm = TRUE
-    ),
-    .groups = "drop"
-  )
+    )
+    if (!is.finite(var_y_hat) || var_y_hat <= 0 || !any(finite_fy)) {
+      return(tibble::tibble(hg2_hat = NA_real_, y_var_hat = NA_real_))
+    }
+    fitted_total <- Reduce(`+`, lapply(fy_list[finite_fy], as.numeric))
+    tibble::tibble(
+      hg2_hat = stats::var(fitted_total) / var_y_hat,
+      y_var_hat = var_y_hat
+    )
+  }) %>%
+  dplyr::ungroup()
 
-panel_B <- ggplot(pve_df,
-                  aes(x = .data$model_method, y = .data$total_model_pve,
+panel_B <- ggplot(hg2_df,
+                  aes(x = .data$model_method, y = .data$hg2_hat,
                       fill = .data$model_method)) +
+  geom_hline(yintercept = 0.25, linetype = "dotted",
+             linewidth = 0.45, color = "grey25") +
   geom_boxplot(width = 0.68, outlier.alpha = 0.18,
                outlier.size = 0.45, linewidth = 0.28) +
+  annotate(
+    "text", x = warm_pi_method, y = 0.25,
+    label = "true h_g^2 = 0.25",
+    hjust = 1.03, vjust = -0.55, size = 2.35, color = "grey20"
+  ) +
   scale_x_discrete(labels = method_legend_short[methods_in_order], drop = FALSE) +
   scale_fill_manual(values = method_color, guide = "none") +
   scale_y_continuous(labels = scales::number_format(accuracy = 0.01)) +
   labs(
     x = NULL,
-    y = "Total model PVE",
-    title = "B. Explanatory signal size"
+    y = expression(hat(h)[g]^2),
+    title = "B. Estimated model heritability"
   ) +
   theme_effect_paper(base_size = 8) +
   theme(
@@ -405,7 +448,53 @@ panel_B <- ggplot(pve_df,
                               margin = margin(b = 3))
   )
 
-panel_C_df <- density_shift_df %>%
+panel_C_df <- dplyr::bind_rows(
+  auprc_per_dataset %>%
+    dplyr::transmute(
+      .data$dataset_bundle_id,
+      transition = "cold -> annotated",
+      delta_mu = .data$auprc_delta_mu,
+      delta_pi = .data$auprc_delta_pi
+    ),
+  auprc_per_dataset %>%
+    dplyr::transmute(
+      .data$dataset_bundle_id,
+      transition = "cold -> warm",
+      delta_mu = .data$auprc_delta_warm_mu_vs_vanilla,
+      delta_pi = .data$auprc_delta_warm_pi_vs_vanilla
+    )
+) %>%
+  dplyr::mutate(
+    transition = factor(.data$transition,
+                        levels = c("cold -> annotated", "cold -> warm"))
+  )
+
+delta_lim <- max(abs(c(panel_C_df$delta_mu, panel_C_df$delta_pi)),
+                 na.rm = TRUE)
+delta_lim <- max(delta_lim, 0.01, na.rm = TRUE)
+
+panel_C <- ggplot(panel_C_df,
+                  aes(x = .data$delta_pi, y = .data$delta_mu)) +
+  geom_hline(yintercept = 0, linewidth = 0.25, color = "grey70") +
+  geom_vline(xintercept = 0, linewidth = 0.25, color = "grey70") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed",
+              color = "grey35", linewidth = 0.35) +
+  geom_point(alpha = 0.38, size = 0.85, color = "grey20") +
+  facet_wrap(~ transition, nrow = 1) +
+  coord_equal(xlim = c(-delta_lim, delta_lim),
+              ylim = c(-delta_lim, delta_lim)) +
+  labs(
+    x = expression(paste(Delta, "AUPRC, ", pi, " chain")),
+    y = expression(paste(Delta, "AUPRC, ", mu, " chain")),
+    title = "C. AUPRC gains: mu vs pi chains"
+  ) +
+  theme_effect_paper(base_size = 8) +
+  theme(
+    plot.title = element_text(face = "bold", size = 9.2,
+                              margin = margin(b = 3))
+  )
+
+panel_D_df <- density_shift_df %>%
   dplyr::filter(.data$comparison_kind %in% c(
     "vanilla_to_treatment", "vanilla_to_warm"
   )) %>%
@@ -425,7 +514,7 @@ y_label_paper <- expression(paste(
   "Effect accuracy: ", A[l], " = max causal PIP / max SNP PIP"
 ))
 
-panel_C_core <- ggplot(panel_C_df,
+panel_D_core <- ggplot(panel_D_df,
                        aes(x = .data$x, y = .data$y,
                            fill = .data$density_diff)) +
   geom_raster(interpolate = TRUE) +
@@ -448,7 +537,7 @@ panel_C_core <- ggplot(panel_C_df,
   labs(
     x = x_label_paper, y = y_label_paper,
     fill = "destination - source\n(PVE-weighted density)",
-    title = "C. Per-effect quality shifts"
+    title = "D. Per-effect quality shifts"
   ) +
   guides(fill = guide_colorbar(
     title.position = "top",
@@ -468,19 +557,19 @@ panel_C_core <- ggplot(panel_C_df,
                               margin = margin(b = 3))
   )
 
-panel_C <- (panel_C_core + guide_area()) +
+panel_D <- (panel_D_core + guide_area()) +
   plot_layout(widths = c(1, 0.13), guides = "collect") &
   theme(legend.position = "right")
 
 top_row <- (wrap_elements(full = panel_A) | wrap_elements(full = panel_B)) +
   plot_layout(widths = c(0.52, 0.48))
 
-combined_fig <- (top_row / panel_C) +
-  plot_layout(heights = c(0.9, 1.25))
+combined_fig <- (top_row / panel_C / panel_D) +
+  plot_layout(heights = c(0.9, 0.8, 1.25))
 
 ggsave(
   paper_figure_pr_pve_quality_png, combined_fig,
-  width = 8.8, height = 6.9, dpi = 300, bg = "white",
+  width = 8.8, height = 8.8, dpi = 300, bg = "white",
   limitsize = FALSE
 )
 cat("Wrote figure to ", paper_figure_pr_pve_quality_png, "\n", sep = "")
