@@ -1229,21 +1229,80 @@ real_data_basin_r2_drift_pair <- function(b_a, b_b, R) {
   )
 }
 
+real_data_basin_r2_cache <- function(fit, R) {
+  b <- real_data_extract_b_matrix(fit)
+  if (is.null(b)) return(NULL)
+  if (ncol(b) != ncol(R)) return(NULL)
+  Rb <- tcrossprod(b, R)
+  list(
+    b = b,
+    Rb = Rb,
+    var = pmax(rowSums(b * Rb), 0)
+  )
+}
+
+real_data_basin_r2_drift_pair_cached <- function(cache_a, cache_b) {
+  if (is.null(cache_a) || is.null(cache_b)) return(list(drift = NA_real_, n_matched = 0L))
+  L_a <- nrow(cache_a$b); L_b <- nrow(cache_b$b)
+  if (L_a == 0L || L_b == 0L) return(list(drift = NA_real_, n_matched = 0L))
+  if (!requireNamespace("clue", quietly = TRUE))
+    stop("Package 'clue' required for solve_LSAP. install.packages('clue').")
+
+  num <- cache_a$b %*% t(cache_b$Rb)
+  denom <- sqrt(outer(cache_a$var, cache_b$var))
+  cor_mat <- ifelse(denom > 0, num / denom, 0)
+  cor_mat <- pmin(pmax(cor_mat, -1), 1)
+
+  L <- max(L_a, L_b)
+  M_sq <- matrix(0, L, L)
+  M_sq[seq_len(L_a), seq_len(L_b)] <- cor_mat + 1
+  perm <- as.integer(clue::solve_LSAP(M_sq, maximum = TRUE))
+
+  w_sum <- 0
+  num_sum <- 0
+  n_matched <- 0L
+  for (i in seq_len(L_a)) {
+    j <- perm[i]
+    if (j > L_b) next
+    w <- min(cache_a$var[i], cache_b$var[j])
+    if (!is.finite(w) || w <= 0) next
+    cij <- cor_mat[i, j]
+    num_sum <- num_sum + w * (1 - cij^2)
+    w_sum <- w_sum + w
+    n_matched <- n_matched + 1L
+  }
+  list(
+    drift = if (w_sum > 0) num_sum / w_sum else NA_real_,
+    n_matched = n_matched
+  )
+}
+
 # Compute basin r^2 drift for every (sigma_0_2, c) cell in a locus's
 # functional_grid runs, vs the same-sigma c=0 baseline. Returns a long tibble.
 # `runs_tbl` must have columns: run_id, c_value, sigma_0_2_scalar, fit_rds_path.
-real_data_basin_r2_drift_locus <- function(R, runs_tbl) {
+real_data_basin_r2_drift_locus <- function(R, runs_tbl, progress = NULL) {
   rows <- list()
+  fit_cache <- vector("list", nrow(runs_tbl))
+  for (i in seq_len(nrow(runs_tbl))) {
+    path <- runs_tbl$fit_rds_path[[i]]
+    if (!is.na(path)) {
+      fit <- tryCatch(readRDS(path), error = function(e) NULL)
+      fit_cache[[i]] <- real_data_basin_r2_cache(fit, R)
+    }
+    if (is.function(progress)) {
+      progress(stage = "cached fit", index = i, total = nrow(runs_tbl))
+    }
+  }
   sigmas <- sort(unique(runs_tbl$sigma_0_2_scalar))
   for (sig in sigmas) {
     sig_runs <- runs_tbl %>%
+      dplyr::mutate(.drift_cache_idx = dplyr::row_number()) %>%
       dplyr::filter(abs(.data$sigma_0_2_scalar - !!sig) < 1e-12) %>%
       dplyr::arrange(.data$c_value)
     base_row <- sig_runs %>% dplyr::filter(abs(.data$c_value) < 1e-12)
     if (nrow(base_row) != 1L || is.na(base_row$fit_rds_path[[1]])) next
-    base_fit <- tryCatch(readRDS(base_row$fit_rds_path[[1]]), error = function(e) NULL)
-    b_base <- real_data_extract_b_matrix(base_fit)
-    if (is.null(b_base)) next
+    base_cache <- fit_cache[[base_row$.drift_cache_idx[[1]]]]
+    if (is.null(base_cache)) next
     for (k in seq_len(nrow(sig_runs))) {
       row <- sig_runs[k, , drop = FALSE]
       if (is.na(row$fit_rds_path[[1]])) {
@@ -1254,9 +1313,10 @@ real_data_basin_r2_drift_locus <- function(R, runs_tbl) {
         )
         next
       }
-      this_fit <- tryCatch(readRDS(row$fit_rds_path[[1]]), error = function(e) NULL)
-      b_this <- real_data_extract_b_matrix(this_fit)
-      drift_res <- real_data_basin_r2_drift_pair(b_this, b_base, R)
+      drift_res <- real_data_basin_r2_drift_pair_cached(
+        fit_cache[[row$.drift_cache_idx[[1]]]],
+        base_cache
+      )
       rows[[length(rows) + 1L]] <- tibble::tibble(
         sigma_0_2_scalar = sig,
         c_value = row$c_value[[1]],
@@ -1264,6 +1324,9 @@ real_data_basin_r2_drift_locus <- function(R, runs_tbl) {
         n_matched_effects = drift_res$n_matched,
         run_id = row$run_id[[1]]
       )
+      if (is.function(progress)) {
+        progress(stage = "computed drift", index = length(rows), total = nrow(runs_tbl))
+      }
     }
   }
   dplyr::bind_rows(rows)

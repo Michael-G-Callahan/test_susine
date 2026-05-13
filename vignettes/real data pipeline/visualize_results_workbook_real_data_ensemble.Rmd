@@ -39,6 +39,7 @@ theme_set(theme_bw(base_size = 12))
 ```{r config}
 job_name <- "real_data_ensemble_geometric_n20"
 parent_job_id <- "REPLACE_WITH_SLURM_JOB_ID"
+force_recompute_basin_r2_drift <- FALSE
 
 if (identical(parent_job_id, "REPLACE_WITH_SLURM_JOB_ID")) {
   stop("Set parent_job_id to the SLURM job id returned by sbatch before visualizing.")
@@ -348,30 +349,97 @@ functional_runs_for_drift <- run_metrics %>%
                 !is.na(.data$fit_rds_path)) %>%
   dplyr::select(locus_id, run_id, c_value, sigma_0_2_scalar, fit_rds_path)
 
-basin_r2_drift_tbl <- purrr::map_dfr(
-  sort(unique(functional_runs_for_drift$locus_id)),
-  function(loc) {
-    runs_tbl <- dplyr::filter(functional_runs_for_drift, .data$locus_id == loc)
-    # apply_sample_size_filter = FALSE so R matches the dimensions of fits
-    # produced before the filter was introduced. Set TRUE if you have re-run
-    # the SLURM job under the filter and want filter-consistent diagnostics.
-    bundle <- tryCatch(
-      load_real_data_locus_bundle(loc, manifest_path = manifest_path,
-                                  repo_root = repo_root,
-                                  apply_sample_size_filter = FALSE),
-      error = function(e) NULL
-    )
-    if (is.null(bundle)) {
-      message("Skipping ", loc, ": bundle load failed.")
-      return(tibble::tibble())
-    }
-    drift <- real_data_basin_r2_drift_locus(bundle$R, runs_tbl)
-    if (!nrow(drift)) return(tibble::tibble())
-    drift %>% dplyr::mutate(locus_id = loc, .before = 1L)
-  }
-)
+format_duration <- function(seconds) {
+  if (!is.finite(seconds)) return("unknown")
+  seconds <- max(0, as.integer(round(seconds)))
+  hh <- seconds %/% 3600L
+  mm <- (seconds %% 3600L) %/% 60L
+  ss <- seconds %% 60L
+  if (hh > 0L) sprintf("%dh %02dm %02ds", hh, mm, ss) else sprintf("%dm %02ds", mm, ss)
+}
 
-readr::write_csv(basin_r2_drift_tbl, file.path(figure_dir, "basin_r2_drift.csv"))
+make_basin_r2_progress <- function(total_units, report_every_pct = 1) {
+  total_units <- max(1L, as.integer(total_units))
+  done_units <- 0L
+  next_pct <- 0
+  start_time <- Sys.time()
+  function(label = NULL, units = 1L, force = FALSE) {
+    done_units <<- min(total_units, done_units + as.integer(units))
+    pct <- 100 * done_units / total_units
+    if (isTRUE(force) || done_units == total_units || pct >= next_pct) {
+      elapsed <- as.numeric(difftime(Sys.time(), start_time, units = "secs"))
+      eta <- if (done_units > 0L) elapsed * (total_units - done_units) / done_units else NA_real_
+      label_text <- if (!is.null(label) && nzchar(label)) paste0(" | ", label) else ""
+      message(sprintf(
+        "[%s] basin r2 drift %.1f%% (%d/%d units), elapsed %s, ETA %s%s",
+        format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+        pct, done_units, total_units,
+        format_duration(elapsed), format_duration(eta),
+        label_text
+      ))
+      while (next_pct <= pct) {
+        next_pct <<- next_pct + report_every_pct
+      }
+    }
+    invisible(done_units)
+  }
+}
+
+basin_r2_drift_path <- file.path(figure_dir, "basin_r2_drift.csv")
+if (file.exists(basin_r2_drift_path) && !isTRUE(force_recompute_basin_r2_drift)) {
+  basin_r2_drift_tbl <- readr::read_csv(basin_r2_drift_path, show_col_types = FALSE)
+} else {
+  drift_loci <- sort(unique(functional_runs_for_drift$locus_id))
+  basin_r2_progress <- make_basin_r2_progress(
+    total_units = length(drift_loci) + 2L * nrow(functional_runs_for_drift),
+    report_every_pct = 1
+  )
+  basin_r2_progress("starting", units = 0L, force = TRUE)
+  basin_r2_drift_tbl <- purrr::map_dfr(
+    drift_loci,
+    function(loc) {
+      runs_tbl <- dplyr::filter(functional_runs_for_drift, .data$locus_id == loc)
+      # apply_sample_size_filter = FALSE so R matches the dimensions of fits
+      # produced before the filter was introduced. Set TRUE if you have re-run
+      # the SLURM job under the filter and want filter-consistent diagnostics.
+      bundle <- tryCatch(
+        load_real_data_locus_bundle(loc, manifest_path = manifest_path,
+                                    repo_root = repo_root,
+                                    apply_sample_size_filter = FALSE),
+        error = function(e) NULL
+      )
+      basin_r2_progress(paste0(loc, ": loaded bundle"))
+      if (is.null(bundle)) {
+        message("Skipping ", loc, ": bundle load failed.")
+        basin_r2_progress(
+          paste0(loc, ": skipped remaining work after bundle load failure"),
+          units = 2L * nrow(runs_tbl)
+        )
+        return(tibble::tibble())
+      }
+      locus_drift_units_done <- 0L
+      drift <- real_data_basin_r2_drift_locus(
+        bundle$R,
+        runs_tbl,
+        progress = function(stage, index, total) {
+          locus_drift_units_done <<- locus_drift_units_done + 1L
+          basin_r2_progress(sprintf("%s: %s %d/%d", loc, stage, index, total))
+        }
+      )
+      expected_locus_drift_units <- 2L * nrow(runs_tbl)
+      if (locus_drift_units_done < expected_locus_drift_units) {
+        basin_r2_progress(
+          paste0(loc, ": accounted for skipped drift work"),
+          units = expected_locus_drift_units - locus_drift_units_done
+        )
+      }
+      if (!nrow(drift)) return(tibble::tibble())
+      drift %>% dplyr::mutate(locus_id = loc, .before = 1L)
+    }
+  )
+  basin_r2_progress("finished", units = 0L, force = TRUE)
+  readr::write_csv(basin_r2_drift_tbl, basin_r2_drift_path)
+}
 basin_r2_drift_tbl
 ```
 
