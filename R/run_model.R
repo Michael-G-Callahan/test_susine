@@ -1456,9 +1456,26 @@ normalize_susier_fit <- function(fit_raw, X, L) {
     pip <- 1 - apply(1 - alpha, 2, prod)
   }
   mu <- fit_raw$mu
-  beta <- rep(0, ncol(X))
+  beta_std <- rep(0, ncol(X))
   if (!is.null(mu)) {
-    beta <- colSums(alpha * as.matrix(mu))
+    beta_std <- colSums(alpha * as.matrix(mu))
+  }
+  beta <- tryCatch(as.numeric(stats::coef(fit_raw)[-1]), error = function(e) NULL)
+  if (is.null(beta) || length(beta) != ncol(X) || any(!is.finite(beta))) {
+    scale_factors <- fit_raw$X_column_scale_factors
+    if (!is.null(scale_factors) && length(scale_factors) == ncol(X)) {
+      beta <- beta_std / as.numeric(scale_factors)
+    } else {
+      beta <- beta_std
+    }
+  }
+  fitted_y <- fit_raw$fitted
+  if (is.null(fitted_y) || length(fitted_y) != nrow(X) || any(!is.finite(fitted_y))) {
+    intercept <- suppressWarnings(as.numeric(fit_raw$intercept %||% 0))
+    if (!length(intercept) || !is.finite(intercept)) {
+      intercept <- 0
+    }
+    fitted_y <- as.vector(intercept + X %*% beta)
   }
   sigma2 <- fit_raw$sigma2 %||% fit_raw$residual_variance %||% NA_real_
   list(
@@ -1469,8 +1486,8 @@ normalize_susier_fit <- function(fit_raw, X, L) {
       elbo = fit_raw$elbo %||% NA_real_,
       sigma_2 = sigma2,
       coef = as.numeric(beta),
-      std_coef = as.numeric(beta),
-      fitted_y = as.vector(X %*% beta)
+      std_coef = as.numeric(beta_std),
+      fitted_y = as.numeric(fitted_y)
     ),
     raw = fit_raw
   )

@@ -156,11 +156,16 @@ save_checkpoint <- function(records, progress_rows, pip_records = NULL) {
   }
 }
 
-# Model-wide PIP from a fit's L x p alpha matrix:
-#   PIP_j = 1 - prod_l (1 - alpha_lj).
-# Works uniformly for susine fits (effect_fits$alpha) and harness-wrapped
-# susieR fits (raw$alpha). Returns a length-p numeric in [0, 1].
+# Model-wide PIPs. Prefer the fit's canonical PIP slot because susieR's
+# susie_get_pip() excludes effects with prior variance below prior_tol; blindly
+# recomputing from every alpha row can disagree with baseline confusion bins.
+# Fall back to alpha reconstruction only for fit schemas without stored PIPs.
 fit_to_pip_vec <- function(fit) {
+  pip <- fit$model_fit$PIPs %||% fit$raw$pip %||% fit$pip %||% NULL
+  if (!is.null(pip)) {
+    return(pmin(pmax(as.numeric(pip), 0), 1))
+  }
+
   alpha <- NULL
   if (!is.null(fit$effect_fits) && !is.null(fit$effect_fits$alpha)) {
     alpha <- fit$effect_fits$alpha
@@ -217,7 +222,12 @@ effect_coef_matrix <- function(fit, X) {
       mu <- t(mu)
     }
     if (nrow(mu) == L && ncol(mu) == p) {
-      return(alpha * mu)
+      coef_mat <- alpha * mu
+      scale_factors <- fit$raw$X_column_scale_factors %||% NULL
+      if (!is.null(scale_factors) && length(scale_factors) == p) {
+        coef_mat <- sweep(coef_mat, 2L, as.numeric(scale_factors), "/")
+      }
+      return(coef_mat)
     }
   }
 
@@ -605,7 +615,13 @@ for (i in seq_along(todo_ids)) {
   dataset_pip_records <- tibble::tibble(
     dataset_bundle_id = as.character(dataset_id),
     matrix_id = as.character(bundle_row$matrix_id[[1]]),
-    model_method = all_method_levels,
+    model_method = c(
+      "susie_vanilla",
+      "susine_functional_mu",
+      "susie_vanilla_warm_from_mu",
+      "susie_functional_pi",
+      "susie_vanilla_warm_from_pi"
+    ),
     pip = list(
       fit_to_pip_vec(vanilla_res$fit),
       fit_to_pip_vec(mu_res$fit),
