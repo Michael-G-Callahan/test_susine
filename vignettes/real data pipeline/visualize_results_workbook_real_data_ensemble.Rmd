@@ -93,13 +93,58 @@ loci
 # 3. Plot Helpers
 
 ```{r helpers}
+format_grid_value <- function(x) {
+  out <- sprintf("%.2f", as.numeric(x))
+  out <- sub("0+$", "", out)
+  sub("\\.$", "", out)
+}
+
+add_grid_labels <- function(df) {
+  c_vals <- sort(unique(df$c_value))
+  sigma_vals <- sort(unique(df$sigma_0_2_scalar))
+  df %>%
+    dplyr::mutate(
+      c_label = factor(format_grid_value(.data$c_value),
+                       levels = format_grid_value(c_vals)),
+      sigma_label = factor(format_grid_value(.data$sigma_0_2_scalar),
+                           levels = format_grid_value(sigma_vals))
+    )
+}
+
+nearest_reference_run <- function(locus_id, target_c = 0, target_sigma = 0.2) {
+  df <- functional_grid_summary %>%
+    dplyr::filter(.data$locus_id == !!locus_id,
+                  is.finite(.data$c_value),
+                  is.finite(.data$sigma_0_2_scalar)) %>%
+    dplyr::mutate(
+      c_distance = abs(.data$c_value - target_c),
+      sigma_distance = abs(log(.data$sigma_0_2_scalar / target_sigma))
+    ) %>%
+    dplyr::arrange(.data$c_distance, .data$sigma_distance, .data$run_id)
+  if (!nrow(df)) return(NA_integer_)
+  as.integer(df$run_id[[1]])
+}
+
+reference_pip_tbl <- function(locus_id) {
+  ref_run_id <- nearest_reference_run(locus_id)
+  if (is.na(ref_run_id)) {
+    return(tibble::tibble(variant_id = character(), baseline_pip = numeric()))
+  }
+  variant_posteriors %>%
+    dplyr::filter(.data$locus_id == !!locus_id,
+                  .data$run_id == !!ref_run_id) %>%
+    dplyr::select(.data$variant_id, baseline_pip = .data$pip)
+}
+
 plot_cluster_grid <- function(locus_id) {
   df <- functional_grid_summary %>%
     dplyr::filter(.data$locus_id == !!locus_id)
+  sigma_vals <- sort(unique(df$sigma_0_2_scalar))
 
   ggplot(df, aes(x = c_value, y = sigma_0_2_scalar, color = factor(cluster_id))) +
     geom_point(size = 3) +
     geom_vline(aes(xintercept = baseline_c_l), linetype = "dashed", color = "grey40") +
+    scale_y_log10(breaks = sigma_vals, labels = format_grid_value(sigma_vals)) +
     labs(
       title = paste("Clustered Functional Grid:", locus_id),
       x = "Annotation scale c",
@@ -110,9 +155,10 @@ plot_cluster_grid <- function(locus_id) {
 
 plot_weight_heatmap <- function(locus_id) {
   df <- functional_grid_summary %>%
-    dplyr::filter(.data$locus_id == !!locus_id)
+    dplyr::filter(.data$locus_id == !!locus_id) %>%
+    add_grid_labels()
 
-  ggplot(df, aes(x = c_value, y = sigma_0_2_scalar, fill = agg_weight_run)) +
+  ggplot(df, aes(x = c_label, y = sigma_label, fill = agg_weight_run)) +
     geom_tile(color = "white") +
     scale_fill_gradient(low = "white", high = "#0B6E4F") +
     labs(
@@ -124,25 +170,45 @@ plot_weight_heatmap <- function(locus_id) {
 }
 
 plot_drift <- function(locus_id) {
-  df <- functional_grid_summary %>%
-    dplyr::filter(.data$locus_id == !!locus_id)
+  ref_run_id <- nearest_reference_run(locus_id)
+  ref_pip <- reference_pip_tbl(locus_id)
+  run_tbl <- functional_grid_summary %>%
+    dplyr::filter(.data$locus_id == !!locus_id) %>%
+    dplyr::arrange(.data$sigma_0_2_scalar, .data$c_value)
+  pip_tbl <- variant_posteriors %>%
+    dplyr::filter(.data$locus_id == !!locus_id,
+                  .data$run_id %in% run_tbl$run_id) %>%
+    dplyr::select(.data$run_id, .data$variant_id, .data$pip) %>%
+    dplyr::inner_join(ref_pip, by = "variant_id")
+  df <- run_tbl %>%
+    dplyr::mutate(
+      jsd_from_reference_c0_sigma02 = purrr::map_dbl(.data$run_id, function(rid) {
+        x <- pip_tbl %>%
+          dplyr::filter(.data$run_id == !!rid) %>%
+          dplyr::arrange(.data$variant_id)
+        if (!nrow(x)) return(NA_real_)
+        js_distance(x$pip, x$baseline_pip)
+      })
+    )
 
-  ggplot(df, aes(x = c_value, y = jsd_from_same_sigma_c0, color = factor(sigma_0_2_scalar))) +
-    geom_line() +
+  ggplot(df, aes(x = c_value, y = jsd_from_reference_c0_sigma02, color = factor(sigma_0_2_scalar))) +
+    geom_line(linewidth = 0.7) +
     geom_point(size = 2) +
     labs(
-      title = paste("PIP Drift From c = 0:", locus_id),
+      title = paste("PIP Drift From c = 0, sigma0^2 = 0.2 Reference:", locus_id),
+      subtitle = paste("Reference run_id:", ref_run_id),
       x = "Annotation scale c",
-      y = "JSD from same-sigma c = 0 baseline",
+      y = "JSD from nearest c = 0, sigma0^2 = 0.2 baseline",
       color = expression(sigma[0]^2)
     )
 }
 
 plot_elbo_heatmap <- function(locus_id) {
   df <- functional_grid_summary %>%
-    dplyr::filter(.data$locus_id == !!locus_id)
+    dplyr::filter(.data$locus_id == !!locus_id) %>%
+    add_grid_labels()
 
-  ggplot(df, aes(x = c_value, y = sigma_0_2_scalar, fill = elbo_final)) +
+  ggplot(df, aes(x = c_label, y = sigma_label, fill = elbo_final)) +
     geom_tile(color = "white") +
     scale_fill_viridis_c() +
     labs(
@@ -165,17 +231,17 @@ plot_anchor_comparison <- function(locus_id) {
   df <- row %>%
     dplyr::transmute(
       locus_id,
-      `susieR anchor` = susie_anchor_h2_proxy_std,
-      `susine c=0` = baseline_h2_proxy_std
+      `susieR anchor` = susie_anchor_pve_postmean_std,
+      `susine c=0` = baseline_pve_postmean_std
     ) %>%
-    tidyr::pivot_longer(-.data$locus_id, names_to = "fit_type", values_to = "h2_proxy_std")
+    tidyr::pivot_longer(-.data$locus_id, names_to = "fit_type", values_to = "pve_postmean_std")
 
-  p <- ggplot(df, aes(x = fit_type, y = h2_proxy_std, fill = fit_type)) +
+  p <- ggplot(df, aes(x = fit_type, y = pve_postmean_std, fill = fit_type)) +
     geom_col(width = 0.6, na.rm = TRUE) +
     labs(
-      title = paste("susine vs susieR h2 Proxy:", locus_id),
+      title = paste("susine vs susieR posterior-mean PVE:", locus_id),
       x = NULL,
-      y = "Standardized h2 proxy"
+      y = "Posterior-mean PVE proxy"
     ) +
     theme(legend.position = "none")
 
@@ -241,9 +307,59 @@ plot_aggregated_lollipop <- function(locus_id) {
 }
 ```
 
+```{r lollipop-helper-override}
+plot_aggregated_lollipop <- function(locus_id) {
+  agg_df <- aggregated_variants %>%
+    dplyr::filter(.data$locus_id == !!locus_id) %>%
+    dplyr::arrange(dplyr::desc(.data$aggregated_pip), .data$ld_matrix_index) %>%
+    dplyr::slice_head(n = 20) %>%
+    dplyr::mutate(variant_f = factor(.data$variant_id, levels = rev(.data$variant_id)))
+  baseline_df <- reference_pip_tbl(locus_id) %>%
+    dplyr::filter(.data$variant_id %in% agg_df$variant_id)
+  plot_df <- agg_df %>%
+    dplyr::left_join(baseline_df, by = "variant_id")
+  points_df <- dplyr::bind_rows(
+    plot_df %>%
+      dplyr::transmute(variant_f, pip = baseline_pip, fit_type = "Baseline"),
+    plot_df %>%
+      dplyr::transmute(variant_f, pip = aggregated_pip, fit_type = "SuSiNE ensemble")
+  ) %>%
+    dplyr::filter(is.finite(.data$pip)) %>%
+    dplyr::mutate(fit_type = factor(.data$fit_type, levels = c("Baseline", "SuSiNE ensemble")))
+
+  ggplot(plot_df, aes(y = variant_f)) +
+    geom_segment(
+      aes(x = baseline_pip, xend = aggregated_pip, yend = variant_f),
+      color = "grey35",
+      linewidth = 0.8,
+      alpha = 0.75,
+      na.rm = TRUE
+    ) +
+    geom_point(
+      data = points_df,
+      aes(x = pip, color = fit_type),
+      size = 2.8,
+      inherit.aes = FALSE
+    ) +
+    scale_color_manual(
+      values = c("Baseline" = "#666666", "SuSiNE ensemble" = "#0B6E4F"),
+      breaks = c("Baseline", "SuSiNE ensemble"),
+      name = NULL
+    ) +
+    labs(
+      title = paste("Baseline vs Ensemble Variant PIPs:", locus_id),
+      x = "PIP",
+      y = "Variant"
+    ) +
+    theme(legend.position = "bottom")
+}
+```
+
 # 4. Save Locus Figures
 
 ```{r save-figures, fig.width=10, fig.height=6}
+unlink(file.path(figure_dir, "*_anchor_comparison.png"))
+
 purrr::walk(loci, function(locus_id) {
   ggsave(
     file.path(figure_dir, paste0(locus_id, "_cluster_grid.png")),
@@ -274,13 +390,6 @@ purrr::walk(loci, function(locus_id) {
     dpi = 150
   )
   if (locus_id %in% anchor_summary$locus_id) {
-    ggsave(
-      file.path(figure_dir, paste0(locus_id, "_anchor_comparison.png")),
-      plot_anchor_comparison(locus_id),
-      width = 7,
-      height = 4,
-      dpi = 150
-    )
     ggsave(
       file.path(figure_dir, paste0(locus_id, "_aggregated_lollipop.png")),
       plot_aggregated_lollipop(locus_id),
@@ -319,7 +428,109 @@ ggsave(
 multimodal_plot
 ```
 
-# 6. Basin r² Drift From c = 0 (one panel per locus)
+# 6. Study-Level Ensemble Effects
+
+```{r overall-ensemble-effects, fig.width=8, fig.height=6}
+overall_weight_tbl <- functional_grid_summary %>%
+  add_grid_labels() %>%
+  dplyr::group_by(.data$c_label, .data$sigma_label) %>%
+  dplyr::summarise(
+    mean_weight = mean(.data$agg_weight_run, na.rm = TRUE),
+    n_loci = dplyr::n_distinct(.data$locus_id),
+    .groups = "drop"
+  )
+
+overall_weight_plot <- ggplot(overall_weight_tbl, aes(x = c_label, y = sigma_label, fill = mean_weight)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient(low = "white", high = "#0B6E4F") +
+  labs(
+    title = "Mean Ensemble Weight Across Loci",
+    x = "Annotation scale c",
+    y = expression(sigma[0]^2),
+    fill = "Mean weight"
+  )
+
+ggsave(
+  file.path(figure_dir, "overall_mean_aggregation_weight_heatmap.png"),
+  overall_weight_plot,
+  width = 8,
+  height = 5,
+  dpi = 150
+)
+
+overall_pip_change_tbl <- purrr::map_dfr(loci, function(loc) {
+  reference_pip_tbl(loc) %>%
+    dplyr::inner_join(
+      aggregated_variants %>%
+        dplyr::filter(.data$locus_id == !!loc) %>%
+        dplyr::select(.data$variant_id, .data$aggregated_pip),
+      by = "variant_id"
+    ) %>%
+    dplyr::mutate(locus_id = loc, .before = 1L)
+})
+
+overall_pip_change_plot <- ggplot(
+  overall_pip_change_tbl,
+  aes(x = baseline_pip, y = aggregated_pip)
+) +
+  geom_abline(slope = 1, intercept = 0, color = "grey50", linewidth = 0.7) +
+  geom_point(alpha = 0.18, size = 0.8, color = "#0B6E4F") +
+  coord_equal(xlim = c(0, 1), ylim = c(0, 1)) +
+  labs(
+    title = "Variant PIP Changes Across Loci",
+    x = "Baseline PIP",
+    y = "SuSiNE ensemble PIP"
+  )
+
+ggsave(
+  file.path(figure_dir, "overall_variant_pip_baseline_vs_ensemble.png"),
+  overall_pip_change_plot,
+  width = 6,
+  height = 6,
+  dpi = 150
+)
+
+overall_pve_tbl <- anchor_summary %>%
+  dplyr::transmute(
+    locus_id,
+    baseline_run_id,
+    baseline_pve_postmean_std,
+    ensemble_pve_postmean_std
+  )
+
+pve_lim <- range(c(overall_pve_tbl$baseline_pve_postmean_std,
+                   overall_pve_tbl$ensemble_pve_postmean_std), na.rm = TRUE)
+if (!all(is.finite(pve_lim))) pve_lim <- c(0, 1)
+pve_pad <- max(0.02, diff(pve_lim) * 0.05)
+pve_lim <- c(max(0, pve_lim[[1]] - pve_pad), min(1, pve_lim[[2]] + pve_pad))
+
+overall_pve_change_plot <- ggplot(
+  overall_pve_tbl,
+  aes(x = baseline_pve_postmean_std, y = ensemble_pve_postmean_std)
+) +
+  geom_abline(slope = 1, intercept = 0, color = "grey50", linewidth = 0.7) +
+  geom_point(size = 2.4, color = "#0B6E4F") +
+  coord_equal(xlim = pve_lim, ylim = pve_lim) +
+  labs(
+    title = "Posterior-Mean PVE Proxy: Baseline vs Ensemble",
+    x = "Baseline posterior-mean PVE",
+    y = "SuSiNE ensemble posterior-mean PVE"
+  )
+
+ggsave(
+  file.path(figure_dir, "overall_pve_postmean_baseline_vs_ensemble.png"),
+  overall_pve_change_plot,
+  width = 6,
+  height = 6,
+  dpi = 150
+)
+
+overall_weight_plot
+overall_pip_change_plot
+overall_pve_change_plot
+```
+
+# 7. Basin r² Drift From c = 0 (one panel per locus)
 
 Drift metric: weighted (1 - r²) on max-weight 1-1 matched per-effect coefficient
 vectors, weighted by `min(var_y_explained_a, var_y_explained_b)`. RSS analog of
@@ -327,7 +538,7 @@ vectors, weighted by `min(var_y_explained_a, var_y_explained_b)`. RSS analog of
 R-weighted cosine `(b_i' R b_j) / sqrt((b_i' R b_i)(b_j' R b_j))` since X is
 not available in the SS regime.
 
-```{r basin-r2-drift-compute, message=FALSE}
+```{r basin-r2-drift-compute, message=TRUE}
 # Need run_metrics to find fit_rds_paths and locus / sigma / c keys.
 run_metrics <- readr::read_csv(
   file.path(aggregated_dir, "run_metrics_full.csv"),
@@ -358,6 +569,13 @@ format_duration <- function(seconds) {
   if (hh > 0L) sprintf("%dh %02dm %02ds", hh, mm, ss) else sprintf("%dm %02ds", mm, ss)
 }
 
+emit_progress_line <- function(x) {
+  cat(x, "\n")
+  try(flush(stdout()), silent = TRUE)
+  if (interactive()) flush.console()
+  invisible(x)
+}
+
 make_basin_r2_progress <- function(total_units, report_every_pct = 1) {
   total_units <- max(1L, as.integer(total_units))
   done_units <- 0L
@@ -370,7 +588,7 @@ make_basin_r2_progress <- function(total_units, report_every_pct = 1) {
       elapsed <- as.numeric(difftime(Sys.time(), start_time, units = "secs"))
       eta <- if (done_units > 0L) elapsed * (total_units - done_units) / done_units else NA_real_
       label_text <- if (!is.null(label) && nzchar(label)) paste0(" | ", label) else ""
-      message(sprintf(
+      emit_progress_line(sprintf(
         "[%s] basin r2 drift %.1f%% (%d/%d units), elapsed %s, ETA %s%s",
         format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
         pct, done_units, total_units,
@@ -399,6 +617,11 @@ if (file.exists(basin_r2_drift_path) && !isTRUE(force_recompute_basin_r2_drift))
     drift_loci,
     function(loc) {
       runs_tbl <- dplyr::filter(functional_runs_for_drift, .data$locus_id == loc)
+      basin_r2_progress(
+        sprintf("%s: loading bundle (%d runs)", loc, nrow(runs_tbl)),
+        units = 0L,
+        force = TRUE
+      )
       # apply_sample_size_filter = FALSE so R matches the dimensions of fits
       # produced before the filter was introduced. Set TRUE if you have re-run
       # the SLURM job under the filter and want filter-consistent diagnostics.
@@ -410,7 +633,7 @@ if (file.exists(basin_r2_drift_path) && !isTRUE(force_recompute_basin_r2_drift))
       )
       basin_r2_progress(paste0(loc, ": loaded bundle"))
       if (is.null(bundle)) {
-        message("Skipping ", loc, ": bundle load failed.")
+        emit_progress_line(paste0("Skipping ", loc, ": bundle load failed."))
         basin_r2_progress(
           paste0(loc, ": skipped remaining work after bundle load failure"),
           units = 2L * nrow(runs_tbl)

@@ -800,6 +800,18 @@ real_data_top_overlap <- function(x, y, k) {
   length(intersect(idx_x, idx_y)) / union_len
 }
 
+real_data_pve_from_posterior_mean <- function(posterior_mean, R) {
+  b <- as.numeric(posterior_mean)
+  if (!length(b) || is.null(R) || nrow(R) != length(b) || ncol(R) != length(b)) {
+    return(NA_real_)
+  }
+  val <- as.numeric(crossprod(b, R %*% b))
+  if (!is.finite(val)) {
+    return(NA_real_)
+  }
+  pmin(pmax(val, 0), 1)
+}
+
 real_data_write_parquet <- function(df, path) {
   ensure_dir(dirname(path))
   arrow::write_parquet(arrow::Table$create(df), path, compression = "zstd")
@@ -974,6 +986,8 @@ compute_real_data_run_metrics <- function(
   pips <- as.numeric(backend_mats$pip)
   elbo <- as.numeric(backend_mats$elbo)
   sigma_2_final <- as.numeric(backend_mats$sigma_2_final)
+  posterior_mean <- colSums(backend_mats$alpha_b_hat, na.rm = TRUE)
+  pve_postmean_std <- real_data_pve_from_posterior_mean(posterior_mean, bundle$R)
   top_ord <- order(pips, decreasing = TRUE)
   top_mass <- function(k) sum(pips[head(top_ord, min(k, length(top_ord)))], na.rm = TRUE)
 
@@ -997,6 +1011,7 @@ compute_real_data_run_metrics <- function(
     converged = as.logical(backend_mats$converged),
     sigma_2_final = sigma_2_final,
     h2_proxy_std = pmin(pmax(1 - sigma_2_final, 0), 1),
+    pve_postmean_std = as.numeric(pve_postmean_std),
     sum_pip = sum(pips, na.rm = TRUE),
     max_pip = max(pips, na.rm = TRUE),
     pip_entropy = prob_entropy(pips),
@@ -1050,6 +1065,7 @@ real_data_failed_run_metrics_stub <- function(run_row, error_message) {
     converged = FALSE,
     sigma_2_final = NA_real_,
     h2_proxy_std = NA_real_,
+    pve_postmean_std = NA_real_,
     sum_pip = NA_real_,
     max_pip = NA_real_,
     pip_entropy = NA_real_,
@@ -1703,6 +1719,7 @@ compute_real_data_comparisons <- function(run_metrics_tbl, pip_lookup, run_rows,
       .data$elbo_final,
       .data$sigma_2_final,
       .data$h2_proxy_std,
+      .data$pve_postmean_std,
       .data$pip_mass_top1,
       .data$pip_mass_top10
     )
@@ -1730,6 +1747,7 @@ compute_real_data_comparisons <- function(run_metrics_tbl, pip_lookup, run_rows,
       delta_elbo = run_m$elbo_final[[1]] - target_m$elbo_final[[1]],
       delta_sigma_2 = run_m$sigma_2_final[[1]] - target_m$sigma_2_final[[1]],
       delta_h2_proxy_std = run_m$h2_proxy_std[[1]] - target_m$h2_proxy_std[[1]],
+      delta_pve_postmean_std = run_m$pve_postmean_std[[1]] - target_m$pve_postmean_std[[1]],
       delta_pip_mass_top1 = run_m$pip_mass_top1[[1]] - target_m$pip_mass_top1[[1]],
       delta_pip_mass_top10 = run_m$pip_mass_top10[[1]] - target_m$pip_mass_top10[[1]]
     )
@@ -1899,9 +1917,36 @@ collect_real_data_results <- function(
       dplyr::select(
         .data$run_id, .data$backend, .data$run_family, .data$variant_id,
         .data$ld_matrix_index, .data$pip, .data$z_score, .data$beta_hat_std,
-        .data$annotation_a, .data$baseline_c_l
+        .data$annotation_a, .data$baseline_c_l, .data$posterior_mean
       ) %>%
       dplyr::collect()
+
+    locus_bundle_for_pve <- tryCatch(
+      load_real_data_locus_bundle(
+        locus_id = locus_id,
+        manifest_path = job_config$job$manifest_path,
+        repo_root = job_config$paths$repo_root %||% ensure_repo_root(getwd())
+      ),
+      error = function(e) NULL
+    )
+    if (!is.null(locus_bundle_for_pve) && "posterior_mean" %in% names(locus_variant_tbl)) {
+      pve_by_run <- locus_variant_tbl %>%
+        dplyr::arrange(.data$run_id, .data$ld_matrix_index) %>%
+        dplyr::group_by(.data$run_id) %>%
+        dplyr::summarise(
+          pve_postmean_std = real_data_pve_from_posterior_mean(
+            .data$posterior_mean,
+            locus_bundle_for_pve$R
+          ),
+          .groups = "drop"
+        )
+      if (!"pve_postmean_std" %in% names(run_metrics_tbl)) {
+        run_metrics_tbl$pve_postmean_std <- NA_real_
+      }
+      idx_run <- match(pve_by_run$run_id, run_metrics_tbl$run_id)
+      keep_idx <- !is.na(idx_run)
+      run_metrics_tbl$pve_postmean_std[idx_run[keep_idx]] <- pve_by_run$pve_postmean_std[keep_idx]
+    }
 
     locus_functional_tbl <- locus_variant_tbl %>%
       dplyr::filter(.data$backend == "susine_rss", .data$run_family == "functional_grid") %>%
@@ -2072,6 +2117,22 @@ collect_real_data_results <- function(
       agg_pip <- as.numeric(pip_mat[1, ])
     }
 
+    weight_vec <- agg_weights_locus$agg_weight_run[match(run_ids, agg_weights_locus$run_id)]
+    weight_vec[!is.finite(weight_vec)] <- 0
+    pm_split <- split(locus_functional_tbl$posterior_mean, locus_functional_tbl$run_id)
+    pm_mat <- do.call(rbind, lapply(as.character(run_ids), function(rid) as.numeric(pm_split[[rid]])))
+    agg_posterior_mean <- if (length(weight_vec) == nrow(pm_mat) && sum(weight_vec) > 0) {
+      as.numeric(crossprod(weight_vec / sum(weight_vec), pm_mat))
+    } else {
+      rep(NA_real_, ncol(pm_mat))
+    }
+
+    ensemble_pve_postmean_std <- if (!is.null(locus_bundle_for_pve)) {
+      real_data_pve_from_posterior_mean(agg_posterior_mean, locus_bundle_for_pve$R)
+    } else {
+      NA_real_
+    }
+
     base_variant_tbl <- locus_functional_tbl %>%
       dplyr::filter(.data$run_id == run_ids[[1]]) %>%
       dplyr::arrange(.data$ld_matrix_index)
@@ -2082,6 +2143,7 @@ collect_real_data_results <- function(
         variant_id = as.character(.data$variant_id),
         ld_matrix_index = as.integer(.data$ld_matrix_index),
         aggregated_pip = as.numeric(agg_pip),
+        aggregated_posterior_mean = as.numeric(agg_posterior_mean),
         z_score = as.numeric(.data$z_score),
         beta_hat_std = as.numeric(.data$beta_hat_std),
         annotation_a = as.numeric(.data$annotation_a),
@@ -2115,6 +2177,7 @@ collect_real_data_results <- function(
         delta_elbo_same_sigma_c0 = .data$delta_elbo,
         delta_sigma_2_same_sigma_c0 = .data$delta_sigma_2,
         delta_h2_proxy_std_same_sigma_c0 = .data$delta_h2_proxy_std,
+        delta_pve_postmean_std_same_sigma_c0 = .data$delta_pve_postmean_std,
         delta_pip_mass_top1_same_sigma_c0 = .data$delta_pip_mass_top1,
         delta_pip_mass_top10_same_sigma_c0 = .data$delta_pip_mass_top10
       )
@@ -2185,11 +2248,14 @@ collect_real_data_results <- function(
           susie_anchor_elbo_final = anchor_metric$elbo_final[[1]],
           susie_anchor_sigma_2_final = anchor_metric$sigma_2_final[[1]],
           susie_anchor_h2_proxy_std = anchor_metric$h2_proxy_std[[1]],
+          susie_anchor_pve_postmean_std = anchor_metric$pve_postmean_std[[1]],
           susie_anchor_max_pip = anchor_metric$max_pip[[1]],
           baseline_run_id = if (base_ok) baseline_metric$run_id[[1]] else NA_integer_,
           baseline_elbo_final = if (base_ok) baseline_metric$elbo_final[[1]] else NA_real_,
           baseline_sigma_2_final = if (base_ok) baseline_metric$sigma_2_final[[1]] else NA_real_,
           baseline_h2_proxy_std = if (base_ok) baseline_metric$h2_proxy_std[[1]] else NA_real_,
+          baseline_pve_postmean_std = if (base_ok) baseline_metric$pve_postmean_std[[1]] else NA_real_,
+          ensemble_pve_postmean_std = ensemble_pve_postmean_std,
           baseline_max_pip = if (base_ok) baseline_metric$max_pip[[1]] else NA_real_,
           jsd_anchor_vs_baseline = if (can_compare)
             as.numeric(js_distance(anchor_pip, base_pip)) else NA_real_,
@@ -2213,6 +2279,7 @@ collect_real_data_results <- function(
   aggregated_variants_tbl <- dplyr::bind_rows(aggregated_variant_rows)
   pairwise_tbl <- dplyr::bind_rows(pairwise_rows)
 
+  if (nrow(run_metrics_tbl)) readr::write_csv(run_metrics_tbl, file.path(output_dir, "run_metrics_full.csv"))
   if (nrow(multimodal_tbl)) readr::write_csv(multimodal_tbl, file.path(output_dir, "multimodal_metrics.csv"))
   if (nrow(cluster_tbl)) readr::write_csv(cluster_tbl, file.path(output_dir, "cluster_membership.csv"))
   if (nrow(agg_weights_tbl)) readr::write_csv(agg_weights_tbl, file.path(output_dir, "aggregation_weights_cluster_weight.csv"))
@@ -2245,7 +2312,7 @@ collect_real_data_results <- function(
     "effect_posteriors_dataset", effect_dataset_dir, "parquet-dataset", "run-effect-variant", "Per-effect posterior summaries",
     "credible_set_membership_dataset", cs_dataset_dir, "parquet-dataset", "run-effect-member", "Credible-set membership rows",
     "pairwise_pip_jsd", file.path(output_dir, "pairwise_pip_jsd.parquet"), "parquet", "run-pair", "Pairwise PIP JSD within each locus",
-    "aggregated_variant_pips_cluster_weight", file.path(output_dir, "aggregated_variant_pips_cluster_weight.parquet"), "parquet", "locus-variant", "Cluster-weight aggregated variant PIPs"
+    "aggregated_variant_pips_cluster_weight", file.path(output_dir, "aggregated_variant_pips_cluster_weight.parquet"), "parquet", "locus-variant", "Cluster-weight aggregated variant PIPs and posterior means"
   )
   readr::write_csv(metric_inventory, file.path(output_dir, "metric_inventory.csv"))
 
@@ -2278,7 +2345,7 @@ validate_real_data_outputs <- function(output_dir) {
 
   required_parquet <- list(
     pairwise_pip_jsd = c("locus_id", "run_id_i", "run_id_j", "jsd", "same_cluster"),
-    aggregated_variant_pips_cluster_weight = c("locus_id", "variant_id", "aggregated_pip")
+    aggregated_variant_pips_cluster_weight = c("locus_id", "variant_id", "aggregated_pip", "aggregated_posterior_mean")
   )
 
   checks <- list()
