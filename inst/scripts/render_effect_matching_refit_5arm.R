@@ -29,6 +29,7 @@ max_datasets <- arg_value("max-datasets", Sys.getenv("EFFECT_MATCHING_MAX_DATASE
 checkpoint_every <- arg_value("checkpoint-every", Sys.getenv("EFFECT_MATCHING_CHECKPOINT_EVERY", "25"))
 
 setwd(repo_root)
+options(bitmapType = "cairo")
 
 study_dir <- file.path(
   repo_root,
@@ -62,6 +63,7 @@ if (fresh) {
 }
 
 Sys.setenv(
+  TEST_SUSINE_REPO_ROOT = repo_root,
   EFFECT_MATCHING_FORCE_REFIT = "false",
   EFFECT_MATCHING_CHECKPOINT_EVERY = checkpoint_every
 )

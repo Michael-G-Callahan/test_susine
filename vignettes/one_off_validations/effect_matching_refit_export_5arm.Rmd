@@ -31,16 +31,39 @@ same mechanism `run_default_prior_refit()` uses in the production harness
 Output goes to a fresh study directory; the 3-arm outputs are preserved.
 
 ```{r setup, message=FALSE}
-here::i_am("vignettes/one_off_validations/effect_matching_refit_export_5arm.Rmd")
-library(here)
-library(devtools)
+repo_root <- Sys.getenv("TEST_SUSINE_REPO_ROOT", unset = NA_character_)
+if (is.na(repo_root) || !nzchar(repo_root)) {
+  if (requireNamespace("here", quietly = TRUE)) {
+    here::i_am("vignettes/one_off_validations/effect_matching_refit_export_5arm.Rmd")
+    repo_root <- here::here()
+  } else {
+    repo_root <- normalizePath(".", winslash = "/", mustWork = TRUE)
+  }
+}
+repo_root <- normalizePath(repo_root, winslash = "/", mustWork = TRUE)
+here <- function(...) file.path(repo_root, ...)
+setwd(repo_root)
+options(bitmapType = "cairo")
+if (requireNamespace("knitr", quietly = TRUE)) {
+  knitr::opts_chunk$set(dev = "png")
+}
+
+load_package_source <- function(path) {
+  if (requireNamespace("devtools", quietly = TRUE)) {
+    devtools::load_all(path)
+  } else if (requireNamespace("pkgload", quietly = TRUE)) {
+    pkgload::load_all(path)
+  } else {
+    stop("Need devtools or pkgload to load package source from: ", path)
+  }
+}
 
 susine_path <- here("..", "susine")
 if (file.exists(file.path(susine_path, "DESCRIPTION"))) {
   options(test_susine.local_susine_path = normalizePath(susine_path, winslash = "/", mustWork = TRUE))
-  devtools::load_all(susine_path)
+  load_package_source(susine_path)
 }
-devtools::load_all(".")
+load_package_source(".")
 
 library(dplyr)
 library(readr)
