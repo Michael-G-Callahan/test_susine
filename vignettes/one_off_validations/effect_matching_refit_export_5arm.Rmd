@@ -59,10 +59,22 @@ output_root <- here("output")
 study_dir <- file.path(output_root, "effect_matching_study", study_name)
 dir.create(study_dir, recursive = TRUE, showWarnings = FALSE)
 
-# Set to a small integer, e.g. 5L, for a local smoke run.
-max_datasets <- Inf
-force_refit <- TRUE
-checkpoint_every <- 25L
+# Set EFFECT_MATCHING_MAX_DATASETS to a small integer, e.g. 5, for a smoke run.
+env_flag <- function(name, default) {
+  val <- Sys.getenv(name, unset = NA_character_)
+  if (is.na(val) || !nzchar(val)) {
+    return(default)
+  }
+  tolower(val) %in% c("1", "true", "t", "yes", "y")
+}
+env_int <- function(name, default) {
+  val <- suppressWarnings(as.integer(Sys.getenv(name, unset = NA_character_)))
+  if (length(val) && !is.na(val) && is.finite(val)) val else default
+}
+
+max_datasets <- env_int("EFFECT_MATCHING_MAX_DATASETS", Inf)
+force_refit <- env_flag("EFFECT_MATCHING_FORCE_REFIT", TRUE)
+checkpoint_every <- env_int("EFFECT_MATCHING_CHECKPOINT_EVERY", 25L)
 
 # Baseline-sims dataset recipe. These come from `_5arm_cfg.R` so the refit
 # and downstream drift/PR regeneration use identical bundle definitions.
