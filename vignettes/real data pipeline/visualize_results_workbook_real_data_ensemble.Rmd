@@ -90,7 +90,12 @@ highest_weight_refit_basin <- if (file.exists(file.path(aggregated_dir, "highest
 paper_summary <- if (file.exists(file.path(aggregated_dir, "paper_real_data_ensemble_summary.csv"))) {
   readr::read_csv(file.path(aggregated_dir, "paper_real_data_ensemble_summary.csv"), show_col_types = FALSE)
 } else {
-  tibble::tibble(locus_id = character())
+  tibble::tibble(
+    locus_id = character(),
+    jsd_susie_anchor_vs_susine_ensemble = numeric(),
+    jsd_susie_anchor_vs_refit = numeric(),
+    jsd_susine_ensemble_vs_refit = numeric()
+  )
 }
 cluster_summary <- readr::read_csv(
   file.path(aggregated_dir, "cluster_summary.csv"),
@@ -618,6 +623,54 @@ ggsave(
   dpi = 150
 )
 
+overall_jsd_triangle_tbl <- paper_summary %>%
+  dplyr::transmute(
+    locus_id,
+    jsd_susie_to_susine = .data$jsd_susie_anchor_vs_susine_ensemble,
+    jsd_susie_to_refit = .data$jsd_susie_anchor_vs_refit,
+    jsd_susine_to_refit = .data$jsd_susine_ensemble_vs_refit
+  ) %>%
+  dplyr::filter(
+    is.finite(.data$jsd_susie_to_susine),
+    is.finite(.data$jsd_susie_to_refit),
+    is.finite(.data$jsd_susine_to_refit)
+  )
+
+jsd_lim <- range(c(overall_jsd_triangle_tbl$jsd_susie_to_susine,
+                   overall_jsd_triangle_tbl$jsd_susie_to_refit), na.rm = TRUE)
+if (!all(is.finite(jsd_lim))) jsd_lim <- c(0, 1)
+jsd_pad <- max(0.01, diff(jsd_lim) * 0.05)
+jsd_lim <- c(max(0, jsd_lim[[1]] - jsd_pad), jsd_lim[[2]] + jsd_pad)
+
+overall_jsd_triangle_plot <- ggplot(
+  overall_jsd_triangle_tbl,
+  aes(
+    x = jsd_susie_to_susine,
+    y = jsd_susie_to_refit,
+    color = jsd_susine_to_refit,
+    size = jsd_susine_to_refit
+  )
+) +
+  geom_abline(slope = 1, intercept = 0, color = "grey50", linewidth = 0.7) +
+  geom_point(alpha = 0.85, na.rm = TRUE) +
+  geom_text(aes(label = locus_id), size = 2.4, vjust = -0.55, check_overlap = TRUE, show.legend = FALSE, na.rm = TRUE) +
+  scale_color_viridis_c(option = "C", name = "SuSiNE vs refit JSD") +
+  scale_size_continuous(range = c(1.8, 5), name = "SuSiNE vs refit JSD") +
+  coord_equal(xlim = jsd_lim, ylim = jsd_lim) +
+  labs(
+    title = "PIP JSD Triangle: SuSiE, SuSiNE, and Warm Refit",
+    x = "SuSiE baseline to SuSiNE ensemble JSD",
+    y = "SuSiE baseline to warm refit JSD"
+  )
+
+ggsave(
+  file.path(overall_figure_dir, "overall_pip_jsd_triangle_susie_susine_refit.png"),
+  overall_jsd_triangle_plot,
+  width = 6.8,
+  height = 6,
+  dpi = 150
+)
+
 refit_basin_r2_drift_plot <- ggplot(
   highest_weight_refit_basin,
   aes(
@@ -645,6 +698,7 @@ ggsave(
 overall_weight_plot
 overall_pip_change_plot
 overall_pve_change_plot
+overall_jsd_triangle_plot
 refit_basin_r2_drift_plot
 ```
 

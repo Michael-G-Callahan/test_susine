@@ -2475,6 +2475,16 @@ collect_real_data_results <- function(
         } else {
           NULL
         }
+        ensemble_weight_c0 <- agg_weights_locus %>%
+          dplyr::filter(is.finite(.data$c_value), abs(.data$c_value) < 1e-12) %>%
+          dplyr::summarise(weight = sum(.data$agg_weight_run, na.rm = TRUE), .groups = "drop") %>%
+          dplyr::pull(.data$weight)
+        ensemble_weight_c0 <- if (length(ensemble_weight_c0)) ensemble_weight_c0[[1]] else NA_real_
+        ensemble_weight_off_c0 <- if (is.finite(ensemble_weight_c0)) {
+          1 - ensemble_weight_c0
+        } else {
+          NA_real_
+        }
         paper_summary_rows[[length(paper_summary_rows) + 1L]] <- tibble::tibble(
           locus_id = locus_id,
           gene_name = locus_row$gene_name[[1]],
@@ -2484,8 +2494,20 @@ collect_real_data_results <- function(
           highest_weight_source_run_id = source_run_id,
           highest_weight_refit_run_id = refit_run_id,
           highest_weight_source_agg_weight_run = if (nrow(highest_weight_source)) highest_weight_source$agg_weight_run[[1]] else NA_real_,
+          ensemble_agg_weight_c0_total = ensemble_weight_c0,
+          ensemble_agg_weight_off_c0_total = ensemble_weight_off_c0,
           highest_weight_source_c_value = if (nrow(highest_weight_source)) highest_weight_source$c_value[[1]] else NA_real_,
           highest_weight_source_sigma_0_2_scalar = if (nrow(highest_weight_source)) highest_weight_source$sigma_0_2_scalar[[1]] else NA_real_,
+          elbo_susie_anchor = anchor_metric$elbo_final[[1]],
+          elbo_baseline_c0 = if (base_ok) baseline_metric$elbo_final[[1]] else NA_real_,
+          elbo_highest_weight_source = if (nrow(highest_weight_source)) highest_weight_source$elbo_final[[1]] else NA_real_,
+          elbo_highest_weight_refit = if (nrow(refit_metric)) refit_metric$elbo_final[[1]] else NA_real_,
+          delta_elbo_refit_vs_susie_anchor = if (nrow(refit_metric))
+            refit_metric$elbo_final[[1]] - anchor_metric$elbo_final[[1]] else NA_real_,
+          delta_elbo_refit_vs_baseline_c0 = if (nrow(refit_metric) && base_ok)
+            refit_metric$elbo_final[[1]] - baseline_metric$elbo_final[[1]] else NA_real_,
+          delta_elbo_source_vs_baseline_c0 = if (nrow(highest_weight_source) && base_ok)
+            highest_weight_source$elbo_final[[1]] - baseline_metric$elbo_final[[1]] else NA_real_,
           n_pip_gt_025_susie_anchor = if (!is.null(anchor_pip)) real_data_pip_count(anchor_pip) else NA_integer_,
           n_pip_gt_025_baseline_c0 = if (!is.null(base_pip)) real_data_pip_count(base_pip) else NA_integer_,
           n_pip_gt_025_susine_ensemble = real_data_pip_count(agg_pip),
