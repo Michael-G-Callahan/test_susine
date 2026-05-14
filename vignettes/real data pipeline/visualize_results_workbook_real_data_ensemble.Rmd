@@ -38,7 +38,7 @@ theme_set(theme_bw(base_size = 12))
 
 ```{r config}
 job_name <- "real_data_ensemble_geometric_n20"
-parent_job_id <- "REPLACE_WITH_SLURM_JOB_ID"
+parent_job_id <- "52906940"
 force_recompute_basin_r2_drift <- FALSE
 
 if (identical(parent_job_id, "REPLACE_WITH_SLURM_JOB_ID")) {
@@ -184,7 +184,7 @@ plot_drift <- function(locus_id) {
     dplyr::mutate(
       jsd_from_reference_c0_sigma02 = purrr::map_dbl(.data$run_id, function(rid) {
         x <- pip_tbl %>%
-          dplyr::filter(.data$run_id == !!rid) %>%
+          dplyr::filter(.data$run_id == .env$rid) %>%
           dplyr::arrange(.data$variant_id)
         if (!nrow(x)) return(NA_real_)
         js_distance(x$pip, x$baseline_pip)

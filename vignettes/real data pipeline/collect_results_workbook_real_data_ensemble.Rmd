@@ -33,7 +33,7 @@ devtools::load_all(".")
 
 ```{r config}
 job_name <- "real_data_ensemble_geometric_n20"
-parent_job_id <- "REPLACE_WITH_SLURM_JOB_ID"
+parent_job_id <- "52906940"
 output_root <- here("output")
 
 if (identical(parent_job_id, "REPLACE_WITH_SLURM_JOB_ID")) {
