@@ -337,7 +337,7 @@ plot_aggregated_lollipop <- function(locus_id) {
     ) +
     geom_point(
       data = points_df,
-      aes(x = pip, color = fit_type),
+      aes(x = pip, y = variant_f, color = fit_type),
       size = 2.8,
       inherit.aes = FALSE
     ) +
