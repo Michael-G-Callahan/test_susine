@@ -812,6 +812,68 @@ real_data_pve_from_posterior_mean <- function(posterior_mean, R) {
   pmin(pmax(val, 0), 1)
 }
 
+real_data_pip_count <- function(pip, threshold = 0.25) {
+  sum(as.numeric(pip) > threshold, na.rm = TRUE)
+}
+
+real_data_pip_intersection_count <- function(pip_a, pip_b, threshold = 0.25) {
+  a <- as.numeric(pip_a)
+  b <- as.numeric(pip_b)
+  n <- min(length(a), length(b))
+  if (!n) {
+    return(NA_integer_)
+  }
+  sum(a[seq_len(n)] > threshold & b[seq_len(n)] > threshold, na.rm = TRUE)
+}
+
+real_data_safe_js_distance <- function(pip_a, pip_b) {
+  if (is.null(pip_a) || is.null(pip_b)) {
+    return(NA_real_)
+  }
+  a <- as.numeric(pip_a)
+  b <- as.numeric(pip_b)
+  if (length(a) != length(b) || !length(a)) {
+    return(NA_real_)
+  }
+  as.numeric(js_distance(a, b))
+}
+
+real_data_init_effect_fits_from_susine <- function(fit) {
+  ef <- fit$effect_fits %||% NULL
+  if (is.null(ef) || is.null(ef$alpha) || is.null(ef$b_hat) || is.null(ef$b_2_hat)) {
+    stop("Source SuSiNE fit does not contain alpha, b_hat, and b_2_hat effect_fits.")
+  }
+  list(
+    alpha = as.matrix(ef$alpha),
+    b_hat = as.matrix(ef$b_hat),
+    b_2_hat = as.matrix(ef$b_2_hat)
+  )
+}
+
+real_data_run_highest_weight_refit <- function(source_fit, bundle, job_config,
+                                               sigma_0_2_scalar = 0.2) {
+  if (!requireNamespace("susine", quietly = TRUE)) {
+    stop("Package 'susine' is required for highest-weight warm refits.")
+  }
+  p <- length(bundle$z)
+  susine::susine_rss(
+    L = as.integer(job_config$job$L),
+    z = bundle$z,
+    R = bundle$R,
+    n = bundle$n_sample,
+    mu_0 = 0,
+    sigma_0_2 = as.numeric(sigma_0_2_scalar),
+    prior_inclusion_weights = rep(1 / p, p),
+    prior_update_method = "none",
+    estimate_residual_variance = isTRUE(job_config$job$estimate_residual_variance),
+    verbose = FALSE,
+    convergence_method = "elbo",
+    tol = as.numeric(job_config$job$tol %||% 1e-5),
+    max_iter = as.integer(job_config$job$max_iter %||% 100L),
+    init_effect_fits = real_data_init_effect_fits_from_susine(source_fit)
+  )
+}
+
 real_data_write_parquet <- function(df, path) {
   ensure_dir(dirname(path))
   arrow::write_parquet(arrow::Table$create(df), path, compression = "zstd")
@@ -1811,6 +1873,8 @@ collect_real_data_results <- function(
     output_dir <- file.path(results_dir, "aggregated")
   }
   ensure_dir(output_dir)
+  highest_weight_refit_dir <- file.path(output_dir, "highest_weight_refits")
+  ensure_dir(highest_weight_refit_dir)
 
   temp_dir <- file.path(output_root, "temp", job_name)
   history_dir <- file.path(output_root, "run_history", job_name, parent_job_id)
@@ -1887,8 +1951,16 @@ collect_real_data_results <- function(
   comparison_rows <- list()
   functional_summary_rows <- list()
   anchor_summary_rows <- list()
+  highest_weight_refit_summary_rows <- list()
+  highest_weight_refit_variant_rows <- list()
+  highest_weight_refit_basin_rows <- list()
+  paper_summary_rows <- list()
 
   run_metrics_tbl <- csv_tables$run_metrics
+  if (!"pve_postmean_std" %in% names(run_metrics_tbl)) {
+    run_metrics_tbl$pve_postmean_std <- NA_real_
+  }
+  next_refit_run_id <- max(as.integer(run_manifest$run_id), na.rm = TRUE) + 1L
 
   for (i in seq_len(nrow(dataset_bundles))) {
     locus_row <- dataset_bundles[i, , drop = FALSE]
@@ -2155,6 +2227,132 @@ collect_real_data_results <- function(
       dplyr::slice_head(n = 20L) %>%
       dplyr::mutate(rank = dplyr::row_number(), .before = 1L)
 
+    highest_weight_source <- agg_weights_locus %>%
+      dplyr::left_join(
+        locus_run_metrics_present %>%
+          dplyr::select(.data$run_id, .data$fit_rds_path, .data$elbo_final,
+                        .data$pve_postmean_std, .data$max_pip),
+        by = "run_id"
+      ) %>%
+      dplyr::arrange(
+        dplyr::desc(.data$agg_weight_run),
+        dplyr::desc(.data$elbo_final),
+        .data$run_id
+      ) %>%
+      dplyr::slice_head(n = 1L)
+
+    refit_fit <- NULL
+    source_fit <- NULL
+    refit_artifacts <- NULL
+    refit_metric <- tibble::tibble()
+    refit_variant_tbl <- tibble::tibble()
+    refit_pip <- NULL
+    refit_error <- NA_character_
+    refit_run_id <- next_refit_run_id
+    next_refit_run_id <- next_refit_run_id + 1L
+
+    source_fit_path <- if (nrow(highest_weight_source)) highest_weight_source$fit_rds_path[[1]] else NA_character_
+    can_refit <- !is.null(locus_bundle_for_pve) &&
+      nrow(highest_weight_source) == 1L &&
+      is.character(source_fit_path) &&
+      !is.na(source_fit_path) &&
+      file.exists(source_fit_path)
+
+    if (can_refit) {
+      refit_locus_dir <- file.path(highest_weight_refit_dir, locus_id)
+      ensure_dir(refit_locus_dir)
+      refit_fit_path <- file.path(
+        refit_locus_dir,
+        paste0("highest_weight_refit_run_", refit_run_id, ".rds")
+      )
+      source_fit <- tryCatch(readRDS(source_fit_path), error = function(e) {
+        refit_error <<- conditionMessage(e)
+        NULL
+      })
+      if (!is.null(source_fit)) {
+        refit_run_row <- tibble::tibble(
+          run_id = as.integer(refit_run_id),
+          task_id = NA_integer_,
+          dataset_bundle_id = as.integer(locus_row$dataset_bundle_id[[1]]),
+          locus_id = as.character(locus_id),
+          gene_name = as.character(locus_row$gene_name[[1]]),
+          backend = "susine_rss",
+          run_family = "highest_weight_warm_refit",
+          c_value = 0,
+          sigma_0_2_scalar = 0.2,
+          baseline_c_l = as.numeric((locus_row$baseline_c_l %||% NA_real_)[[1]])
+        )
+        elapsed <- system.time({
+          refit_fit <- tryCatch(
+            real_data_run_highest_weight_refit(
+              source_fit = source_fit,
+              bundle = locus_bundle_for_pve,
+              job_config = job_config,
+              sigma_0_2_scalar = 0.2
+            ),
+            error = function(e) {
+              refit_error <<- conditionMessage(e)
+              NULL
+            }
+          )
+        })[["elapsed"]]
+        if (!is.null(refit_fit)) {
+          saveRDS(refit_fit, refit_fit_path)
+          refit_artifacts <- extract_rss_fit_artifacts(
+            fit = refit_fit,
+            run_row = refit_run_row,
+            bundle = locus_bundle_for_pve,
+            job_config = job_config,
+            fit_rds_path = refit_fit_path,
+            wall_time_sec = elapsed
+          )
+          refit_metric <- refit_artifacts$run_metrics %>%
+            dplyr::mutate(
+              source_run_id = as.integer(highest_weight_source$run_id[[1]]),
+              source_agg_weight_run = as.numeric(highest_weight_source$agg_weight_run[[1]]),
+              source_c_value = as.numeric(highest_weight_source$c_value[[1]]),
+              source_sigma_0_2_scalar = as.numeric(highest_weight_source$sigma_0_2_scalar[[1]]),
+              source_fit_rds_path = as.character(source_fit_path)
+            )
+          refit_variant_tbl <- refit_artifacts$variant_posteriors %>%
+            dplyr::mutate(
+              source_run_id = as.integer(highest_weight_source$run_id[[1]]),
+              source_agg_weight_run = as.numeric(highest_weight_source$agg_weight_run[[1]])
+            )
+          refit_pip <- refit_variant_tbl %>%
+            dplyr::arrange(.data$ld_matrix_index) %>%
+            dplyr::pull(.data$pip)
+          highest_weight_refit_variant_rows[[length(highest_weight_refit_variant_rows) + 1L]] <- refit_variant_tbl
+        }
+      }
+    } else if (!nrow(highest_weight_source)) {
+      refit_error <- "No highest-weight source run was available."
+    } else if (is.null(locus_bundle_for_pve)) {
+      refit_error <- "Locus bundle could not be loaded."
+    } else {
+      refit_error <- paste0("Highest-weight source fit is missing: ", source_fit_path)
+    }
+
+    highest_weight_refit_summary_rows[[length(highest_weight_refit_summary_rows) + 1L]] <- tibble::tibble(
+      locus_id = locus_id,
+      gene_name = locus_row$gene_name[[1]],
+      refit_status = if (is.null(refit_fit)) "failed" else "ok",
+      refit_error = if (is.null(refit_fit)) refit_error else NA_character_,
+      refit_run_id = as.integer(refit_run_id),
+      refit_fit_rds_path = if (nrow(refit_metric)) refit_metric$fit_rds_path[[1]] else NA_character_,
+      refit_elbo_final = if (nrow(refit_metric)) refit_metric$elbo_final[[1]] else NA_real_,
+      refit_pve_postmean_std = if (nrow(refit_metric)) refit_metric$pve_postmean_std[[1]] else NA_real_,
+      refit_max_pip = if (nrow(refit_metric)) refit_metric$max_pip[[1]] else NA_real_,
+      source_run_id = if (nrow(highest_weight_source)) as.integer(highest_weight_source$run_id[[1]]) else NA_integer_,
+      source_agg_weight_run = if (nrow(highest_weight_source)) highest_weight_source$agg_weight_run[[1]] else NA_real_,
+      source_c_value = if (nrow(highest_weight_source)) highest_weight_source$c_value[[1]] else NA_real_,
+      source_sigma_0_2_scalar = if (nrow(highest_weight_source)) highest_weight_source$sigma_0_2_scalar[[1]] else NA_real_,
+      source_elbo_final = if (nrow(highest_weight_source)) highest_weight_source$elbo_final[[1]] else NA_real_,
+      source_pve_postmean_std = if (nrow(highest_weight_source)) highest_weight_source$pve_postmean_std[[1]] else NA_real_,
+      source_max_pip = if (nrow(highest_weight_source)) highest_weight_source$max_pip[[1]] else NA_real_,
+      source_fit_rds_path = source_fit_path
+    )
+
     anchor_run_id <- if (nrow(anchor_runs)) as.integer(anchor_runs$run_id[[1]]) else NA_integer_
     locus_run_metrics <- run_metrics_tbl %>% dplyr::filter(.data$locus_id == !!locus_id)
     comparison_tbl <- compute_real_data_comparisons(
@@ -2256,6 +2454,12 @@ collect_real_data_results <- function(
           baseline_h2_proxy_std = if (base_ok) baseline_metric$h2_proxy_std[[1]] else NA_real_,
           baseline_pve_postmean_std = if (base_ok) baseline_metric$pve_postmean_std[[1]] else NA_real_,
           ensemble_pve_postmean_std = ensemble_pve_postmean_std,
+          highest_weight_refit_run_id = refit_run_id,
+          highest_weight_refit_status = if (is.null(refit_fit)) "failed" else "ok",
+          highest_weight_refit_pve_postmean_std = if (nrow(refit_metric)) refit_metric$pve_postmean_std[[1]] else NA_real_,
+          highest_weight_refit_max_pip = if (nrow(refit_metric)) refit_metric$max_pip[[1]] else NA_real_,
+          highest_weight_source_run_id = if (nrow(highest_weight_source)) highest_weight_source$run_id[[1]] else NA_integer_,
+          highest_weight_source_agg_weight_run = if (nrow(highest_weight_source)) highest_weight_source$agg_weight_run[[1]] else NA_real_,
           baseline_max_pip = if (base_ok) baseline_metric$max_pip[[1]] else NA_real_,
           jsd_anchor_vs_baseline = if (can_compare)
             as.numeric(js_distance(anchor_pip, base_pip)) else NA_real_,
@@ -2264,6 +2468,71 @@ collect_real_data_results <- function(
           top10_overlap_anchor_vs_baseline = if (can_compare)
             real_data_top_overlap(anchor_pip, base_pip, 10L) else NA_real_
         )
+
+        source_run_id <- if (nrow(highest_weight_source)) as.integer(highest_weight_source$run_id[[1]]) else NA_integer_
+        source_pip <- if (!is.na(source_run_id)) {
+          pip_lookup_all[[as.character(source_run_id)]]
+        } else {
+          NULL
+        }
+        paper_summary_rows[[length(paper_summary_rows) + 1L]] <- tibble::tibble(
+          locus_id = locus_id,
+          gene_name = locus_row$gene_name[[1]],
+          n_variants = length(agg_pip),
+          susie_anchor_run_id = anchor_id,
+          baseline_c0_run_id = if (base_ok) baseline_metric$run_id[[1]] else NA_integer_,
+          highest_weight_source_run_id = source_run_id,
+          highest_weight_refit_run_id = refit_run_id,
+          highest_weight_source_agg_weight_run = if (nrow(highest_weight_source)) highest_weight_source$agg_weight_run[[1]] else NA_real_,
+          highest_weight_source_c_value = if (nrow(highest_weight_source)) highest_weight_source$c_value[[1]] else NA_real_,
+          highest_weight_source_sigma_0_2_scalar = if (nrow(highest_weight_source)) highest_weight_source$sigma_0_2_scalar[[1]] else NA_real_,
+          n_pip_gt_025_susie_anchor = if (!is.null(anchor_pip)) real_data_pip_count(anchor_pip) else NA_integer_,
+          n_pip_gt_025_baseline_c0 = if (!is.null(base_pip)) real_data_pip_count(base_pip) else NA_integer_,
+          n_pip_gt_025_susine_ensemble = real_data_pip_count(agg_pip),
+          n_pip_gt_025_highest_weight_source = if (!is.null(source_pip)) real_data_pip_count(source_pip) else NA_integer_,
+          n_pip_gt_025_highest_weight_refit = if (!is.null(refit_pip)) real_data_pip_count(refit_pip) else NA_integer_,
+          n_pip_gt_025_susie_anchor_and_susine_ensemble = real_data_pip_intersection_count(anchor_pip, agg_pip),
+          n_pip_gt_025_susie_anchor_and_refit = real_data_pip_intersection_count(anchor_pip, refit_pip),
+          n_pip_gt_025_baseline_c0_and_susine_ensemble = real_data_pip_intersection_count(base_pip, agg_pip),
+          n_pip_gt_025_baseline_c0_and_refit = real_data_pip_intersection_count(base_pip, refit_pip),
+          n_pip_gt_025_susine_ensemble_and_refit = real_data_pip_intersection_count(agg_pip, refit_pip),
+          pve_susie_anchor = anchor_metric$pve_postmean_std[[1]],
+          pve_baseline_c0 = if (base_ok) baseline_metric$pve_postmean_std[[1]] else NA_real_,
+          pve_susine_ensemble = ensemble_pve_postmean_std,
+          pve_highest_weight_source = if (nrow(highest_weight_source)) highest_weight_source$pve_postmean_std[[1]] else NA_real_,
+          pve_highest_weight_refit = if (nrow(refit_metric)) refit_metric$pve_postmean_std[[1]] else NA_real_,
+          jsd_susie_anchor_vs_susine_ensemble = real_data_safe_js_distance(anchor_pip, agg_pip),
+          jsd_susie_anchor_vs_refit = real_data_safe_js_distance(anchor_pip, refit_pip),
+          jsd_baseline_c0_vs_susine_ensemble = real_data_safe_js_distance(base_pip, agg_pip),
+          jsd_baseline_c0_vs_refit = real_data_safe_js_distance(base_pip, refit_pip),
+          jsd_susine_ensemble_vs_refit = real_data_safe_js_distance(agg_pip, refit_pip)
+        )
+
+        if (!is.null(locus_bundle_for_pve) && !anchor_failed && nrow(highest_weight_source)) {
+          anchor_fit <- tryCatch(readRDS(anchor_metric$fit_rds_path[[1]]), error = function(e) NULL)
+          if (is.null(source_fit) && !is.na(source_fit_path) && file.exists(source_fit_path)) {
+            source_fit <- tryCatch(readRDS(source_fit_path), error = function(e) NULL)
+          }
+          anchor_cache <- real_data_basin_r2_cache(anchor_fit, locus_bundle_for_pve$R)
+          source_cache <- real_data_basin_r2_cache(source_fit, locus_bundle_for_pve$R)
+          refit_cache <- real_data_basin_r2_cache(refit_fit, locus_bundle_for_pve$R)
+          source_vs_anchor <- real_data_basin_r2_drift_pair_cached(source_cache, anchor_cache)
+          refit_vs_anchor <- real_data_basin_r2_drift_pair_cached(refit_cache, anchor_cache)
+          refit_vs_source <- real_data_basin_r2_drift_pair_cached(refit_cache, source_cache)
+          highest_weight_refit_basin_rows[[length(highest_weight_refit_basin_rows) + 1L]] <- tibble::tibble(
+            locus_id = locus_id,
+            gene_name = locus_row$gene_name[[1]],
+            susie_anchor_run_id = anchor_id,
+            highest_weight_source_run_id = source_run_id,
+            highest_weight_refit_run_id = refit_run_id,
+            basin_r2_drift_highest_weight_vs_susie_anchor = source_vs_anchor$drift,
+            basin_r2_drift_refit_vs_susie_anchor = refit_vs_anchor$drift,
+            basin_r2_drift_refit_vs_highest_weight = refit_vs_source$drift,
+            n_matched_highest_weight_vs_susie_anchor = source_vs_anchor$n_matched,
+            n_matched_refit_vs_susie_anchor = refit_vs_anchor$n_matched,
+            n_matched_refit_vs_highest_weight = refit_vs_source$n_matched
+          )
+        }
       }
     }
   }
@@ -2274,6 +2543,10 @@ collect_real_data_results <- function(
   cluster_summary_tbl <- dplyr::bind_rows(cluster_summary_rows)
   functional_summary_tbl <- dplyr::bind_rows(functional_summary_rows)
   anchor_summary_tbl <- dplyr::bind_rows(anchor_summary_rows)
+  highest_weight_refit_summary_tbl <- dplyr::bind_rows(highest_weight_refit_summary_rows)
+  highest_weight_refit_variants_tbl <- dplyr::bind_rows(highest_weight_refit_variant_rows)
+  highest_weight_refit_basin_tbl <- dplyr::bind_rows(highest_weight_refit_basin_rows)
+  paper_summary_tbl <- dplyr::bind_rows(paper_summary_rows)
   top_variants_tbl <- dplyr::bind_rows(top_variant_rows)
   comparisons_tbl <- dplyr::bind_rows(comparison_rows)
   aggregated_variants_tbl <- dplyr::bind_rows(aggregated_variant_rows)
@@ -2286,10 +2559,14 @@ collect_real_data_results <- function(
   if (nrow(cluster_summary_tbl)) readr::write_csv(cluster_summary_tbl, file.path(output_dir, "cluster_summary.csv"))
   if (nrow(functional_summary_tbl)) readr::write_csv(functional_summary_tbl, file.path(output_dir, "functional_grid_summary.csv"))
   if (nrow(anchor_summary_tbl)) readr::write_csv(anchor_summary_tbl, file.path(output_dir, "susie_anchor_summary.csv"))
+  if (nrow(highest_weight_refit_summary_tbl)) readr::write_csv(highest_weight_refit_summary_tbl, file.path(output_dir, "highest_weight_refit_summary.csv"))
+  if (nrow(highest_weight_refit_basin_tbl)) readr::write_csv(highest_weight_refit_basin_tbl, file.path(output_dir, "highest_weight_refit_basin_r2_drift.csv"))
+  if (nrow(paper_summary_tbl)) readr::write_csv(paper_summary_tbl, file.path(output_dir, "paper_real_data_ensemble_summary.csv"))
   if (nrow(top_variants_tbl)) readr::write_csv(top_variants_tbl, file.path(output_dir, "top_variants_cluster_weight.csv"))
   if (nrow(comparisons_tbl)) readr::write_csv(comparisons_tbl, file.path(output_dir, "run_comparisons.csv"))
   if (nrow(pairwise_tbl)) real_data_write_parquet(pairwise_tbl, file.path(output_dir, "pairwise_pip_jsd.parquet"))
   if (nrow(aggregated_variants_tbl)) real_data_write_parquet(aggregated_variants_tbl, file.path(output_dir, "aggregated_variant_pips_cluster_weight.parquet"))
+  if (nrow(highest_weight_refit_variants_tbl)) real_data_write_parquet(highest_weight_refit_variants_tbl, file.path(output_dir, "highest_weight_refit_variant_posteriors.parquet"))
 
   metric_inventory <- tibble::tribble(
     ~artifact, ~path, ~format, ~granularity, ~description,
@@ -2306,13 +2583,17 @@ collect_real_data_results <- function(
     "cluster_summary", file.path(output_dir, "cluster_summary.csv"), "csv", "locus-cluster", "Representative runs and cluster weights",
     "functional_grid_summary", file.path(output_dir, "functional_grid_summary.csv"), "csv", "run", "Functional grid summary joined to cluster and drift metrics",
     "susie_anchor_summary", file.path(output_dir, "susie_anchor_summary.csv"), "csv", "locus", "susieR anchor vs functional baseline summary",
+    "highest_weight_refit_summary", file.path(output_dir, "highest_weight_refit_summary.csv"), "csv", "locus", "Warm baseline refit initialized from the highest-weight SuSiNE ensemble member",
+    "highest_weight_refit_basin_r2_drift", file.path(output_dir, "highest_weight_refit_basin_r2_drift.csv"), "csv", "locus", "Basin r2 drift among susie anchor, highest-weight source, and warm refit",
+    "paper_real_data_ensemble_summary", file.path(output_dir, "paper_real_data_ensemble_summary.csv"), "csv", "locus", "Paper-facing summary of PIP counts, overlaps, PVE, and JSD",
     "top_variants_cluster_weight", file.path(output_dir, "top_variants_cluster_weight.csv"), "csv", "locus-variant", "Top aggregated variants per locus",
     "run_comparisons", file.path(output_dir, "run_comparisons.csv"), "csv", "run-target", "Per-run comparison metrics against baselines",
     "variant_posteriors_dataset", variant_dataset_dir, "parquet-dataset", "run-variant", "Per-run variant posterior summaries",
     "effect_posteriors_dataset", effect_dataset_dir, "parquet-dataset", "run-effect-variant", "Per-effect posterior summaries",
     "credible_set_membership_dataset", cs_dataset_dir, "parquet-dataset", "run-effect-member", "Credible-set membership rows",
     "pairwise_pip_jsd", file.path(output_dir, "pairwise_pip_jsd.parquet"), "parquet", "run-pair", "Pairwise PIP JSD within each locus",
-    "aggregated_variant_pips_cluster_weight", file.path(output_dir, "aggregated_variant_pips_cluster_weight.parquet"), "parquet", "locus-variant", "Cluster-weight aggregated variant PIPs and posterior means"
+    "aggregated_variant_pips_cluster_weight", file.path(output_dir, "aggregated_variant_pips_cluster_weight.parquet"), "parquet", "locus-variant", "Cluster-weight aggregated variant PIPs and posterior means",
+    "highest_weight_refit_variant_posteriors", file.path(output_dir, "highest_weight_refit_variant_posteriors.parquet"), "parquet", "locus-variant", "Variant posterior summaries for highest-weight warm refits"
   )
   readr::write_csv(metric_inventory, file.path(output_dir, "metric_inventory.csv"))
 
