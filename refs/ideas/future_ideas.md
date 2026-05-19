@@ -19,7 +19,7 @@ IBSS coordinate ascent can be viewed through the lens of **mirror descent** on t
 
 ## 2. Method B: KDE Importance Sampling for Large Ensembles
 
-From `refs/pip_ensemble_methods.md`. For K = 100+ restarts, replace discrete clustering (Method A) with continuous density estimation on the PIP simplex:
+From `refs/investigation/pip_ensemble_methods.md`. For K = 100+ restarts, replace discrete clustering (Method A) with continuous density estimation on the PIP simplex:
 
 - Use the **heat kernel** on the simplex (the geometrically principled kernel under Fisher-Rao / JSD):
   $$K_t(\text{PIP}_i, \text{PIP}_j) \propto \exp(-\text{JSD}(\text{PIP}_i/L, \text{PIP}_j/L) / 2t)$$

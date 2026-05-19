@@ -13,9 +13,9 @@ This document inventories every piece of remaining analysis work (short of paper
 
 Key references:
 
-- `refs/susine_study_plan_high_level.md` (Sections 0-9)
-- `refs/susie_susine_background.md` (SuSiE/SuSiE-2/SuSiNE technical background)
-- `refs/pip_ensemble_methods.md` (ensemble weighting theory + methods)
+- `refs/study_plans/susine_study_plan_high_level.md` (Sections 0-9)
+- `refs/background/susie_susine_background.md` (SuSiE/SuSiE-2/SuSiNE technical background)
+- `refs/investigation/pip_ensemble_methods.md` (ensemble weighting theory + methods)
 - `vignettes/susie_pathology.ipynb` (SuSiE failure mode demonstrations)
 
 ---
@@ -30,7 +30,7 @@ Every decision here blocks or shapes downstream implementation. Marked with stat
 
 **Status: RESOLVED — Plan A (two-package strategy)**
 
-**Discovery (2025-07-07):** The local susieR fork (v0.12.40) was stale. The upstream stephenslab/susieR has been rewritten as v2.0.0 with SuSiE-ash, SuSiE-inf, PIP convergence, refinement, NIG priors, stochastic LD, and a full S3 class architecture. This fundamentally changed the analysis. See `refs/d1_package_architecture_analysis.md` (revised) and `refs/susieR_2.0_inventory.md` for full details.
+**Discovery (2025-07-07):** The local susieR fork (v0.12.40) was stale. The upstream stephenslab/susieR has been rewritten as v2.0.0 with SuSiE-ash, SuSiE-inf, PIP convergence, refinement, NIG priors, stochastic LD, and a full S3 class architecture. This fundamentally changed the analysis. See `refs/decisions/d1_package_architecture_analysis.md` (revised) and `refs/background/susieR_2.0_inventory.md` for full details.
 
 **Decision:** Use upstream susieR 2.0 as-is for SuSiE baselines. Keep susine for SuSiNE-specific features. Harness (test_susine) wraps both packages.
 
@@ -106,7 +106,7 @@ This means exploration methods carry a **validity constraint** against prior spe
 | `max_elbo` | Max ELBO (single best) | Baseline; ignores all other fits |
 | `uniform` | Uniform weighting | Ignores ELBO; frequency-biased |
 | `elbo_softmax` | ELBO softmax | Simple BMA approximation; still frequency-biased |
-| `cluster_weight` | Cluster-then-weight (Method A) | Importance-corrects for optimizer frequency via JSD clustering (see `pip_ensemble_methods.md`) |
+| `cluster_weight` | Cluster-then-weight (Method A) | Importance-corrects for optimizer frequency via JSD clustering (see `refs/investigation/pip_ensemble_methods.md`) |
 
 ### Migration plan
 
@@ -536,7 +536,7 @@ In `run_model.R` `compute_multimodal_metrics()`:
 - mean_pip_var (per-SNP PIP variance across fits)
 - n_clusters (hierarchical clustering at JSD threshold)
 
-**Minor issue:** Uses average linkage; `pip_ensemble_methods.md` recommends complete linkage. Consider switching.
+**Minor issue:** Uses average linkage; `refs/investigation/pip_ensemble_methods.md` recommends complete linkage. Consider switching.
 
 **Action:** Verify these are computed for ALL multi-fit groups (not just restart_alpha use cases).
 
@@ -556,7 +556,7 @@ In `run_model.R` `compute_multimodal_metrics()`:
 
 | Method | Priority | Effort | Description |
 | ------ | -------- | ------ | ----------- |
-| **Cluster-then-weight (Method A)** | HIGH | Low-med | Clustering infra exists (JSD + hclust). Need: importance correction w_m ~ exp(ELBO_m) / f_m, representative selection per cluster, ESS diagnostic. Ref: `pip_ensemble_methods.md` |
+| **Cluster-then-weight (Method A)** | HIGH | Low-med | Clustering infra exists (JSD + hclust). Need: importance correction w_m ~ exp(ELBO_m) / f_m, representative selection per cluster, ESS diagnostic. Ref: `refs/investigation/pip_ensemble_methods.md` |
 | **Temperature-exposed softmax** | MEDIUM | Trivial | Wire temperature param from job config through to aggregation. |
 | **KDE importance sampling (Method B)** | LOW | Medium | Only for K=100+ ensembles. Skip unless we run large restart counts. |
 | **Global cross-model-spec pooling** | HIGH (D7 RESOLVED) | Medium | Pool all fits across model specs for a dataset. |

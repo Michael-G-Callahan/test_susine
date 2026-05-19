@@ -3,7 +3,7 @@
 **Date:** 2025-02-25 (original); **Revised:** 2025-07-07
 **Purpose:** Concrete implementation plans for D1, updated after discovering that the upstream stephenslab/susieR has undergone a complete rewrite to v2.0.0. The original analysis was based on the stale local fork (v0.12.40) and is superseded.
 
-> **KEY CORRECTION:** The original analysis stated "susieR does NOT have: alpha/PIP convergence, SuSiE-ash, SuSiE-inf." This was **wrong** — it reflected the stale local fork. The upstream susieR 2.0.0 has **all of these features** and more. See `refs/susieR_2.0_inventory.md` for the full inventory.
+> **KEY CORRECTION:** The original analysis stated "susieR does NOT have: alpha/PIP convergence, SuSiE-ash, SuSiE-inf." This was **wrong** — it reflected the stale local fork. The upstream susieR 2.0.0 has **all of these features** and more. See `refs/background/susieR_2.0_inventory.md` for the full inventory.
 
 ---
 

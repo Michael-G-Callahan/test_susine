@@ -121,7 +121,7 @@ where $\beta$ is the sparse SuSiE part and $\theta$ captures diffuse moderate/we
 
 #### 2.1.1 Rough implementation spec (SuSiE-ash)
 
-> **Note (2025-07-07):** SuSiE-ash is now fully implemented in upstream susieR 2.0 via `susie(X, y, unmappable_effects = "ash")`. The spec below remains useful as a conceptual reference but is no longer a porting target. See `refs/susieR_2.0_inventory.md` for the actual implementation details (C++ backend via `caisa_rcpp`, masking/unmasking pattern, individual-data only constraint).
+> **Note (2025-07-07):** SuSiE-ash is now fully implemented in upstream susieR 2.0 via `susie(X, y, unmappable_effects = "ash")`. The spec below remains useful as a conceptual reference but is no longer a porting target. See `refs/background/susieR_2.0_inventory.md` for the actual implementation details (C++ backend via `caisa_rcpp`, masking/unmasking pattern, individual-data only constraint).
 
 If someone needs a first working implementation, this is the minimum useful spec.
 
@@ -216,7 +216,7 @@ Summary-stat note: in an RSS implementation, replace raw $X$ operations with LD/
 
 #### 2.2.1 Rough implementation spec (SuSiE-inf)
 
-> **Note (2025-07-07):** SuSiE-inf is now fully implemented in upstream susieR 2.0 via `susie(X, y, unmappable_effects = "inf")` (individual data) and `susie_ss(unmappable_effects = "inf")` (summary stats). Uses omega-weighted SER updates and BLUP theta. See `refs/susieR_2.0_inventory.md` for details. Incompatible with RSS (λ>0).
+> **Note (2025-07-07):** SuSiE-inf is now fully implemented in upstream susieR 2.0 via `susie(X, y, unmappable_effects = "inf")` (individual data) and `susie_ss(unmappable_effects = "inf")` (summary stats). Uses omega-weighted SER updates and BLUP theta. See `refs/background/susieR_2.0_inventory.md` for details. Incompatible with RSS (λ>0).
 
 SuSiE-inf can be viewed as the same decomposition, but with a single Gaussian background prior:
 $$
@@ -385,6 +385,5 @@ These questions are here so a new collaborator/AI can quickly diagnose what rema
 1. **Primary output**: are we optimizing for (a) calibrated posterior PIPs/CSs, or (b) robust candidate selection under hyperparameter uncertainty?
 2. **Compute budget definition**: will we compare methods under a fixed number of model fits per locus, or fixed walltime? **→ D8 RESOLVED: fixed K (number of fits); record wall time per fit.**
 3. **Annotation error model**: will we include explicit sign-flip scenarios, LD-correlated annotation noise, or just R²-controlled Gaussian noise? **→ D14 RESOLVED: current controls sufficient, no sign flips or LD-correlated noise.**
-4. **Role of SuSiE-ash/inf**: do we treat them as baseline "engines" (single-fit) or include them in any ensemble comparisons (even via non-ELBO pooling)? **→ D3 RESOLVED: include as baseline comparison arms via susieR 2.0 (`unmappable_effects`). Zero implementation cost. See `analysis_completion_status.md` D3.**
-
+4. **Role of SuSiE-ash/inf**: do we treat them as baseline "engines" (single-fit) or include them in any ensemble comparisons (even via non-ELBO pooling)? **→ D3 RESOLVED: include as baseline comparison arms via susieR 2.0 (`unmappable_effects`). Zero implementation cost. See `refs/old/analysis_completion_status.md` D3.**
 

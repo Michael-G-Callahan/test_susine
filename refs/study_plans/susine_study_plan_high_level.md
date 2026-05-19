@@ -135,7 +135,7 @@ Treat this as a first-class contribution, not a side analysis.
 
 #### B1) Define “use cases” (model families)
 
-**[UPDATED 2025-07-07 per D1/D3 resolution — see `analysis_completion_status.md`]**
+**[UPDATED 2025-07-07 per D1/D3 resolution — see `refs/old/analysis_completion_status.md`]**
 
 5 model arms (factored design per D2):
 
@@ -170,7 +170,7 @@ Secondary/sensitivity:
 **Caution — EB prior variance estimation distorts ELBO-softmax weights:**
 The pathology vignette (A0, Scenario 3) demonstrates that `estimate_prior_variance = TRUE` amplifies small numerical asymmetries between symmetric basins, producing long-run ensemble weights of 0.21/0.79 instead of the expected ~0.50/0.50. Fixing prior variance restores balance. This motivates using a fixed $\sigma_0^2$ grid (B2) rather than per-fit EB estimation when computing ELBO-softmax weights for aggregation.
 
-**Aggregation design decision (RESOLVED — see `analysis_completion_status.md` D6):**
+**Aggregation design decision (RESOLVED — see `refs/old/analysis_completion_status.md` D6):**
 - All aggregation methods operate on a **flattened pool** of fits for a given (dataset, model_spec). Each fit's ELBO is evaluated under its own prior only (no cross-prior re-scoring).
 - Primary methods: Max ELBO, Uniform, ELBO softmax, and **Cluster-then-weight (Method A)** — which importance-corrects for optimizer frequency bias via JSD-based clustering.
 - Grid structure matters at the *exploration* stage (what fits to generate), not at the *aggregation* stage.
@@ -328,7 +328,7 @@ For each dataset \((X,y,a)\):
 
 ## 8) Scope control (to keep the paper finishable)
 
-**[UPDATED 2025-07-07 per D1/D3/D4/D5 resolution — see `analysis_completion_status.md`]**
+**[UPDATED 2025-07-07 per D1/D3/D4/D5 resolution — see `refs/old/analysis_completion_status.md`]**
 
 1. ~~Do not implement SuSiNE-ash/inf unless absolutely necessary.~~ **D3 RESOLVED:** SuSiE-ash/inf are free baseline arms via susieR 2.0 (`unmappable_effects`). Include them.
 2. ~~Keep the "functional SuSiE via π" baseline minimal.~~ **D5 RESOLVED:** Implement functional pi as `softmax(|a_j| / tau)` with tau-grid exploration (D15).
@@ -343,7 +343,7 @@ For each dataset \((X,y,a)\):
 3. Finalize simulation harness changes:
    - alpha-based convergence for comparability
    - consistent genotype QC filters (MAF, missingness)
-3. Implement flatten-based aggregation pipeline (see `analysis_completion_status.md` D6):
+3. Implement flatten-based aggregation pipeline (see `refs/old/analysis_completion_status.md` D6):
    - save all per-fit PIP vectors + ELBOs
    - post-hoc: flatten all fits per (dataset, model_spec), apply four aggregation methods
 4. Implement dataset difficulty metrics (M1 + full z-score metric family).
@@ -362,6 +362,5 @@ For each dataset \((X,y,a)\):
 - **M1:** LD complexity metric \(\sum_{i<j} |r_{ij}|(1-|r_{ij}|)\).
 - **Z-primary metric:** selected z-score-only difficulty metric used with M1 to stratify failure modes.
 - **JSD:** Jensen–Shannon style divergence between PIP vectors (diversity proxy), currently computed on raw model-wide PIPs in `run_model.R`.
-- **Flatten-based aggregation:** pool all fits per (dataset, model_spec); aggregate via Max ELBO, Uniform, ELBO softmax, or Cluster-then-weight (Method A). See `analysis_completion_status.md` D6.
-
+- **Flatten-based aggregation:** pool all fits per (dataset, model_spec); aggregate via Max ELBO, Uniform, ELBO softmax, or Cluster-then-weight (Method A). See `refs/old/analysis_completion_status.md` D6.
 

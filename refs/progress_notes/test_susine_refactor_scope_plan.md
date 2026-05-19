@@ -5,7 +5,7 @@
 
 ## 1) Scope and Goal
 
-This plan scopes all `T1`-`T20` items from `refs/project_status.md` Section 3.2, maps each item to the current codebase, and orders implementation for lowest integration risk.
+This plan scopes all `T1`-`T20` items from `refs/progress_notes/project_status.md` Section 3.2, maps each item to the current codebase, and orders implementation for lowest integration risk.
 
 Primary objective:
 - Move from the legacy use-case-centric harness (single `susine` backend + bundled exploration logic) to a factored design:
@@ -408,4 +408,3 @@ Mitigation:
 - Add run-count accounting before and after refactor.
 - Lock deterministic seeding rules early.
 - Keep schema migration notes and version stamps in job config.
-

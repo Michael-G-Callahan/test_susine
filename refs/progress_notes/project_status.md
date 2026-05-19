@@ -1,7 +1,7 @@
 # SuSiNE Project Status
 
 **Last updated:** 2026-03-02
-**Supersedes:** `analysis_completion_status.md` (which remains as archival reference for resolved decisions D1-D17)
+**Supersedes:** `refs/old/analysis_completion_status.md` (which remains as archival reference for resolved decisions D1-D17)
 
 ---
 
@@ -113,7 +113,7 @@ Applied post-hoc to each (dataset, use_case, exploration) group, **and** to the 
 | Max ELBO | Select single fit with highest ELBO |
 | Uniform | Equal-weight average of all PIPs |
 | ELBO softmax | w_i proportional to exp(ELBO_i); flatten all fits first |
-| Cluster-then-ELBO-softmax | JSD-based clustering, importance-corrected weights (Method A from pip_ensemble_methods.md) |
+| Cluster-then-ELBO-softmax | JSD-based clustering, importance-corrected weights (Method A from `refs/investigation/pip_ensemble_methods.md`) |
 
 ### 2.4 Genotype Matrices
 
@@ -266,7 +266,7 @@ Phase 3 (pre-pilot validation) - COMPLETE:
 ---
 ## Appendix: Resolved Decisions (Summary)
 
-All 17 critical decisions (D1-D17) from analysis_completion_status.md are resolved. Key outcomes:
+All 17 critical decisions (D1-D17) from `refs/old/analysis_completion_status.md` are resolved. Key outcomes:
 
 | Decision | Resolution |
 |----------|-----------|
