@@ -3,6 +3,7 @@
 #SBATCH --time=05:59:59
 #SBATCH --mem=8G
 #SBATCH --cpus-per-task=1
+#SBATCH --array=1-20
 #SBATCH --mail-user=mgc5166@psu.edu
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --account=statsresearch_sc_default
@@ -31,11 +32,15 @@ export SUSINE_DEV="1"
 FRESH="${EFFECT_MATCHING_FRESH:-true}"
 CHECKPOINT_EVERY="${EFFECT_MATCHING_CHECKPOINT_EVERY:-5}"
 MAX_DATASETS="${EFFECT_MATCHING_MAX_DATASETS:-}"
+SHARD_TOTAL="${EFFECT_MATCHING_SHARD_TOTAL:-${SLURM_ARRAY_TASK_COUNT:-1}}"
+SHARD_INDEX="${EFFECT_MATCHING_SHARD_INDEX:-${SLURM_ARRAY_TASK_ID:-1}}"
 
 CMD=(Rscript "${REPO_ROOT}/inst/scripts/render_effect_matching_refit_5arm.R"
   "--repo-root=${REPO_ROOT}"
   "--fresh=${FRESH}"
-  "--checkpoint-every=${CHECKPOINT_EVERY}")
+  "--checkpoint-every=${CHECKPOINT_EVERY}"
+  "--shard-total=${SHARD_TOTAL}"
+  "--shard-index=${SHARD_INDEX}")
 
 if [ -n "${MAX_DATASETS}" ]; then
   CMD+=("--max-datasets=${MAX_DATASETS}")

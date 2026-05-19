@@ -98,6 +98,18 @@ env_int <- function(name, default) {
 max_datasets <- env_int("EFFECT_MATCHING_MAX_DATASETS", Inf)
 force_refit <- env_flag("EFFECT_MATCHING_FORCE_REFIT", TRUE)
 checkpoint_every <- env_int("EFFECT_MATCHING_CHECKPOINT_EVERY", 25L)
+shard_total <- env_int("EFFECT_MATCHING_SHARD_TOTAL", 1L)
+shard_index <- env_int("EFFECT_MATCHING_SHARD_INDEX", 1L)
+if (!is.finite(shard_total) || shard_total < 1L) shard_total <- 1L
+if (!is.finite(shard_index) || shard_index < 1L || shard_index > shard_total) {
+  stop("Invalid shard settings: EFFECT_MATCHING_SHARD_INDEX=", shard_index,
+       ", EFFECT_MATCHING_SHARD_TOTAL=", shard_total)
+}
+shard_suffix <- if (shard_total > 1L) {
+  sprintf("_shard_%03d_of_%03d", shard_index, shard_total)
+} else {
+  ""
+}
 
 # Baseline-sims dataset recipe. These come from `_5arm_cfg.R` so the refit
 # and downstream drift/PR regeneration use identical bundle definitions.
@@ -137,14 +149,15 @@ n_methods_expected <- length(all_method_levels)
 # Offset added to source run_id to make warm-refit run_ids globally unique.
 warm_run_id_offset <- 10000000L
 
-records_rds <- file.path(study_dir, "effect_refit_records.rds")
-metadata_csv <- file.path(study_dir, "effect_refit_metadata.csv")
+records_rds <- file.path(study_dir, paste0("effect_refit_records", shard_suffix, ".rds"))
+metadata_csv <- file.path(study_dir, paste0("effect_refit_metadata", shard_suffix, ".csv"))
 selected_runs_csv <- file.path(study_dir, "selected_run_rows.csv")
 dataset_bundles_csv <- file.path(study_dir, "dataset_bundles.csv")
-progress_csv <- file.path(study_dir, "refit_progress_log.csv")
-pip_records_rds <- file.path(study_dir, "pip_records_5arm.rds")
+progress_csv <- file.path(study_dir, paste0("refit_progress_log", shard_suffix, ".csv"))
+pip_records_rds <- file.path(study_dir, paste0("pip_records_5arm", shard_suffix, ".rds"))
 
 cat("Study dir:", study_dir, "\n")
+cat("Shard:", shard_index, "of", shard_total, "\n")
 cat("Methods (in fit order):", paste(all_method_levels, collapse = ", "), "\n")
 ```
 
@@ -569,6 +582,10 @@ stopifnot(nrow(selected_runs) == length(cold_method_levels) * nrow(cfg$tables$da
 dataset_ids <- sort(as.character(unique(selected_runs$dataset_bundle_id)))
 if (is.finite(max_datasets)) {
   dataset_ids <- head(dataset_ids, as.integer(max_datasets))
+}
+if (shard_total > 1L) {
+  shard_pos <- ((seq_along(dataset_ids) - 1L) %% shard_total) + 1L
+  dataset_ids <- dataset_ids[shard_pos == shard_index]
 }
 
 existing_records <- tibble::tibble()
