@@ -1773,14 +1773,14 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
   )
   print(combined_3col)
 
-  cat("Inner winsorization limits (symmetric, 99% of |value|):\n")
-  cat(sprintf("  col 1 x (delta_explanatory_basis_divergence): [%.3f, %.3f]\n",
+  cat("Display winsorization limits (1st/99th percentiles):\n")
+  cat(sprintf("  Panel E x (basis-divergence reduction): [%.3f, %.3f]\n",
               col1_xlim[1], col1_xlim[2]))
-  cat(sprintf("  col 1 y (delta_AUPRC): [%.3f, %.3f]\n",
+  cat(sprintf("  Panel E y (delta AUPRC): [%.3f, %.3f]\n",
               col1_ylim[1], col1_ylim[2]))
-  cat(sprintf("  col 2 axes (delta_AUPRC): [%.3f, %.3f]\n",
+  cat(sprintf("  Panel C axes (delta AUPRC): [%.3f, %.3f]\n",
               col2_axislim[1], col2_axislim[2]))
-  cat(sprintf("  col 3 axes (delta_explanatory_basis_divergence): [%.3f, %.3f]\n",
+  cat(sprintf("  Panel D axes (basis-divergence reduction): [%.3f, %.3f]\n",
               col3_axislim[1], col3_axislim[2]))
 } else {
   if (exists("combined_3col")) {
