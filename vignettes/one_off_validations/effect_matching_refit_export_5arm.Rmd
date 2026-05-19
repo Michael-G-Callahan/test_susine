@@ -246,7 +246,14 @@ effect_coef_matrix <- function(fit, X) {
       b_hat <- t(b_hat)
     }
     if (nrow(b_hat) == L && ncol(b_hat) == p) {
-      return(b_hat)
+      # SuSiNE stores effect coefficients on the internally standardized-X
+      # scale. The cached fitted-y records are rebuilt from the original data
+      # bundle X, so convert to original-X coefficients before X %*% b below.
+      # Omitting this conversion shrinks PVE/hg2 whenever genotype columns have
+      # sd < 1.
+      x_sd <- apply(as.matrix(X), 2L, stats::sd)
+      x_sd[!is.finite(x_sd) | x_sd <= 0] <- 1
+      return(sweep(b_hat, 2L, x_sd, "/"))
     }
   }
 
@@ -276,6 +283,24 @@ extract_effect_records <- function(fit, eval_res, data_bundle, run_row, model_me
   fitted_y_mat <- X %*% t(b_hat)
   L <- ncol(fitted_y_mat)
   var_y <- stats::var(y)
+
+  model_fitted_y <- fit$model_fit$fitted_y %||% NULL
+  if (!is.null(model_fitted_y) && length(model_fitted_y) == nrow(fitted_y_mat)) {
+    reconstructed_total <- rowSums(fitted_y_mat)
+    centered_diff <- (reconstructed_total - mean(reconstructed_total)) -
+      (as.numeric(model_fitted_y) - mean(as.numeric(model_fitted_y)))
+    denom <- max(stats::sd(as.numeric(model_fitted_y)), 1e-12)
+    rel_rmse <- sqrt(mean(centered_diff^2)) / denom
+    if (is.finite(rel_rmse) && rel_rmse > 1e-5) {
+      stop(
+        "Per-effect fitted_y reconstruction disagrees with model_fit$fitted_y ",
+        "for dataset_bundle_id=", run_row$dataset_bundle_id[[1]],
+        ", method=", model_method,
+        ". Relative centered RMSE=", signif(rel_rmse, 4),
+        ". Check coefficient scaling before exporting effect records."
+      )
+    }
+  }
 
   effect_tbl <- eval_res$effects_unfiltered %>%
     tibble::as_tibble() %>%
