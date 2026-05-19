@@ -1443,7 +1443,7 @@ if (!file.exists(truth_drift_csv)) {
       pair_kind = dplyr::recode(
         as.character(.data$comparison),
         `cold -> annotated` = "cold_ann",
-        `cold -> warm vanilla` = "cold_warm"
+        `cold -> warm refit` = "cold_warm"
       ),
       delta_mu = .data$delta_mu,
       delta_pi = .data$delta_pi
@@ -1532,9 +1532,8 @@ if (!file.exists(truth_drift_csv)) {
 if (file.exists(truth_drift_csv) && exists("sanity_join")) {
   delta_truth_thresh <- 0.05
   delta_auprc_thresh <- 0.02
-  trim_q <- c(0.01, 0.99)
-  label_edge_mult <- 1.12
-  annotation_axis_mult <- 1.24
+  display_trim_q <- c(0.01, 0.99)
+  display_axis_pad <- 0.03
 
   baseline_context_lookup <- truth_drift_summary %>%
     dplyr::filter(.data$model_method == baseline_method) %>%
@@ -1573,26 +1572,37 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
     ) %>%
     dplyr::inner_join(baseline_context_lookup, by = "dataset_bundle_id")
 
-  # Compute trimmed axis limits pooled across both pair_kinds so rows share
-  # scales. Symmetric (around 0) so the y=x diagonal sits across the panel.
-  symm_trim <- function(x) {
-    q <- stats::quantile(abs(x), trim_q[[2]], na.rm = TRUE, names = FALSE)
-    c(-q, q)
+  quantile_lim <- function(x, probs = display_trim_q) {
+    x <- x[is.finite(x)]
+    if (!length(x)) {
+      return(c(-1, 1))
+    }
+    lim <- stats::quantile(x, probs = probs, na.rm = TRUE, names = FALSE)
+    if (!all(is.finite(lim)) || lim[[1]] == lim[[2]]) {
+      center <- mean(x, na.rm = TRUE)
+      spread <- max(abs(x - center), na.rm = TRUE)
+      spread <- if (is.finite(spread) && spread > 0) spread else 1
+      lim <- c(center - spread, center + spread)
+    }
+    lim
   }
-  col1_xlim <- symm_trim(sanity_join_lab$delta_truth)
-  col1_ylim <- symm_trim(sanity_join_lab$auprc_delta)
-  col2_axislim <- symm_trim(c(pair_within_dataset$auprc_delta_pi,
-                              pair_within_dataset$auprc_delta_mu))
-  col3_axislim <- symm_trim(c(pair_within_dataset$delta_truth_pi,
-                              pair_within_dataset$delta_truth_mu))
-
-  expand_lim <- function(lim, mult = annotation_axis_mult) {
-    lim * mult
+  expand_axis_lim <- function(lim, pad = display_axis_pad) {
+    width <- diff(lim)
+    if (!is.finite(width) || width <= 0) {
+      width <- max(abs(lim), 1, na.rm = TRUE)
+    }
+    lim + c(-pad, pad) * width
   }
-  col1_plot_xlim <- expand_lim(col1_xlim)
-  col1_plot_ylim <- expand_lim(col1_ylim)
-  col2_plot_axislim <- expand_lim(col2_axislim)
-  col3_plot_axislim <- expand_lim(col3_axislim)
+  col1_xlim <- quantile_lim(sanity_join_lab$delta_truth)
+  col1_ylim <- quantile_lim(sanity_join_lab$auprc_delta)
+  col2_axislim <- quantile_lim(c(pair_within_dataset$auprc_delta_pi,
+                                 pair_within_dataset$auprc_delta_mu))
+  col3_axislim <- quantile_lim(c(pair_within_dataset$delta_truth_pi,
+                                 pair_within_dataset$delta_truth_mu))
+  col1_plot_xlim <- expand_axis_lim(col1_xlim)
+  col1_plot_ylim <- expand_axis_lim(col1_ylim)
+  col2_plot_axislim <- expand_axis_lim(col2_axislim)
+  col3_plot_axislim <- expand_axis_lim(col3_axislim)
 
   # Winsorize col-1 data to the trim limits before fitting OLS. The smoother
   # is then fit on the same values that are visually shown at the panel
@@ -1772,12 +1782,6 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
               col2_axislim[1], col2_axislim[2]))
   cat(sprintf("  col 3 axes (delta_explanatory_basis_divergence): [%.3f, %.3f]\n",
               col3_axislim[1], col3_axislim[2]))
-  cat("Cell counts (col 1: explanatory-basis-divergence x AUPRC, chain pooled):\n")
-  print(col1_counts %>% dplyr::select(-.data$x_pos, -.data$y_pos))
-  cat("Cell counts (col 2: mu vs pi delta AUPRC):\n")
-  print(col2_counts %>% dplyr::select(-.data$x_pos, -.data$y_pos))
-  cat("Cell counts (col 3: mu vs pi delta explanatory basis divergence):\n")
-  print(col3_counts %>% dplyr::select(-.data$x_pos, -.data$y_pos))
 } else {
   if (exists("combined_3col")) {
     rm(combined_3col)
@@ -2022,9 +2026,6 @@ if (exists("baseline_points")) {
         fill = .data$divergence_bin)
   ) +
     geom_boxplot(alpha = 0.7, outlier.size = 0.7, width = 0.6) +
-    geom_jitter(aes(color = .data$divergence_bin),
-                width = 0.12, height = 0, alpha = 0.32,
-                size = 0.75, show.legend = FALSE) +
     geom_text(
       data = bin_counts,
       aes(x = .data$divergence_bin, y = y_label_top,
