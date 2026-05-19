@@ -87,11 +87,11 @@ method_labels <- c(
   susie_vanilla_warm_from_pi = "SuSiE-vanilla (warm from pi)"
 )
 method_legend_short <- c(
-  susie_vanilla = "Vanilla cold",
-  susine_functional_mu = "Functional-mu",
-  susie_vanilla_warm_from_mu = "Warm vanilla (mu)",
-  susie_functional_pi = "Functional-pi",
-  susie_vanilla_warm_from_pi = "Warm vanilla (pi)"
+  susie_vanilla = "Cold SuSiE",
+  susine_functional_mu = "Annotated mu0",
+  susie_vanilla_warm_from_mu = "Warm refit (mu0)",
+  susie_functional_pi = "Annotated pi",
+  susie_vanilla_warm_from_pi = "Warm refit (pi)"
 )
 method_color <- c(
   susie_vanilla = "black",
@@ -111,7 +111,7 @@ pr_top_k <- 8L
 # at 8). Must match the truth_drift_top_k used to build the cache in
 # effect_matching_drift_analysis_5arm.Rmd.
 truth_drift_top_k <- 23L
-truth_drift_spline_df <- 3L
+truth_drift_spline_df <- 5L
 divergence_breaks <- c(-Inf, 0.05, 0.10, Inf)
 divergence_labels <- c("[0, 0.05]", "(0.05, 0.10]", "(0.10, inf)")
 baseline_bin_palette <- c(
@@ -157,6 +157,17 @@ keff_x_scale <- function(breaks = x_keff_breaks, xlim = NULL) {
 basis_divergence_bin <- function(x) {
   cut(x, breaks = divergence_breaks, labels = divergence_labels, right = TRUE)
 }
+
+basis_divergence_axis <- "Explanatory basis divergence"
+basis_reduction_axis <- "Reduction in basis divergence"
+transition_label_map <- c(
+  cold_ann = "Cold -> annotated",
+  cold_warm = "Cold -> warm refit"
+)
+chain_label_map <- c(
+  mu = "mu0 channel",
+  pi = "pi channel"
+)
 
 theme_effect_paper <- function(base_size = 8) {
   theme_bw(base_size = base_size) +
@@ -357,12 +368,12 @@ expr_basin_x <- expression(paste("Basin drift (", mu, " chain)"))
 expr_basin_y <- expression(paste("Basin drift (", pi, " chain)"))
 expr_jsd_x   <- expression(paste("PIP JSD (", mu, " chain)"))
 expr_jsd_y   <- expression(paste("PIP JSD (", pi, " chain)"))
-expr_dauprc  <- expression(paste(Delta, "AUPRC vs cold vanilla"))
+expr_dauprc  <- expression(paste(Delta, "AUPRC vs cold SuSiE"))
 
-chain_labeller <- c(mu = "mu chain", pi = "pi chain")
+chain_labeller <- c(mu = "mu0 channel", pi = "pi channel")
 pair_kind_labeller <- c(
   "cold -> annotated" = "Cold -> annotated",
-  "cold -> vanilla_warm" = "Cold -> warm vanilla"
+  "cold -> vanilla_warm" = "Cold -> warm refit"
 )
 
 method_legend_labels <- vapply(
@@ -535,7 +546,7 @@ pB1 <- make_b_panel(
 pB2 <- make_b_panel(
   joined_pf_cold_warm, "basin_mu", "basin_pi", "jsd_mu",
   expr_basin_x, expr_basin_y, basin_color_title,
-  "Cold -> warm vanilla",
+  "Cold -> warm refit",
   color_lim_max = jsd_color_max, max_val = basin_max_pf,
   show_y = FALSE,
   show_legend = FALSE
@@ -551,7 +562,7 @@ pB3 <- make_b_panel(
 pB4 <- make_b_panel(
   joined_pf_cold_warm, "jsd_mu", "jsd_pi", "basin_mu",
   expr_jsd_x, expr_jsd_y, jsd_color_title,
-  "Cold -> warm vanilla",
+  "Cold -> warm refit",
   color_lim_max = basin_color_max, max_val = jsd_max_pf,
   show_y = FALSE,
   show_legend = FALSE
@@ -796,7 +807,7 @@ panel_c_diag <- joined_pf %>%
     comparison = dplyr::recode(
       .data$pair_kind,
       cold_ann = "cold -> annotated",
-      cold_warm = "cold -> warm vanilla"
+      cold_warm = "cold -> warm refit"
     ),
     delta_mu = dplyr::if_else(.data$pair_kind == "cold_ann",
                              .data$delta_mu_treat, .data$delta_mu_warm),
@@ -810,7 +821,7 @@ panel_c_diag <- joined_pf %>%
     ),
     comparison = factor(
       .data$comparison,
-      levels = c("cold -> annotated", "cold -> warm vanilla")
+      levels = c("cold -> annotated", "cold -> warm refit")
     )
   )
 
@@ -879,7 +890,7 @@ p_quadrant_transition <- ggplot(
   scale_fill_gradient(low = "grey96", high = "#2b6cb0") +
   labs(
     x = "Basin quadrant: cold -> annotated",
-    y = "Basin quadrant: cold -> warm vanilla",
+    y = "Basin quadrant: cold -> warm refit",
     fill = "datasets",
     title = "Panel C diagnostic: basin-drift quadrant membership"
   ) +
@@ -948,14 +959,14 @@ metric_triangle_long <- basin_long_pf %>%
       TRUE ~ NA_real_
     ),
     chain = factor(.data$chain, levels = c("mu", "pi"),
-                   labels = c("mu chain", "pi chain")),
+                   labels = c("mu0 channel", "pi channel")),
     comparison = factor(
       dplyr::recode(
         .data$pair_kind,
         cold_ann = "cold -> annotated",
-        cold_warm = "cold -> warm vanilla"
+        cold_warm = "cold -> warm refit"
       ),
-      levels = c("cold -> annotated", "cold -> warm vanilla")
+      levels = c("cold -> annotated", "cold -> warm refit")
     )
   ) %>%
   dplyr::select(
@@ -971,7 +982,7 @@ readr::write_csv(
 metric_axis_labels <- c(
   basin_drift = "Basin drift",
   pip_jsd = "PIP JSD",
-  auprc_delta = "AUPRC delta vs cold vanilla"
+  auprc_delta = "AUPRC delta vs cold SuSiE"
 )
 
 make_metric_triangle_plot <- function(df, x_metric, y_metric, color_metric,
@@ -1134,13 +1145,13 @@ swap_pair_long <- joined_pf %>%
     chain = factor(.data$chain, levels = c("mu", "pi")),
     pair_kind = factor(
       .data$pair_kind, levels = c("cold_ann", "cold_warm"),
-      labels = c("cold -> annotated", "cold -> warm vanilla")
+      labels = c("cold -> annotated", "cold -> warm refit")
     )
   )
 
 chain_color_diag <- c(mu = "#2b8cbe", pi = "#74c476")
 pair_color_diag  <- c(`cold -> annotated`     = "#c44e52",
-                      `cold -> warm vanilla`  = "#4c72b0")
+                      `cold -> warm refit`  = "#4c72b0")
 axis_lim_swap <- c(0, max(swap_pair_long$basin, swap_pair_long$jsd,
                           na.rm = TRUE) + 0.01)
 
@@ -1154,10 +1165,10 @@ p_swap_facet_pair <- ggplot(
   geom_smooth(method = "lm", se = FALSE, linewidth = 0.5) +
   facet_wrap(~ pair_kind, nrow = 1) +
   scale_color_manual(values = chain_color_diag,
-                     labels = c(mu = "mu chain", pi = "pi chain")) +
+                     labels = chain_label_map) +
   coord_cartesian(xlim = axis_lim_swap, ylim = axis_lim_swap) +
   labs(
-    x = "Basin drift (weighted_r2_drift)", y = "PIP JSD", color = NULL,
+    x = "Basin drift", y = "PIP JSD", color = NULL,
     title = "Panel C diagnostic: basin/JSD coupling by chain within transition"
   ) +
   theme_effect_paper(base_size = 10) +
@@ -1177,12 +1188,11 @@ p_swap_facet_chain <- ggplot(
   geom_point(alpha = 0.55, size = 1.6, stroke = 0) +
   geom_smooth(method = "lm", se = FALSE, linewidth = 0.5) +
   facet_wrap(~ chain, nrow = 1,
-             labeller = labeller(chain = c(mu = "mu chain",
-                                           pi = "pi chain"))) +
+             labeller = labeller(chain = chain_label_map)) +
   scale_color_manual(values = pair_color_diag) +
   coord_cartesian(xlim = axis_lim_swap, ylim = axis_lim_swap) +
   labs(
-    x = "Basin drift (weighted_r2_drift)", y = "PIP JSD", color = NULL,
+    x = "Basin drift", y = "PIP JSD", color = NULL,
     title = "Panel C diagnostic: basin/JSD coupling by transition within chain"
   ) +
   theme_effect_paper(base_size = 10) +
@@ -1483,19 +1493,16 @@ if (!file.exists(truth_drift_csv)) {
     geom_smooth(method = "lm", se = FALSE, linewidth = 0.5) +
     facet_wrap(~ pair_kind, nrow = 1,
                labeller = labeller(pair_kind = c(
-                 cold_ann  = "cold -> annotated",
-                 cold_warm = "cold -> warm vanilla"
+                 cold_ann  = "Cold -> annotated",
+                 cold_warm = "Cold -> warm refit"
                ))) +
     scale_color_manual(values = c(mu = "#2b8cbe", pi = "#74c476"),
-                       labels = c(mu = "mu chain", pi = "pi chain")) +
+                       labels = chain_label_map) +
     labs(
-      x = sprintf(
-        "Delta explanatory basis divergence (baseline - treatment; positive = toward truth) [%s]",
-        truth_drift_column
-      ),
-      y = "Delta AUPRC vs cold vanilla",
+      x = "Reduction in basis divergence",
+      y = "Delta AUPRC vs cold SuSiE",
       color = NULL,
-      title = "Explanatory basis divergence sanity: does movement toward truth track AUPRC gain?"
+      title = "Basis movement and AUPRC gain"
     ) +
     theme_effect_paper(base_size = 10) +
     theme(legend.position = "bottom")
@@ -1549,8 +1556,7 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
     dplyr::mutate(
       pair_kind = factor(.data$pair_kind,
                          levels = c("cold_ann", "cold_warm"),
-                         labels = c("cold -> annotated",
-                                    "cold -> warm vanilla"))
+                         labels = transition_label_map)
     )
 
   pair_within_dataset <- sanity_join %>%
@@ -1563,8 +1569,7 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
     dplyr::mutate(
       pair_kind = factor(.data$pair_kind,
                          levels = c("cold_ann", "cold_warm"),
-                         labels = c("cold -> annotated",
-                                    "cold -> warm vanilla"))
+                         labels = transition_label_map)
     ) %>%
     dplyr::inner_join(baseline_context_lookup, by = "dataset_bundle_id")
 
@@ -1611,87 +1616,50 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
       delta_truth_mu_plot = winsorize(.data$delta_truth_mu, col3_axislim)
     )
 
-  # Zone assignment by sign + magnitude threshold.
-  zone_label <- function(x, t) {
-    dplyr::case_when(
-      x <= -t ~ "neg",
-      x <=  t ~ "mid",
-      TRUE    ~ "pos"
+  chain_color_3col <- c(mu = "#2b8cbe", pi = "#74c476")
+  zero_lines <- function() {
+    list(
+      geom_vline(xintercept = 0, color = "grey55", linewidth = 0.25),
+      geom_hline(yintercept = 0, color = "grey55", linewidth = 0.25)
     )
   }
-  # Position each count in the annotation gutter just outside the winsorized
-  # dot cloud. The mid/mid cell is nudged to the top gutter so it also avoids
-  # covering points.
-  edge_pos <- function(zone, axis_lim, mult = label_edge_mult) {
-    dplyr::case_when(
-      zone == "neg" ~ axis_lim[[1]] * mult,
-      zone == "mid" ~ 0,
-      zone == "pos" ~ axis_lim[[2]] * mult
-    )
-  }
-  add_count_positions <- function(count_df, x_lim, y_lim) {
-    count_df %>%
+
+  diagonal_count_labels <- function(df, x_col, y_col, lim) {
+    df %>%
+      dplyr::group_by(.data$pair_kind) %>%
+      dplyr::summarise(
+        mu_gt_pi = sum(.data[[y_col]] > .data[[x_col]], na.rm = TRUE),
+        pi_gt_mu = sum(.data[[y_col]] < .data[[x_col]], na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
       dplyr::mutate(
-        x_pos = edge_pos(.data$x_zone, x_lim),
-        y_pos = edge_pos(.data$y_zone, y_lim),
-        x_pos = dplyr::if_else(
-          .data$x_zone == "mid" & .data$y_zone == "mid",
-          x_lim[[1]] * 0.55,
-          .data$x_pos
-        ),
-        y_pos = dplyr::if_else(
-          .data$x_zone == "mid" & .data$y_zone == "mid",
-          y_lim[[2]] * label_edge_mult,
-          .data$y_pos
-        )
+        x = lim[[1]] * 0.94,
+        y = lim[[2]] * 0.92,
+        label = sprintf("mu0 > pi: %d\npi > mu0: %d",
+                        .data$mu_gt_pi, .data$pi_gt_mu)
       )
   }
+  col2_diag_labels <- diagonal_count_labels(
+    pair_within_dataset,
+    "auprc_delta_pi",
+    "auprc_delta_mu",
+    col2_axislim
+  )
+  col3_diag_labels <- diagonal_count_labels(
+    pair_within_dataset,
+    "delta_truth_pi",
+    "delta_truth_mu",
+    col3_axislim
+  )
 
-  col1_counts <- sanity_join_lab %>%
-    dplyr::mutate(
-      x_zone = zone_label(.data$delta_truth, delta_truth_thresh),
-      y_zone = zone_label(.data$auprc_delta, delta_auprc_thresh)
-    ) %>%
-    dplyr::count(.data$pair_kind, .data$x_zone, .data$y_zone) %>%
-    add_count_positions(col1_xlim, col1_ylim)
-
-  col2_counts <- pair_within_dataset %>%
-    dplyr::mutate(
-      x_zone = zone_label(.data$auprc_delta_pi, delta_auprc_thresh),
-      y_zone = zone_label(.data$auprc_delta_mu, delta_auprc_thresh)
-    ) %>%
-    dplyr::count(.data$pair_kind, .data$x_zone, .data$y_zone) %>%
-    add_count_positions(col2_axislim, col2_axislim)
-
-  col3_counts <- pair_within_dataset %>%
-    dplyr::mutate(
-      x_zone = zone_label(.data$delta_truth_pi, delta_truth_thresh),
-      y_zone = zone_label(.data$delta_truth_mu, delta_truth_thresh)
-    ) %>%
-    dplyr::count(.data$pair_kind, .data$x_zone, .data$y_zone) %>%
-    add_count_positions(col3_axislim, col3_axislim)
-
-  chain_color_3col <- c(mu = "#2b8cbe", pi = "#74c476")
-
-  threshold_lines <- function(x_t, y_t) {
-    list(
-      geom_vline(xintercept = c(-x_t, x_t), color = "grey45",
-                 linetype = "dashed", linewidth = 0.3),
-      geom_hline(yintercept = c(-y_t, y_t), color = "grey45",
-                 linetype = "dashed", linewidth = 0.3),
-      geom_vline(xintercept = 0, color = "grey20", linewidth = 0.3),
-      geom_hline(yintercept = 0, color = "grey20", linewidth = 0.3)
-    )
-  }
-
-  count_label_layer <- function(count_df) {
+  diagonal_count_layer <- function(label_df) {
     geom_label(
-      data = count_df,
-      aes(x = .data$x_pos, y = .data$y_pos, label = .data$n),
-      inherit.aes = FALSE,
-      size = 2.8, color = "grey15", fill = "white",
-      alpha = 0.88, label.size = 0.18,
-      label.padding = grid::unit(1.4, "pt")
+      data = label_df,
+      aes(x = .data$x, y = .data$y, label = .data$label),
+      inherit.aes = FALSE, hjust = 0, vjust = 1,
+      size = 2.55, color = "grey20", fill = "white",
+      alpha = 0.88, label.size = 0.15,
+      label.padding = grid::unit(1.2, "pt")
     )
   }
 
@@ -1700,23 +1668,22 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
     aes(x = .data$delta_truth, y = .data$auprc_delta,
         color = .data$chain)
   ) +
-    threshold_lines(delta_truth_thresh, delta_auprc_thresh) +
+    zero_lines() +
     geom_point(alpha = 0.45, size = 1.7, stroke = 0) +
     geom_smooth(method = "lm", se = TRUE, linewidth = 0.6,
                 fill = "grey75", alpha = 0.18) +
-    count_label_layer(col1_counts) +
     facet_wrap(~ pair_kind, ncol = 1) +
     scale_x_continuous(limits = col1_plot_xlim, oob = scales::squish,
                        expand = expansion(mult = 0)) +
     scale_y_continuous(limits = col1_plot_ylim, oob = scales::squish,
                        expand = expansion(mult = 0)) +
     scale_color_manual(values = chain_color_3col,
-                       labels = c(mu = "mu chain", pi = "pi chain")) +
+                       labels = chain_label_map) +
     labs(
-      x = sprintf("Delta explanatory basis divergence [%s]", truth_drift_column),
-      y = "Delta AUPRC vs cold vanilla",
+      x = basis_reduction_axis,
+      y = "Delta AUPRC vs cold SuSiE",
       color = NULL,
-      title = "Explanatory basis divergence vs AUPRC (OLS on winsorized data)"
+      title = "Basis movement predicts AUPRC gain"
     ) +
     theme_effect_paper(base_size = 9)
 
@@ -1725,11 +1692,11 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
     aes(x = .data$auprc_delta_pi_plot, y = .data$auprc_delta_mu_plot,
         color = .data$baseline_bin)
   ) +
-    threshold_lines(delta_auprc_thresh, delta_auprc_thresh) +
+    zero_lines() +
     geom_abline(slope = 1, intercept = 0, color = "grey45",
                 linetype = "dotted", linewidth = 0.3) +
     geom_point(alpha = 0.55, size = 1.7, stroke = 0) +
-    count_label_layer(col2_counts) +
+    diagonal_count_layer(col2_diag_labels) +
     facet_wrap(~ pair_kind, ncol = 1) +
     scale_x_continuous(limits = col2_plot_axislim, oob = scales::squish,
                        expand = expansion(mult = 0)) +
@@ -1737,13 +1704,13 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
                        expand = expansion(mult = 0)) +
     scale_color_manual(
       values = baseline_bin_palette,
-      name = "Baseline explanatory basis divergence",
+      name = "Baseline basis divergence",
       guide = guide_legend(title.position = "top", nrow = 1)
     ) +
     labs(
-      x = "Delta AUPRC (pi)",
-      y = "Delta AUPRC (mu)",
-      title = "Mu vs pi: delta AUPRC"
+      x = "Delta AUPRC (pi channel)",
+      y = "Delta AUPRC (mu0 channel)",
+      title = "AUPRC gain: mu0 vs pi"
     ) +
     theme_effect_paper(base_size = 9)
 
@@ -1752,11 +1719,11 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
     aes(x = .data$delta_truth_pi_plot, y = .data$delta_truth_mu_plot,
         color = .data$baseline_bin)
   ) +
-    threshold_lines(delta_truth_thresh, delta_truth_thresh) +
+    zero_lines() +
     geom_abline(slope = 1, intercept = 0, color = "grey45",
                 linetype = "dotted", linewidth = 0.3) +
     geom_point(alpha = 0.55, size = 1.7, stroke = 0) +
-    count_label_layer(col3_counts) +
+    diagonal_count_layer(col3_diag_labels) +
     facet_wrap(~ pair_kind, ncol = 1) +
     scale_x_continuous(limits = col3_plot_axislim, oob = scales::squish,
                        expand = expansion(mult = 0)) +
@@ -1764,15 +1731,13 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
                        expand = expansion(mult = 0)) +
     scale_color_manual(
       values = baseline_bin_palette,
-      name = "Explanatory basis divergence from truth at baseline (vanilla SuSiE)",
+      name = "Baseline basis divergence",
       guide = guide_legend(title.position = "top", nrow = 1)
     ) +
     labs(
-      x = sprintf("Delta explanatory basis divergence (pi) [%s]",
-                  truth_drift_column),
-      y = sprintf("Delta explanatory basis divergence (mu) [%s]",
-                  truth_drift_column),
-      title = "Mu vs pi: delta explanatory basis divergence"
+      x = "Basis-divergence reduction (pi channel)",
+      y = "Basis-divergence reduction (mu0 channel)",
+      title = "Basin movement: mu0 vs pi"
     ) +
     theme_effect_paper(base_size = 9)
 
@@ -1830,8 +1795,7 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
     dplyr::mutate(
       pair_kind = factor(.data$pair_kind,
                          levels = c("cold_ann", "cold_warm"),
-                         labels = c("cold -> annotated",
-                                    "cold -> warm vanilla")),
+                         labels = transition_label_map),
       chain = factor(.data$chain, levels = c("mu", "pi"))
     )
 
@@ -1848,13 +1812,12 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
     geom_smooth(method = "lm", se = FALSE, linewidth = 0.5) +
     facet_wrap(~ pair_kind, ncol = 1) +
     scale_color_manual(values = chain_color_3col,
-                       labels = c(mu = "mu chain", pi = "pi chain")) +
+                       labels = chain_label_map) +
     labs(
-      x = sprintf("Delta explanatory basis divergence [%s]",
-                  truth_drift_column),
-      y = "Delta AUPRC vs cold vanilla",
+      x = basis_reduction_axis,
+      y = "Delta AUPRC vs cold SuSiE",
       color = NULL,
-      title = "Explanatory basis divergence vs AUPRC"
+      title = "Basis movement and AUPRC gain"
     ) +
     theme_effect_paper(base_size = 9)
 
@@ -1868,9 +1831,9 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
                  color = "grey20", outlier.size = 0.4) +
     facet_wrap(~ pair_kind, ncol = 1) +
     scale_fill_manual(values = chain_color_3col, guide = "none") +
-    scale_x_discrete(labels = c(mu = "mu", pi = "pi")) +
-    labs(x = NULL, y = "Delta AUPRC vs cold vanilla",
-         title = "Delta AUPRC by chain") +
+    scale_x_discrete(labels = c(mu = "mu0", pi = "pi")) +
+    labs(x = NULL, y = "Delta AUPRC vs cold SuSiE",
+         title = "AUPRC gain by channel") +
     theme_effect_paper(base_size = 9)
 
   p_col3_v <- ggplot(
@@ -1883,11 +1846,10 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
                  color = "grey20", outlier.size = 0.4) +
     facet_wrap(~ pair_kind, ncol = 1) +
     scale_fill_manual(values = chain_color_3col, guide = "none") +
-    scale_x_discrete(labels = c(mu = "mu", pi = "pi")) +
+    scale_x_discrete(labels = c(mu = "mu0", pi = "pi")) +
     labs(x = NULL,
-         y = sprintf("Delta explanatory basis divergence [%s]",
-                     truth_drift_column),
-         title = "Delta explanatory basis divergence by chain") +
+         y = basis_reduction_axis,
+         title = "Basis movement by channel") +
     theme_effect_paper(base_size = 9)
 
   combined_3col_v <- (p_col1_v | p_col2_v | p_col3_v) +
@@ -1947,30 +1909,24 @@ if (file.exists(truth_drift_csv)) {
     dplyr::filter(is.finite(.data$truth_drift), is.finite(.data$auprc)) %>%
     dplyr::arrange(.data$truth_drift) %>%
     dplyr::mutate(divergence_bin = basis_divergence_bin(.data$truth_drift))
-  baseline_curve_fit <- stats::lm(
-    auprc ~ splines::ns(truth_drift, df = truth_drift_spline_df),
-    data = baseline_curve_df
+  baseline_curve_fit <- stats::smooth.spline(
+    x = baseline_curve_df$truth_drift,
+    y = baseline_curve_df$auprc,
+    df = truth_drift_spline_df
   )
-  baseline_curve_fit_summary <- summary(baseline_curve_fit)
-  baseline_curve_r2 <- baseline_curve_fit_summary$r.squared
-  baseline_curve_fstat <- baseline_curve_fit_summary$fstatistic
-  baseline_curve_p <- stats::pf(
-    baseline_curve_fstat[["value"]],
-    baseline_curve_fstat[["numdf"]],
-    baseline_curve_fstat[["dendf"]],
-    lower.tail = FALSE
+  baseline_curve_fitted <- stats::predict(
+    baseline_curve_fit,
+    x = baseline_curve_df$truth_drift
+  )$y
+  baseline_curve_r2 <- 1 - sum(
+    (baseline_curve_df$auprc - baseline_curve_fitted)^2,
+    na.rm = TRUE
+  ) / sum(
+    (baseline_curve_df$auprc - mean(baseline_curve_df$auprc, na.rm = TRUE))^2,
+    na.rm = TRUE
   )
-  baseline_curve_p_label <- if (is.finite(baseline_curve_p) &&
-                                baseline_curve_p < 1e-4) {
-    "< 1e-4"
-  } else {
-    sprintf("= %.3g", baseline_curve_p)
-  }
   predict_baseline_auprc_from_divergence <- function(x) {
-    pred <- stats::predict(
-      baseline_curve_fit,
-      newdata = tibble::tibble(truth_drift = x)
-    )
+    pred <- stats::predict(baseline_curve_fit, x = x)$y
     pmin(pmax(pred, 0), 1)
   }
   baseline_curve_grid <- tibble::tibble(
@@ -2002,25 +1958,21 @@ if (file.exists(truth_drift_csv)) {
                           na.rm = TRUE, names = FALSE),
       y = stats::quantile(baseline_curve_df$auprc, 0.88,
                           na.rm = TRUE, names = FALSE),
-      label = sprintf("Natural spline df=%d\nR^2 = %.3f, p %s",
-                      truth_drift_spline_df, baseline_curve_r2,
-                      baseline_curve_p_label),
+      label = sprintf("Smoothing spline df=%d\nR^2 = %.3f",
+                      truth_drift_spline_df, baseline_curve_r2),
       hjust = 0, vjust = 1, size = 3.0, label.size = 0.2,
       fill = "white", color = "grey20", alpha = 0.9
     ) +
     scale_color_manual(
       values = baseline_bin_palette,
-      name = "Baseline divergence bin"
+      name = "Baseline basis divergence"
     ) +
     labs(
-      x = sprintf("Explanatory basis divergence from top-K causal basis [%s]",
-                  truth_drift_column),
-      y = "AUPRC (cold SuSiE-vanilla)",
-      title = "Baseline: cold vanilla AUPRC vs explanatory basis divergence",
-      subtitle = paste(
-        "One point per dataset (n =", nrow(baseline_points), ").",
-        "Red line is the fixed baseline calibration reused for delta decomposition."
-      ),
+      x = basis_divergence_axis,
+      y = "AUPRC (cold SuSiE)",
+      title = "Baseline AUPRC vs basis divergence",
+      subtitle = sprintf("n = %d datasets; spline reused for decomposition.",
+                         nrow(baseline_points)),
       color = NULL
     ) +
     theme_effect_paper(base_size = 10) +
@@ -2082,11 +2034,10 @@ if (exists("baseline_points")) {
     scale_fill_manual(values = baseline_bin_palette, guide = "none") +
     scale_color_manual(values = baseline_bin_palette, guide = "none") +
     labs(
-      x = sprintf("Explanatory basis divergence from truth bin [%s]",
-                  truth_drift_column),
-      y = "AUPRC (cold SuSiE-vanilla)",
-      title = "Cold vanilla AUPRC by basis divergence bin",
-      subtitle = "Bins match the centroid stratification in the quadrant trajectory plot"
+      x = "Baseline basis-divergence bin",
+      y = "AUPRC (cold SuSiE)",
+      title = "Baseline AUPRC by divergence bin",
+      subtitle = "Same bins used throughout this figure"
     ) +
     theme_effect_paper(base_size = 10)
 
@@ -2207,18 +2158,16 @@ if (file.exists(truth_drift_csv)) {
       size = 3.2, color = "black", stroke = 0.4
     ) +
     facet_wrap(~ chain, nrow = 1,
-               labeller = labeller(chain = c(mu = "mu chain",
-                                             pi = "pi chain"))) +
+               labeller = labeller(chain = chain_label_map)) +
     scale_color_manual(values = chain_color_diag2, guide = "none") +
     scale_fill_manual(values = state_fill, name = "State (centroid)") +
     scale_shape_manual(values = state_shape, name = "State") +
     labs(
-      x = sprintf("Explanatory basis divergence from top-K causal basis [%s]",
-                  truth_drift_column),
+      x = basis_divergence_axis,
       y = "AUPRC",
-      title = "Per-dataset trajectories on (explanatory basis divergence, AUPRC)",
+      title = "Per-dataset trajectories on the basis-divergence axis",
       subtitle = paste(
-        "Faded paths = individual datasets (cold -> annotated -> warm);",
+        "Faded paths = individual datasets (cold -> annotated -> warm refit);",
         "black arrow = chain centroid trajectory"
       )
     ) +
@@ -2300,11 +2249,11 @@ if (exists("trajectory_long") &&
         NA_real_
       ),
       chain = factor(.data$chain, levels = c("mu", "pi"),
-                     labels = c("mu chain", "pi chain")),
+                     labels = c("mu0 channel", "pi channel")),
       transition = factor(
         .data$transition,
         levels = c("cold_ann", "cold_warm"),
-        labels = c("Cold -> annotated", "Cold -> warm vanilla")
+        labels = transition_label_map
       )
     ) %>%
     dplyr::filter(
@@ -2379,17 +2328,30 @@ if (exists("trajectory_long") &&
     auprc_basis_decomp$basis_pred_delta
   )), na.rm = TRUE)
   decomp_lim <- max(0.05, decomp_lim)
+  decomp_plot_lim <- 0.4
+
+  auprc_basis_decomp_plot <- auprc_basis_decomp %>%
+    dplyr::mutate(
+      basis_pred_delta_plot = pmin(
+        pmax(.data$basis_pred_delta, -decomp_plot_lim),
+        decomp_plot_lim
+      ),
+      observed_delta_plot = pmin(
+        pmax(.data$observed_delta, -decomp_plot_lim),
+        decomp_plot_lim
+      )
+    )
 
   decomp_annotation <- auprc_basis_decomp_summary %>%
     dplyr::mutate(
-      x = -0.96 * decomp_lim,
-      y = 0.94 * decomp_lim,
+      x = -0.96 * decomp_plot_lim,
+      y = 0.94 * decomp_plot_lim,
       label = sprintf(
         paste0(
-          "R^2(f(x)+intercept) = %.2f\n",
+          "R^2 = %.2f\n",
           "observed mean = %.3f\n",
-          "basis mean = %.3f\n",
-          "intercept = %.3f"
+          "basis shift = %.3f\n",
+          "non-basis shift = %.3f"
         ),
         .data$basis_r2_with_transition_intercept,
         .data$observed_mean,
@@ -2399,8 +2361,8 @@ if (exists("trajectory_long") &&
     )
 
   p_basis_explain_scatter <- ggplot(
-    auprc_basis_decomp,
-    aes(x = .data$basis_pred_delta, y = .data$observed_delta,
+    auprc_basis_decomp_plot,
+    aes(x = .data$basis_pred_delta_plot, y = .data$observed_delta_plot,
         color = .data$start_divergence_bin)
   ) +
     geom_hline(yintercept = 0, color = "grey65", linewidth = 0.25) +
@@ -2423,14 +2385,14 @@ if (exists("trajectory_long") &&
     facet_grid(chain ~ transition) +
     scale_color_manual(
       values = baseline_bin_palette,
-      name = "Baseline explanatory\nbasis divergence"
+      name = "Baseline basis\ndivergence"
     ) +
-    coord_cartesian(xlim = c(-decomp_lim, decomp_lim),
-                    ylim = c(-decomp_lim, decomp_lim)) +
+    coord_cartesian(xlim = c(-decomp_plot_lim, decomp_plot_lim),
+                    ylim = c(-decomp_plot_lim, decomp_plot_lim)) +
     labs(
-      x = "AUPRC delta predicted from divergence change",
-      y = "Observed AUPRC delta",
-      title = "How much observed AUPRC gain is predicted by basis divergence?"
+      x = "Predicted delta AUPRC from basis movement",
+      y = "Observed delta AUPRC",
+      title = "Decomposing AUPRC gains"
     ) +
     theme_effect_paper(base_size = 9) +
     theme(legend.position = "bottom")
@@ -2595,18 +2557,16 @@ if (exists("trajectory_long")) {
     ) +
     scale_fill_manual(values = state_fill, name = "State (centroid)") +
     facet_wrap(~ chain, nrow = 1,
-               labeller = labeller(chain = c(mu = "mu chain",
-                                             pi = "pi chain"))) +
+               labeller = labeller(chain = chain_label_map)) +
     labs(
-      x = sprintf("Explanatory basis divergence from truth [%s]",
-                  truth_drift_column),
+      x = basis_divergence_axis,
       y = "AUPRC",
       title = paste(
-        "Trajectories colored by cold->warm quadrant;",
+        "Trajectories colored by cold-to-warm outcome;",
         "centroids stratified by baseline divergence bin"
       ),
       subtitle = paste(
-        "Faded paths: per-dataset cold -> annotated -> warm, colored by",
+        "Faded paths: per-dataset cold -> annotated -> warm refit, colored by",
         "net (AUPRC, divergence) sign.",
         "Black arrows: chain centroid trajectory per baseline bin (linetype)."
       )

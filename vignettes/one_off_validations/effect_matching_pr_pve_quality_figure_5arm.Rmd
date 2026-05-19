@@ -80,11 +80,11 @@ method_labels <- c(
   susie_vanilla_warm_from_pi = "SuSiE-vanilla (warm from pi)"
 )
 method_legend_short <- c(
-  susie_vanilla = "Vanilla cold",
-  susine_functional_mu = "Functional-mu",
-  susie_vanilla_warm_from_mu = "Warm vanilla (mu)",
-  susie_functional_pi = "Functional-pi",
-  susie_vanilla_warm_from_pi = "Warm vanilla (pi)"
+  susie_vanilla = "Cold SuSiE",
+  susine_functional_mu = "Annotated mu0",
+  susie_vanilla_warm_from_mu = "Warm refit (mu0)",
+  susie_functional_pi = "Annotated pi",
+  susie_vanilla_warm_from_pi = "Warm refit (pi)"
 )
 method_color <- c(
   susie_vanilla = "black",
@@ -314,10 +314,10 @@ if (!is.finite(shared_fill_lim) || shared_fill_lim <= 0) {
 # Figure
 
 ```{r figure, fig.width=9.4, fig.height=7.4}
-chain_labeller <- c(mu = "mu chain", pi = "pi chain")
+chain_labeller <- c(mu = "mu0 channel", pi = "pi channel")
 pair_kind_labeller <- c(
   "cold -> annotated" = "Cold -> annotated",
-  "cold -> vanilla_warm" = "Cold -> warm vanilla"
+  "cold -> vanilla_warm" = "Cold -> warm refit"
 )
 
 method_legend_labels <- vapply(
@@ -347,8 +347,7 @@ panel_A <- ggplot(pr_curve_df,
   labs(
     x = "Recall", y = "Precision",
     color = "Method (pooled AUPRC)",
-    title = paste0("A. Precision-recall on top-", pr_top_k,
-                   " causal SNPs (600 datasets)")
+    title = paste0("A. Precision-recall across the 5-arm refit chain")
   ) +
   guides(color = guide_legend(
     nrow = 1, byrow = TRUE, title.position = "top",
@@ -408,7 +407,7 @@ panel_D_core <- ggplot(panel_D_df,
                   expand = FALSE) +
   labs(
     x = x_label_paper, y = y_label_paper,
-    fill = "destination - source\n(PVE-weighted density)",
+    fill = "Density shift\n(destination - source)",
     title = "B. Per-effect quality shifts"
   ) +
   guides(fill = guide_colorbar(
