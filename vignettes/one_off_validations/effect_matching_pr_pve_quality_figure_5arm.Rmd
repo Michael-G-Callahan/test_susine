@@ -313,7 +313,7 @@ if (!is.finite(shared_fill_lim) || shared_fill_lim <= 0) {
 
 # Figure
 
-```{r figure, fig.width=8.8, fig.height=6.9}
+```{r figure, fig.width=9.4, fig.height=7.4}
 chain_labeller <- c(mu = "mu chain", pi = "pi chain")
 pair_kind_labeller <- c(
   "cold -> annotated" = "Cold -> annotated",
@@ -351,7 +351,7 @@ panel_A <- ggplot(pr_curve_df,
                    " causal SNPs (600 datasets)")
   ) +
   guides(color = guide_legend(
-    nrow = 2, byrow = TRUE, title.position = "top",
+    nrow = 1, byrow = TRUE, title.position = "top",
     override.aes = list(linewidth = 0.7)
   )) +
   theme_effect_paper(base_size = 8) +
@@ -360,9 +360,9 @@ panel_A <- ggplot(pr_curve_df,
     legend.justification = "left",
     legend.box.margin = margin(t = -4),
     legend.key.height = grid::unit(3.0, "mm"),
-    legend.key.width = grid::unit(6, "mm"),
+    legend.key.width = grid::unit(5.2, "mm"),
     legend.title = element_text(size = 6.8),
-    legend.text = element_text(size = 6.2),
+    legend.text = element_text(size = 5.8),
     panel.grid.minor = element_line(color = "grey95", linewidth = 0.18)
   )
 
@@ -434,11 +434,11 @@ panel_D <- (panel_D_core + guide_area()) +
   theme(legend.position = "right")
 
 combined_fig <- (wrap_elements(full = panel_A) / panel_D) +
-  plot_layout(heights = c(0.92, 1.28))
+  plot_layout(heights = c(1, 1))
 
 ggsave(
   paper_figure_pr_pve_quality_png, combined_fig,
-  width = 8.8, height = 6.9, dpi = 300, bg = "white",
+  width = 9.4, height = 7.4, dpi = 300, bg = "white",
   limitsize = FALSE
 )
 cat("Wrote figure to ", paper_figure_pr_pve_quality_png, "\n", sep = "")

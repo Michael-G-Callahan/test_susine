@@ -1813,6 +1813,9 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
   cat("Cell counts (col 3: mu vs pi delta explanatory basis divergence):\n")
   print(col3_counts %>% dplyr::select(-.data$x_pos, -.data$y_pos))
 } else {
+  if (exists("combined_3col")) {
+    rm(combined_3col)
+  }
   message("Skipping 3-col scatter; sanity_join not yet built.")
 }
 ```
@@ -2451,12 +2454,13 @@ if (exists("p_baseline_truth") &&
     exists("p_baseline_boxplot") &&
     exists("combined_3col") &&
     exists("p_basis_explain_scatter")) {
-  paper_basis_divergence_fig <- (
-    (p_baseline_truth | p_baseline_boxplot) /
-      combined_3col /
-      p_basis_explain_scatter
+  paper_basis_divergence_fig <- patchwork::wrap_plots(
+    (p_baseline_truth | p_baseline_boxplot),
+    combined_3col,
+    p_basis_explain_scatter,
+    ncol = 1,
+    heights = c(0.78, 1.18, 1.08)
   ) +
-    plot_layout(heights = c(0.78, 1.18, 1.08)) +
     plot_annotation(tag_levels = "A") &
     theme(plot.tag = element_text(face = "bold", size = 11))
 
