@@ -47,6 +47,9 @@ pip_records_rds <- file.path(study_dir, "pip_records_5arm.rds")
 causal_truth_rds <- file.path(study_dir, "causal_truth_5arm.rds")
 
 paper_figure_png <- file.path(plot_dir, "paper_figure_effect_drift.png")
+paper_basis_divergence_png <- file.path(
+  plot_dir, "paper_figure_truth_drift_basis_divergence.png"
+)
 
 required_cache_files <- c(
   drift_summary_csv,
@@ -108,6 +111,14 @@ pr_top_k <- 8L
 # at 8). Must match the truth_drift_top_k used to build the cache in
 # effect_matching_drift_analysis_5arm.Rmd.
 truth_drift_top_k <- 23L
+truth_drift_spline_df <- 3L
+divergence_breaks <- c(-Inf, 0.05, 0.10, Inf)
+divergence_labels <- c("[0, 0.05]", "(0.05, 0.10]", "(0.10, inf)")
+baseline_bin_palette <- c(
+  "[0, 0.05]"    = "#4e79a7",
+  "(0.05, 0.10]" = "#f28e2b",
+  "(0.10, inf)"  = "#e15759"
+)
 
 x_keff_breaks <- c(1, 2, 5, 10, 20, 50, 100, 200, 500, 1000)
 x_limits <- NULL
@@ -141,6 +152,10 @@ keff_x_scale <- function(breaks = x_keff_breaks, xlim = NULL) {
     labels = formatC(finite_breaks, format = "fg", big.mark = ","),
     limits = xlim
   )
+}
+
+basis_divergence_bin <- function(x) {
+  cut(x, breaks = divergence_breaks, labels = divergence_labels, right = TRUE)
 }
 
 theme_effect_paper <- function(base_size = 8) {
@@ -1485,7 +1500,7 @@ if (!file.exists(truth_drift_csv)) {
     theme_effect_paper(base_size = 10) +
     theme(legend.position = "bottom")
   ggsave(
-    file.path(diagnostic_dir, "truth_drift_sanity_scatter.png"),
+    file.path(diagnostic_dir, "truth_drift_sanity_scatter_simple.png"),
     p_sanity, width = 8.4, height = 4.2, dpi = 220, bg = "white"
   )
   print(p_sanity)
@@ -1513,25 +1528,13 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
   trim_q <- c(0.01, 0.99)
   label_edge_mult <- 1.12
   annotation_axis_mult <- 1.24
-  divergence_breaks <- c(-Inf, 0.05, 0.10, Inf)
-  divergence_labels <- c("[0, 0.05]", "(0.05, 0.10]", "(0.10, inf)")
-  baseline_bin_palette <- c(
-    "[0, 0.05]"    = "#9ecae1",
-    "(0.05, 0.10]" = "#3182bd",
-    "(0.10, inf)"  = "#08519c"
-  )
 
   baseline_context_lookup <- truth_drift_summary %>%
     dplyr::filter(.data$model_method == baseline_method) %>%
     dplyr::transmute(
       dataset_bundle_id = as.character(.data$dataset_bundle_id),
       baseline_basis_divergence = .data[[truth_drift_column]],
-      baseline_bin = cut(
-        .data[[truth_drift_column]],
-        breaks = divergence_breaks,
-        labels = divergence_labels,
-        right = TRUE
-      )
+      baseline_bin = basis_divergence_bin(.data[[truth_drift_column]])
     ) %>%
     dplyr::inner_join(
       auprc_per_dataset %>%
@@ -1720,7 +1723,7 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
   p_col2 <- ggplot(
     pair_within_dataset_wins,
     aes(x = .data$auprc_delta_pi_plot, y = .data$auprc_delta_mu_plot,
-        color = .data$baseline_auprc)
+        color = .data$baseline_bin)
   ) +
     threshold_lines(delta_auprc_thresh, delta_auprc_thresh) +
     geom_abline(slope = 1, intercept = 0, color = "grey45",
@@ -1732,17 +1735,10 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
                        expand = expansion(mult = 0)) +
     scale_y_continuous(limits = col2_plot_axislim, oob = scales::squish,
                        expand = expansion(mult = 0)) +
-    scale_color_viridis_c(
-      option = "C",
-      name = "Baseline AUPRC (vanilla SuSiE)",
-      guide = guide_colorbar(
-        title.position = "top",
-        title.hjust = 0.5,
-        label.position = "bottom",
-        barwidth = grid::unit(2.5, "cm"),
-        barheight = grid::unit(0.24, "cm"),
-        direction = "horizontal"
-      )
+    scale_color_manual(
+      values = baseline_bin_palette,
+      name = "Baseline explanatory basis divergence",
+      guide = guide_legend(title.position = "top", nrow = 1)
     ) +
     labs(
       x = "Delta AUPRC (pi)",
@@ -1780,7 +1776,7 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
     ) +
     theme_effect_paper(base_size = 9)
 
-  first_col_3col <- p_col1 +
+  basis_vs_gain_col_3col <- p_col1 +
     theme(legend.position = "bottom",
           legend.justification = "center")
   mu_pi_cols_3col <- (p_col2 | p_col3) +
@@ -1788,11 +1784,15 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
     theme(legend.position = "bottom",
           legend.justification = "center",
           legend.box = "horizontal")
-  combined_3col <- (first_col_3col | mu_pi_cols_3col) +
-    plot_layout(widths = c(1, 2))
+  combined_3col <- (mu_pi_cols_3col | basis_vs_gain_col_3col) +
+    plot_layout(widths = c(2, 1))
 
   ggsave(
     file.path(diagnostic_dir, "truth_drift_sanity_3col_scatter.png"),
+    combined_3col, width = 12, height = 6.8, dpi = 220, bg = "white"
+  )
+  ggsave(
+    file.path(diagnostic_dir, "truth_drift_sanity_scatter.png"),
     combined_3col, width = 12, height = 6.8, dpi = 220, bg = "white"
   )
   print(combined_3col)
@@ -1941,15 +1941,32 @@ if (file.exists(truth_drift_csv)) {
 
   baseline_curve_df <- baseline_points %>%
     dplyr::filter(is.finite(.data$truth_drift), is.finite(.data$auprc)) %>%
-    dplyr::arrange(.data$truth_drift)
-  baseline_curve_spline_df <- 5
-  baseline_curve_fit <- stats::smooth.spline(
-    x = baseline_curve_df$truth_drift,
-    y = baseline_curve_df$auprc,
-    df = baseline_curve_spline_df
+    dplyr::arrange(.data$truth_drift) %>%
+    dplyr::mutate(divergence_bin = basis_divergence_bin(.data$truth_drift))
+  baseline_curve_fit <- stats::lm(
+    auprc ~ splines::ns(truth_drift, df = truth_drift_spline_df),
+    data = baseline_curve_df
   )
+  baseline_curve_fit_summary <- summary(baseline_curve_fit)
+  baseline_curve_r2 <- baseline_curve_fit_summary$r.squared
+  baseline_curve_fstat <- baseline_curve_fit_summary$fstatistic
+  baseline_curve_p <- stats::pf(
+    baseline_curve_fstat[["value"]],
+    baseline_curve_fstat[["numdf"]],
+    baseline_curve_fstat[["dendf"]],
+    lower.tail = FALSE
+  )
+  baseline_curve_p_label <- if (is.finite(baseline_curve_p) &&
+                                baseline_curve_p < 1e-4) {
+    "< 1e-4"
+  } else {
+    sprintf("= %.3g", baseline_curve_p)
+  }
   predict_baseline_auprc_from_divergence <- function(x) {
-    pred <- stats::predict(baseline_curve_fit, x = x)$y
+    pred <- stats::predict(
+      baseline_curve_fit,
+      newdata = tibble::tibble(truth_drift = x)
+    )
     pmin(pmax(pred, 0), 1)
   }
   baseline_curve_grid <- tibble::tibble(
@@ -1964,15 +1981,32 @@ if (file.exists(truth_drift_csv)) {
     )
 
   p_baseline_truth <- ggplot(
-    baseline_points,
-    aes(x = .data$truth_drift, y = .data$auprc)
+    baseline_curve_df,
+    aes(x = .data$truth_drift, y = .data$auprc,
+        color = .data$divergence_bin)
   ) +
-    geom_point(alpha = 0.45, size = 1.5, stroke = 0, color = "grey25") +
+    geom_point(alpha = 0.52, size = 1.5, stroke = 0) +
     geom_line(
       data = baseline_curve_grid,
       aes(x = .data$truth_drift, y = .data$auprc_hat),
       inherit.aes = FALSE,
       color = "#c44e52", linewidth = 0.7
+    ) +
+    annotate(
+      "label",
+      x = stats::quantile(baseline_curve_df$truth_drift, 0.72,
+                          na.rm = TRUE, names = FALSE),
+      y = stats::quantile(baseline_curve_df$auprc, 0.88,
+                          na.rm = TRUE, names = FALSE),
+      label = sprintf("Natural spline df=%d\nR^2 = %.3f, p %s",
+                      truth_drift_spline_df, baseline_curve_r2,
+                      baseline_curve_p_label),
+      hjust = 0, vjust = 1, size = 3.0, label.size = 0.2,
+      fill = "white", color = "grey20", alpha = 0.9
+    ) +
+    scale_color_manual(
+      values = baseline_bin_palette,
+      name = "Baseline divergence bin"
     ) +
     labs(
       x = sprintf("Explanatory basis divergence from top-K causal basis [%s]",
@@ -1981,11 +2015,12 @@ if (file.exists(truth_drift_csv)) {
       title = "Baseline: cold vanilla AUPRC vs explanatory basis divergence",
       subtitle = paste(
         "One point per dataset (n =", nrow(baseline_points), ").",
-        sprintf("Red line: smoothing spline (df=%s) reused for nonlinear calibration.",
-                baseline_curve_spline_df)
-      )
+        "Red line is the fixed baseline calibration reused for delta decomposition."
+      ),
+      color = NULL
     ) +
-    theme_effect_paper(base_size = 10)
+    theme_effect_paper(base_size = 10) +
+    theme(legend.position = "bottom")
 
   ggsave(
     file.path(diagnostic_dir, "truth_drift_baseline_only.png"),
@@ -2002,17 +2037,9 @@ if (file.exists(truth_drift_csv)) {
 # Bin edges match the bins used for centroid stratification in the quadrant
 # trajectory plot below.
 if (exists("baseline_points")) {
-  divergence_breaks <- c(-Inf, 0.05, 0.10, Inf)
-  divergence_labels <- c("[0, 0.05]", "(0.05, 0.10]", "(0.10, inf)")
-
   baseline_binned <- baseline_points %>%
     dplyr::mutate(
-      divergence_bin = cut(
-        .data$truth_drift,
-        breaks = divergence_breaks,
-        labels = divergence_labels,
-        right = TRUE
-      )
+      divergence_bin = basis_divergence_bin(.data$truth_drift)
     )
 
   bin_counts <- baseline_binned %>%
@@ -2039,13 +2066,17 @@ if (exists("baseline_points")) {
         fill = .data$divergence_bin)
   ) +
     geom_boxplot(alpha = 0.7, outlier.size = 0.7, width = 0.6) +
+    geom_jitter(aes(color = .data$divergence_bin),
+                width = 0.12, height = 0, alpha = 0.32,
+                size = 0.75, show.legend = FALSE) +
     geom_text(
       data = bin_counts,
       aes(x = .data$divergence_bin, y = y_label_top,
           label = sprintf("n=%d", .data$n)),
       inherit.aes = FALSE, size = 3.2, color = "grey25"
     ) +
-    scale_fill_brewer(palette = "Blues", guide = "none") +
+    scale_fill_manual(values = baseline_bin_palette, guide = "none") +
+    scale_color_manual(values = baseline_bin_palette, guide = "none") +
     labs(
       x = sprintf("Explanatory basis divergence from truth bin [%s]",
                   truth_drift_column),
@@ -2258,6 +2289,7 @@ if (exists("trajectory_long") &&
       ),
       basis_pred_delta = .data$curve_end - .data$curve_start,
       residual_delta = .data$observed_delta - .data$basis_pred_delta,
+      start_divergence_bin = basis_divergence_bin(.data$start_divergence),
       basis_share = dplyr::if_else(
         abs(.data$observed_delta) >= 0.01,
         .data$basis_pred_delta / .data$observed_delta,
@@ -2275,7 +2307,16 @@ if (exists("trajectory_long") &&
       is.finite(.data$observed_delta),
       is.finite(.data$basis_pred_delta),
       is.finite(.data$residual_delta)
-    )
+    ) %>%
+    dplyr::group_by(.data$chain, .data$transition) %>%
+    dplyr::mutate(
+      transition_intercept = mean(.data$residual_delta, na.rm = TRUE),
+      basis_plus_intercept_delta = .data$basis_pred_delta +
+        .data$transition_intercept,
+      residual_after_intercept = .data$observed_delta -
+        .data$basis_plus_intercept_delta
+    ) %>%
+    dplyr::ungroup()
 
   auprc_basis_decomp_summary <- auprc_basis_decomp %>%
     dplyr::group_by(.data$chain, .data$transition) %>%
@@ -2283,7 +2324,12 @@ if (exists("trajectory_long") &&
       n = dplyr::n(),
       observed_mean = mean(.data$observed_delta, na.rm = TRUE),
       basis_mean = mean(.data$basis_pred_delta, na.rm = TRUE),
-      residual_mean = mean(.data$residual_delta, na.rm = TRUE),
+      transition_intercept = dplyr::first(.data$transition_intercept),
+      fitted_mean = mean(.data$basis_plus_intercept_delta, na.rm = TRUE),
+      residual_after_intercept_mean = mean(
+        .data$residual_after_intercept,
+        na.rm = TRUE
+      ),
       basis_share_of_mean = .data$basis_mean / .data$observed_mean,
       median_basis_share_when_gain = stats::median(
         .data$basis_share[.data$observed_delta >= 0.01],
@@ -2292,6 +2338,22 @@ if (exists("trajectory_long") &&
       mean_divergence_improvement = mean(
         .data$divergence_improvement,
         na.rm = TRUE
+      ),
+      basis_r2_with_transition_intercept = {
+        sst <- sum(
+          (.data$observed_delta - mean(.data$observed_delta, na.rm = TRUE))^2,
+          na.rm = TRUE
+        )
+        sse <- sum(
+          (.data$observed_delta - .data$basis_plus_intercept_delta)^2,
+          na.rm = TRUE
+        )
+        if (is.finite(sst) && sst > 0) 1 - sse / sst else NA_real_
+      },
+      basis_observed_cor = stats::cor(
+        .data$basis_pred_delta,
+        .data$observed_delta,
+        use = "complete.obs"
       ),
       .groups = "drop"
     )
@@ -2314,19 +2376,49 @@ if (exists("trajectory_long") &&
   )), na.rm = TRUE)
   decomp_lim <- max(0.05, decomp_lim)
 
+  decomp_annotation <- auprc_basis_decomp_summary %>%
+    dplyr::mutate(
+      x = -0.96 * decomp_lim,
+      y = 0.94 * decomp_lim,
+      label = sprintf(
+        paste0(
+          "R^2(f(x)+intercept) = %.2f\n",
+          "observed mean = %.3f\n",
+          "basis mean = %.3f\n",
+          "intercept = %.3f"
+        ),
+        .data$basis_r2_with_transition_intercept,
+        .data$observed_mean,
+        .data$basis_mean,
+        .data$transition_intercept
+      )
+    )
+
   p_basis_explain_scatter <- ggplot(
     auprc_basis_decomp,
     aes(x = .data$basis_pred_delta, y = .data$observed_delta,
-        color = .data$start_divergence)
+        color = .data$start_divergence_bin)
   ) +
     geom_hline(yintercept = 0, color = "grey65", linewidth = 0.25) +
     geom_vline(xintercept = 0, color = "grey65", linewidth = 0.25) +
     geom_abline(slope = 1, intercept = 0, color = "grey35",
                 linetype = "dashed", linewidth = 0.35) +
+    geom_abline(
+      data = auprc_basis_decomp_summary,
+      aes(intercept = .data$transition_intercept, slope = 1),
+      inherit.aes = FALSE, color = "#c44e52", linewidth = 0.45
+    ) +
     geom_point(alpha = 0.58, size = 1.45, stroke = 0) +
+    geom_label(
+      data = decomp_annotation,
+      aes(x = .data$x, y = .data$y, label = .data$label),
+      inherit.aes = FALSE, hjust = 0, vjust = 1,
+      size = 2.55, label.size = 0.16, fill = "white",
+      color = "grey18", alpha = 0.9
+    ) +
     facet_grid(chain ~ transition) +
-    scale_color_viridis_c(
-      option = "C",
+    scale_color_manual(
+      values = baseline_bin_palette,
       name = "Baseline explanatory\nbasis divergence"
     ) +
     coord_cartesian(xlim = c(-decomp_lim, decomp_lim),
@@ -2337,90 +2429,50 @@ if (exists("trajectory_long") &&
       title = "How much observed AUPRC gain is predicted by basis divergence?"
     ) +
     theme_effect_paper(base_size = 9) +
-    theme(legend.position = "right")
-
-  decomp_components <- auprc_basis_decomp_summary %>%
-    dplyr::select(.data$chain, .data$transition,
-                  .data$basis_mean, .data$residual_mean) %>%
-    tidyr::pivot_longer(
-      cols = c(.data$basis_mean, .data$residual_mean),
-      names_to = "component",
-      values_to = "mean_delta"
-    ) %>%
-    dplyr::mutate(
-      component = factor(
-        .data$component,
-        levels = c("basis_mean", "residual_mean"),
-        labels = c("Basis-predicted", "Residual / non-basis")
-      )
-    )
-
-  p_basis_decomp_bar <- ggplot(
-    decomp_components,
-    aes(x = .data$chain, y = .data$mean_delta, fill = .data$component)
-  ) +
-    geom_hline(yintercept = 0, color = "grey45", linewidth = 0.25) +
-    geom_col(width = 0.62) +
-    geom_point(
-      data = auprc_basis_decomp_summary,
-      aes(x = .data$chain, y = .data$observed_mean),
-      inherit.aes = FALSE,
-      shape = 21, fill = "white", color = "black", size = 2.3,
-      stroke = 0.35
-    ) +
-    facet_wrap(~ transition, nrow = 1) +
-    scale_fill_manual(
-      values = c("Basis-predicted" = "#4c72b0",
-                 "Residual / non-basis" = "#dd8452")
-    ) +
-    labs(
-      x = NULL,
-      y = "Mean AUPRC delta",
-      fill = NULL,
-      title = "Mean observed gain split into nonlinear basis-predicted and residual parts",
-      subtitle = "White dot marks the observed mean delta."
-    ) +
-    theme_effect_paper(base_size = 9) +
     theme(legend.position = "bottom")
-
-  p_basis_share <- auprc_basis_decomp %>%
-    dplyr::filter(.data$observed_delta >= 0.01,
-                  is.finite(.data$basis_share)) %>%
-    ggplot(aes(x = .data$chain, y = .data$basis_share,
-               fill = .data$chain)) +
-    geom_hline(yintercept = 0, color = "grey65", linewidth = 0.25) +
-    geom_hline(yintercept = 1, color = "grey35", linetype = "dashed",
-               linewidth = 0.3) +
-    geom_boxplot(width = 0.55, alpha = 0.75, outlier.size = 0.45) +
-    facet_wrap(~ transition, nrow = 1) +
-    scale_fill_manual(values = c("mu chain" = "#2b8cbe",
-                                 "pi chain" = "#74c476"),
-                      guide = "none") +
-    scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
-    coord_cartesian(ylim = c(-0.5, 1.5)) +
-    labs(
-      x = NULL,
-      y = "Basis-predicted / observed delta",
-      title = "Per-dataset explained share among observed improvements",
-      subtitle = "Filtered to observed AUPRC gain >= 0.01; dashed line = 100%."
-    ) +
-    theme_effect_paper(base_size = 9)
-
-  p_basis_decomp_combined <- p_basis_explain_scatter /
-    (p_basis_decomp_bar | p_basis_share) +
-    plot_layout(heights = c(1.25, 1))
 
   ggsave(
     file.path(diagnostic_dir,
               "truth_drift_auprc_basis_decomposition.png"),
-    p_basis_decomp_combined, width = 11.5, height = 7.2, dpi = 220,
+    p_basis_explain_scatter, width = 11.5, height = 6.2, dpi = 220,
     bg = "white"
   )
-  print(p_basis_decomp_combined)
+  print(p_basis_explain_scatter)
 } else {
   message(
     "Skipping AUPRC basis decomposition; need trajectory_long and ",
     "baseline divergence smoother."
+  )
+}
+```
+
+```{r explanatory-basis-divergence-paper-figure, fig.width=12, fig.height=16.5}
+if (exists("p_baseline_truth") &&
+    exists("p_baseline_boxplot") &&
+    exists("combined_3col") &&
+    exists("p_basis_explain_scatter")) {
+  paper_basis_divergence_fig <- (
+    (p_baseline_truth | p_baseline_boxplot) /
+      combined_3col /
+      p_basis_explain_scatter
+  ) +
+    plot_layout(heights = c(0.78, 1.18, 1.08)) +
+    plot_annotation(tag_levels = "A") &
+    theme(plot.tag = element_text(face = "bold", size = 11))
+
+  ggsave(
+    paper_basis_divergence_png,
+    paper_basis_divergence_fig,
+    width = 12, height = 16.5, dpi = 300, bg = "white",
+    limitsize = FALSE
+  )
+  cat("Wrote basis-divergence paper figure to ",
+      paper_basis_divergence_png, "\n", sep = "")
+  print(paper_basis_divergence_fig)
+} else {
+  message(
+    "Skipping basis-divergence paper figure; need baseline, 3-column, ",
+    "and decomposition panels."
   )
 }
 ```
@@ -2432,9 +2484,6 @@ if (exists("trajectory_long") &&
 #   - centroid arrows stratified by the dataset's cold (baseline) basis
 #     divergence bin (3 centroid trajectories per chain facet)
 if (exists("trajectory_long")) {
-  divergence_breaks <- c(-Inf, 0.05, 0.10, Inf)
-  divergence_labels <- c("[0, 0.05]", "(0.05, 0.10]", "(0.10, inf)")
-
   # Per (dataset, chain): the cold -> warm net (AUPRC, divergence) quadrant
   # and the dataset's baseline (cold) divergence bin.
   net_movement <- trajectory_long %>%
@@ -2458,12 +2507,7 @@ if (exists("trajectory_long")) {
         .data$delta_auprc < 0  & .data$delta_divergence > 0  ~
           "-AUPRC, +divergence"
       ),
-      baseline_bin = cut(
-        .data$truth_drift_cold,
-        breaks = divergence_breaks,
-        labels = divergence_labels,
-        right = TRUE
-      )
+      baseline_bin = basis_divergence_bin(.data$truth_drift_cold)
     )
 
   trajectory_long_q <- trajectory_long %>%
