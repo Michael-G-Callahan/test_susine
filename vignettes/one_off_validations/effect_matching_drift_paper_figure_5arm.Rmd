@@ -1776,16 +1776,17 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
     ) +
     theme_effect_paper(base_size = 9)
 
-  basis_vs_gain_col_3col <- p_col1 +
-    theme(legend.position = "bottom",
-          legend.justification = "center")
-  mu_pi_cols_3col <- (p_col2 | p_col3) +
-    plot_layout(guides = "collect") &
+  combined_3col <- patchwork::wrap_plots(
+    p_col2,
+    p_col3,
+    p_col1,
+    ncol = 3,
+    widths = c(1, 1, 1),
+    guides = "collect"
+  ) &
     theme(legend.position = "bottom",
           legend.justification = "center",
           legend.box = "horizontal")
-  combined_3col <- (mu_pi_cols_3col | basis_vs_gain_col_3col) +
-    plot_layout(widths = c(2, 1))
 
   ggsave(
     file.path(diagnostic_dir, "truth_drift_sanity_3col_scatter.png"),
