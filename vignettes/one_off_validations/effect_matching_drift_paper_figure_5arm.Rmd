@@ -183,7 +183,7 @@ theme_effect_paper <- function(base_size = 8) {
       panel.grid.major = element_line(color = "grey91", linewidth = 0.22),
       panel.grid.minor = element_blank(),
       panel.border = element_rect(color = "grey35", fill = NA, linewidth = 0.35),
-      axis.title = element_text(size = base_size),
+      axis.title = element_text(size = base_size + 0.5),
       axis.text = element_text(size = base_size - 1, color = "grey25"),
       plot.title = element_text(face = "bold", size = base_size + 1.2,
                                 margin = margin(b = 3)),
@@ -1679,11 +1679,14 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
   )
 
   diagonal_count_layer <- function(label_df) {
-    geom_text(
+    geom_label(
       data = label_df,
       aes(x = .data$x, y = .data$y, label = .data$label),
       inherit.aes = FALSE, hjust = 1, vjust = 0,
-      size = 2.75, color = "grey20"
+      size = 2.75, color = "grey20", fill = "white",
+      alpha = 0.88, label.size = 0.14,
+      label.padding = grid::unit(0.55, "pt"),
+      label.r = grid::unit(0.35, "pt")
     )
   }
 
@@ -2435,7 +2438,7 @@ if (exists("trajectory_long") &&
           paste0(
             "R\u00b2 = %.2f\n",
             "obs. mean \u0394AUPRC = %.2f\n",
-            "curve mean = %.2f\n",
+            "pred. curve mean = %.2f\n",
             "residual mean = %.2f"
           ),
           .data$basis_r2_with_transition_intercept,
@@ -2555,7 +2558,8 @@ if (exists("p_baseline_truth") &&
     theme(legend.position = "none")
 
   paper_basis_divergence_fig <- patchwork::wrap_plots(
-    ((p_baseline_truth_paper | p_col1_paper) +
+    ((patchwork::free(p_baseline_truth_paper, type = "space", side = "t") |
+        p_col1_paper) +
        plot_layout(widths = c(0.9, 1.18))),
     (p_col2_paper | p_col3_paper),
     p_basis_explain_scatter,
@@ -2567,6 +2571,8 @@ if (exists("p_baseline_truth") &&
       plot.tag = element_text(face = "bold", size = 12,
                               margin = margin(0, 1, 0, 0)),
       plot.tag.position = c(0.002, 0.995),
+      plot.title = element_text(face = "bold", size = 9.4,
+                                margin = margin(b = 3)),
       plot.margin = margin(4.5, 4.5, 4.5, 4.5),
       panel.spacing.x = grid::unit(3.2, "mm"),
       panel.spacing.y = grid::unit(3.2, "mm")
