@@ -161,8 +161,8 @@ basis_divergence_bin <- function(x) {
 basis_divergence_axis <- "Explanatory basis divergence"
 basis_reduction_axis <- "Reduction in basis divergence"
 transition_label_map <- c(
-  cold_ann = "Cold -> annotated",
-  cold_warm = "Cold -> warm refit"
+  cold_ann = "Cold \u2192 annotated",
+  cold_warm = "Cold \u2192 warm refit"
 )
 chain_label_map <- c(
   mu = "\u03bc\u2080 channel",
@@ -1497,8 +1497,8 @@ if (!file.exists(truth_drift_csv)) {
     geom_smooth(method = "lm", se = FALSE, linewidth = 0.5) +
     facet_wrap(~ pair_kind, nrow = 1,
                labeller = labeller(pair_kind = c(
-                 cold_ann  = "Cold -> annotated",
-                 cold_warm = "Cold -> warm refit"
+                 cold_ann  = transition_label_map[["cold_ann"]],
+                 cold_warm = transition_label_map[["cold_warm"]]
                ))) +
     scale_color_manual(values = c(mu = "#2b8cbe", pi = "#74c476"),
                        labels = chain_label_map) +
@@ -1641,6 +1641,7 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
 
   diagonal_count_labels <- function(df, x_col, y_col, lim,
                                     equal_buffer = diagonal_equal_buffer) {
+    lim_width <- diff(lim)
     df %>%
       dplyr::mutate(diagonal_diff = .data[[y_col]] - .data[[x_col]]) %>%
       dplyr::group_by(.data$pair_kind) %>%
@@ -1652,10 +1653,10 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
         .groups = "drop"
       ) %>%
       dplyr::mutate(
-        x = lim[[1]] * 0.94,
-        y = lim[[2]] * 0.92,
+        x = lim[[2]] - 0.025 * lim_width,
+        y = lim[[1]] + 0.045 * lim_width,
         label = sprintf(
-          "\u03bc\u2080 > \u03c0: %d\napprox. equal: %d\n\u03c0 > \u03bc\u2080: %d",
+          "\u03bc\u2080>\u03c0 %d | \u2248 %d | \u03c0>\u03bc\u2080 %d",
           .data$mu_gt_pi, .data$approx_equal, .data$pi_gt_mu
         )
       )
@@ -1664,23 +1665,21 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
     pair_within_dataset,
     "auprc_delta_pi",
     "auprc_delta_mu",
-    col2_axislim
+    col2_plot_axislim
   )
   col3_diag_labels <- diagonal_count_labels(
     pair_within_dataset,
     "delta_truth_pi",
     "delta_truth_mu",
-    col3_axislim
+    col3_plot_axislim
   )
 
   diagonal_count_layer <- function(label_df) {
-    geom_label(
+    geom_text(
       data = label_df,
       aes(x = .data$x, y = .data$y, label = .data$label),
-      inherit.aes = FALSE, hjust = 0, vjust = 1,
-      size = 2.55, color = "grey20", fill = "white",
-      alpha = 0.88, label.size = 0.15,
-      label.padding = grid::unit(1.2, "pt")
+      inherit.aes = FALSE, hjust = 1, vjust = 0,
+      size = 2.35, color = "grey20"
     )
   }
 
@@ -1702,7 +1701,7 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
                        labels = chain_label_map) +
     labs(
       x = basis_reduction_axis,
-      y = "Delta AUPRC vs cold SuSiE",
+      y = expression(paste(Delta, "AUPRC vs cold SuSiE")),
       color = NULL,
       title = "Basis movement predicts AUPRC gain"
     ) +
@@ -1954,6 +1953,23 @@ if (file.exists(truth_drift_csv)) {
     dplyr::mutate(
       auprc_hat = predict_baseline_auprc_from_divergence(.data$truth_drift)
     )
+  baseline_bin_count_df <- tibble::tibble(
+    divergence_bin = factor(divergence_labels, levels = divergence_labels)
+  ) %>%
+    dplyr::left_join(
+      baseline_curve_df %>%
+        dplyr::count(.data$divergence_bin, name = "n"),
+      by = "divergence_bin"
+    ) %>%
+    dplyr::mutate(n = dplyr::coalesce(.data$n, 0L))
+  baseline_bin_count_label <- paste(
+    sprintf("%s: n=%d",
+            as.character(baseline_bin_count_df$divergence_bin),
+            baseline_bin_count_df$n),
+    collapse = " | "
+  )
+  baseline_truth_xlim <- range(baseline_curve_df$truth_drift, na.rm = TRUE)
+  baseline_truth_ylim <- range(baseline_curve_df$auprc, na.rm = TRUE)
 
   p_baseline_truth <- ggplot(
     baseline_curve_df,
@@ -1969,13 +1985,12 @@ if (file.exists(truth_drift_csv)) {
     ) +
     annotate(
       "label",
-      x = stats::quantile(baseline_curve_df$truth_drift, 0.72,
-                          na.rm = TRUE, names = FALSE),
-      y = stats::quantile(baseline_curve_df$auprc, 0.88,
-                          na.rm = TRUE, names = FALSE),
-      label = sprintf("Smoothing spline df=%d\nR^2 = %.3f",
-                      truth_drift_spline_df, baseline_curve_r2),
-      hjust = 0, vjust = 1, size = 3.0, label.size = 0.2,
+      x = baseline_truth_xlim[[2]] - 0.02 * diff(baseline_truth_xlim),
+      y = baseline_truth_ylim[[2]] - 0.04 * diff(baseline_truth_ylim),
+      label = sprintf("Spline df=%d; R\u00b2=%.3f\n%s",
+                      truth_drift_spline_df, baseline_curve_r2,
+                      baseline_bin_count_label),
+      hjust = 1, vjust = 1, size = 2.65, label.size = 0.16,
       fill = "white", color = "grey20", alpha = 0.9
     ) +
     scale_color_manual(
@@ -1986,8 +2001,7 @@ if (file.exists(truth_drift_csv)) {
       x = basis_divergence_axis,
       y = "AUPRC (cold SuSiE)",
       title = "Baseline AUPRC vs basis divergence",
-      subtitle = sprintf("n = %d datasets; spline reused for decomposition.",
-                         nrow(baseline_points)),
+      subtitle = sprintf("n = %d datasets", nrow(baseline_points)),
       color = NULL
     ) +
     theme_effect_paper(base_size = 8) +
@@ -2335,8 +2349,8 @@ if (exists("trajectory_long") &&
   cat("AUPRC decomposition using baseline nonlinear divergence curve:\n")
   print(auprc_basis_decomp_summary)
 
-  decomp_trim_q <- c(0.02, 0.98)
-  decomp_axis_pad <- 0.03
+  decomp_trim_q <- c(0.01, 0.99)
+  decomp_axis_pad <- 0.018
   decomp_quantile_lim <- function(x, probs = decomp_trim_q) {
     x <- x[is.finite(x)]
     if (!length(x)) {
@@ -2372,6 +2386,11 @@ if (exists("trajectory_long") &&
   make_decomp_panel <- function(chain_lab, transition_lab,
                                 show_x_title = TRUE,
                                 show_y_title = TRUE) {
+    chain_short <- dplyr::case_when(
+      chain_lab == chain_label_text[["mu"]] ~ "\u03bc\u2080",
+      chain_lab == chain_label_text[["pi"]] ~ "\u03c0",
+      TRUE ~ chain_lab
+    )
     panel_df <- auprc_basis_decomp %>%
       dplyr::filter(
         as.character(.data$chain) == chain_lab,
@@ -2399,10 +2418,10 @@ if (exists("trajectory_long") &&
         y = y_axis[[2]] - 0.018 * diff(y_axis),
         label = sprintf(
           paste0(
-            "R^2 = %.2f\n",
-            "observed mean = %.3f\n",
-            "basis shift = %.3f\n",
-            "non-basis shift = %.3f"
+            "R\u00b2 = %.2f\n",
+            "mean \u0394AUPRC = %.3f\n",
+            "basis-predicted mean = %.3f\n",
+            "non-basis mean = %.3f"
           ),
           .data$basis_r2_with_transition_intercept,
           .data$observed_mean,
@@ -2441,33 +2460,30 @@ if (exists("trajectory_long") &&
       labs(
         x = expression(paste("Predicted ", Delta, "AUPRC from basis movement")),
         y = expression(paste("Observed ", Delta, "AUPRC")),
-        title = transition_lab,
-        subtitle = chain_lab
+        title = sprintf("%s (%s)", transition_lab, chain_short)
       ) +
       theme_effect_paper(base_size = 8) +
       theme(
         legend.position = "bottom",
         axis.title.x = if (show_x_title) element_text() else element_blank(),
-        axis.title.y = if (show_y_title) element_text() else element_blank(),
-        plot.subtitle = element_text(size = 7.0, color = "grey25",
-                                     margin = margin(b = 2))
+        axis.title.y = if (show_y_title) element_text() else element_blank()
       )
   }
 
   p_decomp_mu_ann <- make_decomp_panel(
-    chain_label_text[["mu"]], "Cold -> annotated",
+    chain_label_text[["mu"]], transition_label_map[["cold_ann"]],
     show_x_title = FALSE, show_y_title = TRUE
   )
   p_decomp_mu_warm <- make_decomp_panel(
-    chain_label_text[["mu"]], "Cold -> warm refit",
+    chain_label_text[["mu"]], transition_label_map[["cold_warm"]],
     show_x_title = FALSE, show_y_title = FALSE
   )
   p_decomp_pi_ann <- make_decomp_panel(
-    chain_label_text[["pi"]], "Cold -> annotated",
+    chain_label_text[["pi"]], transition_label_map[["cold_ann"]],
     show_x_title = TRUE, show_y_title = TRUE
   )
   p_decomp_pi_warm <- make_decomp_panel(
-    chain_label_text[["pi"]], "Cold -> warm refit",
+    chain_label_text[["pi"]], transition_label_map[["cold_warm"]],
     show_x_title = TRUE, show_y_title = FALSE
   )
 
@@ -2498,17 +2514,27 @@ if (exists("trajectory_long") &&
 }
 ```
 
-```{r explanatory-basis-divergence-paper-figure, fig.width=9.4, fig.height=9.6}
+```{r explanatory-basis-divergence-paper-figure, fig.width=9.4, fig.height=9.4}
 if (exists("p_baseline_truth") &&
-    exists("p_baseline_boxplot") &&
-    exists("combined_3col") &&
+    exists("p_col1") &&
+    exists("p_col2") &&
+    exists("p_col3") &&
     exists("p_basis_explain_scatter")) {
+  p_baseline_truth_paper <- p_baseline_truth +
+    theme(legend.position = "none")
+  p_col1_paper <- p_col1 +
+    theme(legend.position = "bottom")
+  p_col2_paper <- p_col2 +
+    theme(legend.position = "none")
+  p_col3_paper <- p_col3 +
+    theme(legend.position = "none")
+
   paper_basis_divergence_fig <- patchwork::wrap_plots(
-    (p_baseline_truth | p_baseline_boxplot),
-    combined_3col,
+    (p_baseline_truth_paper | p_col1_paper),
+    (p_col2_paper | p_col3_paper),
     p_basis_explain_scatter,
     ncol = 1,
-    heights = c(0.72, 1.12, 1.18)
+    heights = c(1.0, 1.0, 1.48)
   ) +
     plot_annotation(tag_levels = "A") &
     theme(plot.tag = element_text(face = "bold", size = 10))
@@ -2516,7 +2542,7 @@ if (exists("p_baseline_truth") &&
   ggsave(
     paper_basis_divergence_png,
     paper_basis_divergence_fig,
-    width = 9.4, height = 9.6, dpi = 300, bg = "white",
+    width = 9.4, height = 9.4, dpi = 300, bg = "white",
     limitsize = FALSE
   )
   cat("Wrote basis-divergence paper figure to ",
@@ -2524,8 +2550,8 @@ if (exists("p_baseline_truth") &&
   print(paper_basis_divergence_fig)
 } else {
   message(
-    "Skipping basis-divergence paper figure; need baseline, 3-column, ",
-    "and decomposition panels."
+    "Skipping basis-divergence paper figure; need baseline, paired scatter, ",
+    "movement-vs-AUPRC, and decomposition panels."
   )
 }
 ```
