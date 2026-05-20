@@ -1710,7 +1710,7 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
       x = basis_reduction_axis,
       y = expression(paste(Delta, "AUPRC vs cold SuSiE")),
       color = NULL,
-      title = "Basis-divergence reduction predicts AUPRC gain"
+      title = "Basis-divergence reduction predicts AUPRC gains from annotation"
     ) +
     guides(color = guide_legend(nrow = 1, override.aes = list(size = 2.2))) +
     theme_effect_paper(base_size = 8)
@@ -1738,7 +1738,7 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
     labs(
       x = expression(paste(Delta, "AUPRC (", pi, " channel)")),
       y = expression(paste(Delta, "AUPRC (", mu[0], " channel)")),
-      title = expression(paste("AUPRC gain: ", mu[0], " vs ", pi))
+      title = expression(paste(mu[0], " AUPRC advantage weakens after refit"))
     ) +
     theme_effect_paper(base_size = 8)
 
@@ -1765,7 +1765,7 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
     labs(
       x = expression(paste("Basis-divergence reduction (", pi, " channel)")),
       y = expression(paste("Basis-divergence reduction (", mu[0], " channel)")),
-      title = expression(paste("Basis-divergence reduction: ", mu[0], " vs ", pi))
+      title = expression(paste(mu[0], " basis-divergence advantage persists after refit"))
     ) +
     theme_effect_paper(base_size = 8)
 
@@ -2014,7 +2014,7 @@ if (file.exists(truth_drift_csv)) {
     labs(
       x = basis_divergence_axis,
       y = "AUPRC (cold SuSiE)",
-      title = "Baseline AUPRC vs basis divergence",
+      title = "Basis divergence predicts baseline AUPRC",
       color = NULL
     ) +
     theme_effect_paper(base_size = 8) +
@@ -2365,6 +2365,7 @@ if (exists("trajectory_long") &&
   decomp_trim_q <- c(0.01, 0.99)
   decomp_axis_pad <- 0.018
   decomp_x_upper_pad <- 0.003
+  decomp_y_upper_pad <- 0.003
   decomp_quantile_lim <- function(x, probs = decomp_trim_q) {
     x <- x[is.finite(x)]
     if (!length(x)) {
@@ -2394,6 +2395,14 @@ if (exists("trajectory_long") &&
     }
     lim + c(-lower_pad, upper_pad) * width
   }
+  decomp_expand_y_axis <- function(lim, lower_pad = decomp_axis_pad,
+                                   upper_pad = decomp_y_upper_pad) {
+    width <- diff(lim)
+    if (!is.finite(width) || width <= 0) {
+      width <- max(abs(lim), 1, na.rm = TRUE)
+    }
+    lim + c(-lower_pad, upper_pad) * width
+  }
   decomp_winsorize <- function(x, lim) {
     pmin(pmax(x, lim[[1]]), lim[[2]])
   }
@@ -2404,7 +2413,7 @@ if (exists("trajectory_long") &&
     auprc_basis_decomp$observed_delta
   )
   decomp_x_axis_global <- decomp_expand_x_axis(decomp_x_win_global)
-  decomp_y_axis_global <- decomp_expand_axis(decomp_y_win_global)
+  decomp_y_axis_global <- decomp_expand_y_axis(decomp_y_win_global)
   make_decomp_chain_panel <- function(chain_lab, show_y_title = TRUE) {
     chain_short <- dplyr::case_when(
       chain_lab == chain_label_text[["mu"]] ~ "\u03bc\u2080",
@@ -2486,7 +2495,7 @@ if (exists("trajectory_long") &&
       labs(
         x = expression(paste("Predicted ", Delta, "AUPRC from basis-divergence reduction")),
         y = expression(paste("Observed ", Delta, "AUPRC")),
-        title = sprintf("AUPRC decomposition: %s channel", chain_short)
+        title = sprintf("AUPRC gain decomposition: %s channel", chain_short)
       ) +
       theme_effect_paper(base_size = 8) +
       theme(
@@ -2516,15 +2525,13 @@ if (exists("trajectory_long") &&
       legend.title = element_text(size = 9, margin = margin(r = 6)),
       legend.text = element_text(size = 8.4),
       legend.key.height = grid::unit(4.0, "mm"),
-      legend.key.width = grid::unit(7.0, "mm"),
-      plot.title = element_text(face = "bold", size = 10.2,
-                                margin = margin(b = 3))
+      legend.key.width = grid::unit(7.0, "mm")
     )
 
   ggsave(
     file.path(diagnostic_dir,
               "truth_drift_auprc_basis_decomposition.png"),
-    p_basis_explain_scatter, width = 11.5, height = 4.85, dpi = 220,
+    p_basis_explain_scatter, width = 11.5, height = 4.25, dpi = 220,
     bg = "white"
   )
   print(p_basis_explain_scatter)
@@ -2536,7 +2543,7 @@ if (exists("trajectory_long") &&
 }
 ```
 
-```{r explanatory-basis-divergence-paper-figure, fig.width=9.4, fig.height=9.9}
+```{r explanatory-basis-divergence-paper-figure, fig.width=9.4, fig.height=9.5}
 if (exists("p_baseline_truth") &&
     exists("p_col1") &&
     exists("p_col2") &&
@@ -2558,13 +2565,13 @@ if (exists("p_baseline_truth") &&
     theme(legend.position = "none")
 
   paper_basis_divergence_fig <- patchwork::wrap_plots(
-    ((patchwork::free(p_baseline_truth_paper, type = "space", side = "t") |
+    ((patchwork::free(p_baseline_truth_paper, type = "panel", side = "t") |
         p_col1_paper) +
        plot_layout(widths = c(0.9, 1.18))),
     (p_col2_paper | p_col3_paper),
     p_basis_explain_scatter,
     ncol = 1,
-    heights = c(1.0, 0.95, 1.26)
+    heights = c(1.0, 0.95, 1.08)
   ) +
     plot_annotation(tag_levels = "A") &
     theme(
@@ -2581,7 +2588,7 @@ if (exists("p_baseline_truth") &&
   ggsave(
     paper_basis_divergence_png,
     paper_basis_divergence_fig,
-    width = 9.4, height = 9.9, dpi = 300, bg = "white",
+    width = 9.4, height = 9.5, dpi = 300, bg = "white",
     limitsize = FALSE
   )
   cat("Wrote basis-divergence paper figure to ",
