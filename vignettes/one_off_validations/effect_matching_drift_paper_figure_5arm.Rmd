@@ -1738,7 +1738,7 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
     labs(
       x = expression(paste(Delta, "AUPRC (", pi, " channel)")),
       y = expression(paste(Delta, "AUPRC (", mu[0], " channel)")),
-      title = expression(paste(mu[0], " AUPRC advantage weakens after refit"))
+      title = "\u03bc\u2080 AUPRC advantage weakens after refit"
     ) +
     theme_effect_paper(base_size = 8)
 
@@ -1765,7 +1765,7 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
     labs(
       x = expression(paste("Basis-divergence reduction (", pi, " channel)")),
       y = expression(paste("Basis-divergence reduction (", mu[0], " channel)")),
-      title = expression(paste(mu[0], " basis-divergence advantage persists after refit"))
+      title = "\u03bc\u2080 basis-divergence advantage persists after refit"
     ) +
     theme_effect_paper(base_size = 8)
 
@@ -2750,6 +2750,45 @@ if (exists("trajectory_long")) {
   message(
     "Skipping quadrant trajectory; trajectory_long not in scope. ",
     "Run the explanatory-basis-divergence trajectory chunk first."
+  )
+}
+```
+
+```{r explanatory-basis-divergence-bin-counts-by-arm}
+if (exists("truth_drift_summary") && exists("truth_drift_column")) {
+  divergence_bin_counts_by_arm <- truth_drift_summary %>%
+    dplyr::filter(.data$model_method %in% methods_in_order) %>%
+    dplyr::mutate(
+      model_method = factor(
+        .data$model_method,
+        levels = methods_in_order,
+        labels = method_legend_short[methods_in_order]
+      ),
+      divergence_bin = basis_divergence_bin(.data[[truth_drift_column]])
+    ) %>%
+    dplyr::count(.data$model_method, .data$divergence_bin, name = "n") %>%
+    tidyr::complete(
+      model_method = factor(method_legend_short[methods_in_order],
+                            levels = method_legend_short[methods_in_order]),
+      divergence_bin = factor(divergence_labels, levels = divergence_labels),
+      fill = list(n = 0L)
+    ) %>%
+    dplyr::arrange(.data$model_method, .data$divergence_bin)
+
+  cat("\nBasis-divergence bin counts by model arm:\n")
+  print(divergence_bin_counts_by_arm)
+
+  divergence_bin_counts_by_arm_wide <- divergence_bin_counts_by_arm %>%
+    tidyr::pivot_wider(
+      names_from = .data$divergence_bin,
+      values_from = .data$n
+    )
+  cat("\nWide version for caption/paper notes:\n")
+  print(divergence_bin_counts_by_arm_wide)
+} else {
+  message(
+    "Skipping bin-count printout; truth_drift_summary/truth_drift_column ",
+    "not available in scope."
   )
 }
 ```
