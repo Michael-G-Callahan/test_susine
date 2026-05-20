@@ -1657,7 +1657,7 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
         .groups = "drop"
       ) %>%
       dplyr::mutate(
-        x = lim[[2]] - 0.045 * lim_width,
+        x = lim[[2]] - 0.065 * lim_width,
         y = lim[[1]] + 0.055 * lim_width,
         label = sprintf(
           "\u03bc\u2080>\u03c0: %d; \u2248: %d; \u03c0>\u03bc\u2080: %d",
@@ -2012,7 +2012,6 @@ if (file.exists(truth_drift_csv)) {
       x = basis_divergence_axis,
       y = "AUPRC (cold SuSiE)",
       title = "Baseline AUPRC vs basis divergence",
-      subtitle = sprintf("n = %d datasets", nrow(baseline_points)),
       color = NULL
     ) +
     theme_effect_paper(base_size = 8) +
@@ -2362,7 +2361,7 @@ if (exists("trajectory_long") &&
 
   decomp_trim_q <- c(0.01, 0.99)
   decomp_axis_pad <- 0.018
-  decomp_x_upper_pad <- 0.006
+  decomp_x_upper_pad <- 0.003
   decomp_quantile_lim <- function(x, probs = decomp_trim_q) {
     x <- x[is.finite(x)]
     if (!length(x)) {
@@ -2430,14 +2429,14 @@ if (exists("trajectory_long") &&
       )
     panel_annotation <- panel_summary %>%
       dplyr::mutate(
-        x = x_axis[[1]] + 0.004 * diff(x_axis),
-        y = y_axis[[2]] - 0.006 * diff(y_axis),
+        x = x_axis[[2]] - 0.004 * diff(x_axis),
+        y = y_axis[[1]] + 0.006 * diff(y_axis),
         label = sprintf(
           paste0(
             "R\u00b2 = %.2f\n",
-            "observed mean \u0394AUPRC = %.3f\n",
-            "curve-predicted mean = %.3f\n",
-            "residual mean = %.3f"
+            "obs. mean \u0394AUPRC = %.2f\n",
+            "curve mean = %.2f\n",
+            "residual mean = %.2f"
           ),
           .data$basis_r2_with_transition_intercept,
           .data$observed_mean,
@@ -2464,25 +2463,25 @@ if (exists("trajectory_long") &&
       geom_label(
         data = panel_annotation,
         aes(x = .data$x, y = .data$y, label = .data$label),
-        inherit.aes = FALSE, hjust = 0, vjust = 1,
+        inherit.aes = FALSE, hjust = 1, vjust = 0,
         size = 2.35, label.size = 0.14, fill = "white",
         color = "grey18", alpha = 0.9,
-        label.padding = grid::unit(0.8, "pt"),
-        label.r = grid::unit(0.6, "pt")
+        label.padding = grid::unit(0.4, "pt"),
+        label.r = grid::unit(0.3, "pt")
       ) +
       facet_wrap(~ transition, nrow = 1) +
       scale_color_manual(
         values = baseline_bin_palette,
         labels = baseline_bin_legend_labels,
-        name = "Baseline basis\ndivergence",
+        name = "Baseline basis divergence bin (n = 600 datasets)",
         guide = guide_legend(
-          title.position = "top", nrow = 1,
+          title.position = "left", nrow = 1,
           override.aes = list(size = 3.2, alpha = 0.9)
         )
       ) +
       coord_cartesian(xlim = x_axis, ylim = y_axis) +
       labs(
-        x = expression(paste("Predicted ", Delta, "AUPRC from basis movement")),
+        x = expression(paste("Predicted ", Delta, "AUPRC from basis-divergence reduction")),
         y = expression(paste("Observed ", Delta, "AUPRC")),
         title = sprintf("AUPRC decomposition: %s channel", chain_short)
       ) +
@@ -2490,7 +2489,8 @@ if (exists("trajectory_long") &&
       theme(
         legend.position = "bottom",
         axis.title.y = if (show_y_title) element_text() else element_blank(),
-        legend.title = element_text(size = 9),
+        legend.box = "horizontal",
+        legend.title = element_text(size = 9, margin = margin(r = 6)),
         legend.text = element_text(size = 8.4),
         legend.key.height = grid::unit(4.0, "mm"),
         legend.key.width = grid::unit(7.0, "mm")
@@ -2509,7 +2509,8 @@ if (exists("trajectory_long") &&
     plot_annotation(title = "Decomposing AUPRC gains") &
     theme(
       legend.position = "bottom",
-      legend.title = element_text(size = 9),
+      legend.box = "horizontal",
+      legend.title = element_text(size = 9, margin = margin(r = 6)),
       legend.text = element_text(size = 8.4),
       legend.key.height = grid::unit(4.0, "mm"),
       legend.key.width = grid::unit(7.0, "mm"),
@@ -2520,7 +2521,7 @@ if (exists("trajectory_long") &&
   ggsave(
     file.path(diagnostic_dir,
               "truth_drift_auprc_basis_decomposition.png"),
-    p_basis_explain_scatter, width = 11.5, height = 4.4, dpi = 220,
+    p_basis_explain_scatter, width = 11.5, height = 4.85, dpi = 220,
     bg = "white"
   )
   print(p_basis_explain_scatter)
@@ -2532,7 +2533,7 @@ if (exists("trajectory_long") &&
 }
 ```
 
-```{r explanatory-basis-divergence-paper-figure, fig.width=9.4, fig.height=9.0}
+```{r explanatory-basis-divergence-paper-figure, fig.width=9.4, fig.height=9.9}
 if (exists("p_baseline_truth") &&
     exists("p_col1") &&
     exists("p_col2") &&
@@ -2565,13 +2566,16 @@ if (exists("p_baseline_truth") &&
     theme(
       plot.tag = element_text(face = "bold", size = 12,
                               margin = margin(0, 1, 0, 0)),
-      plot.tag.position = c(0.002, 0.995)
+      plot.tag.position = c(0.002, 0.995),
+      plot.margin = margin(4.5, 4.5, 4.5, 4.5),
+      panel.spacing.x = grid::unit(3.2, "mm"),
+      panel.spacing.y = grid::unit(3.2, "mm")
     )
 
   ggsave(
     paper_basis_divergence_png,
     paper_basis_divergence_fig,
-    width = 9.4, height = 9.0, dpi = 300, bg = "white",
+    width = 9.4, height = 9.9, dpi = 300, bg = "white",
     limitsize = FALSE
   )
   cat("Wrote basis-divergence paper figure to ",
