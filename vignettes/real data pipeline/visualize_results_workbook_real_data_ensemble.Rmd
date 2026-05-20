@@ -210,6 +210,21 @@ run_pip_jsd <- function(locus_id, run_id_a, run_id_b) {
   safe_pip_jsd(run_pip_vec(locus_id, run_id_a), run_pip_vec(locus_id, run_id_b))
 }
 
+core95_entropy <- function(prob, rho = 0.95) {
+  p <- as.numeric(prob)
+  p[!is.finite(p) | p < 0] <- 0
+  s <- sum(p)
+  if (!is.finite(s) || s <= 0) return(NA_real_)
+  p <- p / s
+  ord <- order(p, decreasing = TRUE)
+  cum_p <- cumsum(p[ord])
+  keep_n <- which(cum_p >= rho)[[1]]
+  if (!length(keep_n) || is.na(keep_n)) keep_n <- length(ord)
+  core <- p[ord[seq_len(keep_n)]]
+  core <- core / sum(core)
+  -sum(core[core > 0] * log(core[core > 0]))
+}
+
 geom_locus_text <- function(mapping = NULL, data = NULL, ..., size = 2.4,
                             seed = NA,
                             show.legend = FALSE) {
@@ -762,16 +777,34 @@ refit_basin_r2_drift_plot
 
 # 7. Paper Overall Figure
 
-```{r paper-overall-figure, fig.width=10.5, fig.height=3.9}
-paper_panel_theme <- theme_bw(base_size = 10) +
+```{r paper-overall-figure, fig.width=9.4, fig.height=6.5}
+theme_real_data_paper <- function(base_size = 8) {
+  theme_bw(base_size = base_size) +
+    theme(
+      panel.grid.major = element_line(color = "grey91", linewidth = 0.22),
+      panel.grid.minor = element_blank(),
+      panel.border = element_rect(color = "grey35", fill = NA, linewidth = 0.35),
+      axis.title = element_text(size = base_size + 0.5),
+      axis.text = element_text(size = base_size - 1, color = "grey25"),
+      plot.title = element_text(face = "bold", size = base_size + 1.2,
+                                margin = margin(b = 3)),
+      strip.background = element_rect(fill = "grey88", color = "grey35",
+                                      linewidth = 0.35),
+      strip.text = element_text(size = base_size - 0.8, color = "grey20"),
+      legend.title = element_text(size = base_size - 0.4),
+      legend.text = element_text(size = base_size - 1.1),
+      legend.key.height = grid::unit(3.2, "mm"),
+      legend.key.width = grid::unit(6.0, "mm"),
+      plot.margin = margin(2.5, 2.5, 2.5, 2.5)
+    )
+}
+
+paper_panel_theme <- theme_real_data_paper(base_size = 8) +
   theme(
-    plot.title = element_text(face = "bold", size = 11),
-    axis.title = element_text(size = 10),
-    axis.text = element_text(size = 9),
     legend.position = "bottom",
-    legend.title = element_text(size = 9),
-    legend.text = element_text(size = 8),
-    panel.grid.minor = element_blank()
+    legend.box = "horizontal",
+    legend.margin = margin(t = -2, b = -4),
+    legend.box.margin = margin(t = -2, b = -4)
   )
 
 weighted_annotation_tbl <- functional_grid_summary %>%
@@ -799,12 +832,11 @@ weighted_annotation_tbl <- functional_grid_summary %>%
     is.finite(.data$weighted_sigma_0_2_scalar)
   ) %>%
   dplyr::mutate(
-    locus_label = sub("_lung$", "", .data$locus_id)
-  )
-
-weighted_annotation_label_tbl <- weighted_annotation_tbl %>%
-  dplyr::filter(
-    .data$weighted_c_value > 0.1 | .data$weighted_sigma_0_2_scalar > 0.1
+    locus_label = dplyr::if_else(
+      .data$weighted_c_value > 0.1 | .data$weighted_sigma_0_2_scalar > 0.1,
+      sub("_lung$", "", .data$locus_id),
+      ""
+    )
   )
 
 paper_annotation_weight_plot <- ggplot(
@@ -821,11 +853,18 @@ paper_annotation_weight_plot <- ggplot(
     alpha = 0.9
   ) +
   geom_locus_text(
-    data = weighted_annotation_label_tbl,
+    data = weighted_annotation_tbl,
     aes(label = locus_label),
     seed = 1
   ) +
   scale_fill_viridis_c(option = "D", limits = c(0, 1), name = "Off-c0 weight") +
+  guides(
+    fill = guide_colorbar(
+      title.position = "left",
+      barwidth = grid::unit(18, "mm"),
+      barheight = grid::unit(2.6, "mm")
+    )
+  ) +
   labs(
     title = "(a) Posterior-weighted annotation parameters",
     x = "Weighted annotation scale c",
@@ -876,15 +915,14 @@ drift_jsd_long_tbl <- dplyr::bind_rows(
   ) %>%
   dplyr::mutate(
     fit_type = factor(.data$fit_type, levels = c("Highest-weight model", "Warm refit")),
-    locus_label = sub("_lung$", "", .data$locus_id)
+    locus_label = dplyr::if_else(
+      .data$fit_type == "Highest-weight model" &
+        (.data$basin_r2_drift > 0.1 | .data$pip_jsd > 0.3),
+      sub("_lung$", "", .data$locus_id),
+      ""
+    )
   ) %>%
   dplyr::filter(is.finite(.data$basin_r2_drift), is.finite(.data$pip_jsd))
-
-drift_jsd_label_tbl <- drift_jsd_long_tbl %>%
-  dplyr::filter(
-    .data$fit_type == "Highest-weight model",
-    .data$basin_r2_drift > 0.1 | .data$pip_jsd > 0.3
-  )
 
 paper_drift_jsd_plot <- ggplot(
   drift_jsd_long_tbl,
@@ -903,7 +941,7 @@ paper_drift_jsd_plot <- ggplot(
     na.rm = TRUE
   ) +
   geom_locus_text(
-    data = drift_jsd_label_tbl,
+    data = drift_jsd_long_tbl,
     aes(label = locus_label),
     seed = 2
   ) +
@@ -949,15 +987,14 @@ paper_pve_long_tbl <- dplyr::bind_rows(
 ) %>%
   dplyr::mutate(
     fit_type = factor(.data$fit_type, levels = c("SuSiNE ensemble", "Warm refit")),
-    locus_label = sub("_lung$", "", .data$locus_id)
+    locus_label = dplyr::if_else(
+      .data$fit_type == "SuSiNE ensemble" &
+        (.data$susie_anchor_pve > 0.15 | .data$comparison_pve > 0.15),
+      sub("_lung$", "", .data$locus_id),
+      ""
+    )
   ) %>%
   dplyr::filter(is.finite(.data$susie_anchor_pve), is.finite(.data$comparison_pve))
-
-paper_pve_label_tbl <- paper_pve_long_tbl %>%
-  dplyr::filter(
-    .data$fit_type == "SuSiNE ensemble",
-    .data$susie_anchor_pve > 0.15 | .data$comparison_pve > 0.15
-  )
 
 paper_pve_segment_tbl <- paper_pve_tbl %>%
   dplyr::filter(
@@ -996,7 +1033,7 @@ paper_pve_plot <- ggplot(
   ) +
   geom_point(aes(color = fit_type), size = 2.4, alpha = 0.9) +
   geom_locus_text(
-    data = paper_pve_label_tbl,
+    data = paper_pve_long_tbl,
     aes(label = locus_label),
     seed = 3
   ) +
@@ -1012,45 +1049,171 @@ paper_pve_plot <- ggplot(
   ) +
   paper_panel_theme
 
+effect_diffuseness_run_tbl <- paper_summary %>%
+  dplyr::select(
+    .data$locus_id,
+    .data$susie_anchor_run_id,
+    .data$highest_weight_source_run_id
+  ) %>%
+  tidyr::pivot_longer(
+    cols = c("susie_anchor_run_id", "highest_weight_source_run_id"),
+    names_to = "fit_type",
+    values_to = "run_id"
+  ) %>%
+  dplyr::mutate(
+    fit_type = dplyr::recode(
+      .data$fit_type,
+      susie_anchor_run_id = "SuSiE anchor",
+      highest_weight_source_run_id = "Highest-weight model"
+    ),
+    fit_type = factor(.data$fit_type, levels = c("SuSiE anchor", "Highest-weight model"))
+  ) %>%
+  dplyr::filter(!is.na(.data$run_id)) %>%
+  dplyr::distinct(.data$locus_id, .data$fit_type, .data$run_id)
+
+effect_diffuseness_tbl <- if (nrow(effect_diffuseness_run_tbl)) {
+  effect_posteriors_path <- file.path(aggregated_dir, "effect_posteriors_dataset")
+  if (dir.exists(effect_posteriors_path)) {
+    arrow::open_dataset(effect_posteriors_path) %>%
+      dplyr::filter(.data$run_id %in% !!effect_diffuseness_run_tbl$run_id) %>%
+      dplyr::select(.data$run_id, .data$locus_id, .data$effect_l, .data$alpha) %>%
+      dplyr::collect() %>%
+      dplyr::inner_join(effect_diffuseness_run_tbl, by = c("run_id", "locus_id")) %>%
+      dplyr::group_by(.data$locus_id, .data$run_id, .data$fit_type, .data$effect_l) %>%
+      dplyr::summarise(
+        effect_pip_entropy_core95 = core95_entropy(.data$alpha),
+        effect_k_eff_core95 = exp(.data$effect_pip_entropy_core95),
+        alpha_mass = sum(.data$alpha, na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      dplyr::filter(
+        is.finite(.data$effect_k_eff_core95),
+        .data$alpha_mass > 1e-8
+      )
+  } else {
+    warning("effect_posteriors_dataset is missing; skipping effect diffuseness panel.")
+    tibble::tibble(
+      locus_id = character(),
+      run_id = integer(),
+      fit_type = factor(levels = c("SuSiE anchor", "Highest-weight model")),
+      effect_l = integer(),
+      effect_pip_entropy_core95 = numeric(),
+      effect_k_eff_core95 = numeric(),
+      alpha_mass = numeric()
+    )
+  }
+} else {
+  tibble::tibble(
+    locus_id = character(),
+    run_id = integer(),
+    fit_type = factor(levels = c("SuSiE anchor", "Highest-weight model")),
+    effect_l = integer(),
+    effect_pip_entropy_core95 = numeric(),
+    effect_k_eff_core95 = numeric(),
+    alpha_mass = numeric()
+  )
+}
+
+paper_effect_diffuseness_plot <- ggplot(
+  effect_diffuseness_tbl,
+  aes(
+    x = effect_k_eff_core95,
+    y = after_stat(density),
+    color = fit_type,
+    fill = fit_type
+  )
+) +
+  geom_histogram(
+    position = "identity",
+    bins = 24,
+    alpha = 0.32,
+    linewidth = 0.25,
+    na.rm = TRUE
+  ) +
+  scale_x_log10(
+    breaks = c(1, 2, 5, 10, 20, 50, 100, 200, 500, 1000),
+    labels = function(x) formatC(x, format = "fg", big.mark = ",")
+  ) +
+  scale_color_manual(
+    values = c("SuSiE anchor" = "grey20", "Highest-weight model" = "#0B6E4F"),
+    name = NULL
+  ) +
+  scale_fill_manual(
+    values = c("SuSiE anchor" = "grey20", "Highest-weight model" = "#0B6E4F"),
+    name = NULL
+  ) +
+  labs(
+    title = "(d) Effect diffuseness",
+    x = expression("Effective top-95% support size  " * K[l]),
+    y = "Effect density"
+  ) +
+  paper_panel_theme
+
 ggsave(
   file.path(overall_figure_dir, "paper_overall_annotation_drift_pve_panel_a.png"),
   paper_annotation_weight_plot,
-  width = 3.5,
-  height = 3.36,
-  dpi = 220
+  width = 4.7,
+  height = 3.25,
+  dpi = 300,
+  bg = "white"
 )
 ggsave(
   file.path(overall_figure_dir, "paper_overall_annotation_drift_pve_panel_b.png"),
   paper_drift_jsd_plot,
-  width = 3.5,
-  height = 3.36,
-  dpi = 220
+  width = 4.7,
+  height = 3.25,
+  dpi = 300,
+  bg = "white"
 )
 ggsave(
   file.path(overall_figure_dir, "paper_overall_annotation_drift_pve_panel_c.png"),
   paper_pve_plot,
-  width = 3.5,
-  height = 3.36,
-  dpi = 220
+  width = 4.7,
+  height = 3.25,
+  dpi = 300,
+  bg = "white"
+)
+ggsave(
+  file.path(overall_figure_dir, "paper_overall_annotation_drift_pve_panel_d.png"),
+  paper_effect_diffuseness_plot,
+  width = 4.7,
+  height = 3.25,
+  dpi = 300,
+  bg = "white"
 )
 
 if (requireNamespace("patchwork", quietly = TRUE)) {
-  paper_overall_figure <- paper_annotation_weight_plot |
-    paper_drift_jsd_plot |
-    paper_pve_plot
+  paper_overall_figure <- patchwork::wrap_plots(
+    paper_annotation_weight_plot,
+    paper_drift_jsd_plot,
+    paper_pve_plot,
+    paper_effect_diffuseness_plot,
+    ncol = 2,
+    widths = c(1, 1),
+    heights = c(1, 1)
+  ) &
+    theme(
+      plot.margin = margin(4.5, 4.5, 4.5, 4.5),
+      panel.spacing.x = grid::unit(3.2, "mm"),
+      panel.spacing.y = grid::unit(3.2, "mm")
+    )
 
   ggsave(
     file.path(overall_figure_dir, "paper_overall_annotation_drift_pve.png"),
     paper_overall_figure,
-    width = 10.5,
-    height = 3.64,
-    dpi = 220
+    width = 9.4,
+    height = 6.5,
+    dpi = 300,
+    bg = "white",
+    limitsize = FALSE
   )
   ggsave(
     file.path(overall_figure_dir, "paper_overall_annotation_drift_pve.pdf"),
     paper_overall_figure,
-    width = 10.5,
-    height = 3.64
+    width = 9.4,
+    height = 6.5,
+    bg = "white",
+    limitsize = FALSE
   )
 
   paper_overall_figure
@@ -1059,7 +1222,8 @@ if (requireNamespace("patchwork", quietly = TRUE)) {
   list(
     annotation = paper_annotation_weight_plot,
     drift_jsd = paper_drift_jsd_plot,
-    pve = paper_pve_plot
+    pve = paper_pve_plot,
+    effect_diffuseness = paper_effect_diffuseness_plot
   )
 }
 ```
