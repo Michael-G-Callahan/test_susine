@@ -1534,6 +1534,7 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
   delta_auprc_thresh <- 0.02
   display_trim_q <- c(0.01, 0.99)
   display_axis_pad <- 0.03
+  diagonal_equal_buffer <- 0.02
 
   baseline_context_lookup <- truth_drift_summary %>%
     dplyr::filter(.data$model_method == baseline_method) %>%
@@ -1634,19 +1635,25 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
     )
   }
 
-  diagonal_count_labels <- function(df, x_col, y_col, lim) {
+  diagonal_count_labels <- function(df, x_col, y_col, lim,
+                                    equal_buffer = diagonal_equal_buffer) {
     df %>%
+      dplyr::mutate(diagonal_diff = .data[[y_col]] - .data[[x_col]]) %>%
       dplyr::group_by(.data$pair_kind) %>%
       dplyr::summarise(
-        mu_gt_pi = sum(.data[[y_col]] > .data[[x_col]], na.rm = TRUE),
-        pi_gt_mu = sum(.data[[y_col]] < .data[[x_col]], na.rm = TRUE),
+        mu_gt_pi = sum(.data$diagonal_diff > equal_buffer, na.rm = TRUE),
+        approx_equal = sum(abs(.data$diagonal_diff) <= equal_buffer,
+                           na.rm = TRUE),
+        pi_gt_mu = sum(.data$diagonal_diff < -equal_buffer, na.rm = TRUE),
         .groups = "drop"
       ) %>%
       dplyr::mutate(
         x = lim[[1]] * 0.94,
         y = lim[[2]] * 0.92,
-        label = sprintf("mu0 > pi: %d\npi > mu0: %d",
-                        .data$mu_gt_pi, .data$pi_gt_mu)
+        label = sprintf(
+          "mu0 > pi: %d\napprox. equal: %d\npi > mu0: %d",
+          .data$mu_gt_pi, .data$approx_equal, .data$pi_gt_mu
+        )
       )
   }
   col2_diag_labels <- diagonal_count_labels(
@@ -2324,79 +2331,145 @@ if (exists("trajectory_long") &&
   cat("AUPRC decomposition using baseline nonlinear divergence curve:\n")
   print(auprc_basis_decomp_summary)
 
-  decomp_lim <- max(abs(c(
-    auprc_basis_decomp$observed_delta,
-    auprc_basis_decomp$basis_pred_delta
-  )), na.rm = TRUE)
-  decomp_lim <- max(0.05, decomp_lim)
-  decomp_plot_lim <- 0.4
-
-  auprc_basis_decomp_plot <- auprc_basis_decomp %>%
-    dplyr::mutate(
-      basis_pred_delta_plot = pmin(
-        pmax(.data$basis_pred_delta, -decomp_plot_lim),
-        decomp_plot_lim
-      ),
-      observed_delta_plot = pmin(
-        pmax(.data$observed_delta, -decomp_plot_lim),
-        decomp_plot_lim
+  decomp_trim_q <- c(0.01, 0.99)
+  decomp_axis_pad <- 0.03
+  decomp_quantile_lim <- function(x, probs = decomp_trim_q) {
+    x <- x[is.finite(x)]
+    if (!length(x)) {
+      return(c(-1, 1))
+    }
+    lim <- stats::quantile(x, probs = probs, na.rm = TRUE, names = FALSE)
+    if (!all(is.finite(lim)) || lim[[1]] == lim[[2]]) {
+      center <- mean(x, na.rm = TRUE)
+      spread <- max(abs(x - center), na.rm = TRUE)
+      spread <- if (is.finite(spread) && spread > 0) spread else 1
+      lim <- c(center - spread, center + spread)
+    }
+    lim
+  }
+  decomp_expand_axis <- function(lim, pad = decomp_axis_pad) {
+    width <- diff(lim)
+    if (!is.finite(width) || width <= 0) {
+      width <- max(abs(lim), 1, na.rm = TRUE)
+    }
+    lim + c(-pad, pad) * width
+  }
+  decomp_winsorize <- function(x, lim) {
+    pmin(pmax(x, lim[[1]]), lim[[2]])
+  }
+  make_decomp_panel <- function(chain_lab, transition_lab,
+                                show_x_title = TRUE,
+                                show_y_title = TRUE) {
+    panel_df <- auprc_basis_decomp %>%
+      dplyr::filter(
+        as.character(.data$chain) == chain_lab,
+        as.character(.data$transition) == transition_lab
       )
-    )
-
-  decomp_annotation <- auprc_basis_decomp_summary %>%
-    dplyr::mutate(
-      x = -0.96 * decomp_plot_lim,
-      y = 0.94 * decomp_plot_lim,
-      label = sprintf(
-        paste0(
-          "R^2 = %.2f\n",
-          "observed mean = %.3f\n",
-          "basis shift = %.3f\n",
-          "non-basis shift = %.3f"
+    panel_summary <- auprc_basis_decomp_summary %>%
+      dplyr::filter(
+        as.character(.data$chain) == chain_lab,
+        as.character(.data$transition) == transition_lab
+      )
+    x_win <- decomp_quantile_lim(panel_df$basis_pred_delta)
+    y_win <- decomp_quantile_lim(panel_df$observed_delta)
+    x_axis <- decomp_expand_axis(x_win)
+    y_axis <- decomp_expand_axis(y_win)
+    panel_df <- panel_df %>%
+      dplyr::mutate(
+        basis_pred_delta_plot = decomp_winsorize(
+          .data$basis_pred_delta, x_win
         ),
-        .data$basis_r2_with_transition_intercept,
-        .data$observed_mean,
-        .data$basis_mean,
-        .data$transition_intercept
+        observed_delta_plot = decomp_winsorize(.data$observed_delta, y_win)
       )
-    )
+    panel_annotation <- panel_summary %>%
+      dplyr::mutate(
+        x = x_axis[[1]] + 0.03 * diff(x_axis),
+        y = y_axis[[2]] - 0.05 * diff(y_axis),
+        label = sprintf(
+          paste0(
+            "R^2 = %.2f\n",
+            "observed mean = %.3f\n",
+            "basis shift = %.3f\n",
+            "non-basis shift = %.3f"
+          ),
+          .data$basis_r2_with_transition_intercept,
+          .data$observed_mean,
+          .data$basis_mean,
+          .data$transition_intercept
+        )
+      )
 
-  p_basis_explain_scatter <- ggplot(
-    auprc_basis_decomp_plot,
-    aes(x = .data$basis_pred_delta_plot, y = .data$observed_delta_plot,
-        color = .data$start_divergence_bin)
+    ggplot(
+      panel_df,
+      aes(x = .data$basis_pred_delta_plot, y = .data$observed_delta_plot,
+          color = .data$start_divergence_bin)
+    ) +
+      geom_hline(yintercept = 0, color = "grey65", linewidth = 0.25) +
+      geom_vline(xintercept = 0, color = "grey65", linewidth = 0.25) +
+      geom_abline(slope = 1, intercept = 0, color = "grey35",
+                  linetype = "dashed", linewidth = 0.35) +
+      geom_abline(
+        data = panel_summary,
+        aes(intercept = .data$transition_intercept, slope = 1),
+        inherit.aes = FALSE, color = "#c44e52", linewidth = 0.45
+      ) +
+      geom_point(alpha = 0.58, size = 1.45, stroke = 0) +
+      geom_label(
+        data = panel_annotation,
+        aes(x = .data$x, y = .data$y, label = .data$label),
+        inherit.aes = FALSE, hjust = 0, vjust = 1,
+        size = 2.45, label.size = 0.16, fill = "white",
+        color = "grey18", alpha = 0.9
+      ) +
+      scale_color_manual(
+        values = baseline_bin_palette,
+        name = "Baseline basis\ndivergence"
+      ) +
+      coord_cartesian(xlim = x_axis, ylim = y_axis) +
+      labs(
+        x = "Predicted delta AUPRC from basis movement",
+        y = "Observed delta AUPRC",
+        title = transition_lab,
+        subtitle = chain_lab
+      ) +
+      theme_effect_paper(base_size = 9) +
+      theme(
+        legend.position = "bottom",
+        axis.title.x = if (show_x_title) element_text() else element_blank(),
+        axis.title.y = if (show_y_title) element_text() else element_blank(),
+        plot.subtitle = element_text(size = 7.5, color = "grey25",
+                                     margin = margin(b = 2))
+      )
+  }
+
+  p_decomp_mu_ann <- make_decomp_panel(
+    "mu0 channel", "Cold -> annotated",
+    show_x_title = FALSE, show_y_title = TRUE
+  )
+  p_decomp_mu_warm <- make_decomp_panel(
+    "mu0 channel", "Cold -> warm refit",
+    show_x_title = FALSE, show_y_title = FALSE
+  )
+  p_decomp_pi_ann <- make_decomp_panel(
+    "pi channel", "Cold -> annotated",
+    show_x_title = TRUE, show_y_title = TRUE
+  )
+  p_decomp_pi_warm <- make_decomp_panel(
+    "pi channel", "Cold -> warm refit",
+    show_x_title = TRUE, show_y_title = FALSE
+  )
+
+  p_basis_explain_scatter <- (
+    (p_decomp_mu_ann | p_decomp_mu_warm) /
+      (p_decomp_pi_ann | p_decomp_pi_warm)
   ) +
-    geom_hline(yintercept = 0, color = "grey65", linewidth = 0.25) +
-    geom_vline(xintercept = 0, color = "grey65", linewidth = 0.25) +
-    geom_abline(slope = 1, intercept = 0, color = "grey35",
-                linetype = "dashed", linewidth = 0.35) +
-    geom_abline(
-      data = auprc_basis_decomp_summary,
-      aes(intercept = .data$transition_intercept, slope = 1),
-      inherit.aes = FALSE, color = "#c44e52", linewidth = 0.45
-    ) +
-    geom_point(alpha = 0.58, size = 1.45, stroke = 0) +
-    geom_label(
-      data = decomp_annotation,
-      aes(x = .data$x, y = .data$y, label = .data$label),
-      inherit.aes = FALSE, hjust = 0, vjust = 1,
-      size = 2.55, label.size = 0.16, fill = "white",
-      color = "grey18", alpha = 0.9
-    ) +
-    facet_grid(chain ~ transition) +
-    scale_color_manual(
-      values = baseline_bin_palette,
-      name = "Baseline basis\ndivergence"
-    ) +
-    coord_cartesian(xlim = c(-decomp_plot_lim, decomp_plot_lim),
-                    ylim = c(-decomp_plot_lim, decomp_plot_lim)) +
-    labs(
-      x = "Predicted delta AUPRC from basis movement",
-      y = "Observed delta AUPRC",
-      title = "Decomposing AUPRC gains"
-    ) +
-    theme_effect_paper(base_size = 9) +
-    theme(legend.position = "bottom")
+    plot_layout(guides = "collect") +
+    plot_annotation(title = "Decomposing AUPRC gains") &
+    theme(
+      legend.position = "bottom",
+      plot.title = element_text(face = "bold", size = 10.2,
+                                margin = margin(b = 3))
+    )
 
   ggsave(
     file.path(diagnostic_dir,
