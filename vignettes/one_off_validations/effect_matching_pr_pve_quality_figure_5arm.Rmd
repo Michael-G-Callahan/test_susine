@@ -350,18 +350,18 @@ panel_A <- ggplot(pr_curve_df,
     title = paste0("A. Precision-recall across the 5-arm refit chain")
   ) +
   guides(color = guide_legend(
-    nrow = 1, byrow = TRUE, title.position = "top",
+    ncol = 1, byrow = TRUE, title.position = "top",
     override.aes = list(linewidth = 0.7)
   )) +
   theme_effect_paper(base_size = 8) +
   theme(
-    legend.position = "bottom",
-    legend.justification = "left",
-    legend.box.margin = margin(t = -4),
+    legend.position = "right",
+    legend.justification = "center",
+    legend.box.margin = margin(0, 0, 0, 3),
     legend.key.height = grid::unit(3.0, "mm"),
-    legend.key.width = grid::unit(5.2, "mm"),
-    legend.title = element_text(size = 6.8),
-    legend.text = element_text(size = 5.8),
+    legend.key.width = grid::unit(5.8, "mm"),
+    legend.title = element_text(size = 8),
+    legend.text = element_text(size = 8),
     panel.grid.minor = element_line(color = "grey95", linewidth = 0.18)
   )
 
@@ -423,6 +423,8 @@ panel_D_core <- ggplot(panel_D_df,
     legend.justification = "center",
     legend.margin = margin(0, 0, 0, 2),
     legend.box.margin = margin(0, 0, 0, 2),
+    legend.title = element_text(size = 8),
+    legend.text = element_text(size = 8),
     panel.spacing.y = grid::unit(2.4, "mm"),
     plot.title = element_text(face = "bold", size = 9.2,
                               margin = margin(b = 3))
