@@ -88,10 +88,10 @@ method_labels <- c(
 )
 method_legend_short <- c(
   susie_vanilla = "Cold SuSiE",
-  susine_functional_mu = "Annotated mu0",
-  susie_vanilla_warm_from_mu = "Warm refit (mu0)",
-  susie_functional_pi = "Annotated pi",
-  susie_vanilla_warm_from_pi = "Warm refit (pi)"
+  susine_functional_mu = "Annotated \u03bc\u2080",
+  susie_vanilla_warm_from_mu = "Warm refit (\u03bc\u2080)",
+  susie_functional_pi = "Annotated \u03c0",
+  susie_vanilla_warm_from_pi = "Warm refit (\u03c0)"
 )
 method_color <- c(
   susie_vanilla = "black",
@@ -165,8 +165,12 @@ transition_label_map <- c(
   cold_warm = "Cold -> warm refit"
 )
 chain_label_map <- c(
-  mu = "mu0 channel",
-  pi = "pi channel"
+  mu = "\u03bc\u2080 channel",
+  pi = "\u03c0 channel"
+)
+chain_label_text <- c(
+  mu = "\u03bc\u2080 channel",
+  pi = "\u03c0 channel"
 )
 
 theme_effect_paper <- function(base_size = 8) {
@@ -1504,7 +1508,7 @@ if (!file.exists(truth_drift_csv)) {
       color = NULL,
       title = "Basis movement and AUPRC gain"
     ) +
-    theme_effect_paper(base_size = 10) +
+    theme_effect_paper(base_size = 8) +
     theme(legend.position = "bottom")
   ggsave(
     file.path(diagnostic_dir, "truth_drift_sanity_scatter_simple.png"),
@@ -1651,7 +1655,7 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
         x = lim[[1]] * 0.94,
         y = lim[[2]] * 0.92,
         label = sprintf(
-          "mu0 > pi: %d\napprox. equal: %d\npi > mu0: %d",
+          "\u03bc\u2080 > \u03c0: %d\napprox. equal: %d\n\u03c0 > \u03bc\u2080: %d",
           .data$mu_gt_pi, .data$approx_equal, .data$pi_gt_mu
         )
       )
@@ -1702,7 +1706,7 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
       color = NULL,
       title = "Basis movement predicts AUPRC gain"
     ) +
-    theme_effect_paper(base_size = 9)
+    theme_effect_paper(base_size = 8)
 
   p_col2 <- ggplot(
     pair_within_dataset_wins,
@@ -1725,11 +1729,11 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
       guide = guide_legend(title.position = "top", nrow = 1)
     ) +
     labs(
-      x = "Delta AUPRC (pi channel)",
-      y = "Delta AUPRC (mu0 channel)",
-      title = "AUPRC gain: mu0 vs pi"
+      x = expression(paste(Delta, "AUPRC (", pi, " channel)")),
+      y = expression(paste(Delta, "AUPRC (", mu[0], " channel)")),
+      title = expression(paste("AUPRC gain: ", mu[0], " vs ", pi))
     ) +
-    theme_effect_paper(base_size = 9)
+    theme_effect_paper(base_size = 8)
 
   p_col3 <- ggplot(
     pair_within_dataset_wins,
@@ -1752,11 +1756,11 @@ if (file.exists(truth_drift_csv) && exists("sanity_join")) {
       guide = guide_legend(title.position = "top", nrow = 1)
     ) +
     labs(
-      x = "Basis-divergence reduction (pi channel)",
-      y = "Basis-divergence reduction (mu0 channel)",
-      title = "Basin movement: mu0 vs pi"
+      x = expression(paste("Basis-divergence reduction (", pi, " channel)")),
+      y = expression(paste("Basis-divergence reduction (", mu[0], " channel)")),
+      title = expression(paste("Basin movement: ", mu[0], " vs ", pi))
     ) +
-    theme_effect_paper(base_size = 9)
+    theme_effect_paper(base_size = 8)
 
   combined_3col <- patchwork::wrap_plots(
     p_col2,
@@ -1986,7 +1990,7 @@ if (file.exists(truth_drift_csv)) {
                          nrow(baseline_points)),
       color = NULL
     ) +
-    theme_effect_paper(base_size = 10) +
+    theme_effect_paper(base_size = 8) +
     theme(legend.position = "bottom")
 
   ggsave(
@@ -2047,7 +2051,7 @@ if (exists("baseline_points")) {
       title = "Baseline AUPRC by divergence bin",
       subtitle = "Same bins used throughout this figure"
     ) +
-    theme_effect_paper(base_size = 10)
+    theme_effect_paper(base_size = 8)
 
   ggsave(
     file.path(diagnostic_dir, "truth_drift_baseline_boxplot.png"),
@@ -2257,7 +2261,7 @@ if (exists("trajectory_long") &&
         NA_real_
       ),
       chain = factor(.data$chain, levels = c("mu", "pi"),
-                     labels = c("mu0 channel", "pi channel")),
+                     labels = chain_label_text),
       transition = factor(
         .data$transition,
         levels = c("cold_ann", "cold_warm"),
@@ -2331,7 +2335,7 @@ if (exists("trajectory_long") &&
   cat("AUPRC decomposition using baseline nonlinear divergence curve:\n")
   print(auprc_basis_decomp_summary)
 
-  decomp_trim_q <- c(0.01, 0.99)
+  decomp_trim_q <- c(0.02, 0.98)
   decomp_axis_pad <- 0.03
   decomp_quantile_lim <- function(x, probs = decomp_trim_q) {
     x <- x[is.finite(x)]
@@ -2357,6 +2361,14 @@ if (exists("trajectory_long") &&
   decomp_winsorize <- function(x, lim) {
     pmin(pmax(x, lim[[1]]), lim[[2]])
   }
+  decomp_x_win_global <- decomp_quantile_lim(
+    auprc_basis_decomp$basis_pred_delta
+  )
+  decomp_y_win_global <- decomp_quantile_lim(
+    auprc_basis_decomp$observed_delta
+  )
+  decomp_x_axis_global <- decomp_expand_axis(decomp_x_win_global)
+  decomp_y_axis_global <- decomp_expand_axis(decomp_y_win_global)
   make_decomp_panel <- function(chain_lab, transition_lab,
                                 show_x_title = TRUE,
                                 show_y_title = TRUE) {
@@ -2370,10 +2382,10 @@ if (exists("trajectory_long") &&
         as.character(.data$chain) == chain_lab,
         as.character(.data$transition) == transition_lab
       )
-    x_win <- decomp_quantile_lim(panel_df$basis_pred_delta)
-    y_win <- decomp_quantile_lim(panel_df$observed_delta)
-    x_axis <- decomp_expand_axis(x_win)
-    y_axis <- decomp_expand_axis(y_win)
+    x_win <- decomp_x_win_global
+    y_win <- decomp_y_win_global
+    x_axis <- decomp_x_axis_global
+    y_axis <- decomp_y_axis_global
     panel_df <- panel_df %>%
       dplyr::mutate(
         basis_pred_delta_plot = decomp_winsorize(
@@ -2383,8 +2395,8 @@ if (exists("trajectory_long") &&
       )
     panel_annotation <- panel_summary %>%
       dplyr::mutate(
-        x = x_axis[[1]] + 0.03 * diff(x_axis),
-        y = y_axis[[2]] - 0.05 * diff(y_axis),
+        x = x_axis[[1]] + 0.012 * diff(x_axis),
+        y = y_axis[[2]] - 0.018 * diff(y_axis),
         label = sprintf(
           paste0(
             "R^2 = %.2f\n",
@@ -2427,35 +2439,35 @@ if (exists("trajectory_long") &&
       ) +
       coord_cartesian(xlim = x_axis, ylim = y_axis) +
       labs(
-        x = "Predicted delta AUPRC from basis movement",
-        y = "Observed delta AUPRC",
+        x = expression(paste("Predicted ", Delta, "AUPRC from basis movement")),
+        y = expression(paste("Observed ", Delta, "AUPRC")),
         title = transition_lab,
         subtitle = chain_lab
       ) +
-      theme_effect_paper(base_size = 9) +
+      theme_effect_paper(base_size = 8) +
       theme(
         legend.position = "bottom",
         axis.title.x = if (show_x_title) element_text() else element_blank(),
         axis.title.y = if (show_y_title) element_text() else element_blank(),
-        plot.subtitle = element_text(size = 7.5, color = "grey25",
+        plot.subtitle = element_text(size = 7.0, color = "grey25",
                                      margin = margin(b = 2))
       )
   }
 
   p_decomp_mu_ann <- make_decomp_panel(
-    "mu0 channel", "Cold -> annotated",
+    chain_label_text[["mu"]], "Cold -> annotated",
     show_x_title = FALSE, show_y_title = TRUE
   )
   p_decomp_mu_warm <- make_decomp_panel(
-    "mu0 channel", "Cold -> warm refit",
+    chain_label_text[["mu"]], "Cold -> warm refit",
     show_x_title = FALSE, show_y_title = FALSE
   )
   p_decomp_pi_ann <- make_decomp_panel(
-    "pi channel", "Cold -> annotated",
+    chain_label_text[["pi"]], "Cold -> annotated",
     show_x_title = TRUE, show_y_title = TRUE
   )
   p_decomp_pi_warm <- make_decomp_panel(
-    "pi channel", "Cold -> warm refit",
+    chain_label_text[["pi"]], "Cold -> warm refit",
     show_x_title = TRUE, show_y_title = FALSE
   )
 
@@ -2486,7 +2498,7 @@ if (exists("trajectory_long") &&
 }
 ```
 
-```{r explanatory-basis-divergence-paper-figure, fig.width=12, fig.height=16.5}
+```{r explanatory-basis-divergence-paper-figure, fig.width=9.4, fig.height=9.6}
 if (exists("p_baseline_truth") &&
     exists("p_baseline_boxplot") &&
     exists("combined_3col") &&
@@ -2496,15 +2508,15 @@ if (exists("p_baseline_truth") &&
     combined_3col,
     p_basis_explain_scatter,
     ncol = 1,
-    heights = c(0.78, 1.18, 1.08)
+    heights = c(0.72, 1.12, 1.18)
   ) +
     plot_annotation(tag_levels = "A") &
-    theme(plot.tag = element_text(face = "bold", size = 11))
+    theme(plot.tag = element_text(face = "bold", size = 10))
 
   ggsave(
     paper_basis_divergence_png,
     paper_basis_divergence_fig,
-    width = 12, height = 16.5, dpi = 300, bg = "white",
+    width = 9.4, height = 9.6, dpi = 300, bg = "white",
     limitsize = FALSE
   )
   cat("Wrote basis-divergence paper figure to ",

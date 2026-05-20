@@ -81,10 +81,10 @@ method_labels <- c(
 )
 method_legend_short <- c(
   susie_vanilla = "Cold SuSiE",
-  susine_functional_mu = "Annotated mu0",
-  susie_vanilla_warm_from_mu = "Warm refit (mu0)",
-  susie_functional_pi = "Annotated pi",
-  susie_vanilla_warm_from_pi = "Warm refit (pi)"
+  susine_functional_mu = "Annotated \u03bc\u2080",
+  susie_vanilla_warm_from_mu = "Warm refit (\u03bc\u2080)",
+  susie_functional_pi = "Annotated \u03c0",
+  susie_vanilla_warm_from_pi = "Warm refit (\u03c0)"
 )
 method_color <- c(
   susie_vanilla = "black",
@@ -314,7 +314,7 @@ if (!is.finite(shared_fill_lim) || shared_fill_lim <= 0) {
 # Figure
 
 ```{r figure, fig.width=9.4, fig.height=7.4}
-chain_labeller <- c(mu = "mu0 channel", pi = "pi channel")
+chain_labeller <- c(mu = "\u03bc\u2080 channel", pi = "\u03c0 channel")
 pair_kind_labeller <- c(
   "cold -> annotated" = "Cold -> annotated",
   "cold -> vanilla_warm" = "Cold -> warm refit"
