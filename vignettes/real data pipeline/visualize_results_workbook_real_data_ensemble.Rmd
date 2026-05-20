@@ -92,10 +92,19 @@ paper_summary <- if (file.exists(file.path(aggregated_dir, "paper_real_data_ense
 } else {
   tibble::tibble(
     locus_id = character(),
+    susie_anchor_run_id = integer(),
+    highest_weight_source_run_id = integer(),
+    highest_weight_source_agg_weight_run = numeric(),
     jsd_susie_anchor_vs_susine_ensemble = numeric(),
     jsd_susie_anchor_vs_refit = numeric(),
     jsd_susine_ensemble_vs_refit = numeric()
   )
+}
+for (nm in c("susie_anchor_run_id", "highest_weight_source_run_id")) {
+  if (!nm %in% names(paper_summary)) paper_summary[[nm]] <- NA_integer_
+}
+if (!"highest_weight_source_agg_weight_run" %in% names(paper_summary)) {
+  paper_summary$highest_weight_source_agg_weight_run <- NA_real_
 }
 cluster_summary <- readr::read_csv(
   file.path(aggregated_dir, "cluster_summary.csv"),
@@ -177,6 +186,55 @@ refit_pip_tbl <- function(locus_id) {
   highest_weight_refit_variants %>%
     dplyr::filter(.data$locus_id == !!locus_id) %>%
     dplyr::select(.data$variant_id, refit_pip = .data$pip)
+}
+
+run_pip_vec <- function(locus_id, run_id) {
+  if (length(run_id) != 1L || is.na(run_id)) return(NULL)
+  x <- variant_posteriors %>%
+    dplyr::filter(.data$locus_id == !!locus_id,
+                  .data$run_id == !!as.integer(run_id)) %>%
+    dplyr::arrange(.data$ld_matrix_index) %>%
+    dplyr::pull(.data$pip)
+  if (!length(x)) return(NULL)
+  x
+}
+
+safe_pip_jsd <- function(x, y) {
+  if (is.null(x) || is.null(y) || length(x) != length(y) || !length(x)) {
+    return(NA_real_)
+  }
+  as.numeric(js_distance(x, y))
+}
+
+run_pip_jsd <- function(locus_id, run_id_a, run_id_b) {
+  safe_pip_jsd(run_pip_vec(locus_id, run_id_a), run_pip_vec(locus_id, run_id_b))
+}
+
+geom_locus_text <- function(mapping = NULL, data = NULL, ..., size = 2.4,
+                            seed = NA,
+                            show.legend = FALSE) {
+  if (requireNamespace("ggrepel", quietly = TRUE)) {
+    return(ggrepel::geom_text_repel(
+      mapping = mapping,
+      data = data,
+      size = size,
+      min.segment.length = 0,
+      box.padding = 0.25,
+      point.padding = 0.15,
+      max.overlaps = Inf,
+      seed = seed,
+      show.legend = show.legend,
+      ...
+    ))
+  }
+  ggplot2::geom_text(
+    mapping = mapping,
+    data = data,
+    size = size,
+    check_overlap = TRUE,
+    show.legend = show.legend,
+    ...
+  )
 }
 
 plot_cluster_grid <- function(locus_id) {
@@ -702,7 +760,285 @@ overall_jsd_triangle_plot
 refit_basin_r2_drift_plot
 ```
 
-# 7. Basin r² Drift From c = 0 (one panel per locus)
+# 7. Paper Overall Figure
+
+```{r paper-overall-figure, fig.width=15, fig.height=5.5}
+paper_panel_theme <- theme_bw(base_size = 10) +
+  theme(
+    plot.title = element_text(face = "bold", size = 11),
+    axis.title = element_text(size = 10),
+    axis.text = element_text(size = 9),
+    legend.position = "bottom",
+    legend.title = element_text(size = 9),
+    legend.text = element_text(size = 8),
+    panel.grid.minor = element_blank()
+  )
+
+weighted_annotation_tbl <- functional_grid_summary %>%
+  dplyr::filter(
+    is.finite(.data$c_value),
+    is.finite(.data$sigma_0_2_scalar),
+    is.finite(.data$agg_weight_run)
+  ) %>%
+  dplyr::group_by(.data$locus_id, .data$gene_name) %>%
+  dplyr::summarise(
+    weight_total = sum(.data$agg_weight_run, na.rm = TRUE),
+    weighted_c_value = sum(.data$agg_weight_run * .data$c_value, na.rm = TRUE) /
+      sum(.data$agg_weight_run, na.rm = TRUE),
+    weighted_sigma_0_2_scalar = sum(.data$agg_weight_run * .data$sigma_0_2_scalar, na.rm = TRUE) /
+      sum(.data$agg_weight_run, na.rm = TRUE),
+    off_c0_weight = sum(.data$agg_weight_run[abs(.data$c_value) > 1e-12], na.rm = TRUE) /
+      sum(.data$agg_weight_run, na.rm = TRUE),
+    max_model_weight = max(.data$agg_weight_run, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  dplyr::filter(
+    is.finite(.data$weight_total),
+    .data$weight_total > 0,
+    is.finite(.data$weighted_c_value),
+    is.finite(.data$weighted_sigma_0_2_scalar)
+  )
+
+paper_annotation_weight_plot <- ggplot(
+  weighted_annotation_tbl,
+  aes(x = weighted_c_value, y = weighted_sigma_0_2_scalar)
+) +
+  geom_hline(yintercept = 0, color = "grey75", linewidth = 0.4) +
+  geom_vline(xintercept = 0, color = "grey75", linewidth = 0.4) +
+  geom_point(
+    aes(fill = off_c0_weight, size = max_model_weight),
+    shape = 21,
+    color = "grey20",
+    alpha = 0.9
+  ) +
+  geom_locus_text(aes(label = locus_id), seed = 1) +
+  scale_fill_viridis_c(option = "D", limits = c(0, 1), name = "Off-c0 weight") +
+  scale_size_continuous(range = c(1.8, 5), name = "Max model weight") +
+  labs(
+    title = "(a) Posterior-weighted annotation parameters",
+    x = "Weighted annotation scale c",
+    y = expression("Weighted " * sigma[0]^2)
+  ) +
+  paper_panel_theme
+
+source_jsd_tbl <- paper_summary %>%
+  dplyr::transmute(
+    locus_id,
+    highest_weight_source_run_id,
+    susie_anchor_run_id,
+    jsd_susie_anchor_vs_highest_weight_source = purrr::pmap_dbl(
+      list(.data$locus_id, .data$susie_anchor_run_id, .data$highest_weight_source_run_id),
+      run_pip_jsd
+    )
+  )
+
+drift_jsd_tbl <- highest_weight_refit_basin %>%
+  dplyr::left_join(
+    paper_summary %>%
+      dplyr::select(
+        .data$locus_id,
+        .data$highest_weight_source_agg_weight_run,
+        .data$jsd_susie_anchor_vs_refit
+      ),
+    by = "locus_id"
+  ) %>%
+  dplyr::left_join(source_jsd_tbl, by = "locus_id")
+
+drift_jsd_long_tbl <- dplyr::bind_rows(
+  drift_jsd_tbl %>%
+    dplyr::transmute(
+      locus_id,
+      fit_type = "Highest-weight model",
+      basin_r2_drift = .data$basin_r2_drift_highest_weight_vs_susie_anchor,
+      pip_jsd = .data$jsd_susie_anchor_vs_highest_weight_source,
+      source_weight = .data$highest_weight_source_agg_weight_run
+    ),
+  drift_jsd_tbl %>%
+    dplyr::transmute(
+      locus_id,
+      fit_type = "Warm refit",
+      basin_r2_drift = .data$basin_r2_drift_refit_vs_susie_anchor,
+      pip_jsd = .data$jsd_susie_anchor_vs_refit,
+      source_weight = .data$highest_weight_source_agg_weight_run
+    )
+) %>%
+  dplyr::mutate(
+    fit_type = factor(.data$fit_type, levels = c("Highest-weight model", "Warm refit"))
+  ) %>%
+  dplyr::filter(is.finite(.data$basin_r2_drift), is.finite(.data$pip_jsd))
+
+paper_drift_jsd_plot <- ggplot(
+  drift_jsd_long_tbl,
+  aes(x = basin_r2_drift, y = pip_jsd)
+) +
+  geom_path(
+    aes(group = locus_id),
+    color = "grey70",
+    linewidth = 0.5,
+    na.rm = TRUE
+  ) +
+  geom_point(
+    aes(color = fit_type, size = source_weight),
+    alpha = 0.9,
+    na.rm = TRUE
+  ) +
+  geom_locus_text(
+    data = dplyr::filter(drift_jsd_long_tbl, .data$fit_type == "Highest-weight model"),
+    aes(label = locus_id),
+    seed = 2
+  ) +
+  scale_color_manual(
+    values = c("Highest-weight model" = "#0B6E4F", "Warm refit" = "#C65D00"),
+    name = NULL
+  ) +
+  scale_size_continuous(range = c(1.8, 5), name = "Source weight") +
+  labs(
+    title = "(b) Effect-basin drift vs PIP movement",
+    x = expression("Basin " * r^2 * " drift from SuSiE anchor"),
+    y = "PIP JSD from SuSiE anchor"
+  ) +
+  paper_panel_theme
+
+paper_pve_tbl <- anchor_summary %>%
+  dplyr::left_join(
+    highest_weight_refit_summary %>%
+      dplyr::select(.data$locus_id, .data$refit_pve_postmean_std),
+    by = "locus_id"
+  ) %>%
+  dplyr::transmute(
+    locus_id,
+    susie_anchor_pve = .data$susie_anchor_pve_postmean_std,
+    susine_ensemble_pve = .data$ensemble_pve_postmean_std,
+    warm_refit_pve = .data$refit_pve_postmean_std
+  )
+
+paper_pve_long_tbl <- dplyr::bind_rows(
+  paper_pve_tbl %>%
+    dplyr::transmute(
+      locus_id,
+      fit_type = "SuSiNE ensemble",
+      susie_anchor_pve,
+      comparison_pve = .data$susine_ensemble_pve
+    ),
+  paper_pve_tbl %>%
+    dplyr::transmute(
+      locus_id,
+      fit_type = "Warm refit",
+      susie_anchor_pve,
+      comparison_pve = .data$warm_refit_pve
+    )
+) %>%
+  dplyr::mutate(
+    fit_type = factor(.data$fit_type, levels = c("SuSiNE ensemble", "Warm refit"))
+  ) %>%
+  dplyr::filter(is.finite(.data$susie_anchor_pve), is.finite(.data$comparison_pve))
+
+paper_pve_segment_tbl <- paper_pve_tbl %>%
+  dplyr::filter(
+    is.finite(.data$susie_anchor_pve),
+    is.finite(.data$susine_ensemble_pve),
+    is.finite(.data$warm_refit_pve)
+  )
+
+paper_pve_lim <- range(
+  c(paper_pve_long_tbl$susie_anchor_pve, paper_pve_long_tbl$comparison_pve),
+  na.rm = TRUE
+)
+if (!all(is.finite(paper_pve_lim))) paper_pve_lim <- c(0, 1)
+paper_pve_pad <- max(0.02, diff(paper_pve_lim) * 0.05)
+paper_pve_lim <- c(
+  max(0, paper_pve_lim[[1]] - paper_pve_pad),
+  min(1, paper_pve_lim[[2]] + paper_pve_pad)
+)
+
+paper_pve_plot <- ggplot(
+  paper_pve_long_tbl,
+  aes(x = susie_anchor_pve, y = comparison_pve)
+) +
+  geom_abline(slope = 1, intercept = 0, color = "grey55", linewidth = 0.5) +
+  geom_segment(
+    data = paper_pve_segment_tbl,
+    aes(
+      x = susie_anchor_pve,
+      xend = susie_anchor_pve,
+      y = susine_ensemble_pve,
+      yend = warm_refit_pve
+    ),
+    color = "grey70",
+    linewidth = 0.5,
+    inherit.aes = FALSE
+  ) +
+  geom_point(aes(color = fit_type), size = 2.4, alpha = 0.9) +
+  geom_locus_text(
+    data = dplyr::filter(paper_pve_long_tbl, .data$fit_type == "SuSiNE ensemble"),
+    aes(label = locus_id),
+    seed = 3
+  ) +
+  scale_color_manual(
+    values = c("SuSiNE ensemble" = "#0B6E4F", "Warm refit" = "#C65D00"),
+    name = NULL
+  ) +
+  coord_equal(xlim = paper_pve_lim, ylim = paper_pve_lim) +
+  labs(
+    title = "(c) Posterior-mean PVE",
+    x = "SuSiE anchor PVE",
+    y = "Comparison PVE"
+  ) +
+  paper_panel_theme
+
+ggsave(
+  file.path(overall_figure_dir, "paper_overall_annotation_drift_pve_panel_a.png"),
+  paper_annotation_weight_plot,
+  width = 5,
+  height = 4.8,
+  dpi = 220
+)
+ggsave(
+  file.path(overall_figure_dir, "paper_overall_annotation_drift_pve_panel_b.png"),
+  paper_drift_jsd_plot,
+  width = 5,
+  height = 4.8,
+  dpi = 220
+)
+ggsave(
+  file.path(overall_figure_dir, "paper_overall_annotation_drift_pve_panel_c.png"),
+  paper_pve_plot,
+  width = 5,
+  height = 4.8,
+  dpi = 220
+)
+
+if (requireNamespace("patchwork", quietly = TRUE)) {
+  paper_overall_figure <- paper_annotation_weight_plot |
+    paper_drift_jsd_plot |
+    paper_pve_plot
+
+  ggsave(
+    file.path(overall_figure_dir, "paper_overall_annotation_drift_pve.png"),
+    paper_overall_figure,
+    width = 15,
+    height = 5.2,
+    dpi = 220
+  )
+  ggsave(
+    file.path(overall_figure_dir, "paper_overall_annotation_drift_pve.pdf"),
+    paper_overall_figure,
+    width = 15,
+    height = 5.2
+  )
+
+  paper_overall_figure
+} else {
+  warning("patchwork is not installed; saved individual paper panels only.")
+  list(
+    annotation = paper_annotation_weight_plot,
+    drift_jsd = paper_drift_jsd_plot,
+    pve = paper_pve_plot
+  )
+}
+```
+
+# 8. Basin r² Drift From c = 0 (one panel per locus)
 
 Drift metric: weighted (1 - r²) on max-weight 1-1 matched per-effect coefficient
 vectors, weighted by `min(var_y_explained_a, var_y_explained_b)`. RSS analog of
