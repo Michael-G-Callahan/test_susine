@@ -1234,7 +1234,7 @@ if (requireNamespace("patchwork", quietly = TRUE)) {
       patchwork::plot_spacer() /
       (paper_pve_plot | paper_effect_diffuseness_plot)
   ) +
-    patchwork::plot_layout(heights = c(1, 0.24, 1)) +
+    patchwork::plot_layout(heights = c(1, 0.1, 1)) +
     patchwork::plot_annotation(tag_levels = "A") &
     theme(
       plot.tag = element_text(face = "bold", size = 12,
