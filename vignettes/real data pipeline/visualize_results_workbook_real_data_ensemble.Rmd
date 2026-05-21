@@ -226,7 +226,10 @@ core95_entropy <- function(prob, rho = 0.95) {
 }
 
 geom_locus_text <- function(mapping = NULL, data = NULL, ..., size = 2.4,
-                            seed = NA,
+                            seed = NA, box.padding = 0.35,
+                            point.padding = 0.35, force = 1.4,
+                            force_pull = 1, max.iter = 10000,
+                            max.time = 1, segment.size = 0.3,
                             show.legend = FALSE) {
   if (requireNamespace("ggrepel", quietly = TRUE)) {
     return(ggrepel::geom_text_repel(
@@ -234,9 +237,13 @@ geom_locus_text <- function(mapping = NULL, data = NULL, ..., size = 2.4,
       data = data,
       size = size,
       min.segment.length = 0,
-      box.padding = 0.35,
-      point.padding = 0.35,
-      force = 1.4,
+      box.padding = box.padding,
+      point.padding = point.padding,
+      force = force,
+      force_pull = force_pull,
+      max.iter = max.iter,
+      max.time = max.time,
+      segment.size = segment.size,
       max.overlaps = Inf,
       seed = seed,
       show.legend = show.legend,
@@ -856,16 +863,25 @@ paper_annotation_weight_plot <- ggplot(
   geom_locus_text(
     data = weighted_annotation_tbl,
     aes(label = locus_label),
-    seed = 1
+    size = 2.2,
+    seed = 11,
+    box.padding = 0.65,
+    point.padding = 0.85,
+    force = 4,
+    force_pull = 0.03,
+    max.iter = 20000,
+    max.time = 2,
+    segment.size = 0.25
   ) +
-  scale_fill_viridis_c(option = "D", limits = c(0, 1), name = "Off-c0 weight") +
+  scale_fill_viridis_c(option = "D", limits = c(0, 1), name = "Total c>0 weight") +
   guides(
     fill = guide_colorbar(
       title.position = "left",
-      barwidth = grid::unit(18, "mm"),
+      barwidth = grid::unit(27, "mm"),
       barheight = grid::unit(2.6, "mm")
     )
   ) +
+  coord_cartesian(ylim = c(-0.08, 1.05), clip = "off") +
   labs(
     title = "Posterior-weighted annotation parameters",
     x = "Weighted annotation scale c",
@@ -1117,10 +1133,29 @@ effect_diffuseness_tbl <- if (nrow(effect_diffuseness_run_tbl)) {
   )
 }
 
-diffuseness_breaks <- c(0, 1.5, 3, 5, 20, 100, 500, 1000, Inf)
+terminal_diffuseness_values <- effect_diffuseness_tbl$effect_k_eff_core95[
+  is.finite(effect_diffuseness_tbl$effect_k_eff_core95) &
+    effect_diffuseness_tbl$effect_k_eff_core95 >= 1000
+]
+terminal_split_k <- if (length(terminal_diffuseness_values) > 1L) {
+  max_terminal_k <- max(2L, ceiling(max(terminal_diffuseness_values, na.rm = TRUE) / 1000))
+  candidate_k <- seq.int(2L, max_terminal_k)
+  terminal_n <- length(terminal_diffuseness_values)
+  candidate_left_n <- vapply(candidate_k, function(k) {
+    sum(terminal_diffuseness_values < k * 1000)
+  }, integer(1))
+  candidate_k[[which.min(abs(candidate_left_n - terminal_n / 2))]]
+} else {
+  2L
+}
+terminal_split <- terminal_split_k * 1000
+
+diffuseness_breaks <- c(0, 1.5, 3, 5, 20, 100, 500, 1000, terminal_split, Inf)
 diffuseness_labels <- c(
   "0-1.5", "1.5-3", "3-5", "5-20", "20-100",
-  "100-500", "500-1,000", "1,000+"
+  "100-500", "500-1,000",
+  paste0("1,000-", formatC(terminal_split, format = "fg", big.mark = ",")),
+  paste0(formatC(terminal_split, format = "fg", big.mark = ","), "+")
 )
 effect_diffuseness_count_tbl <- effect_diffuseness_tbl %>%
   dplyr::mutate(
@@ -1221,7 +1256,7 @@ if (requireNamespace("patchwork", quietly = TRUE)) {
       plot.tag.position = c(0.002, 0.995),
       plot.margin = margin(4.5, 4.5, 4.5, 4.5),
       panel.spacing.x = grid::unit(3.2, "mm"),
-      panel.spacing.y = grid::unit(3.2, "mm")
+      panel.spacing.y = grid::unit(7.0, "mm")
     )
 
   ggsave(
