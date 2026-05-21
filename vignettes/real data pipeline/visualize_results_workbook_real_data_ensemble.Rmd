@@ -1070,7 +1070,7 @@ paper_pve_plot <- ggplot(
   ) +
   coord_equal(xlim = paper_pve_lim, ylim = paper_pve_lim) +
   labs(
-    title = expression("Posterior-mean PVE (" * h[g]^2 * " proxy)"),
+    title = expression(bold("Posterior-mean PVE (" * h[g]^2 * " proxy)")),
     x = "SuSiE anchor PVE",
     y = "Comparison PVE"
   ) +
@@ -1141,10 +1141,10 @@ effect_diffuseness_tbl <- if (nrow(effect_diffuseness_run_tbl)) {
   )
 }
 
-diffuseness_breaks <- c(0, 1.5, 5, 20, 100, 1000, 3000, Inf)
+diffuseness_breaks <- c(0, 1.5, 5, 20, 100, 1000, 3500, Inf)
 diffuseness_labels <- c(
   "0-1.5", "1.5-5", "5-20", "20-100",
-  "100-1,000", "1k-3k", "3k+"
+  "100-1,000", "1k-3.5k", "3.5k+"
 )
 effect_diffuseness_count_tbl <- effect_diffuseness_tbl %>%
   dplyr::mutate(
@@ -1199,7 +1199,7 @@ ggsave(
   file.path(overall_figure_dir, "paper_overall_annotation_drift_pve_panel_a.png"),
   paper_annotation_weight_plot,
   width = 3.76,
-  height = 2.73,
+  height = 3.9,
   dpi = 300,
   bg = "white"
 )
@@ -1207,7 +1207,7 @@ ggsave(
   file.path(overall_figure_dir, "paper_overall_annotation_drift_pve_panel_b.png"),
   paper_drift_jsd_plot,
   width = 3.76,
-  height = 2.73,
+  height = 3.9,
   dpi = 300,
   bg = "white"
 )
@@ -1215,7 +1215,7 @@ ggsave(
   file.path(overall_figure_dir, "paper_overall_annotation_drift_pve_panel_c.png"),
   paper_pve_plot,
   width = 3.76,
-  height = 2.73,
+  height = 3.9,
   dpi = 300,
   bg = "white"
 )
@@ -1223,21 +1223,18 @@ ggsave(
   file.path(overall_figure_dir, "paper_overall_annotation_drift_pve_panel_d.png"),
   paper_effect_diffuseness_plot,
   width = 3.76,
-  height = 2.73,
+  height = 3.9,
   dpi = 300,
   bg = "white"
 )
 
 if (requireNamespace("patchwork", quietly = TRUE)) {
-  paper_overall_figure <- patchwork::wrap_plots(
-    paper_annotation_weight_plot,
-    paper_drift_jsd_plot,
-    paper_pve_plot,
-    paper_effect_diffuseness_plot,
-    ncol = 2,
-    widths = c(1, 1),
-    heights = c(1, 1)
+  paper_overall_figure <- (
+    (paper_annotation_weight_plot | paper_drift_jsd_plot) /
+      patchwork::plot_spacer() /
+      (paper_pve_plot | paper_effect_diffuseness_plot)
   ) +
+    patchwork::plot_layout(heights = c(1, 0.24, 1)) +
     patchwork::plot_annotation(tag_levels = "A") &
     theme(
       plot.tag = element_text(face = "bold", size = 12,
@@ -1245,14 +1242,14 @@ if (requireNamespace("patchwork", quietly = TRUE)) {
       plot.tag.position = c(0.002, 0.995),
       plot.margin = margin(4.5, 4.5, 4.5, 4.5),
       panel.spacing.x = grid::unit(3.2, "mm"),
-      panel.spacing.y = grid::unit(9.0, "mm")
+      panel.spacing.y = grid::unit(16.0, "mm")
     )
 
   ggsave(
     file.path(overall_figure_dir, "paper_overall_annotation_drift_pve.png"),
     paper_overall_figure,
     width = 7.52,
-    height = 5.46,
+    height = 7.8,
     dpi = 300,
     bg = "white",
     limitsize = FALSE
@@ -1261,7 +1258,7 @@ if (requireNamespace("patchwork", quietly = TRUE)) {
     file.path(overall_figure_dir, "paper_overall_annotation_drift_pve.pdf"),
     paper_overall_figure,
     width = 7.52,
-    height = 5.46,
+    height = 7.8,
     bg = "white",
     limitsize = FALSE
   )
