@@ -234,8 +234,9 @@ geom_locus_text <- function(mapping = NULL, data = NULL, ..., size = 2.4,
       data = data,
       size = size,
       min.segment.length = 0,
-      box.padding = 0.25,
-      point.padding = 0.15,
+      box.padding = 0.35,
+      point.padding = 0.35,
+      force = 1.4,
       max.overlaps = Inf,
       seed = seed,
       show.legend = show.legend,
@@ -777,7 +778,7 @@ refit_basin_r2_drift_plot
 
 # 7. Paper Overall Figure
 
-```{r paper-overall-figure, fig.width=9.4, fig.height=6.5}
+```{r paper-overall-figure, fig.width=7.52, fig.height=7.8}
 theme_real_data_paper <- function(base_size = 8) {
   theme_bw(base_size = base_size) +
     theme(
@@ -866,7 +867,7 @@ paper_annotation_weight_plot <- ggplot(
     )
   ) +
   labs(
-    title = "(a) Posterior-weighted annotation parameters",
+    title = "Posterior-weighted annotation parameters",
     x = "Weighted annotation scale c",
     y = expression("Weighted " * sigma[0]^2)
   ) +
@@ -877,6 +878,8 @@ source_jsd_tbl <- paper_summary %>%
     locus_id,
     highest_weight_source_run_id,
     susie_anchor_run_id,
+    # Match the fitted-model basin drift x-axis: this is highest-weight model
+    # PIP JSD, not cluster-weight aggregated ensemble PIP JSD.
     jsd_susie_anchor_vs_highest_weight_source = purrr::pmap_dbl(
       list(.data$locus_id, .data$susie_anchor_run_id, .data$highest_weight_source_run_id),
       run_pip_jsd
@@ -950,7 +953,7 @@ paper_drift_jsd_plot <- ggplot(
     name = NULL
   ) +
   labs(
-    title = "(b) Effect-basin drift vs PIP movement",
+    title = "Effect-basin drift vs PIP movement",
     x = expression("Basin " * r^2 * " drift from SuSiE anchor"),
     y = "PIP JSD from SuSiE anchor"
   ) +
@@ -1043,7 +1046,7 @@ paper_pve_plot <- ggplot(
   ) +
   coord_equal(xlim = paper_pve_lim, ylim = paper_pve_lim) +
   labs(
-    title = "(c) Posterior-mean PVE",
+    title = expression("Posterior-mean PVE (" * h[g]^2 * " proxy)"),
     x = "SuSiE anchor PVE",
     y = "Comparison PVE"
   ) +
@@ -1114,25 +1117,43 @@ effect_diffuseness_tbl <- if (nrow(effect_diffuseness_run_tbl)) {
   )
 }
 
-paper_effect_diffuseness_plot <- ggplot(
-  effect_diffuseness_tbl,
-  aes(
-    x = effect_k_eff_core95,
-    y = after_stat(density),
-    color = fit_type,
-    fill = fit_type
+diffuseness_breaks <- c(0, 1.5, 3, 5, 20, 100, 500, 1000, Inf)
+diffuseness_labels <- c(
+  "0-1.5", "1.5-3", "3-5", "5-20", "20-100",
+  "100-500", "500-1,000", "1,000+"
+)
+effect_diffuseness_count_tbl <- effect_diffuseness_tbl %>%
+  dplyr::mutate(
+    diffuseness_bin = cut(
+      .data$effect_k_eff_core95,
+      breaks = diffuseness_breaks,
+      labels = diffuseness_labels,
+      include.lowest = TRUE,
+      right = FALSE
+    )
+  ) %>%
+  dplyr::filter(!is.na(.data$diffuseness_bin)) %>%
+  dplyr::count(.data$fit_type, .data$diffuseness_bin, name = "n") %>%
+  tidyr::complete(
+    fit_type = factor(c("SuSiE anchor", "Highest-weight model"),
+                      levels = c("SuSiE anchor", "Highest-weight model")),
+    diffuseness_bin = factor(diffuseness_labels, levels = diffuseness_labels),
+    fill = list(n = 0L)
+  ) %>%
+  dplyr::mutate(
+    diffuseness_bin = factor(.data$diffuseness_bin, levels = diffuseness_labels)
   )
+
+paper_effect_diffuseness_plot <- ggplot(
+  effect_diffuseness_count_tbl,
+  aes(x = diffuseness_bin, y = n, color = fit_type, fill = fit_type)
 ) +
-  geom_histogram(
+  geom_col(
     position = "identity",
-    bins = 24,
-    alpha = 0.32,
+    width = 0.82,
+    alpha = 0.38,
     linewidth = 0.25,
     na.rm = TRUE
-  ) +
-  scale_x_log10(
-    breaks = c(1, 2, 5, 10, 20, 50, 100, 200, 500, 1000),
-    labels = function(x) formatC(x, format = "fg", big.mark = ",")
   ) +
   scale_color_manual(
     values = c("SuSiE anchor" = "grey20", "Highest-weight model" = "#0B6E4F"),
@@ -1143,41 +1164,42 @@ paper_effect_diffuseness_plot <- ggplot(
     name = NULL
   ) +
   labs(
-    title = "(d) Effect diffuseness",
+    title = "Effect diffuseness",
     x = expression("Effective top-95% support size  " * K[l]),
-    y = "Effect density"
+    y = "Effect count"
   ) +
-  paper_panel_theme
+  paper_panel_theme +
+  theme(axis.text.x = element_text(angle = 25, hjust = 1))
 
 ggsave(
   file.path(overall_figure_dir, "paper_overall_annotation_drift_pve_panel_a.png"),
   paper_annotation_weight_plot,
-  width = 4.7,
-  height = 3.25,
+  width = 3.76,
+  height = 3.9,
   dpi = 300,
   bg = "white"
 )
 ggsave(
   file.path(overall_figure_dir, "paper_overall_annotation_drift_pve_panel_b.png"),
   paper_drift_jsd_plot,
-  width = 4.7,
-  height = 3.25,
+  width = 3.76,
+  height = 3.9,
   dpi = 300,
   bg = "white"
 )
 ggsave(
   file.path(overall_figure_dir, "paper_overall_annotation_drift_pve_panel_c.png"),
   paper_pve_plot,
-  width = 4.7,
-  height = 3.25,
+  width = 3.76,
+  height = 3.9,
   dpi = 300,
   bg = "white"
 )
 ggsave(
   file.path(overall_figure_dir, "paper_overall_annotation_drift_pve_panel_d.png"),
   paper_effect_diffuseness_plot,
-  width = 4.7,
-  height = 3.25,
+  width = 3.76,
+  height = 3.9,
   dpi = 300,
   bg = "white"
 )
@@ -1191,8 +1213,12 @@ if (requireNamespace("patchwork", quietly = TRUE)) {
     ncol = 2,
     widths = c(1, 1),
     heights = c(1, 1)
-  ) &
+  ) +
+    patchwork::plot_annotation(tag_levels = "A") &
     theme(
+      plot.tag = element_text(face = "bold", size = 12,
+                              margin = margin(0, 1, 0, 0)),
+      plot.tag.position = c(0.002, 0.995),
       plot.margin = margin(4.5, 4.5, 4.5, 4.5),
       panel.spacing.x = grid::unit(3.2, "mm"),
       panel.spacing.y = grid::unit(3.2, "mm")
@@ -1201,8 +1227,8 @@ if (requireNamespace("patchwork", quietly = TRUE)) {
   ggsave(
     file.path(overall_figure_dir, "paper_overall_annotation_drift_pve.png"),
     paper_overall_figure,
-    width = 9.4,
-    height = 6.5,
+    width = 7.52,
+    height = 7.8,
     dpi = 300,
     bg = "white",
     limitsize = FALSE
@@ -1210,8 +1236,8 @@ if (requireNamespace("patchwork", quietly = TRUE)) {
   ggsave(
     file.path(overall_figure_dir, "paper_overall_annotation_drift_pve.pdf"),
     paper_overall_figure,
-    width = 9.4,
-    height = 6.5,
+    width = 7.52,
+    height = 7.8,
     bg = "white",
     limitsize = FALSE
   )
