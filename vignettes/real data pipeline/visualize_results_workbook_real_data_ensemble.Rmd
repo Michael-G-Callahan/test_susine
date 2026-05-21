@@ -433,18 +433,48 @@ plot_aggregated_lollipop <- function(locus_id) {
 
 ```{r lollipop-helper-override}
 plot_aggregated_lollipop <- function(locus_id) {
-  agg_df <- aggregated_variants %>%
+  plot_df <- aggregated_variants %>%
     dplyr::filter(.data$locus_id == !!locus_id) %>%
+    dplyr::left_join(reference_pip_tbl(locus_id), by = "variant_id") %>%
+    dplyr::left_join(refit_pip_tbl(locus_id), by = "variant_id") %>%
+    dplyr::mutate(
+      max_display_pip = pmax(
+        .data$baseline_pip,
+        .data$aggregated_pip,
+        .data$refit_pip,
+        na.rm = TRUE
+      )
+    )
+
+  display_threshold <- 0.1
+  threshold_candidates <- plot_df %>%
+    dplyr::filter(is.finite(.data$max_display_pip), .data$max_display_pip >= display_threshold)
+  if (nrow(threshold_candidates) > 15L) {
+    display_threshold <- sort(threshold_candidates$max_display_pip, decreasing = TRUE)[[15L]]
+  }
+
+  plot_df <- plot_df %>%
+    dplyr::filter(is.finite(.data$max_display_pip), .data$max_display_pip >= display_threshold) %>%
+    dplyr::arrange(
+      dplyr::desc(.data$max_display_pip),
+      dplyr::desc(.data$aggregated_pip),
+      .data$ld_matrix_index
+    ) %>%
+    dplyr::slice_head(n = 15)
+
+  if (!nrow(plot_df)) {
+    plot_df <- aggregated_variants %>%
+      dplyr::filter(.data$locus_id == !!locus_id) %>%
+      dplyr::arrange(dplyr::desc(.data$aggregated_pip), .data$ld_matrix_index) %>%
+      dplyr::slice_head(n = 5) %>%
+      dplyr::left_join(reference_pip_tbl(locus_id), by = "variant_id") %>%
+      dplyr::left_join(refit_pip_tbl(locus_id), by = "variant_id")
+    display_threshold <- NA_real_
+  }
+
+  plot_df <- plot_df %>%
     dplyr::arrange(dplyr::desc(.data$aggregated_pip), .data$ld_matrix_index) %>%
-    dplyr::slice_head(n = 20) %>%
     dplyr::mutate(variant_f = factor(.data$variant_id, levels = rev(.data$variant_id)))
-  baseline_df <- reference_pip_tbl(locus_id) %>%
-    dplyr::filter(.data$variant_id %in% agg_df$variant_id)
-  refit_df <- refit_pip_tbl(locus_id) %>%
-    dplyr::filter(.data$variant_id %in% agg_df$variant_id)
-  plot_df <- agg_df %>%
-    dplyr::left_join(baseline_df, by = "variant_id") %>%
-    dplyr::left_join(refit_df, by = "variant_id")
   points_df <- dplyr::bind_rows(
     plot_df %>%
       dplyr::transmute(variant_f, pip = baseline_pip, fit_type = "Baseline"),
@@ -477,6 +507,11 @@ plot_aggregated_lollipop <- function(locus_id) {
     ) +
     labs(
       title = paste("Baseline vs Ensemble Variant PIPs:", locus_id),
+      subtitle = if (is.finite(display_threshold)) {
+        sprintf("Variants shown when baseline, ensemble, or warm-refit PIP >= %.3g", display_threshold)
+      } else {
+        "No variants reached PIP >= 0.1; showing top 5 ensemble PIPs"
+      },
       x = "PIP",
       y = "Variant"
     ) +
@@ -1152,10 +1187,10 @@ effect_diffuseness_tbl <- if (nrow(effect_diffuseness_run_tbl)) {
   )
 }
 
-diffuseness_breaks <- c(0, 1.5, 5, 20, 100, 1000, 3500, Inf)
+diffuseness_breaks <- c(0, 1.5, 5, 20, 100, 2000, 4000, Inf)
 diffuseness_labels <- c(
   "0-1.5", "1.5-5", "5-20", "20-100",
-  "100-1,000", "1k-3.5k", "3.5k+"
+  "100-2k", "2k-4k", "4k+"
 )
 effect_diffuseness_count_tbl <- effect_diffuseness_tbl %>%
   dplyr::mutate(
@@ -1286,7 +1321,99 @@ if (requireNamespace("patchwork", quietly = TRUE)) {
 }
 ```
 
-# 8. Basin r² Drift From c = 0 (one panel per locus)
+# 8. Selected Locus Zoom Figure
+
+```{r paper-selected-locus-zoom, fig.width=7.52, fig.height=9.2}
+resolve_locus_token <- function(token, locus_ids) {
+  hit <- locus_ids[grepl(paste0("^", token), locus_ids, ignore.case = TRUE)]
+  if (!length(hit)) {
+    hit <- locus_ids[grepl(token, locus_ids, ignore.case = TRUE)]
+  }
+  if (!length(hit)) {
+    stop("Could not resolve selected locus token: ", token)
+  }
+  hit[[1]]
+}
+
+selected_locus_tokens <- c("ydjc", "arsa", "prpf38b")
+selected_zoom_loci <- vapply(
+  selected_locus_tokens,
+  resolve_locus_token,
+  character(1),
+  locus_ids = loci
+)
+
+paper_locus_label <- function(locus_id) sub("_lung$", "", locus_id)
+
+paper_lollipop_plot <- function(locus_id, show_legend = FALSE) {
+  plot_aggregated_lollipop(locus_id) +
+    labs(
+      title = paste0(paper_locus_label(locus_id), ": variant PIPs"),
+      subtitle = NULL
+    ) +
+    paper_panel_theme +
+    theme(
+      legend.position = if (show_legend) "bottom" else "none",
+      axis.text.y = element_text(size = 5.8)
+    )
+}
+
+paper_pip_drift_plot <- function(locus_id, show_legend = FALSE) {
+  plot_drift(locus_id) +
+    labs(
+      title = paste0(paper_locus_label(locus_id), ": PIP drift"),
+      subtitle = NULL,
+      x = "Annotation scale c",
+      y = "PIP JSD from baseline"
+    ) +
+    paper_panel_theme +
+    theme(legend.position = if (show_legend) "bottom" else "none")
+}
+
+if (requireNamespace("patchwork", quietly = TRUE)) {
+  selected_locus_zoom_rows <- purrr::map2(selected_zoom_loci, seq_along(selected_zoom_loci), function(loc, i) {
+    show_legend <- i == length(selected_zoom_loci)
+    paper_lollipop_plot(loc, show_legend = show_legend) |
+      paper_pip_drift_plot(loc, show_legend = show_legend)
+  })
+
+  selected_locus_zoom_figure <- patchwork::wrap_plots(
+    selected_locus_zoom_rows,
+    ncol = 1
+  ) +
+    patchwork::plot_layout(heights = rep(1, length(selected_locus_zoom_rows))) &
+    theme(
+      plot.margin = margin(4.5, 4.5, 4.5, 4.5),
+      panel.spacing.x = grid::unit(3.2, "mm"),
+      panel.spacing.y = grid::unit(5.5, "mm")
+    )
+
+  ggsave(
+    file.path(overall_figure_dir, "paper_selected_locus_zoom_lollipop_drift.png"),
+    selected_locus_zoom_figure,
+    width = 7.52,
+    height = 9.2,
+    dpi = 300,
+    bg = "white",
+    limitsize = FALSE
+  )
+  ggsave(
+    file.path(overall_figure_dir, "paper_selected_locus_zoom_lollipop_drift.pdf"),
+    selected_locus_zoom_figure,
+    width = 7.52,
+    height = 9.2,
+    bg = "white",
+    limitsize = FALSE
+  )
+
+  selected_locus_zoom_figure
+} else {
+  warning("patchwork is not installed; selected-locus zoom figure skipped.")
+  invisible(NULL)
+}
+```
+
+# 9. Basin r² Drift From c = 0 (one panel per locus)
 
 Drift metric: weighted (1 - r²) on max-weight 1-1 matched per-effect coefficient
 vectors, weighted by `min(var_y_explained_a, var_y_explained_b)`. RSS analog of
