@@ -891,7 +891,7 @@ paper_annotation_weight_plot <- ggplot(
   ) +
   coord_cartesian(ylim = c(-0.08, 1.05), clip = "off") +
   labs(
-    title = "Posterior-weighted annotation parameters",
+    title = "Annotation influence varies across loci",
     x = "Weighted annotation scale c",
     y = expression("Weighted " * sigma[0]^2)
   ) +
@@ -977,9 +977,9 @@ paper_drift_jsd_plot <- ggplot(
     name = NULL
   ) +
   labs(
-    title = "Effect-basin drift vs PIP movement",
-    x = expression("Basin " * r^2 * " drift from SuSiE anchor"),
-    y = "PIP JSD from SuSiE anchor"
+    title = "PIP shifts and effect size shifts can decouple",
+    x = expression("Basis " * r^2 * " drift from SuSiE baseline"),
+    y = "PIP JSD from SuSiE baseline"
   ) +
   paper_panel_theme
 
@@ -1058,7 +1058,18 @@ paper_pve_plot <- ggplot(
     linewidth = 0.5,
     inherit.aes = FALSE
   ) +
-  geom_point(aes(color = fit_type), size = 2.4, alpha = 0.9) +
+  geom_point(
+    data = dplyr::filter(paper_pve_long_tbl, .data$fit_type == "Warm refit"),
+    aes(color = fit_type),
+    size = 2.4,
+    alpha = 0.9
+  ) +
+  geom_point(
+    data = dplyr::filter(paper_pve_long_tbl, .data$fit_type == "SuSiNE ensemble"),
+    aes(color = fit_type),
+    size = 2.4,
+    alpha = 0.9
+  ) +
   geom_locus_text(
     data = paper_pve_long_tbl,
     aes(label = locus_label),
@@ -1070,9 +1081,9 @@ paper_pve_plot <- ggplot(
   ) +
   coord_equal(xlim = paper_pve_lim, ylim = paper_pve_lim) +
   labs(
-    title = expression(bold("Posterior-mean PVE (" * h[g]^2 * " proxy)")),
-    x = "SuSiE anchor PVE",
-    y = "Comparison PVE"
+    title = "Annotations can boost explanatory signal",
+    x = expression("SuSiE baseline PVE (" * h[g]^2 * " proxy)"),
+    y = expression("Comparison PVE (" * h[g]^2 * " proxy)")
   ) +
   paper_panel_theme
 
@@ -1090,10 +1101,10 @@ effect_diffuseness_run_tbl <- paper_summary %>%
   dplyr::mutate(
     fit_type = dplyr::recode(
       .data$fit_type,
-      susie_anchor_run_id = "SuSiE anchor",
+      susie_anchor_run_id = "SuSiE baseline",
       highest_weight_source_run_id = "Highest-weight model"
     ),
-    fit_type = factor(.data$fit_type, levels = c("SuSiE anchor", "Highest-weight model"))
+    fit_type = factor(.data$fit_type, levels = c("SuSiE baseline", "Highest-weight model"))
   ) %>%
   dplyr::filter(!is.na(.data$run_id)) %>%
   dplyr::distinct(.data$locus_id, .data$fit_type, .data$run_id)
@@ -1122,7 +1133,7 @@ effect_diffuseness_tbl <- if (nrow(effect_diffuseness_run_tbl)) {
     tibble::tibble(
       locus_id = character(),
       run_id = integer(),
-      fit_type = factor(levels = c("SuSiE anchor", "Highest-weight model")),
+      fit_type = factor(levels = c("SuSiE baseline", "Highest-weight model")),
       effect_l = integer(),
       effect_pip_entropy_core95 = numeric(),
       effect_k_eff_core95 = numeric(),
@@ -1133,7 +1144,7 @@ effect_diffuseness_tbl <- if (nrow(effect_diffuseness_run_tbl)) {
   tibble::tibble(
     locus_id = character(),
     run_id = integer(),
-    fit_type = factor(levels = c("SuSiE anchor", "Highest-weight model")),
+    fit_type = factor(levels = c("SuSiE baseline", "Highest-weight model")),
     effect_l = integer(),
     effect_pip_entropy_core95 = numeric(),
     effect_k_eff_core95 = numeric(),
@@ -1159,8 +1170,8 @@ effect_diffuseness_count_tbl <- effect_diffuseness_tbl %>%
   dplyr::filter(!is.na(.data$diffuseness_bin)) %>%
   dplyr::count(.data$fit_type, .data$diffuseness_bin, name = "n") %>%
   tidyr::complete(
-    fit_type = factor(c("SuSiE anchor", "Highest-weight model"),
-                      levels = c("SuSiE anchor", "Highest-weight model")),
+    fit_type = factor(c("SuSiE baseline", "Highest-weight model"),
+                      levels = c("SuSiE baseline", "Highest-weight model")),
     diffuseness_bin = factor(diffuseness_labels, levels = diffuseness_labels),
     fill = list(n = 0L)
   ) %>%
@@ -1180,15 +1191,15 @@ paper_effect_diffuseness_plot <- ggplot(
     na.rm = TRUE
   ) +
   scale_color_manual(
-    values = c("SuSiE anchor" = "grey20", "Highest-weight model" = "#0B6E4F"),
+    values = c("SuSiE baseline" = "grey20", "Highest-weight model" = "#0B6E4F"),
     name = NULL
   ) +
   scale_fill_manual(
-    values = c("SuSiE anchor" = "grey20", "Highest-weight model" = "#0B6E4F"),
+    values = c("SuSiE baseline" = "grey20", "Highest-weight model" = "#0B6E4F"),
     name = NULL
   ) +
   labs(
-    title = "Effect diffuseness",
+    title = "Annotations sharpen effects",
     x = expression("Effective top-95% support size  " * K[l]),
     y = "Effect count"
   ) +
@@ -1234,7 +1245,7 @@ if (requireNamespace("patchwork", quietly = TRUE)) {
       patchwork::plot_spacer() /
       (paper_pve_plot | paper_effect_diffuseness_plot)
   ) +
-    patchwork::plot_layout(heights = c(1, 0.1, 1)) +
+    patchwork::plot_layout(heights = c(1, 0.05, 1)) +
     patchwork::plot_annotation(tag_levels = "A") &
     theme(
       plot.tag = element_text(face = "bold", size = 12,
