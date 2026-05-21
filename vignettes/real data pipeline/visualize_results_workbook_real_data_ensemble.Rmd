@@ -977,7 +977,7 @@ paper_drift_jsd_plot <- ggplot(
     name = NULL
   ) +
   labs(
-    title = "PIP shifts and effect size shifts can decouple",
+    title = "Shifts to PIPs and effect bases can decouple",
     x = expression("Basis " * r^2 * " drift from SuSiE baseline"),
     y = "PIP JSD from SuSiE baseline"
   ) +
