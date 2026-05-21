@@ -812,7 +812,12 @@ paper_panel_theme <- theme_real_data_paper(base_size = 8) +
     legend.position = "bottom",
     legend.box = "horizontal",
     legend.margin = margin(t = -2, b = -4),
-    legend.box.margin = margin(t = -2, b = -4)
+    legend.box.margin = margin(t = -2, b = -4),
+    axis.title = element_text(size = 8.5, face = "plain"),
+    axis.text = element_text(size = 7, face = "plain", color = "grey25"),
+    plot.title = element_text(face = "bold", size = 9.2, margin = margin(b = 3)),
+    legend.title = element_text(size = 7.6, face = "plain"),
+    legend.text = element_text(size = 6.9, face = "plain")
   )
 
 weighted_annotation_tbl <- functional_grid_summary %>%
@@ -877,8 +882,11 @@ paper_annotation_weight_plot <- ggplot(
   guides(
     fill = guide_colorbar(
       title.position = "left",
+      title.hjust = 0.5,
       barwidth = grid::unit(27, "mm"),
-      barheight = grid::unit(2.6, "mm")
+      barheight = grid::unit(2.6, "mm"),
+      label.theme = element_text(size = 6.9),
+      title.theme = element_text(size = 7.6, margin = margin(r = 8))
     )
   ) +
   coord_cartesian(ylim = c(-0.08, 1.05), clip = "off") +
@@ -1133,29 +1141,10 @@ effect_diffuseness_tbl <- if (nrow(effect_diffuseness_run_tbl)) {
   )
 }
 
-terminal_diffuseness_values <- effect_diffuseness_tbl$effect_k_eff_core95[
-  is.finite(effect_diffuseness_tbl$effect_k_eff_core95) &
-    effect_diffuseness_tbl$effect_k_eff_core95 >= 1000
-]
-terminal_split_k <- if (length(terminal_diffuseness_values) > 1L) {
-  max_terminal_k <- max(2L, ceiling(max(terminal_diffuseness_values, na.rm = TRUE) / 1000))
-  candidate_k <- seq.int(2L, max_terminal_k)
-  terminal_n <- length(terminal_diffuseness_values)
-  candidate_left_n <- vapply(candidate_k, function(k) {
-    sum(terminal_diffuseness_values < k * 1000)
-  }, integer(1))
-  candidate_k[[which.min(abs(candidate_left_n - terminal_n / 2))]]
-} else {
-  2L
-}
-terminal_split <- terminal_split_k * 1000
-
-diffuseness_breaks <- c(0, 1.5, 3, 5, 20, 100, 500, 1000, terminal_split, Inf)
+diffuseness_breaks <- c(0, 1.5, 5, 20, 100, 1000, 3000, Inf)
 diffuseness_labels <- c(
-  "0-1.5", "1.5-3", "3-5", "5-20", "20-100",
-  "100-500", "500-1,000",
-  paste0("1,000-", formatC(terminal_split, format = "fg", big.mark = ",")),
-  paste0(formatC(terminal_split, format = "fg", big.mark = ","), "+")
+  "0-1.5", "1.5-5", "5-20", "20-100",
+  "100-1,000", "1k-3k", "3k+"
 )
 effect_diffuseness_count_tbl <- effect_diffuseness_tbl %>%
   dplyr::mutate(
@@ -1210,7 +1199,7 @@ ggsave(
   file.path(overall_figure_dir, "paper_overall_annotation_drift_pve_panel_a.png"),
   paper_annotation_weight_plot,
   width = 3.76,
-  height = 3.9,
+  height = 2.73,
   dpi = 300,
   bg = "white"
 )
@@ -1218,7 +1207,7 @@ ggsave(
   file.path(overall_figure_dir, "paper_overall_annotation_drift_pve_panel_b.png"),
   paper_drift_jsd_plot,
   width = 3.76,
-  height = 3.9,
+  height = 2.73,
   dpi = 300,
   bg = "white"
 )
@@ -1226,7 +1215,7 @@ ggsave(
   file.path(overall_figure_dir, "paper_overall_annotation_drift_pve_panel_c.png"),
   paper_pve_plot,
   width = 3.76,
-  height = 3.9,
+  height = 2.73,
   dpi = 300,
   bg = "white"
 )
@@ -1234,7 +1223,7 @@ ggsave(
   file.path(overall_figure_dir, "paper_overall_annotation_drift_pve_panel_d.png"),
   paper_effect_diffuseness_plot,
   width = 3.76,
-  height = 3.9,
+  height = 2.73,
   dpi = 300,
   bg = "white"
 )
@@ -1256,14 +1245,14 @@ if (requireNamespace("patchwork", quietly = TRUE)) {
       plot.tag.position = c(0.002, 0.995),
       plot.margin = margin(4.5, 4.5, 4.5, 4.5),
       panel.spacing.x = grid::unit(3.2, "mm"),
-      panel.spacing.y = grid::unit(7.0, "mm")
+      panel.spacing.y = grid::unit(9.0, "mm")
     )
 
   ggsave(
     file.path(overall_figure_dir, "paper_overall_annotation_drift_pve.png"),
     paper_overall_figure,
     width = 7.52,
-    height = 7.8,
+    height = 5.46,
     dpi = 300,
     bg = "white",
     limitsize = FALSE
@@ -1272,7 +1261,7 @@ if (requireNamespace("patchwork", quietly = TRUE)) {
     file.path(overall_figure_dir, "paper_overall_annotation_drift_pve.pdf"),
     paper_overall_figure,
     width = 7.52,
-    height = 7.8,
+    height = 5.46,
     bg = "white",
     limitsize = FALSE
   )
