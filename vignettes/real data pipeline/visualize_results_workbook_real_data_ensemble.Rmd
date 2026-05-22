@@ -1333,42 +1333,13 @@ selected_zoom_loci <- vapply(
 paper_locus_label <- function(locus_id) sub("_lung$", "", locus_id)
 
 selected_lollipop_xlim <- c(0, 1)
-least_movement_locus <- highest_weight_refit_basin %>%
-  dplyr::left_join(
-    paper_summary %>%
-      dplyr::transmute(
-        locus_id,
-        highest_weight_source_run_id,
-        susie_anchor_run_id,
-        jsd_susie_anchor_vs_highest_weight_source = purrr::pmap_dbl(
-          list(.data$locus_id, .data$susie_anchor_run_id, .data$highest_weight_source_run_id),
-          run_pip_jsd
-        )
-      ),
-    by = "locus_id"
-  ) %>%
-  dplyr::transmute(
-    locus_id,
-    movement_distance = sqrt(
-      .data$basin_r2_drift_highest_weight_vs_susie_anchor^2 +
-        .data$jsd_susie_anchor_vs_highest_weight_source^2
-    )
-  ) %>%
-  dplyr::filter(is.finite(.data$movement_distance)) %>%
-  dplyr::arrange(.data$movement_distance, .data$locus_id) %>%
-  dplyr::slice_head(n = 1) %>%
-  dplyr::pull(.data$locus_id)
-
-selected_l2_locus_tokens <- c("rrp7a", "arsa", "prpf38b", "ydjc", "tmtc1")
-selected_zoom_l2_loci <- unique(c(
-  vapply(
-    selected_l2_locus_tokens,
-    resolve_locus_token,
-    character(1),
-    locus_ids = loci
-  ),
-  least_movement_locus
-))
+selected_l2_locus_tokens <- c("ydjc", "arsa", "rrp7a", "tmtc1", "prpf38b", "znf280b")
+selected_zoom_l2_loci <- vapply(
+  selected_l2_locus_tokens,
+  resolve_locus_token,
+  character(1),
+  locus_ids = loci
+)
 
 build_selected_drift_tbl <- function(selected_loci) {
   purrr::map_dfr(selected_loci, function(loc) {
@@ -1475,7 +1446,8 @@ paper_column_header_plot <- function(label) {
     annotate("text", x = 0.5, y = 0.5, label = label,
              fontface = "bold", size = 3.2) +
     coord_cartesian(xlim = c(0, 1), ylim = c(0, 1), expand = FALSE) +
-    theme_void()
+    theme_void() +
+    theme(plot.margin = margin(0, 0, -3, 0))
 }
 
 paper_locus_row_label_plot <- function(locus_id) {
@@ -1528,7 +1500,7 @@ paper_pip_drift_l2_plot <- function(locus_id, show_x_axis = FALSE, show_legend =
     labs(
       title = NULL,
       x = if (show_x_axis) "Annotation scale c" else NULL,
-      y = expression("PIP shift from baseline, " * "||" * Delta * "PIP" * "||"[2]),
+      y = expression("||" * Delta * "PIP" * "||"[2]),
       color = expression("Prior variance " * sigma[0]^2)
     ) +
     paper_panel_theme +
@@ -1565,7 +1537,7 @@ if (requireNamespace("patchwork", quietly = TRUE)) {
   selected_locus_zoom_l2_header <- (
     paper_column_header_plot("") |
       paper_column_header_plot("Most shifted PIPs") |
-      paper_column_header_plot("PIP drift")
+      paper_column_header_plot("PIP drift from baseline")
   ) +
     patchwork::plot_layout(widths = c(0.08, 1, 1))
 
@@ -1584,11 +1556,11 @@ if (requireNamespace("patchwork", quietly = TRUE)) {
     c(list(selected_locus_zoom_l2_header), selected_locus_zoom_l2_rows),
     ncol = 1
   ) +
-    patchwork::plot_layout(heights = c(0.18, rep(1, length(selected_locus_zoom_l2_rows)))) &
+    patchwork::plot_layout(heights = c(0.10, rep(1, length(selected_locus_zoom_l2_rows)))) &
     theme(
       plot.margin = margin(4.5, 4.5, 4.5, 4.5),
       panel.spacing.x = grid::unit(3.2, "mm"),
-      panel.spacing.y = grid::unit(5.5, "mm")
+      panel.spacing.y = grid::unit(3.2, "mm")
     )
 
   ggsave(
