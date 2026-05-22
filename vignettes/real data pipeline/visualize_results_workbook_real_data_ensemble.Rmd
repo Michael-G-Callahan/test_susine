@@ -1481,12 +1481,19 @@ paper_lollipop_l2_plot <- function(locus_id, show_x_axis = FALSE, show_legend = 
 
 paper_pip_drift_l2_plot <- function(locus_id, show_x_axis = FALSE, show_legend = FALSE) {
   df <- dplyr::filter(selected_l2_drift_tbl, .data$locus_id == !!locus_id)
-  ggplot(df, aes(x = c_value, y = l2_from_reference_c0_sigma02,
-                 color = factor(sigma_0_2_scalar))) +
+  highlight_df <- dplyr::filter(selected_l2_highest_weight_drift_tbl, .data$locus_id == !!locus_id) %>%
+    dplyr::mutate(weight_label = sprintf("%.2f", .data$agg_weight_run))
+  y_span <- diff(range(df$l2_from_reference_c0_sigma02, na.rm = TRUE))
+  if (!is.finite(y_span) || y_span <= 0) y_span <- 1
+  label_nudge_x <- if (nrow(highlight_df) && highlight_df$c_value[[1]] > mean(selected_drift_xlim)) -0.12 else 0.12
+  label_nudge_y <- 0.08 * y_span
+
+  p <- ggplot(df, aes(x = c_value, y = l2_from_reference_c0_sigma02,
+                      color = factor(sigma_0_2_scalar))) +
     geom_line(linewidth = 0.7, na.rm = TRUE) +
     geom_point(size = 2, na.rm = TRUE) +
     geom_point(
-      data = dplyr::filter(selected_l2_highest_weight_drift_tbl, .data$locus_id == !!locus_id),
+      data = highlight_df,
       aes(x = c_value, y = l2_from_reference_c0_sigma02),
       inherit.aes = FALSE,
       shape = 21,
@@ -1495,7 +1502,48 @@ paper_pip_drift_l2_plot <- function(locus_id, show_x_axis = FALSE, show_legend =
       fill = NA,
       color = "black",
       na.rm = TRUE
-    ) +
+    )
+
+  if (nrow(highlight_df)) {
+    if (requireNamespace("ggrepel", quietly = TRUE)) {
+      p <- p +
+        ggrepel::geom_label_repel(
+          data = highlight_df,
+          aes(x = c_value, y = l2_from_reference_c0_sigma02, label = weight_label),
+          inherit.aes = FALSE,
+          color = "black",
+          fill = "white",
+          label.size = 0.18,
+          size = 2.5,
+          box.padding = 0.35,
+          point.padding = 0.55,
+          min.segment.length = 0,
+          segment.color = "black",
+          segment.size = 0.25,
+          seed = 17,
+          nudge_x = label_nudge_x,
+          nudge_y = label_nudge_y,
+          max.overlaps = Inf,
+          show.legend = FALSE
+        )
+    } else {
+      p <- p +
+        geom_label(
+          data = highlight_df,
+          aes(x = c_value, y = l2_from_reference_c0_sigma02, label = weight_label),
+          inherit.aes = FALSE,
+          color = "black",
+          fill = "white",
+          label.size = 0.18,
+          size = 2.5,
+          nudge_x = label_nudge_x,
+          nudge_y = label_nudge_y,
+          show.legend = FALSE
+        )
+    }
+  }
+
+  p +
     coord_cartesian(xlim = selected_drift_xlim) +
     labs(
       title = NULL,
@@ -1511,6 +1559,101 @@ paper_pip_drift_l2_plot <- function(locus_id, show_x_axis = FALSE, show_legend =
       axis.text.x = if (show_x_axis) element_text(size = 7, color = "grey25") else element_blank(),
       axis.ticks.x = if (show_x_axis) element_line(color = "grey35") else element_blank()
     )
+}
+
+paper_lollipop_l2_legend_plot <- function() {
+  df <- tibble::tibble(
+    fit_type = factor(
+      c("Baseline", "SuSiNE ensemble", "Warm refit"),
+      levels = c("Baseline", "SuSiNE ensemble", "Warm refit")
+    ),
+    x = c(0.16, 0.50, 0.82),
+    y = 0.55
+  )
+  ggplot(df, aes(x = x, y = y, color = fit_type)) +
+    geom_point(size = 2.8) +
+    geom_text(aes(label = fit_type), x = df$x + 0.045, hjust = 0,
+              size = 2.7, color = "grey15") +
+    scale_color_manual(
+      values = c("Baseline" = "#666666", "SuSiNE ensemble" = "#0B6E4F", "Warm refit" = "#C65D00"),
+      guide = "none"
+    ) +
+    coord_cartesian(xlim = c(0, 1), ylim = c(0, 1), expand = FALSE, clip = "off") +
+    theme_void() +
+    theme(plot.margin = margin(0, 4, 0, 4))
+}
+
+paper_highlight_l2_legend_plot <- function() {
+  ggplot() +
+    geom_point(
+      aes(x = 0.14, y = 0.55),
+      shape = 21,
+      size = 4.0,
+      stroke = 1.1,
+      fill = NA,
+      color = "black"
+    ) +
+    geom_label(
+      aes(x = 0.32, y = 0.72, label = "0.42"),
+      size = 2.5,
+      label.size = 0.18,
+      fill = "white",
+      color = "black"
+    ) +
+    geom_segment(
+      aes(x = 0.25, xend = 0.17, y = 0.66, yend = 0.58),
+      color = "black",
+      linewidth = 0.25
+    ) +
+    annotate(
+      "text",
+      x = 0.44,
+      y = 0.50,
+      label = "circle: highest-weight setting\nnumber: aggregation weight",
+      hjust = 0,
+      size = 2.55,
+      color = "grey15"
+    ) +
+    coord_cartesian(xlim = c(0, 1), ylim = c(0, 1), expand = FALSE, clip = "off") +
+    theme_void() +
+    theme(plot.margin = margin(0, 4, 0, 4))
+}
+
+paper_sigma_l2_legend_plot <- function() {
+  sigma_levels <- sort(unique(selected_l2_drift_tbl$sigma_0_2_scalar))
+  sigma_labels <- format_grid_value(sigma_levels)
+  sigma_cols <- scales::hue_pal()(length(sigma_levels))
+  df <- tibble::tibble(
+    sigma_label = sigma_labels,
+    color = sigma_cols,
+    col = rep(seq_len(4), length.out = length(sigma_levels)),
+    row = rep(c(2, 1), each = 4, length.out = length(sigma_levels))
+  ) %>%
+    dplyr::mutate(
+      x = 0.08 + (.data$col - 1) * 0.23,
+      xend = .data$x + 0.055,
+      text_x = .data$xend + 0.025,
+      y = 0.28 + (.data$row - 1) * 0.35
+    )
+  ggplot(df) +
+    geom_segment(aes(x = x, xend = xend, y = y, yend = y, color = sigma_label),
+                 linewidth = 0.7) +
+    geom_point(aes(x = xend, y = y, color = sigma_label), size = 2.1) +
+    geom_text(aes(x = text_x, y = y, label = sigma_label),
+              hjust = 0, size = 2.45, color = "grey15") +
+    scale_color_manual(values = stats::setNames(df$color, df$sigma_label), guide = "none") +
+    annotate(
+      "text",
+      x = 0.02,
+      y = 0.88,
+      label = expression(sigma[0]^2),
+      hjust = 0,
+      size = 2.65,
+      color = "grey15"
+    ) +
+    coord_cartesian(xlim = c(0, 1), ylim = c(0, 1), expand = FALSE, clip = "off") +
+    theme_void() +
+    theme(plot.margin = margin(0, 4, 0, 4))
 }
 
 if (requireNamespace("patchwork", quietly = TRUE)) {
@@ -1543,24 +1686,30 @@ if (requireNamespace("patchwork", quietly = TRUE)) {
 
   selected_locus_zoom_l2_rows <- purrr::map2(selected_zoom_l2_loci, seq_along(selected_zoom_l2_loci), function(loc, i) {
     show_x_axis <- i == length(selected_zoom_l2_loci)
-    show_legend <- i == length(selected_zoom_l2_loci)
     (
       paper_locus_row_label_plot(loc) |
-        paper_lollipop_l2_plot(loc, show_x_axis = show_x_axis, show_legend = show_legend) |
-        paper_pip_drift_l2_plot(loc, show_x_axis = show_x_axis, show_legend = show_legend)
+        paper_lollipop_l2_plot(loc, show_x_axis = show_x_axis, show_legend = FALSE) |
+        paper_pip_drift_l2_plot(loc, show_x_axis = show_x_axis, show_legend = FALSE)
     ) +
       patchwork::plot_layout(widths = c(0.08, 1, 1))
   })
 
+  selected_locus_zoom_l2_legend <- (
+    paper_lollipop_l2_legend_plot() |
+      paper_highlight_l2_legend_plot() |
+      paper_sigma_l2_legend_plot()
+  ) +
+    patchwork::plot_layout(widths = c(1, 1, 1))
+
   selected_locus_zoom_l2_figure <- patchwork::wrap_plots(
-    c(list(selected_locus_zoom_l2_header), selected_locus_zoom_l2_rows),
+    c(list(selected_locus_zoom_l2_header), selected_locus_zoom_l2_rows, list(selected_locus_zoom_l2_legend)),
     ncol = 1
   ) +
-    patchwork::plot_layout(heights = c(0.10, rep(1, length(selected_locus_zoom_l2_rows)))) &
+    patchwork::plot_layout(heights = c(0.06, rep(0.90, length(selected_locus_zoom_l2_rows)), 0.42)) &
     theme(
-      plot.margin = margin(4.5, 4.5, 4.5, 4.5),
+      plot.margin = margin(2.5, 4.5, 2.5, 4.5),
       panel.spacing.x = grid::unit(3.2, "mm"),
-      panel.spacing.y = grid::unit(3.2, "mm")
+      panel.spacing.y = grid::unit(2.0, "mm")
     )
 
   ggsave(
@@ -1584,7 +1733,7 @@ if (requireNamespace("patchwork", quietly = TRUE)) {
     file.path(overall_figure_dir, "paper_selected_locus_zoom_lollipop_l2_drift.png"),
     selected_locus_zoom_l2_figure,
     width = 7.52,
-    height = 9.2,
+    height = 8.4,
     dpi = 300,
     bg = "white",
     limitsize = FALSE
@@ -1593,7 +1742,7 @@ if (requireNamespace("patchwork", quietly = TRUE)) {
     file.path(overall_figure_dir, "paper_selected_locus_zoom_lollipop_l2_drift.pdf"),
     selected_locus_zoom_l2_figure,
     width = 7.52,
-    height = 9.2,
+    height = 8.4,
     bg = "white",
     limitsize = FALSE
   )
