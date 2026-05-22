@@ -1335,7 +1335,7 @@ resolve_locus_token <- function(token, locus_ids) {
   hit[[1]]
 }
 
-selected_locus_tokens <- c("ydjc", "arsa", "prpf38b")
+selected_locus_tokens <- c("rrp7a", "arsa", "prpf38b")
 selected_zoom_loci <- vapply(
   selected_locus_tokens,
   resolve_locus_token,
