@@ -1187,10 +1187,10 @@ effect_diffuseness_tbl <- if (nrow(effect_diffuseness_run_tbl)) {
   )
 }
 
-diffuseness_breaks <- c(0, 1.5, 5, 20, 100, 2000, 4000, Inf)
+diffuseness_breaks <- c(0, 1.5, 5, 20, 100, 2500, 4000, Inf)
 diffuseness_labels <- c(
   "0-1.5", "1.5-5", "5-20", "20-100",
-  "100-2k", "2k-4k", "4k+"
+  "100-2.5k", "2.5k-4k", "4k+"
 )
 effect_diffuseness_count_tbl <- effect_diffuseness_tbl %>%
   dplyr::mutate(
@@ -1345,10 +1345,41 @@ selected_zoom_loci <- vapply(
 
 paper_locus_label <- function(locus_id) sub("_lung$", "", locus_id)
 
-paper_lollipop_plot <- function(locus_id, show_legend = FALSE) {
+selected_lollipop_xlim <- c(0, 1)
+selected_drift_tbl <- purrr::map_dfr(selected_zoom_loci, function(loc) {
+  ref_pip <- reference_pip_tbl(loc)
+  run_tbl <- functional_grid_summary %>%
+    dplyr::filter(.data$locus_id == !!loc) %>%
+    dplyr::arrange(.data$sigma_0_2_scalar, .data$c_value)
+  pip_tbl <- variant_posteriors %>%
+    dplyr::filter(.data$locus_id == !!loc,
+                  .data$run_id %in% run_tbl$run_id) %>%
+    dplyr::select(.data$run_id, .data$variant_id, .data$pip) %>%
+    dplyr::inner_join(ref_pip, by = "variant_id")
+  run_tbl %>%
+    dplyr::mutate(
+      jsd_from_reference_c0_sigma02 = purrr::map_dbl(.data$run_id, function(rid) {
+        x <- pip_tbl %>%
+          dplyr::filter(.data$run_id == .env$rid) %>%
+          dplyr::arrange(.data$variant_id)
+        if (!nrow(x)) return(NA_real_)
+        js_distance(x$pip, x$baseline_pip)
+      }),
+      locus_id = loc,
+      .before = 1L
+    )
+})
+selected_drift_xlim <- range(selected_drift_tbl$c_value, na.rm = TRUE)
+if (!all(is.finite(selected_drift_xlim))) selected_drift_xlim <- c(0, 1)
+selected_drift_ylim <- range(selected_drift_tbl$jsd_from_reference_c0_sigma02, na.rm = TRUE)
+if (!all(is.finite(selected_drift_ylim))) selected_drift_ylim <- c(0, 1)
+selected_drift_ylim <- c(0, selected_drift_ylim[[2]] * 1.05)
+
+paper_lollipop_plot <- function(locus_id, panel_letter, show_legend = FALSE) {
   plot_aggregated_lollipop(locus_id) +
+    scale_x_continuous(limits = selected_lollipop_xlim) +
     labs(
-      title = paste0(paper_locus_label(locus_id), ": variant PIPs"),
+      title = paste0(panel_letter, "   ", paper_locus_label(locus_id), ": variant PIPs"),
       subtitle = NULL
     ) +
     paper_panel_theme +
@@ -1358,10 +1389,11 @@ paper_lollipop_plot <- function(locus_id, show_legend = FALSE) {
     )
 }
 
-paper_pip_drift_plot <- function(locus_id, show_legend = FALSE) {
+paper_pip_drift_plot <- function(locus_id, panel_letter, show_legend = FALSE) {
   plot_drift(locus_id) +
+    coord_cartesian(xlim = selected_drift_xlim, ylim = selected_drift_ylim) +
     labs(
-      title = paste0(paper_locus_label(locus_id), ": PIP drift"),
+      title = paste0(panel_letter, "   ", paper_locus_label(locus_id), ": PIP drift"),
       subtitle = NULL,
       x = "Annotation scale c",
       y = "PIP JSD from baseline"
@@ -1371,10 +1403,13 @@ paper_pip_drift_plot <- function(locus_id, show_legend = FALSE) {
 }
 
 if (requireNamespace("patchwork", quietly = TRUE)) {
+  zoom_panel_letters <- LETTERS[seq_len(2L * length(selected_zoom_loci))]
   selected_locus_zoom_rows <- purrr::map2(selected_zoom_loci, seq_along(selected_zoom_loci), function(loc, i) {
     show_legend <- i == length(selected_zoom_loci)
-    paper_lollipop_plot(loc, show_legend = show_legend) |
-      paper_pip_drift_plot(loc, show_legend = show_legend)
+    left_letter <- zoom_panel_letters[[2L * i - 1L]]
+    right_letter <- zoom_panel_letters[[2L * i]]
+    paper_lollipop_plot(loc, left_letter, show_legend = show_legend) |
+      paper_pip_drift_plot(loc, right_letter, show_legend = show_legend)
   })
 
   selected_locus_zoom_figure <- patchwork::wrap_plots(
