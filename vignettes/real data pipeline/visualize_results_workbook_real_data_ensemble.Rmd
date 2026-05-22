@@ -1370,6 +1370,16 @@ selected_drift_ylim <- c(0, selected_drift_ylim[[2]] * 1.05)
 selected_drift_l2_ylim <- range(selected_drift_tbl$l2_from_reference_c0_sigma02, na.rm = TRUE)
 if (!all(is.finite(selected_drift_l2_ylim))) selected_drift_l2_ylim <- c(0, 1)
 selected_drift_l2_ylim <- c(0, selected_drift_l2_ylim[[2]] * 1.05)
+selected_highest_weight_drift_tbl <- selected_drift_tbl %>%
+  dplyr::group_by(.data$locus_id) %>%
+  dplyr::arrange(
+    dplyr::desc(.data$agg_weight_run),
+    dplyr::desc(.data$elbo_final),
+    .data$run_id,
+    .by_group = TRUE
+  ) %>%
+  dplyr::slice_head(n = 1) %>%
+  dplyr::ungroup()
 
 paper_lollipop_plot <- function(locus_id, panel_letter, show_legend = FALSE) {
   plot_aggregated_lollipop(locus_id) +
@@ -1387,6 +1397,17 @@ paper_lollipop_plot <- function(locus_id, panel_letter, show_legend = FALSE) {
 
 paper_pip_drift_plot <- function(locus_id, panel_letter, show_legend = FALSE) {
   plot_drift(locus_id) +
+    geom_point(
+      data = dplyr::filter(selected_highest_weight_drift_tbl, .data$locus_id == !!locus_id),
+      aes(x = c_value, y = jsd_from_reference_c0_sigma02),
+      inherit.aes = FALSE,
+      shape = 21,
+      size = 4.0,
+      stroke = 1.1,
+      fill = NA,
+      color = "black",
+      na.rm = TRUE
+    ) +
     coord_cartesian(xlim = selected_drift_xlim, ylim = selected_drift_ylim) +
     labs(
       title = paste0(panel_letter, "   ", paper_locus_label(locus_id), ": PIP drift"),
@@ -1405,6 +1426,17 @@ paper_pip_drift_l2_plot <- function(locus_id, panel_letter, show_legend = FALSE)
                  color = factor(sigma_0_2_scalar))) +
     geom_line(linewidth = 0.7, na.rm = TRUE) +
     geom_point(size = 2, na.rm = TRUE) +
+    geom_point(
+      data = dplyr::filter(selected_highest_weight_drift_tbl, .data$locus_id == !!locus_id),
+      aes(x = c_value, y = l2_from_reference_c0_sigma02),
+      inherit.aes = FALSE,
+      shape = 21,
+      size = 4.0,
+      stroke = 1.1,
+      fill = NA,
+      color = "black",
+      na.rm = TRUE
+    ) +
     coord_cartesian(xlim = selected_drift_xlim, ylim = selected_drift_l2_ylim) +
     labs(
       title = paste0(panel_letter, "   ", paper_locus_label(locus_id), ": PIP drift"),
