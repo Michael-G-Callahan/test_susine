@@ -1396,7 +1396,8 @@ paper_pip_drift_plot <- function(locus_id, panel_letter, show_legend = FALSE) {
       title = paste0(panel_letter, "   ", paper_locus_label(locus_id), ": PIP drift"),
       subtitle = NULL,
       x = "Annotation scale c",
-      y = "PIP JSD from baseline"
+      y = "PIP JSD from baseline",
+      color = expression("Prior variance " * sigma[0]^2)
     ) +
     paper_panel_theme +
     theme(legend.position = if (show_legend) "bottom" else "none")
