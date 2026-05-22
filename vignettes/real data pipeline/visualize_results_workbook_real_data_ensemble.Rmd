@@ -1385,7 +1385,7 @@ paper_lollipop_plot <- function(locus_id, panel_letter, show_legend = FALSE) {
   plot_aggregated_lollipop(locus_id) +
     scale_x_continuous(limits = selected_lollipop_xlim) +
     labs(
-      title = paste0(panel_letter, "   ", paper_locus_label(locus_id), ": variant PIPs"),
+      title = paste0(panel_letter, "   ", paper_locus_label(locus_id), ": most shifted PIPs"),
       subtitle = NULL
     ) +
     paper_panel_theme +
