@@ -61,12 +61,17 @@ Important provenance notes:
   top 8 causal variants by absolute effect size as positives. The remaining
   causal variants are not counted as positives for the confusion-bin scoring
   used in pooled AUPRC and precision-recall plots.
-- There are two similar but not identical implementations of cluster-weight
-  aggregation. The primary full-ensemble aggregation in `run_model.R` uses
-  cluster representatives and frequency-adjusted ELBO weights. The scaling-bin
-  helper in `collect_results.R` uses all fits inside each cluster with ELBO
-  softmax weights and uniform cluster weights. This matters for scaling-curve
-  interpretation.
+- Cluster-weight aggregation is unified across the package (resolved
+  2026-05-22). Both the primary full-ensemble aggregation in `run_model.R`
+  (via `.cluster_weight_from_hc()`) and the scaling-bin helper in
+  `collect_results.R` (via `aggregate_pip_matrix(..., method = "cluster_weight")`
+  -> `.aggregate_cluster_weight()`) now delegate to `.cluster_weights_from_hc()`,
+  which selects the highest-ELBO nominee per JSD cluster and applies
+  frequency-adjusted softmax(ELBO) weights across nominees. Scaling-curve
+  outputs produced before the unification used a different rule
+  (each cluster weighted `1/K`, all members contributing via within-cluster
+  softmax) and should be regenerated before being read as the published
+  cluster-weight method.
 
 ## 2. Manuscript context
 

@@ -849,9 +849,22 @@ aggregate_pip_matrix <- function(pip_mat, elbos, method, jsd_threshold = 0.15, h
 }
 
 # Internal JSD-based cluster-then-ELBO-softmax aggregation.
+#
+# Forms JSD-based clusters of the N fits (columns of pip_mat), nominates the
+# single highest-ELBO fit in each cluster as that cluster's representative,
+# and assigns the representatives across-cluster softmax(ELBO) weights with a
+# frequency adjustment (divide by cluster size, then renormalise). Only the
+# nominee PIP vectors contribute to the aggregated output; non-nominee fits
+# get weight zero.
+#
+# This delegates to `.cluster_weights_from_hc()` in run_model.R so that all
+# cluster-weight aggregation in the package (PIP aggregation here, real-data
+# run-level weights in real_data_pipeline.R, and the simulation main-AUPRC
+# aggregation in run_model.R) uses a single shared implementation.
 #' @keywords internal
 .aggregate_cluster_weight <- function(pip_mat, elbos, jsd_threshold, hc = NULL) {
-  N   <- ncol(pip_mat)
+  N <- ncol(pip_mat)
+  if (N <= 1L) return(as.vector(pip_mat))
   eps <- 1e-10
   if (is.null(hc)) {
     H   <- apply(pip_mat + eps, 2L, function(pv) -sum(pv * log(pv)))
@@ -862,18 +875,10 @@ aggregate_pip_matrix <- function(pip_mat, elbos, method, jsd_threshold = 0.15, h
         jsd[i, j]  <- jsd[j, i] <- max(-sum(mix * log(mix)) - 0.5 * (H[i] + H[j]), 0)
       }
     }
-    hc <- hclust(as.dist(jsd), method = "complete")
+    hc <- stats::hclust(stats::as.dist(jsd), method = "complete")
   }
-  clusters <- cutree(hc, h = jsd_threshold)
-  K        <- max(clusters)
-  w        <- numeric(N)
-  e        <- ifelse(is.na(elbos), -Inf, elbos)
-  for (k in seq_len(K)) {
-    idx    <- which(clusters == k)
-    ew     <- exp(e[idx] - max(e[idx]))
-    w[idx] <- ew / sum(ew) / K
-  }
-  as.vector(pip_mat %*% w)
+  cw <- .cluster_weights_from_hc(hc, jsd_threshold, elbos, n_fits = N)
+  as.vector(pip_mat[, cw$rep_idx, drop = FALSE] %*% cw$w_rep)
 }
 
 # Select n_ens run_ids from run_meta using the appropriate lever strategy.
