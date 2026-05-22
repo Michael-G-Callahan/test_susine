@@ -432,7 +432,8 @@ plot_aggregated_lollipop <- function(locus_id) {
 ```
 
 ```{r lollipop-helper-override}
-plot_aggregated_lollipop <- function(locus_id) {
+plot_aggregated_lollipop <- function(locus_id, n_variants = 15L) {
+  n_variants <- as.integer(n_variants)
   plot_df <- aggregated_variants %>%
     dplyr::filter(.data$locus_id == !!locus_id) %>%
     dplyr::left_join(reference_pip_tbl(locus_id), by = "variant_id") %>%
@@ -451,13 +452,13 @@ plot_aggregated_lollipop <- function(locus_id) {
       dplyr::desc(.data$abs_delta_baseline_ensemble),
       .data$ld_matrix_index
     ) %>%
-    dplyr::slice_head(n = 15)
+    dplyr::slice_head(n = n_variants)
 
   if (!nrow(plot_df)) {
     plot_df <- aggregated_variants %>%
       dplyr::filter(.data$locus_id == !!locus_id) %>%
       dplyr::arrange(dplyr::desc(.data$aggregated_pip), .data$ld_matrix_index) %>%
-      dplyr::slice_head(n = 5) %>%
+      dplyr::slice_head(n = n_variants) %>%
       dplyr::left_join(reference_pip_tbl(locus_id), by = "variant_id") %>%
       dplyr::left_join(refit_pip_tbl(locus_id), by = "variant_id")
   }
@@ -497,7 +498,7 @@ plot_aggregated_lollipop <- function(locus_id) {
     ) +
     labs(
       title = paste("Baseline vs Ensemble Variant PIPs:", locus_id),
-      subtitle = "Top 15 variants by absolute baseline-to-ensemble PIP difference",
+      subtitle = paste0("Top ", n_variants, " variants by absolute baseline-to-ensemble PIP difference"),
       x = "PIP",
       y = "Variant"
     ) +
@@ -1332,45 +1333,94 @@ selected_zoom_loci <- vapply(
 paper_locus_label <- function(locus_id) sub("_lung$", "", locus_id)
 
 selected_lollipop_xlim <- c(0, 1)
-selected_drift_tbl <- purrr::map_dfr(selected_zoom_loci, function(loc) {
-  ref_pip <- reference_pip_tbl(loc)
-  run_tbl <- functional_grid_summary %>%
-    dplyr::filter(.data$locus_id == !!loc) %>%
-    dplyr::arrange(.data$sigma_0_2_scalar, .data$c_value)
-  pip_tbl <- variant_posteriors %>%
-    dplyr::filter(.data$locus_id == !!loc,
-                  .data$run_id %in% run_tbl$run_id) %>%
-    dplyr::select(.data$run_id, .data$variant_id, .data$pip) %>%
-    dplyr::inner_join(ref_pip, by = "variant_id")
-  run_tbl %>%
-    dplyr::mutate(
-      jsd_from_reference_c0_sigma02 = purrr::map_dbl(.data$run_id, function(rid) {
-        x <- pip_tbl %>%
-          dplyr::filter(.data$run_id == .env$rid) %>%
-          dplyr::arrange(.data$variant_id)
-        if (!nrow(x)) return(NA_real_)
-        js_distance(x$pip, x$baseline_pip)
-      }),
-      l2_from_reference_c0_sigma02 = purrr::map_dbl(.data$run_id, function(rid) {
-        x <- pip_tbl %>%
-          dplyr::filter(.data$run_id == .env$rid) %>%
-          dplyr::arrange(.data$variant_id)
-        if (!nrow(x)) return(NA_real_)
-        sqrt(sum((x$pip - x$baseline_pip)^2, na.rm = TRUE))
-      }),
-      locus_id = loc,
-      .before = 1L
+least_movement_locus <- highest_weight_refit_basin %>%
+  dplyr::left_join(
+    paper_summary %>%
+      dplyr::transmute(
+        locus_id,
+        highest_weight_source_run_id,
+        susie_anchor_run_id,
+        jsd_susie_anchor_vs_highest_weight_source = purrr::pmap_dbl(
+          list(.data$locus_id, .data$susie_anchor_run_id, .data$highest_weight_source_run_id),
+          run_pip_jsd
+        )
+      ),
+    by = "locus_id"
+  ) %>%
+  dplyr::transmute(
+    locus_id,
+    movement_distance = sqrt(
+      .data$basin_r2_drift_highest_weight_vs_susie_anchor^2 +
+        .data$jsd_susie_anchor_vs_highest_weight_source^2
     )
-})
+  ) %>%
+  dplyr::filter(is.finite(.data$movement_distance)) %>%
+  dplyr::arrange(.data$movement_distance, .data$locus_id) %>%
+  dplyr::slice_head(n = 1) %>%
+  dplyr::pull(.data$locus_id)
+
+selected_l2_locus_tokens <- c("rrp7a", "arsa", "prpf38b", "ydjc", "tmtc1")
+selected_zoom_l2_loci <- unique(c(
+  vapply(
+    selected_l2_locus_tokens,
+    resolve_locus_token,
+    character(1),
+    locus_ids = loci
+  ),
+  least_movement_locus
+))
+
+build_selected_drift_tbl <- function(selected_loci) {
+  purrr::map_dfr(selected_loci, function(loc) {
+    ref_pip <- reference_pip_tbl(loc)
+    run_tbl <- functional_grid_summary %>%
+      dplyr::filter(.data$locus_id == !!loc) %>%
+      dplyr::arrange(.data$sigma_0_2_scalar, .data$c_value)
+    pip_tbl <- variant_posteriors %>%
+      dplyr::filter(.data$locus_id == !!loc,
+                    .data$run_id %in% run_tbl$run_id) %>%
+      dplyr::select(.data$run_id, .data$variant_id, .data$pip) %>%
+      dplyr::inner_join(ref_pip, by = "variant_id")
+    run_tbl %>%
+      dplyr::mutate(
+        jsd_from_reference_c0_sigma02 = purrr::map_dbl(.data$run_id, function(rid) {
+          x <- pip_tbl %>%
+            dplyr::filter(.data$run_id == .env$rid) %>%
+            dplyr::arrange(.data$variant_id)
+          if (!nrow(x)) return(NA_real_)
+          js_distance(x$pip, x$baseline_pip)
+        }),
+        l2_from_reference_c0_sigma02 = purrr::map_dbl(.data$run_id, function(rid) {
+          x <- pip_tbl %>%
+            dplyr::filter(.data$run_id == .env$rid) %>%
+            dplyr::arrange(.data$variant_id)
+          if (!nrow(x)) return(NA_real_)
+          sqrt(sum((x$pip - x$baseline_pip)^2, na.rm = TRUE))
+        }),
+        locus_id = loc,
+        .before = 1L
+      )
+  })
+}
+
+selected_drift_tbl <- build_selected_drift_tbl(selected_zoom_loci)
+selected_l2_drift_tbl <- build_selected_drift_tbl(selected_zoom_l2_loci)
 selected_drift_xlim <- range(selected_drift_tbl$c_value, na.rm = TRUE)
 if (!all(is.finite(selected_drift_xlim))) selected_drift_xlim <- c(0, 1)
 selected_drift_ylim <- range(selected_drift_tbl$jsd_from_reference_c0_sigma02, na.rm = TRUE)
 if (!all(is.finite(selected_drift_ylim))) selected_drift_ylim <- c(0, 1)
 selected_drift_ylim <- c(0, selected_drift_ylim[[2]] * 1.05)
-selected_drift_l2_ylim <- range(selected_drift_tbl$l2_from_reference_c0_sigma02, na.rm = TRUE)
-if (!all(is.finite(selected_drift_l2_ylim))) selected_drift_l2_ylim <- c(0, 1)
-selected_drift_l2_ylim <- c(0, selected_drift_l2_ylim[[2]] * 1.05)
 selected_highest_weight_drift_tbl <- selected_drift_tbl %>%
+  dplyr::group_by(.data$locus_id) %>%
+  dplyr::arrange(
+    dplyr::desc(.data$agg_weight_run),
+    dplyr::desc(.data$elbo_final),
+    .data$run_id,
+    .by_group = TRUE
+  ) %>%
+  dplyr::slice_head(n = 1) %>%
+  dplyr::ungroup()
+selected_l2_highest_weight_drift_tbl <- selected_l2_drift_tbl %>%
   dplyr::group_by(.data$locus_id) %>%
   dplyr::arrange(
     dplyr::desc(.data$agg_weight_run),
@@ -1420,14 +1470,51 @@ paper_pip_drift_plot <- function(locus_id, panel_letter, show_legend = FALSE) {
     theme(legend.position = if (show_legend) "bottom" else "none")
 }
 
-paper_pip_drift_l2_plot <- function(locus_id, panel_letter, show_legend = FALSE) {
-  df <- dplyr::filter(selected_drift_tbl, .data$locus_id == !!locus_id)
+paper_column_header_plot <- function(label) {
+  ggplot() +
+    annotate("text", x = 0.5, y = 0.5, label = label,
+             fontface = "bold", size = 3.2) +
+    coord_cartesian(xlim = c(0, 1), ylim = c(0, 1), expand = FALSE) +
+    theme_void()
+}
+
+paper_locus_row_label_plot <- function(locus_id) {
+  ggplot() +
+    annotate("text", x = 0.5, y = 0.5, label = paper_locus_label(locus_id),
+             angle = 90, fontface = "bold", size = 3.0) +
+    coord_cartesian(xlim = c(0, 1), ylim = c(0, 1), expand = FALSE) +
+    theme_void()
+}
+
+paper_lollipop_l2_plot <- function(locus_id, show_x_axis = FALSE, show_legend = FALSE) {
+  plot_aggregated_lollipop(locus_id, n_variants = 5L) +
+    scale_x_continuous(limits = selected_lollipop_xlim) +
+    labs(
+      title = NULL,
+      subtitle = NULL,
+      x = if (show_x_axis) "PIP" else NULL,
+      y = NULL
+    ) +
+    paper_panel_theme +
+    theme(
+      legend.position = if (show_legend) "bottom" else "none",
+      axis.text.y = element_text(size = 5.8),
+      plot.title = element_blank(),
+      plot.subtitle = element_blank(),
+      axis.title.x = if (show_x_axis) element_text(size = 8.5) else element_blank(),
+      axis.text.x = if (show_x_axis) element_text(size = 7, color = "grey25") else element_blank(),
+      axis.ticks.x = if (show_x_axis) element_line(color = "grey35") else element_blank()
+    )
+}
+
+paper_pip_drift_l2_plot <- function(locus_id, show_x_axis = FALSE, show_legend = FALSE) {
+  df <- dplyr::filter(selected_l2_drift_tbl, .data$locus_id == !!locus_id)
   ggplot(df, aes(x = c_value, y = l2_from_reference_c0_sigma02,
                  color = factor(sigma_0_2_scalar))) +
     geom_line(linewidth = 0.7, na.rm = TRUE) +
     geom_point(size = 2, na.rm = TRUE) +
     geom_point(
-      data = dplyr::filter(selected_highest_weight_drift_tbl, .data$locus_id == !!locus_id),
+      data = dplyr::filter(selected_l2_highest_weight_drift_tbl, .data$locus_id == !!locus_id),
       aes(x = c_value, y = l2_from_reference_c0_sigma02),
       inherit.aes = FALSE,
       shape = 21,
@@ -1437,15 +1524,21 @@ paper_pip_drift_l2_plot <- function(locus_id, panel_letter, show_legend = FALSE)
       color = "black",
       na.rm = TRUE
     ) +
-    coord_cartesian(xlim = selected_drift_xlim, ylim = selected_drift_l2_ylim) +
+    coord_cartesian(xlim = selected_drift_xlim) +
     labs(
-      title = paste0(panel_letter, "   ", paper_locus_label(locus_id), ": PIP drift"),
-      x = "Annotation scale c",
+      title = NULL,
+      x = if (show_x_axis) "Annotation scale c" else NULL,
       y = expression("PIP shift from baseline, " * "||" * Delta * "PIP" * "||"[2]),
       color = expression("Prior variance " * sigma[0]^2)
     ) +
     paper_panel_theme +
-    theme(legend.position = if (show_legend) "bottom" else "none")
+    theme(
+      legend.position = if (show_legend) "bottom" else "none",
+      plot.title = element_blank(),
+      axis.title.x = if (show_x_axis) element_text(size = 8.5) else element_blank(),
+      axis.text.x = if (show_x_axis) element_text(size = 7, color = "grey25") else element_blank(),
+      axis.ticks.x = if (show_x_axis) element_line(color = "grey35") else element_blank()
+    )
 }
 
 if (requireNamespace("patchwork", quietly = TRUE)) {
@@ -1469,19 +1562,29 @@ if (requireNamespace("patchwork", quietly = TRUE)) {
       panel.spacing.y = grid::unit(5.5, "mm")
     )
 
-  selected_locus_zoom_l2_rows <- purrr::map2(selected_zoom_loci, seq_along(selected_zoom_loci), function(loc, i) {
-    show_legend <- i == length(selected_zoom_loci)
-    left_letter <- zoom_panel_letters[[2L * i - 1L]]
-    right_letter <- zoom_panel_letters[[2L * i]]
-    paper_lollipop_plot(loc, left_letter, show_legend = show_legend) |
-      paper_pip_drift_l2_plot(loc, right_letter, show_legend = show_legend)
+  selected_locus_zoom_l2_header <- (
+    paper_column_header_plot("") |
+      paper_column_header_plot("Most shifted PIPs") |
+      paper_column_header_plot("PIP drift")
+  ) +
+    patchwork::plot_layout(widths = c(0.08, 1, 1))
+
+  selected_locus_zoom_l2_rows <- purrr::map2(selected_zoom_l2_loci, seq_along(selected_zoom_l2_loci), function(loc, i) {
+    show_x_axis <- i == length(selected_zoom_l2_loci)
+    show_legend <- i == length(selected_zoom_l2_loci)
+    (
+      paper_locus_row_label_plot(loc) |
+        paper_lollipop_l2_plot(loc, show_x_axis = show_x_axis, show_legend = show_legend) |
+        paper_pip_drift_l2_plot(loc, show_x_axis = show_x_axis, show_legend = show_legend)
+    ) +
+      patchwork::plot_layout(widths = c(0.08, 1, 1))
   })
 
   selected_locus_zoom_l2_figure <- patchwork::wrap_plots(
-    selected_locus_zoom_l2_rows,
+    c(list(selected_locus_zoom_l2_header), selected_locus_zoom_l2_rows),
     ncol = 1
   ) +
-    patchwork::plot_layout(heights = rep(1, length(selected_locus_zoom_l2_rows))) &
+    patchwork::plot_layout(heights = c(0.18, rep(1, length(selected_locus_zoom_l2_rows)))) &
     theme(
       plot.margin = margin(4.5, 4.5, 4.5, 4.5),
       panel.spacing.x = grid::unit(3.2, "mm"),
