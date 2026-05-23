@@ -221,6 +221,62 @@ refit_pip_tbl <- function(locus_id) {
     )
 }
 
+real_data_job_context_cache <- NULL
+real_data_job_context <- function() {
+  if (!is.null(real_data_job_context_cache)) return(real_data_job_context_cache)
+  job_config_path <- file.path(
+    here("output", "run_history", job_name, parent_job_id, "job_config.json")
+  )
+  job_cfg <- jsonlite::fromJSON(job_config_path, simplifyVector = FALSE)
+  real_data_job_context_cache <<- list(
+    manifest_path = job_cfg$job$manifest_path,
+    repo_root = job_cfg$paths$repo_root %||% here()
+  )
+  real_data_job_context_cache
+}
+
+selected_locus_R_cache <- new.env(parent = emptyenv())
+selected_locus_R_matrix <- function(locus_id) {
+  key <- as.character(locus_id)
+  if (exists(key, envir = selected_locus_R_cache, inherits = FALSE)) {
+    return(get(key, envir = selected_locus_R_cache, inherits = FALSE))
+  }
+  ctx <- real_data_job_context()
+  bundle <- load_real_data_locus_bundle(
+    locus_id,
+    manifest_path = ctx$manifest_path,
+    repo_root = ctx$repo_root,
+    apply_sample_size_filter = FALSE
+  )
+  assign(key, bundle$R, envir = selected_locus_R_cache)
+  bundle$R
+}
+
+signal_contribution_vec <- function(b, R) {
+  b <- as.numeric(b)
+  if (!length(b) || is.null(R) || nrow(R) != length(b) || ncol(R) != length(b)) {
+    return(rep(NA_real_, length(b)))
+  }
+  as.numeric(b * as.vector(R %*% b))
+}
+
+add_signal_contribution_cols <- function(df, locus_id) {
+  if (!nrow(df)) return(df)
+  R <- selected_locus_R_matrix(locus_id)
+  if (is.null(R) || nrow(R) != nrow(df) || ncol(R) != nrow(df)) {
+    df$baseline_signal_contribution <- NA_real_
+    df$aggregated_signal_contribution <- NA_real_
+    df$refit_signal_contribution <- NA_real_
+    return(df)
+  }
+  ord <- order(df$ld_matrix_index)
+  inv_ord <- order(ord)
+  df$baseline_signal_contribution <- signal_contribution_vec(df$baseline_posterior_mean[ord], R)[inv_ord]
+  df$aggregated_signal_contribution <- signal_contribution_vec(df$aggregated_posterior_mean[ord], R)[inv_ord]
+  df$refit_signal_contribution <- signal_contribution_vec(df$refit_posterior_mean[ord], R)[inv_ord]
+  df
+}
+
 run_pip_vec <- function(locus_id, run_id) {
   if (length(run_id) != 1L || is.na(run_id)) return(NULL)
   x <- variant_posteriors %>%
@@ -468,7 +524,7 @@ plot_aggregated_lollipop <- function(locus_id) {
 selected_lollipop_variant_tbl <- function(
     locus_id,
     n_variants = 15L,
-    selection_metric = c("pip_delta", "posterior_mean_delta")
+    selection_metric = c("pip_delta", "posterior_mean_delta", "signal_contribution_delta")
 ) {
   n_variants <- as.integer(n_variants)
   selection_metric <- match.arg(selection_metric)
@@ -485,6 +541,7 @@ selected_lollipop_variant_tbl <- function(
   plot_df <- locus_aggregated_variants %>%
     dplyr::left_join(reference_pip_tbl(locus_id), by = "variant_id") %>%
     dplyr::left_join(refit_pip_tbl(locus_id), by = "variant_id") %>%
+    add_signal_contribution_cols(locus_id) %>%
     dplyr::mutate(
       aggregated_conditional_effect = dplyr::if_else(
         is.finite(.data$aggregated_pip) & .data$aggregated_pip > .Machine$double.eps,
@@ -499,8 +556,10 @@ selected_lollipop_variant_tbl <- function(
       ),
       abs_delta_baseline_ensemble = abs(.data$aggregated_pip - .data$baseline_pip),
       abs_delta_posterior_mean = abs(.data$aggregated_posterior_mean - .data$baseline_posterior_mean),
+      abs_delta_signal_contribution = abs(.data$aggregated_signal_contribution - .data$baseline_signal_contribution),
       selection_score = dplyr::case_when(
         .env$selection_metric == "posterior_mean_delta" ~ .data$abs_delta_posterior_mean,
+        .env$selection_metric == "signal_contribution_delta" ~ .data$abs_delta_signal_contribution,
         TRUE ~ .data$abs_delta_baseline_ensemble
       )
     ) %>%
@@ -517,13 +576,15 @@ selected_lollipop_variant_tbl <- function(
       dplyr::slice_head(n = n_variants) %>%
       dplyr::left_join(reference_pip_tbl(locus_id), by = "variant_id") %>%
       dplyr::left_join(refit_pip_tbl(locus_id), by = "variant_id") %>%
+      add_signal_contribution_cols(locus_id) %>%
       dplyr::mutate(
         aggregated_conditional_effect = dplyr::if_else(
           is.finite(.data$aggregated_pip) & .data$aggregated_pip > .Machine$double.eps,
           .data$aggregated_posterior_mean / .data$aggregated_pip,
           NA_real_
         ),
-        abs_delta_posterior_mean = abs(.data$aggregated_posterior_mean - .data$baseline_posterior_mean)
+        abs_delta_posterior_mean = abs(.data$aggregated_posterior_mean - .data$baseline_posterior_mean),
+        abs_delta_signal_contribution = abs(.data$aggregated_signal_contribution - .data$baseline_signal_contribution)
       )
   }
 
@@ -1582,13 +1643,13 @@ selected_l2_effect_tbl <- purrr::map_dfr(
   ~ selected_lollipop_variant_tbl(
     .x,
     n_variants = selected_l2_n_variants,
-    selection_metric = "posterior_mean_delta"
+    selection_metric = "signal_contribution_delta"
   )
 )
 selected_l2_effect_xlim <- range(c(
-  selected_l2_effect_tbl$baseline_conditional_effect,
-  selected_l2_effect_tbl$aggregated_conditional_effect,
-  selected_l2_effect_tbl$refit_conditional_effect
+  selected_l2_effect_tbl$baseline_signal_contribution,
+  selected_l2_effect_tbl$aggregated_signal_contribution,
+  selected_l2_effect_tbl$refit_signal_contribution
 ), na.rm = TRUE)
 if (!all(is.finite(selected_l2_effect_xlim))) selected_l2_effect_xlim <- c(-1, 1)
 selected_l2_effect_pad <- 0.08 * diff(selected_l2_effect_xlim)
@@ -1659,9 +1720,9 @@ paper_pip_drift_plot <- function(locus_id, panel_letter, show_legend = FALSE) {
     theme(legend.position = if (show_legend) "bottom" else "none")
 }
 
-paper_column_header_plot <- function(label) {
+paper_column_header_plot <- function(label, x = 0.5) {
   ggplot() +
-    annotate("text", x = 0.5, y = 0.46, label = label,
+    annotate("text", x = x, y = 0.46, label = label,
              fontface = "bold", size = 3.2) +
     coord_cartesian(xlim = c(0, 1), ylim = c(0, 1), expand = FALSE, clip = "off") +
     theme_void() +
@@ -1680,7 +1741,7 @@ paper_lollipop_l2_plot <- function(locus_id, show_x_axis = FALSE, show_legend = 
   plot_aggregated_lollipop(
     locus_id,
     n_variants = selected_l2_n_variants,
-    selection_metric = "posterior_mean_delta"
+    selection_metric = "signal_contribution_delta"
   ) +
     scale_x_continuous(limits = selected_lollipop_xlim) +
     labs(
@@ -1766,6 +1827,10 @@ paper_pip_drift_l2_plot <- function(locus_id, show_x_axis = FALSE, show_legend =
   }
 
   p +
+    scale_y_continuous(
+      labels = scales::label_number(accuracy = 0.1),
+      breaks = scales::breaks_extended(n = 4)
+    ) +
     coord_cartesian(xlim = selected_drift_xlim) +
     labs(
       title = NULL,
@@ -1783,27 +1848,27 @@ paper_pip_drift_l2_plot <- function(locus_id, show_x_axis = FALSE, show_legend =
     )
 }
 
-paper_conditional_effect_l2_plot <- function(locus_id, show_x_axis = FALSE, show_legend = FALSE) {
+paper_signal_contribution_l2_plot <- function(locus_id, show_x_axis = FALSE, show_legend = FALSE) {
   plot_df <- selected_lollipop_variant_tbl(
     locus_id,
     n_variants = selected_l2_n_variants,
-    selection_metric = "posterior_mean_delta"
+    selection_metric = "signal_contribution_delta"
   )
   points_df <- dplyr::bind_rows(
     plot_df %>%
-      dplyr::transmute(variant_f, effect_mean = baseline_conditional_effect, fit_type = "Baseline"),
+      dplyr::transmute(variant_f, signal_contribution = baseline_signal_contribution, fit_type = "Baseline"),
     plot_df %>%
-      dplyr::transmute(variant_f, effect_mean = aggregated_conditional_effect, fit_type = "SuSiNE ensemble"),
+      dplyr::transmute(variant_f, signal_contribution = aggregated_signal_contribution, fit_type = "SuSiNE ensemble"),
     plot_df %>%
-      dplyr::transmute(variant_f, effect_mean = refit_conditional_effect, fit_type = "Warm refit")
+      dplyr::transmute(variant_f, signal_contribution = refit_signal_contribution, fit_type = "Warm refit")
   ) %>%
-    dplyr::filter(is.finite(.data$effect_mean)) %>%
+    dplyr::filter(is.finite(.data$signal_contribution)) %>%
     dplyr::mutate(fit_type = factor(.data$fit_type, levels = c("Baseline", "SuSiNE ensemble", "Warm refit")))
 
   ggplot(plot_df, aes(y = variant_f)) +
     geom_vline(xintercept = 0, color = "grey78", linewidth = 0.35) +
     geom_segment(
-      aes(x = baseline_conditional_effect, xend = aggregated_conditional_effect, yend = variant_f),
+      aes(x = baseline_signal_contribution, xend = aggregated_signal_contribution, yend = variant_f),
       color = "grey35",
       linewidth = 0.8,
       alpha = 0.75,
@@ -1811,7 +1876,7 @@ paper_conditional_effect_l2_plot <- function(locus_id, show_x_axis = FALSE, show
     ) +
     geom_point(
       data = points_df,
-      aes(x = effect_mean, y = variant_f, color = fit_type),
+      aes(x = signal_contribution, y = variant_f, color = fit_type),
       size = 2.8,
       inherit.aes = FALSE
     ) +
@@ -1824,7 +1889,7 @@ paper_conditional_effect_l2_plot <- function(locus_id, show_x_axis = FALSE, show
     labs(
       title = NULL,
       subtitle = NULL,
-      x = if (show_x_axis) expression(E(beta * " | included")) else NULL,
+      x = if (show_x_axis) expression(b[j] * " " * (R * b)[j]) else NULL,
       y = NULL
     ) +
     paper_panel_theme +
@@ -1909,9 +1974,9 @@ paper_sigma_l2_legend_plot <- function() {
     row = rep(c(2, 1), each = 4, length.out = length(sigma_levels))
   ) %>%
     dplyr::mutate(
-      x = 0.24 + (.data$col - 1) * 0.18,
+      x = 0.21 + (.data$col - 1) * 0.18,
       xend = .data$x + 0.045,
-      text_x = .data$xend + 0.022,
+      text_x = .data$xend + 0.018,
       y = 0.28 + (.data$row - 1) * 0.35
     )
   ggplot(df) +
@@ -1923,7 +1988,7 @@ paper_sigma_l2_legend_plot <- function() {
     scale_color_manual(values = stats::setNames(df$color, df$sigma_label), guide = "none") +
     annotate(
       "text",
-      x = 0.08,
+      x = 0.10,
       y = 0.50,
       label = expression(sigma[0]^2),
       hjust = 0.5,
@@ -1957,9 +2022,9 @@ if (requireNamespace("patchwork", quietly = TRUE)) {
     )
 
   selected_locus_zoom_l2_header <- (
-    paper_column_header_plot("") |
+      paper_column_header_plot("") |
       paper_column_header_plot("PIPs for shifted effects") |
-      paper_column_header_plot("Effect mean if included") |
+      paper_column_header_plot("Fitted signal contribution", x = 0.53) |
       paper_column_header_plot("PIP L2 drift from baseline")
   ) +
     patchwork::plot_layout(widths = c(0.07, 1.08, 0.90, 0.90))
@@ -1967,9 +2032,9 @@ if (requireNamespace("patchwork", quietly = TRUE)) {
   selected_locus_zoom_l2_rows <- purrr::map2(selected_zoom_l2_loci, seq_along(selected_zoom_l2_loci), function(loc, i) {
     show_x_axis <- i == length(selected_zoom_l2_loci)
     (
-      paper_locus_row_label_plot(loc) |
+        paper_locus_row_label_plot(loc) |
         paper_lollipop_l2_plot(loc, show_x_axis = show_x_axis, show_legend = FALSE) |
-        paper_conditional_effect_l2_plot(loc, show_x_axis = show_x_axis, show_legend = FALSE) |
+        paper_signal_contribution_l2_plot(loc, show_x_axis = show_x_axis, show_legend = FALSE) |
         paper_pip_drift_l2_plot(loc, show_x_axis = show_x_axis, show_legend = FALSE)
     ) +
       patchwork::plot_layout(widths = c(0.07, 1.08, 0.90, 0.90))
