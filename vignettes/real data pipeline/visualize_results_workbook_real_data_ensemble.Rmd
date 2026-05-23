@@ -84,8 +84,17 @@ highest_weight_refit_basin <- if (file.exists(file.path(aggregated_dir, "highest
   tibble::tibble(
     locus_id = character(),
     basin_r2_drift_highest_weight_vs_susie_anchor = numeric(),
-    basin_r2_drift_refit_vs_susie_anchor = numeric()
+    basin_r2_drift_refit_vs_susie_anchor = numeric(),
+    basis_drift_var_y_highest_weight_vs_susie_anchor = numeric(),
+    basis_drift_var_y_refit_vs_susie_anchor = numeric()
   )
+}
+for (nm in c(
+  "basis_drift_var_y_highest_weight_vs_susie_anchor",
+  "basis_drift_var_y_refit_vs_susie_anchor",
+  "basis_drift_var_y_refit_vs_highest_weight"
+)) {
+  if (!nm %in% names(highest_weight_refit_basin)) highest_weight_refit_basin[[nm]] <- NA_real_
 }
 paper_summary <- if (file.exists(file.path(aggregated_dir, "paper_real_data_ensemble_summary.csv"))) {
   readr::read_csv(file.path(aggregated_dir, "paper_real_data_ensemble_summary.csv"), show_col_types = FALSE)
@@ -124,10 +133,14 @@ highest_weight_refit_variants <- if (file.exists(file.path(aggregated_dir, "high
 } else {
   tibble::tibble(locus_id = character(), variant_id = character(), pip = numeric())
 }
+# Kept lazy on purpose: the variant_posteriors_dataset is ~ (loci x runs x p)
+# rows wide and collecting it up front pushed the workbook over RAM limits on
+# HPC. All downstream consumers below filter on locus_id (and usually run_id)
+# first, so Arrow can push the predicate into the parquet scan. Per-consumer
+# `dplyr::collect()` materializes only the slice that consumer needs.
 variant_posteriors <- arrow::open_dataset(
   file.path(aggregated_dir, "variant_posteriors_dataset")
-) %>%
-  dplyr::collect()
+)
 
 loci <- sort(unique(functional_grid_summary$locus_id))
 loci
@@ -180,7 +193,8 @@ reference_pip_tbl <- function(locus_id) {
   }
   df <- variant_posteriors %>%
     dplyr::filter(.data$locus_id == !!locus_id,
-                  .data$run_id == !!ref_run_id)
+                  .data$run_id == !!ref_run_id) %>%
+    dplyr::collect()
   if (!"posterior_mean" %in% names(df)) df$posterior_mean <- NA_real_
   # Variant-level conditional effect mean: E[beta_j | variant j is included].
   df %>%
@@ -279,9 +293,12 @@ add_signal_contribution_cols <- function(df, locus_id) {
 
 run_pip_vec <- function(locus_id, run_id) {
   if (length(run_id) != 1L || is.na(run_id)) return(NULL)
+  # Arrow does not implement arrange()+pull() server-side; collect first.
   x <- variant_posteriors %>%
     dplyr::filter(.data$locus_id == !!locus_id,
                   .data$run_id == !!as.integer(run_id)) %>%
+    dplyr::select(.data$ld_matrix_index, .data$pip) %>%
+    dplyr::collect() %>%
     dplyr::arrange(.data$ld_matrix_index) %>%
     dplyr::pull(.data$pip)
   if (!length(x)) return(NULL)
@@ -392,6 +409,7 @@ plot_drift <- function(locus_id) {
     dplyr::filter(.data$locus_id == !!locus_id,
                   .data$run_id %in% run_tbl$run_id) %>%
     dplyr::select(.data$run_id, .data$variant_id, .data$pip) %>%
+    dplyr::collect() %>%
     dplyr::inner_join(ref_pip, by = "variant_id")
   df <- run_tbl %>%
     dplyr::mutate(
@@ -482,7 +500,10 @@ plot_aggregated_lollipop <- function(locus_id) {
     anchor_row$susie_anchor_error[[1]] else NA_character_
 
   overlay <- variant_posteriors %>%
-    dplyr::filter(.data$run_id %in% c(anchor_id, baseline_id), .data$variant_id %in% agg_df$variant_id) %>%
+    dplyr::filter(.data$locus_id == !!locus_id,
+                  .data$run_id %in% c(anchor_id, baseline_id),
+                  .data$variant_id %in% agg_df$variant_id) %>%
+    dplyr::collect() %>%
     dplyr::mutate(fit_type = dplyr::case_when(
       .data$run_id %in% anchor_id ~ "susieR anchor",
       .data$run_id %in% baseline_id ~ "susine c=0",
@@ -1082,7 +1103,7 @@ drift_jsd_long_tbl <- dplyr::bind_rows(
     dplyr::transmute(
       locus_id,
       fit_type = "Highest-weight model",
-      basin_r2_drift = .data$basin_r2_drift_highest_weight_vs_susie_anchor,
+      basis_drift_var_y = .data$basis_drift_var_y_highest_weight_vs_susie_anchor,
       pip_jsd = .data$jsd_susie_anchor_vs_highest_weight_source,
       source_weight = .data$highest_weight_source_agg_weight_run
     ),
@@ -1090,7 +1111,7 @@ drift_jsd_long_tbl <- dplyr::bind_rows(
     dplyr::transmute(
       locus_id,
       fit_type = "Warm refit",
-      basin_r2_drift = .data$basin_r2_drift_refit_vs_susie_anchor,
+      basis_drift_var_y = .data$basis_drift_var_y_refit_vs_susie_anchor,
       pip_jsd = .data$jsd_susie_anchor_vs_refit,
       source_weight = .data$highest_weight_source_agg_weight_run
     )
@@ -1099,16 +1120,16 @@ drift_jsd_long_tbl <- dplyr::bind_rows(
     fit_type = factor(.data$fit_type, levels = c("Highest-weight model", "Warm refit")),
     locus_label = dplyr::if_else(
       .data$fit_type == "Highest-weight model" &
-        (.data$basin_r2_drift > 0.1 | .data$pip_jsd > 0.3),
+        (.data$basis_drift_var_y > 0.05 | .data$pip_jsd > 0.3),
       sub("_lung$", "", .data$locus_id),
       ""
     )
   ) %>%
-  dplyr::filter(is.finite(.data$basin_r2_drift), is.finite(.data$pip_jsd))
+  dplyr::filter(is.finite(.data$basis_drift_var_y), is.finite(.data$pip_jsd))
 
 paper_drift_jsd_plot <- ggplot(
   drift_jsd_long_tbl,
-  aes(x = basin_r2_drift, y = pip_jsd)
+  aes(x = basis_drift_var_y, y = pip_jsd)
 ) +
   geom_path(
     aes(group = locus_id),
@@ -1133,7 +1154,7 @@ paper_drift_jsd_plot <- ggplot(
   ) +
   labs(
     title = "Shifts to PIPs and effect bases can decouple",
-    x = expression("Basis " * r^2 * " drift from SuSiE baseline"),
+    x = expression("Effect-basis drift from SuSiE baseline (fraction of var(" * y * "))"),
     y = "PIP JSD from SuSiE baseline"
   ) +
   paper_panel_theme
@@ -1609,27 +1630,30 @@ build_selected_drift_tbl <- function(selected_loci) {
     run_tbl <- functional_grid_summary %>%
       dplyr::filter(.data$locus_id == !!loc) %>%
       dplyr::arrange(.data$sigma_0_2_scalar, .data$c_value)
+    # Pull only the needed rows from the parquet, join refs once, then split
+    # by run_id so the per-cell drift computations are O(p) hash lookups
+    # instead of O(runs * p) repeated filters.
     pip_tbl <- variant_posteriors %>%
       dplyr::filter(.data$locus_id == !!loc,
                     .data$run_id %in% run_tbl$run_id) %>%
       dplyr::select(.data$run_id, .data$variant_id, .data$pip) %>%
-      dplyr::inner_join(ref_pip, by = "variant_id")
+      dplyr::collect() %>%
+      dplyr::inner_join(ref_pip, by = "variant_id") %>%
+      dplyr::arrange(.data$variant_id)
+    pip_tbl_by_run <- split(pip_tbl, pip_tbl$run_id)
+    drift_for_run <- function(rid, kind) {
+      x <- pip_tbl_by_run[[as.character(rid)]]
+      if (is.null(x) || !nrow(x)) return(NA_real_)
+      if (identical(kind, "jsd")) {
+        js_distance(x$pip, x$baseline_pip)
+      } else {
+        sqrt(sum((x$pip - x$baseline_pip)^2, na.rm = TRUE))
+      }
+    }
     run_tbl %>%
       dplyr::mutate(
-        jsd_from_reference_c0_sigma02 = purrr::map_dbl(.data$run_id, function(rid) {
-          x <- pip_tbl %>%
-            dplyr::filter(.data$run_id == .env$rid) %>%
-            dplyr::arrange(.data$variant_id)
-          if (!nrow(x)) return(NA_real_)
-          js_distance(x$pip, x$baseline_pip)
-        }),
-        l2_from_reference_c0_sigma02 = purrr::map_dbl(.data$run_id, function(rid) {
-          x <- pip_tbl %>%
-            dplyr::filter(.data$run_id == .env$rid) %>%
-            dplyr::arrange(.data$variant_id)
-          if (!nrow(x)) return(NA_real_)
-          sqrt(sum((x$pip - x$baseline_pip)^2, na.rm = TRUE))
-        }),
+        jsd_from_reference_c0_sigma02 = purrr::map_dbl(.data$run_id, drift_for_run, kind = "jsd"),
+        l2_from_reference_c0_sigma02 = purrr::map_dbl(.data$run_id, drift_for_run, kind = "l2"),
         locus_id = loc,
         .before = 1L
       )
@@ -1643,18 +1667,29 @@ selected_l2_effect_tbl <- purrr::map_dfr(
   ~ selected_lollipop_variant_tbl(
     .x,
     n_variants = selected_l2_n_variants,
-    selection_metric = "signal_contribution_delta"
+    selection_metric = "posterior_mean_delta"
   )
 )
-selected_l2_effect_xlim <- range(c(
-  selected_l2_effect_tbl$baseline_signal_contribution,
-  selected_l2_effect_tbl$aggregated_signal_contribution,
-  selected_l2_effect_tbl$refit_signal_contribution
-), na.rm = TRUE)
-if (!all(is.finite(selected_l2_effect_xlim))) selected_l2_effect_xlim <- c(-1, 1)
-selected_l2_effect_pad <- 0.08 * diff(selected_l2_effect_xlim)
-if (!is.finite(selected_l2_effect_pad) || selected_l2_effect_pad <= 0) selected_l2_effect_pad <- 0.1
-selected_l2_effect_xlim <- selected_l2_effect_xlim + c(-selected_l2_effect_pad, selected_l2_effect_pad)
+# Per-locus signed-effect xlims. We let each row auto-scale rather than share a
+# global x-axis, because posterior-mean magnitudes differ by 1-2 orders of
+# magnitude across loci (a noise-floor locus would otherwise collapse to zero
+# on a globally shared axis dominated by a high-PVE locus).
+selected_l2_effect_xlim_by_locus <- selected_l2_effect_tbl %>%
+  dplyr::group_by(.data$locus_id) %>%
+  dplyr::summarise(
+    lo = min(c(.data$baseline_posterior_mean,
+               .data$aggregated_posterior_mean,
+               .data$refit_posterior_mean), na.rm = TRUE),
+    hi = max(c(.data$baseline_posterior_mean,
+               .data$aggregated_posterior_mean,
+               .data$refit_posterior_mean), na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  dplyr::mutate(
+    span = pmax(.data$hi - .data$lo, 1e-6),
+    lo = .data$lo - 0.08 * .data$span,
+    hi = .data$hi + 0.08 * .data$span
+  )
 selected_drift_xlim <- range(selected_drift_tbl$c_value, na.rm = TRUE)
 if (!all(is.finite(selected_drift_xlim))) selected_drift_xlim <- c(0, 1)
 selected_drift_ylim <- range(selected_drift_tbl$jsd_from_reference_c0_sigma02, na.rm = TRUE)
@@ -1741,7 +1776,7 @@ paper_lollipop_l2_plot <- function(locus_id, show_x_axis = FALSE, show_legend = 
   plot_aggregated_lollipop(
     locus_id,
     n_variants = selected_l2_n_variants,
-    selection_metric = "signal_contribution_delta"
+    selection_metric = "posterior_mean_delta"
   ) +
     scale_x_continuous(limits = selected_lollipop_xlim) +
     labs(
@@ -1849,26 +1884,35 @@ paper_pip_drift_l2_plot <- function(locus_id, show_x_axis = FALSE, show_legend =
 }
 
 paper_signal_contribution_l2_plot <- function(locus_id, show_x_axis = FALSE, show_legend = FALSE) {
+  # Despite the legacy name, this panel now plots the signed standardized
+  # posterior-mean effect b_j (in z-scale units) for the same variants as the
+  # left lollipop column. The previous quantity b_j * (R b)_j was unstable
+  # under LD-induced sign cancellation: per-variant values could exceed the
+  # global b' R b by orders of magnitude, and a globally shared x-axis crushed
+  # low-PVE loci to a flat zero column. Per-locus free x-axis is intentional.
   plot_df <- selected_lollipop_variant_tbl(
     locus_id,
     n_variants = selected_l2_n_variants,
-    selection_metric = "signal_contribution_delta"
+    selection_metric = "posterior_mean_delta"
   )
+  xlim_row <- selected_l2_effect_xlim_by_locus %>%
+    dplyr::filter(.data$locus_id == !!locus_id)
+  xlim_vec <- if (nrow(xlim_row)) c(xlim_row$lo[[1]], xlim_row$hi[[1]]) else NULL
   points_df <- dplyr::bind_rows(
     plot_df %>%
-      dplyr::transmute(variant_f, signal_contribution = baseline_signal_contribution, fit_type = "Baseline"),
+      dplyr::transmute(variant_f, posterior_mean = baseline_posterior_mean, fit_type = "Baseline"),
     plot_df %>%
-      dplyr::transmute(variant_f, signal_contribution = aggregated_signal_contribution, fit_type = "SuSiNE ensemble"),
+      dplyr::transmute(variant_f, posterior_mean = aggregated_posterior_mean, fit_type = "SuSiNE ensemble"),
     plot_df %>%
-      dplyr::transmute(variant_f, signal_contribution = refit_signal_contribution, fit_type = "Warm refit")
+      dplyr::transmute(variant_f, posterior_mean = refit_posterior_mean, fit_type = "Warm refit")
   ) %>%
-    dplyr::filter(is.finite(.data$signal_contribution)) %>%
+    dplyr::filter(is.finite(.data$posterior_mean)) %>%
     dplyr::mutate(fit_type = factor(.data$fit_type, levels = c("Baseline", "SuSiNE ensemble", "Warm refit")))
 
-  ggplot(plot_df, aes(y = variant_f)) +
+  p <- ggplot(plot_df, aes(y = variant_f)) +
     geom_vline(xintercept = 0, color = "grey78", linewidth = 0.35) +
     geom_segment(
-      aes(x = baseline_signal_contribution, xend = aggregated_signal_contribution, yend = variant_f),
+      aes(x = baseline_posterior_mean, xend = aggregated_posterior_mean, yend = variant_f),
       color = "grey35",
       linewidth = 0.8,
       alpha = 0.75,
@@ -1876,7 +1920,7 @@ paper_signal_contribution_l2_plot <- function(locus_id, show_x_axis = FALSE, sho
     ) +
     geom_point(
       data = points_df,
-      aes(x = signal_contribution, y = variant_f, color = fit_type),
+      aes(x = posterior_mean, y = variant_f, color = fit_type),
       size = 2.8,
       inherit.aes = FALSE
     ) +
@@ -1884,12 +1928,15 @@ paper_signal_contribution_l2_plot <- function(locus_id, show_x_axis = FALSE, sho
       values = c("Baseline" = "#666666", "SuSiNE ensemble" = "#0B6E4F", "Warm refit" = "#C65D00"),
       breaks = c("Baseline", "SuSiNE ensemble", "Warm refit"),
       name = NULL
-    ) +
-    coord_cartesian(xlim = selected_l2_effect_xlim) +
+    )
+  if (!is.null(xlim_vec) && all(is.finite(xlim_vec))) {
+    p <- p + coord_cartesian(xlim = xlim_vec)
+  }
+  p +
     labs(
       title = NULL,
       subtitle = NULL,
-      x = if (show_x_axis) expression(b[j] * " " * (R * b)[j]) else NULL,
+      x = if (show_x_axis) expression("Posterior-mean effect " * E * "[" * b[j] * "]") else NULL,
       y = NULL
     ) +
     paper_panel_theme +
@@ -2101,6 +2148,14 @@ if (requireNamespace("patchwork", quietly = TRUE)) {
   warning("patchwork is not installed; selected-locus zoom figure skipped.")
   invisible(NULL)
 }
+```
+
+```{r free-locus-R-cache}
+# The lollipop helpers cache per-locus R matrices (each ~ p^2 doubles, around
+# 0.3-0.5 GB at p = 6-7k) in selected_locus_R_cache. Nothing downstream needs
+# them, so evict before section 9 reloads its own bundles per locus.
+rm(list = ls(envir = selected_locus_R_cache), envir = selected_locus_R_cache)
+invisible(gc(full = TRUE))
 ```
 
 # 9. Basin r² Drift From c = 0 (one panel per locus)

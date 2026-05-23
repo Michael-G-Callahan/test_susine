@@ -1319,6 +1319,28 @@ real_data_basin_r2_cache <- function(fit, R) {
   )
 }
 
+# Variance of the difference in linear predictor between two fits, on
+# standardized phenotype scale: ||b_a - b_b||_R^2 = (b_a - b_b)' R (b_a - b_b),
+# where b_* is the global posterior-mean effect vector colSums(alpha * mu). With
+# var(y) = 1 this is directly a fraction of var(y). Unlike
+# `real_data_basin_r2_drift_pair_cached` it is a single global scalar (no
+# per-effect Hungarian matching) and is not scale-invariant: a locus whose two
+# fits explain very different amounts of var(y) in nearly orthogonal bases
+# will register larger drift than a locus whose two fits explain the same
+# small fraction of var(y) in different bases.
+real_data_basis_drift_var_y_pair_cached <- function(cache_a, cache_b) {
+  if (is.null(cache_a) || is.null(cache_b)) return(NA_real_)
+  if (ncol(cache_a$b) != ncol(cache_b$b)) return(NA_real_)
+  b_a_total  <- colSums(cache_a$b)
+  b_b_total  <- colSums(cache_b$b)
+  Rb_a_total <- colSums(cache_a$Rb)
+  Rb_b_total <- colSums(cache_b$Rb)
+  val <- sum(b_a_total * Rb_a_total) + sum(b_b_total * Rb_b_total) -
+    2 * sum(b_a_total * Rb_b_total)
+  if (!is.finite(val)) return(NA_real_)
+  max(val, 0)
+}
+
 real_data_basin_r2_drift_pair_cached <- function(cache_a, cache_b) {
   if (is.null(cache_a) || is.null(cache_b)) return(list(drift = NA_real_, n_matched = 0L))
   L_a <- nrow(cache_a$b); L_b <- nrow(cache_b$b)
@@ -2605,6 +2627,9 @@ collect_real_data_results <- function(
           source_vs_anchor <- real_data_basin_r2_drift_pair_cached(source_cache, anchor_cache)
           refit_vs_anchor <- real_data_basin_r2_drift_pair_cached(refit_cache, anchor_cache)
           refit_vs_source <- real_data_basin_r2_drift_pair_cached(refit_cache, source_cache)
+          source_vs_anchor_vy <- real_data_basis_drift_var_y_pair_cached(source_cache, anchor_cache)
+          refit_vs_anchor_vy  <- real_data_basis_drift_var_y_pair_cached(refit_cache, anchor_cache)
+          refit_vs_source_vy  <- real_data_basis_drift_var_y_pair_cached(refit_cache, source_cache)
           highest_weight_refit_basin_rows[[length(highest_weight_refit_basin_rows) + 1L]] <- tibble::tibble(
             locus_id = locus_id,
             gene_name = locus_row$gene_name[[1]],
@@ -2614,6 +2639,9 @@ collect_real_data_results <- function(
             basin_r2_drift_highest_weight_vs_susie_anchor = source_vs_anchor$drift,
             basin_r2_drift_refit_vs_susie_anchor = refit_vs_anchor$drift,
             basin_r2_drift_refit_vs_highest_weight = refit_vs_source$drift,
+            basis_drift_var_y_highest_weight_vs_susie_anchor = source_vs_anchor_vy,
+            basis_drift_var_y_refit_vs_susie_anchor = refit_vs_anchor_vy,
+            basis_drift_var_y_refit_vs_highest_weight = refit_vs_source_vy,
             n_matched_highest_weight_vs_susie_anchor = source_vs_anchor$n_matched,
             n_matched_refit_vs_susie_anchor = refit_vs_anchor$n_matched,
             n_matched_refit_vs_highest_weight = refit_vs_source$n_matched
