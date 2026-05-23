@@ -1443,11 +1443,11 @@ paper_pip_drift_plot <- function(locus_id, panel_letter, show_legend = FALSE) {
 
 paper_column_header_plot <- function(label) {
   ggplot() +
-    annotate("text", x = 0.5, y = 0.5, label = label,
+    annotate("text", x = 0.5, y = 0.46, label = label,
              fontface = "bold", size = 3.2) +
-    coord_cartesian(xlim = c(0, 1), ylim = c(0, 1), expand = FALSE) +
+    coord_cartesian(xlim = c(0, 1), ylim = c(0, 1), expand = FALSE, clip = "off") +
     theme_void() +
-    theme(plot.margin = margin(0, 0, -3, 0))
+    theme(plot.margin = margin(2, 0, -1, 0))
 }
 
 paper_locus_row_label_plot <- function(locus_id) {
@@ -1567,13 +1567,13 @@ paper_lollipop_l2_legend_plot <- function() {
       c("Baseline", "SuSiNE ensemble", "Warm refit"),
       levels = c("Baseline", "SuSiNE ensemble", "Warm refit")
     ),
-    x = c(0.16, 0.50, 0.82),
-    y = 0.55
+    x = c(0.07, 0.43, 0.07),
+    y = c(0.68, 0.68, 0.30)
   )
   ggplot(df, aes(x = x, y = y, color = fit_type)) +
     geom_point(size = 2.8) +
-    geom_text(aes(label = fit_type), x = df$x + 0.045, hjust = 0,
-              size = 2.7, color = "grey15") +
+    geom_text(aes(label = fit_type), x = df$x + 0.055, hjust = 0,
+              size = 2.55, color = "grey15") +
     scale_color_manual(
       values = c("Baseline" = "#666666", "SuSiNE ensemble" = "#0B6E4F", "Warm refit" = "#C65D00"),
       guide = "none"
@@ -1586,7 +1586,7 @@ paper_lollipop_l2_legend_plot <- function() {
 paper_highlight_l2_legend_plot <- function() {
   ggplot() +
     geom_point(
-      aes(x = 0.14, y = 0.55),
+      aes(x = 0.10, y = 0.64),
       shape = 21,
       size = 4.0,
       stroke = 1.1,
@@ -1594,21 +1594,21 @@ paper_highlight_l2_legend_plot <- function() {
       color = "black"
     ) +
     geom_label(
-      aes(x = 0.32, y = 0.72, label = "0.42"),
+      aes(x = 0.10, y = 0.28, label = "0.42"),
       size = 2.5,
       label.size = 0.18,
       fill = "white",
       color = "black"
     ) +
     geom_segment(
-      aes(x = 0.25, xend = 0.17, y = 0.66, yend = 0.58),
+      aes(x = 0.10, xend = 0.10, y = 0.39, yend = 0.53),
       color = "black",
       linewidth = 0.25
     ) +
     annotate(
       "text",
-      x = 0.44,
-      y = 0.50,
+      x = 0.25,
+      y = 0.48,
       label = "circle: highest-weight setting\nnumber: aggregation weight",
       hjust = 0,
       size = 2.55,
@@ -1705,9 +1705,9 @@ if (requireNamespace("patchwork", quietly = TRUE)) {
     c(list(selected_locus_zoom_l2_header), selected_locus_zoom_l2_rows, list(selected_locus_zoom_l2_legend)),
     ncol = 1
   ) +
-    patchwork::plot_layout(heights = c(0.06, rep(0.90, length(selected_locus_zoom_l2_rows)), 0.42)) &
+    patchwork::plot_layout(heights = c(0.085, rep(0.90, length(selected_locus_zoom_l2_rows)), 0.42)) &
     theme(
-      plot.margin = margin(2.5, 4.5, 2.5, 4.5),
+      plot.margin = margin(4.5, 4.5, 2.5, 4.5),
       panel.spacing.x = grid::unit(3.2, "mm"),
       panel.spacing.y = grid::unit(2.0, "mm")
     )
