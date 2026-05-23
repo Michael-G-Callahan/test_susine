@@ -1341,6 +1341,134 @@ selected_zoom_l2_loci <- vapply(
   locus_ids = loci
 )
 
+ensure_basin_r2_drift_tbl <- function() {
+  basin_r2_drift_path <- file.path(overall_figure_dir, "basin_r2_drift.csv")
+  if (file.exists(basin_r2_drift_path) && !isTRUE(force_recompute_basin_r2_drift)) {
+    return(readr::read_csv(basin_r2_drift_path, show_col_types = FALSE))
+  }
+
+  run_metrics <- readr::read_csv(
+    file.path(aggregated_dir, "run_metrics_full.csv"),
+    show_col_types = FALSE
+  )
+  job_config_path <- file.path(
+    here("output", "run_history", job_name, parent_job_id, "job_config.json")
+  )
+  job_cfg <- jsonlite::fromJSON(job_config_path, simplifyVector = FALSE)
+  manifest_path <- job_cfg$job$manifest_path
+  repo_root <- job_cfg$paths$repo_root %||% here()
+
+  functional_runs_for_drift <- run_metrics %>%
+    dplyr::filter(.data$backend == "susine_rss",
+                  .data$run_family == "functional_grid",
+                  !is.na(.data$fit_rds_path)) %>%
+    dplyr::select(locus_id, run_id, c_value, sigma_0_2_scalar, fit_rds_path)
+
+  format_duration <- function(seconds) {
+    if (!is.finite(seconds)) return("unknown")
+    seconds <- max(0, as.integer(round(seconds)))
+    hh <- seconds %/% 3600L
+    mm <- (seconds %% 3600L) %/% 60L
+    ss <- seconds %% 60L
+    if (hh > 0L) sprintf("%dh %02dm %02ds", hh, mm, ss) else sprintf("%dm %02ds", mm, ss)
+  }
+  emit_progress_line <- function(x) {
+    cat(x, "\n")
+    try(flush(stdout()), silent = TRUE)
+    if (interactive()) flush.console()
+    invisible(x)
+  }
+  make_basin_r2_progress <- function(total_units, report_every_pct = 1) {
+    total_units <- max(1L, as.integer(total_units))
+    done_units <- 0L
+    next_pct <- 0
+    start_time <- Sys.time()
+    function(label = NULL, units = 1L, force = FALSE) {
+      done_units <<- min(total_units, done_units + as.integer(units))
+      pct <- 100 * done_units / total_units
+      if (isTRUE(force) || done_units == total_units || pct >= next_pct) {
+        elapsed <- as.numeric(difftime(Sys.time(), start_time, units = "secs"))
+        eta <- if (done_units > 0L) elapsed * (total_units - done_units) / done_units else NA_real_
+        label_text <- if (!is.null(label) && nzchar(label)) paste0(" | ", label) else ""
+        emit_progress_line(sprintf(
+          "[%s] basin r2 drift %.1f%% (%d/%d units), elapsed %s, ETA %s%s",
+          format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+          pct, done_units, total_units,
+          format_duration(elapsed), format_duration(eta),
+          label_text
+        ))
+        while (next_pct <= pct) {
+          next_pct <<- next_pct + report_every_pct
+        }
+      }
+      invisible(done_units)
+    }
+  }
+
+  drift_loci <- sort(unique(functional_runs_for_drift$locus_id))
+  basin_r2_progress <- make_basin_r2_progress(
+    total_units = length(drift_loci) + 2L * nrow(functional_runs_for_drift),
+    report_every_pct = 1
+  )
+  basin_r2_progress("starting", units = 0L, force = TRUE)
+  basin_r2_drift_tbl <- purrr::map_dfr(
+    drift_loci,
+    function(loc) {
+      runs_tbl <- dplyr::filter(functional_runs_for_drift, .data$locus_id == loc)
+      basin_r2_progress(
+        sprintf("%s: loading bundle (%d runs)", loc, nrow(runs_tbl)),
+        units = 0L,
+        force = TRUE
+      )
+      bundle <- tryCatch(
+        load_real_data_locus_bundle(loc, manifest_path = manifest_path,
+                                    repo_root = repo_root,
+                                    apply_sample_size_filter = FALSE),
+        error = function(e) NULL
+      )
+      basin_r2_progress(paste0(loc, ": loaded bundle"))
+      if (is.null(bundle)) {
+        emit_progress_line(paste0("Skipping ", loc, ": bundle load failed."))
+        basin_r2_progress(
+          paste0(loc, ": skipped remaining work after bundle load failure"),
+          units = 2L * nrow(runs_tbl)
+        )
+        return(tibble::tibble())
+      }
+      locus_drift_units_done <- 0L
+      drift <- real_data_basin_r2_drift_locus(
+        bundle$R,
+        runs_tbl,
+        progress = function(stage, index, total) {
+          locus_drift_units_done <<- locus_drift_units_done + 1L
+          basin_r2_progress(sprintf("%s: %s %d/%d", loc, stage, index, total))
+        }
+      )
+      expected_locus_drift_units <- 2L * nrow(runs_tbl)
+      if (locus_drift_units_done < expected_locus_drift_units) {
+        basin_r2_progress(
+          paste0(loc, ": accounted for skipped drift work"),
+          units = expected_locus_drift_units - locus_drift_units_done
+        )
+      }
+      if (!nrow(drift)) return(tibble::tibble())
+      drift %>% dplyr::mutate(locus_id = loc, .before = 1L)
+    }
+  )
+  basin_r2_progress("finished", units = 0L, force = TRUE)
+  if (!nrow(basin_r2_drift_tbl) && !all(c("locus_id", "run_id", "c_value", "sigma_0_2_scalar", "basin_r2_drift") %in% names(basin_r2_drift_tbl))) {
+    basin_r2_drift_tbl <- tibble::tibble(
+      locus_id = character(),
+      run_id = integer(),
+      c_value = numeric(),
+      sigma_0_2_scalar = numeric(),
+      basin_r2_drift = numeric()
+    )
+  }
+  readr::write_csv(basin_r2_drift_tbl, basin_r2_drift_path)
+  basin_r2_drift_tbl
+}
+
 build_selected_drift_tbl <- function(selected_loci) {
   purrr::map_dfr(selected_loci, function(loc) {
     ref_pip <- reference_pip_tbl(loc)
@@ -1376,6 +1504,9 @@ build_selected_drift_tbl <- function(selected_loci) {
 
 selected_drift_tbl <- build_selected_drift_tbl(selected_zoom_loci)
 selected_l2_drift_tbl <- build_selected_drift_tbl(selected_zoom_l2_loci)
+basin_r2_drift_tbl <- ensure_basin_r2_drift_tbl()
+selected_l2_basin_r2_tbl <- basin_r2_drift_tbl %>%
+  dplyr::filter(.data$locus_id %in% selected_zoom_l2_loci)
 selected_drift_xlim <- range(selected_drift_tbl$c_value, na.rm = TRUE)
 if (!all(is.finite(selected_drift_xlim))) selected_drift_xlim <- c(0, 1)
 selected_drift_ylim <- range(selected_drift_tbl$jsd_from_reference_c0_sigma02, na.rm = TRUE)
@@ -1401,6 +1532,13 @@ selected_l2_highest_weight_drift_tbl <- selected_l2_drift_tbl %>%
   ) %>%
   dplyr::slice_head(n = 1) %>%
   dplyr::ungroup()
+selected_l2_highest_weight_basin_r2_tbl <- selected_l2_basin_r2_tbl %>%
+  dplyr::inner_join(
+    selected_l2_highest_weight_drift_tbl %>%
+      dplyr::select(.data$locus_id, .data$run_id, .data$agg_weight_run),
+    by = c("locus_id", "run_id")
+  ) %>%
+  dplyr::mutate(weight_label = sprintf("%.2f", .data$agg_weight_run))
 
 paper_lollipop_plot <- function(locus_id, panel_letter, show_legend = FALSE) {
   plot_aggregated_lollipop(locus_id) +
@@ -1548,7 +1686,88 @@ paper_pip_drift_l2_plot <- function(locus_id, show_x_axis = FALSE, show_legend =
     labs(
       title = NULL,
       x = if (show_x_axis) "Annotation scale c" else NULL,
-      y = expression("||" * Delta * "PIP" * "||"[2]),
+      y = NULL,
+      color = expression("Prior variance " * sigma[0]^2)
+    ) +
+    paper_panel_theme +
+    theme(
+      legend.position = if (show_legend) "bottom" else "none",
+      plot.title = element_blank(),
+      axis.title.x = if (show_x_axis) element_text(size = 8.5) else element_blank(),
+      axis.text.x = if (show_x_axis) element_text(size = 7, color = "grey25") else element_blank(),
+      axis.ticks.x = if (show_x_axis) element_line(color = "grey35") else element_blank()
+    )
+}
+
+paper_basin_r2_drift_l2_plot <- function(locus_id, show_x_axis = FALSE, show_legend = FALSE) {
+  df <- dplyr::filter(selected_l2_basin_r2_tbl, .data$locus_id == !!locus_id)
+  highlight_df <- dplyr::filter(selected_l2_highest_weight_basin_r2_tbl, .data$locus_id == !!locus_id)
+  y_span <- diff(range(df$basin_r2_drift, na.rm = TRUE))
+  if (!is.finite(y_span) || y_span <= 0) y_span <- 1
+  label_nudge_x <- if (nrow(highlight_df) && highlight_df$c_value[[1]] > mean(selected_drift_xlim)) -0.12 else 0.12
+  label_nudge_y <- 0.08 * y_span
+
+  p <- ggplot(df, aes(x = c_value, y = basin_r2_drift,
+                      color = factor(sigma_0_2_scalar))) +
+    geom_line(linewidth = 0.7, na.rm = TRUE) +
+    geom_point(size = 2, na.rm = TRUE) +
+    geom_point(
+      data = highlight_df,
+      aes(x = c_value, y = basin_r2_drift),
+      inherit.aes = FALSE,
+      shape = 21,
+      size = 4.0,
+      stroke = 1.1,
+      fill = NA,
+      color = "black",
+      na.rm = TRUE
+    )
+
+  if (nrow(highlight_df)) {
+    if (requireNamespace("ggrepel", quietly = TRUE)) {
+      p <- p +
+        ggrepel::geom_label_repel(
+          data = highlight_df,
+          aes(x = c_value, y = basin_r2_drift, label = weight_label),
+          inherit.aes = FALSE,
+          color = "black",
+          fill = "white",
+          label.size = 0.18,
+          size = 2.5,
+          box.padding = 0.35,
+          point.padding = 0.55,
+          min.segment.length = 0,
+          segment.color = "black",
+          segment.size = 0.25,
+          seed = 23,
+          nudge_x = label_nudge_x,
+          nudge_y = label_nudge_y,
+          max.overlaps = Inf,
+          show.legend = FALSE
+        )
+    } else {
+      p <- p +
+        geom_label(
+          data = highlight_df,
+          aes(x = c_value, y = basin_r2_drift, label = weight_label),
+          inherit.aes = FALSE,
+          color = "black",
+          fill = "white",
+          label.size = 0.18,
+          size = 2.5,
+          nudge_x = label_nudge_x,
+          nudge_y = label_nudge_y,
+          show.legend = FALSE
+        )
+    }
+  }
+
+  p +
+    coord_cartesian(xlim = selected_drift_xlim) +
+    labs(
+      title = NULL,
+      x = if (show_x_axis) "Annotation scale c" else NULL,
+      y = NULL,
       color = expression("Prior variance " * sigma[0]^2)
     ) +
     paper_panel_theme +
@@ -1630,9 +1849,9 @@ paper_sigma_l2_legend_plot <- function() {
     row = rep(c(2, 1), each = 4, length.out = length(sigma_levels))
   ) %>%
     dplyr::mutate(
-      x = 0.08 + (.data$col - 1) * 0.23,
-      xend = .data$x + 0.055,
-      text_x = .data$xend + 0.025,
+      x = 0.24 + (.data$col - 1) * 0.18,
+      xend = .data$x + 0.045,
+      text_x = .data$xend + 0.022,
       y = 0.28 + (.data$row - 1) * 0.35
     )
   ggplot(df) +
@@ -1644,11 +1863,11 @@ paper_sigma_l2_legend_plot <- function() {
     scale_color_manual(values = stats::setNames(df$color, df$sigma_label), guide = "none") +
     annotate(
       "text",
-      x = 0.02,
-      y = 0.88,
+      x = 0.08,
+      y = 0.50,
       label = expression(sigma[0]^2),
-      hjust = 0,
-      size = 2.65,
+      hjust = 0.5,
+      size = 3.35,
       color = "grey15"
     ) +
     coord_cartesian(xlim = c(0, 1), ylim = c(0, 1), expand = FALSE, clip = "off") +
@@ -1680,18 +1899,20 @@ if (requireNamespace("patchwork", quietly = TRUE)) {
   selected_locus_zoom_l2_header <- (
     paper_column_header_plot("") |
       paper_column_header_plot("Most shifted PIPs") |
-      paper_column_header_plot("PIP drift from baseline")
+      paper_column_header_plot("PIP L2 drift from baseline") |
+      paper_column_header_plot("Basis r2 drift from baseline")
   ) +
-    patchwork::plot_layout(widths = c(0.08, 1, 1))
+    patchwork::plot_layout(widths = c(0.07, 1.12, 0.86, 0.86))
 
   selected_locus_zoom_l2_rows <- purrr::map2(selected_zoom_l2_loci, seq_along(selected_zoom_l2_loci), function(loc, i) {
     show_x_axis <- i == length(selected_zoom_l2_loci)
     (
       paper_locus_row_label_plot(loc) |
         paper_lollipop_l2_plot(loc, show_x_axis = show_x_axis, show_legend = FALSE) |
-        paper_pip_drift_l2_plot(loc, show_x_axis = show_x_axis, show_legend = FALSE)
+        paper_pip_drift_l2_plot(loc, show_x_axis = show_x_axis, show_legend = FALSE) |
+        paper_basin_r2_drift_l2_plot(loc, show_x_axis = show_x_axis, show_legend = FALSE)
     ) +
-      patchwork::plot_layout(widths = c(0.08, 1, 1))
+      patchwork::plot_layout(widths = c(0.07, 1.12, 0.86, 0.86))
   })
 
   selected_locus_zoom_l2_legend <- (
@@ -1699,7 +1920,7 @@ if (requireNamespace("patchwork", quietly = TRUE)) {
       paper_highlight_l2_legend_plot() |
       paper_sigma_l2_legend_plot()
   ) +
-    patchwork::plot_layout(widths = c(1, 1, 1))
+    patchwork::plot_layout(widths = c(1, 0.95, 1.35))
 
   selected_locus_zoom_l2_figure <- patchwork::wrap_plots(
     c(list(selected_locus_zoom_l2_header), selected_locus_zoom_l2_rows, list(selected_locus_zoom_l2_legend)),
@@ -1766,130 +1987,7 @@ R-weighted cosine `(b_i' R b_j) / sqrt((b_i' R b_i)(b_j' R b_j))` since X is
 not available in the SS regime.
 
 ```{r basin-r2-drift-compute, message=TRUE}
-# Need run_metrics to find fit_rds_paths and locus / sigma / c keys.
-run_metrics <- readr::read_csv(
-  file.path(aggregated_dir, "run_metrics_full.csv"),
-  show_col_types = FALSE
-)
-
-# Manifest path for load_real_data_locus_bundle. Read from the job_config that
-# real_case_slurm copies into run_history alongside the slurm output.
-job_config_path <- file.path(
-  here("output", "run_history", job_name, parent_job_id, "job_config.json")
-)
-job_cfg <- jsonlite::fromJSON(job_config_path, simplifyVector = FALSE)
-manifest_path <- job_cfg$job$manifest_path
-repo_root <- job_cfg$paths$repo_root %||% here()
-
-functional_runs_for_drift <- run_metrics %>%
-  dplyr::filter(.data$backend == "susine_rss",
-                .data$run_family == "functional_grid",
-                !is.na(.data$fit_rds_path)) %>%
-  dplyr::select(locus_id, run_id, c_value, sigma_0_2_scalar, fit_rds_path)
-
-format_duration <- function(seconds) {
-  if (!is.finite(seconds)) return("unknown")
-  seconds <- max(0, as.integer(round(seconds)))
-  hh <- seconds %/% 3600L
-  mm <- (seconds %% 3600L) %/% 60L
-  ss <- seconds %% 60L
-  if (hh > 0L) sprintf("%dh %02dm %02ds", hh, mm, ss) else sprintf("%dm %02ds", mm, ss)
-}
-
-emit_progress_line <- function(x) {
-  cat(x, "\n")
-  try(flush(stdout()), silent = TRUE)
-  if (interactive()) flush.console()
-  invisible(x)
-}
-
-make_basin_r2_progress <- function(total_units, report_every_pct = 1) {
-  total_units <- max(1L, as.integer(total_units))
-  done_units <- 0L
-  next_pct <- 0
-  start_time <- Sys.time()
-  function(label = NULL, units = 1L, force = FALSE) {
-    done_units <<- min(total_units, done_units + as.integer(units))
-    pct <- 100 * done_units / total_units
-    if (isTRUE(force) || done_units == total_units || pct >= next_pct) {
-      elapsed <- as.numeric(difftime(Sys.time(), start_time, units = "secs"))
-      eta <- if (done_units > 0L) elapsed * (total_units - done_units) / done_units else NA_real_
-      label_text <- if (!is.null(label) && nzchar(label)) paste0(" | ", label) else ""
-      emit_progress_line(sprintf(
-        "[%s] basin r2 drift %.1f%% (%d/%d units), elapsed %s, ETA %s%s",
-        format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
-        pct, done_units, total_units,
-        format_duration(elapsed), format_duration(eta),
-        label_text
-      ))
-      while (next_pct <= pct) {
-        next_pct <<- next_pct + report_every_pct
-      }
-    }
-    invisible(done_units)
-  }
-}
-
-basin_r2_drift_path <- file.path(overall_figure_dir, "basin_r2_drift.csv")
-if (file.exists(basin_r2_drift_path) && !isTRUE(force_recompute_basin_r2_drift)) {
-  basin_r2_drift_tbl <- readr::read_csv(basin_r2_drift_path, show_col_types = FALSE)
-} else {
-  drift_loci <- sort(unique(functional_runs_for_drift$locus_id))
-  basin_r2_progress <- make_basin_r2_progress(
-    total_units = length(drift_loci) + 2L * nrow(functional_runs_for_drift),
-    report_every_pct = 1
-  )
-  basin_r2_progress("starting", units = 0L, force = TRUE)
-  basin_r2_drift_tbl <- purrr::map_dfr(
-    drift_loci,
-    function(loc) {
-      runs_tbl <- dplyr::filter(functional_runs_for_drift, .data$locus_id == loc)
-      basin_r2_progress(
-        sprintf("%s: loading bundle (%d runs)", loc, nrow(runs_tbl)),
-        units = 0L,
-        force = TRUE
-      )
-      # apply_sample_size_filter = FALSE so R matches the dimensions of fits
-      # produced before the filter was introduced. Set TRUE if you have re-run
-      # the SLURM job under the filter and want filter-consistent diagnostics.
-      bundle <- tryCatch(
-        load_real_data_locus_bundle(loc, manifest_path = manifest_path,
-                                    repo_root = repo_root,
-                                    apply_sample_size_filter = FALSE),
-        error = function(e) NULL
-      )
-      basin_r2_progress(paste0(loc, ": loaded bundle"))
-      if (is.null(bundle)) {
-        emit_progress_line(paste0("Skipping ", loc, ": bundle load failed."))
-        basin_r2_progress(
-          paste0(loc, ": skipped remaining work after bundle load failure"),
-          units = 2L * nrow(runs_tbl)
-        )
-        return(tibble::tibble())
-      }
-      locus_drift_units_done <- 0L
-      drift <- real_data_basin_r2_drift_locus(
-        bundle$R,
-        runs_tbl,
-        progress = function(stage, index, total) {
-          locus_drift_units_done <<- locus_drift_units_done + 1L
-          basin_r2_progress(sprintf("%s: %s %d/%d", loc, stage, index, total))
-        }
-      )
-      expected_locus_drift_units <- 2L * nrow(runs_tbl)
-      if (locus_drift_units_done < expected_locus_drift_units) {
-        basin_r2_progress(
-          paste0(loc, ": accounted for skipped drift work"),
-          units = expected_locus_drift_units - locus_drift_units_done
-        )
-      }
-      if (!nrow(drift)) return(tibble::tibble())
-      drift %>% dplyr::mutate(locus_id = loc, .before = 1L)
-    }
-  )
-  basin_r2_progress("finished", units = 0L, force = TRUE)
-  readr::write_csv(basin_r2_drift_tbl, basin_r2_drift_path)
-}
+basin_r2_drift_tbl <- ensure_basin_r2_drift_tbl()
 basin_r2_drift_tbl
 ```
 
