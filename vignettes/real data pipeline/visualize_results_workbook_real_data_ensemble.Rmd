@@ -465,8 +465,13 @@ plot_aggregated_lollipop <- function(locus_id) {
 ```
 
 ```{r lollipop-helper-override}
-selected_lollipop_variant_tbl <- function(locus_id, n_variants = 15L) {
+selected_lollipop_variant_tbl <- function(
+    locus_id,
+    n_variants = 15L,
+    selection_metric = c("pip_delta", "posterior_mean_delta")
+) {
   n_variants <- as.integer(n_variants)
+  selection_metric <- match.arg(selection_metric)
   locus_aggregated_variants <- aggregated_variants %>%
     dplyr::filter(.data$locus_id == !!locus_id) %>%
     {
@@ -492,11 +497,16 @@ selected_lollipop_variant_tbl <- function(locus_id, n_variants = 15L) {
         .data$refit_pip,
         na.rm = TRUE
       ),
-      abs_delta_baseline_ensemble = abs(.data$aggregated_pip - .data$baseline_pip)
+      abs_delta_baseline_ensemble = abs(.data$aggregated_pip - .data$baseline_pip),
+      abs_delta_posterior_mean = abs(.data$aggregated_posterior_mean - .data$baseline_posterior_mean),
+      selection_score = dplyr::case_when(
+        .env$selection_metric == "posterior_mean_delta" ~ .data$abs_delta_posterior_mean,
+        TRUE ~ .data$abs_delta_baseline_ensemble
+      )
     ) %>%
-    dplyr::filter(is.finite(.data$abs_delta_baseline_ensemble)) %>%
+    dplyr::filter(is.finite(.data$selection_score)) %>%
     dplyr::arrange(
-      dplyr::desc(.data$abs_delta_baseline_ensemble),
+      dplyr::desc(.data$selection_score),
       .data$ld_matrix_index
     ) %>%
     dplyr::slice_head(n = n_variants)
@@ -512,7 +522,8 @@ selected_lollipop_variant_tbl <- function(locus_id, n_variants = 15L) {
           is.finite(.data$aggregated_pip) & .data$aggregated_pip > .Machine$double.eps,
           .data$aggregated_posterior_mean / .data$aggregated_pip,
           NA_real_
-        )
+        ),
+        abs_delta_posterior_mean = abs(.data$aggregated_posterior_mean - .data$baseline_posterior_mean)
       )
   }
 
@@ -521,8 +532,12 @@ selected_lollipop_variant_tbl <- function(locus_id, n_variants = 15L) {
     dplyr::mutate(variant_f = factor(.data$variant_id, levels = rev(.data$variant_id)))
 }
 
-plot_aggregated_lollipop <- function(locus_id, n_variants = 15L) {
-  plot_df <- selected_lollipop_variant_tbl(locus_id, n_variants = n_variants)
+plot_aggregated_lollipop <- function(locus_id, n_variants = 15L, selection_metric = "pip_delta") {
+  plot_df <- selected_lollipop_variant_tbl(
+    locus_id,
+    n_variants = n_variants,
+    selection_metric = selection_metric
+  )
   points_df <- dplyr::bind_rows(
     plot_df %>%
       dplyr::transmute(variant_f, pip = baseline_pip, fit_type = "Baseline"),
@@ -1391,6 +1406,7 @@ paper_locus_label <- function(locus_id) sub("_lung$", "", locus_id)
 
 selected_lollipop_xlim <- c(0, 1)
 selected_l2_locus_tokens <- c("ydjc", "arsa", "rrp7a", "tmtc1", "prpf38b", "znf280b")
+selected_l2_n_variants <- 6L
 selected_zoom_l2_loci <- vapply(
   selected_l2_locus_tokens,
   resolve_locus_token,
@@ -1563,7 +1579,11 @@ selected_drift_tbl <- build_selected_drift_tbl(selected_zoom_loci)
 selected_l2_drift_tbl <- build_selected_drift_tbl(selected_zoom_l2_loci)
 selected_l2_effect_tbl <- purrr::map_dfr(
   selected_zoom_l2_loci,
-  ~ selected_lollipop_variant_tbl(.x, n_variants = 5L)
+  ~ selected_lollipop_variant_tbl(
+    .x,
+    n_variants = selected_l2_n_variants,
+    selection_metric = "posterior_mean_delta"
+  )
 )
 selected_l2_effect_xlim <- range(c(
   selected_l2_effect_tbl$baseline_conditional_effect,
@@ -1657,7 +1677,11 @@ paper_locus_row_label_plot <- function(locus_id) {
 }
 
 paper_lollipop_l2_plot <- function(locus_id, show_x_axis = FALSE, show_legend = FALSE) {
-  plot_aggregated_lollipop(locus_id, n_variants = 5L) +
+  plot_aggregated_lollipop(
+    locus_id,
+    n_variants = selected_l2_n_variants,
+    selection_metric = "posterior_mean_delta"
+  ) +
     scale_x_continuous(limits = selected_lollipop_xlim) +
     labs(
       title = NULL,
@@ -1760,7 +1784,11 @@ paper_pip_drift_l2_plot <- function(locus_id, show_x_axis = FALSE, show_legend =
 }
 
 paper_conditional_effect_l2_plot <- function(locus_id, show_x_axis = FALSE, show_legend = FALSE) {
-  plot_df <- selected_lollipop_variant_tbl(locus_id, n_variants = 5L)
+  plot_df <- selected_lollipop_variant_tbl(
+    locus_id,
+    n_variants = selected_l2_n_variants,
+    selection_metric = "posterior_mean_delta"
+  )
   points_df <- dplyr::bind_rows(
     plot_df %>%
       dplyr::transmute(variant_f, effect_mean = baseline_conditional_effect, fit_type = "Baseline"),
@@ -1930,7 +1958,7 @@ if (requireNamespace("patchwork", quietly = TRUE)) {
 
   selected_locus_zoom_l2_header <- (
     paper_column_header_plot("") |
-      paper_column_header_plot("Most shifted PIPs") |
+      paper_column_header_plot("PIPs for shifted effects") |
       paper_column_header_plot("Effect mean if included") |
       paper_column_header_plot("PIP L2 drift from baseline")
   ) +
