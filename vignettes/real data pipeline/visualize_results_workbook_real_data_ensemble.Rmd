@@ -1158,7 +1158,7 @@ paper_drift_jsd_plot <- ggplot(
     name = NULL
   ) +
   labs(
-    title = "Annotations refine LD ties and basin choice",
+    title = "Annotations refine signal within and across LD groups",
     x = expression("Effect-basis drift from SuSiE baseline (fraction of var(" * y * "))"),
     y = "PIP JSD from SuSiE baseline"
   ) +
@@ -1492,7 +1492,7 @@ selected_zoom_loci <- vapply(
 paper_locus_label <- function(locus_id) sub("_lung$", "", locus_id)
 
 selected_lollipop_xlim <- c(0, 1)
-selected_l2_locus_tokens <- c("ydjc", "arsa", "rrp7a", "tmtc1", "prpf38b", "znf280b")
+selected_l2_locus_tokens <- c("ydjc", "arsa", "rrp7a", "tmtc1", "lgals9", "znf280b")
 selected_l2_n_variants <- 6L
 selected_zoom_l2_loci <- vapply(
   selected_l2_locus_tokens,
@@ -1691,6 +1691,23 @@ if (!is.finite(selected_l2_effect_xlim_abs) || selected_l2_effect_xlim_abs <= 0)
   selected_l2_effect_xlim_abs <- 1
 }
 selected_l2_effect_xlim <- c(-1, 1) * selected_l2_effect_xlim_abs * 1.08
+
+# Signed-log axis for the conditional-effect column: linear within
+# [-selected_l2_effect_signed_log_sigma, +selected_l2_effect_signed_log_sigma]
+# (so values at and below the pip<0.001 hard-zero are not visually shoved
+# into a singularity), log-compressed for larger magnitudes. Labels stay on
+# the raw conditional-effect scale; only tick spacing is warped.
+selected_l2_effect_signed_log_sigma <- 0.03
+selected_l2_effect_break_candidates <- c(
+  -1, -0.3, -0.1, -0.03, 0, 0.03, 0.1, 0.3, 1
+)
+selected_l2_effect_breaks <- selected_l2_effect_break_candidates[
+  selected_l2_effect_break_candidates >= selected_l2_effect_xlim[[1]] &
+    selected_l2_effect_break_candidates <= selected_l2_effect_xlim[[2]]
+]
+selected_l2_effect_break_labels <- formatC(
+  selected_l2_effect_breaks, format = "fg", digits = 2, drop0trailing = TRUE
+)
 selected_drift_xlim <- range(selected_drift_tbl$c_value, na.rm = TRUE)
 if (!all(is.finite(selected_drift_xlim))) selected_drift_xlim <- c(0, 1)
 selected_drift_ylim <- range(selected_drift_tbl$jsd_from_reference_c0_sigma02, na.rm = TRUE)
@@ -1931,7 +1948,13 @@ paper_signal_contribution_l2_plot <- function(locus_id, show_x_axis = FALSE, sho
       breaks = c("Baseline", "SuSiNE ensemble", "Warm refit"),
       name = NULL
     ) +
-    coord_cartesian(xlim = selected_l2_effect_xlim) +
+    scale_x_continuous(
+      trans = scales::pseudo_log_trans(sigma = selected_l2_effect_signed_log_sigma),
+      breaks = selected_l2_effect_breaks,
+      labels = selected_l2_effect_break_labels,
+      limits = selected_l2_effect_xlim,
+      oob = scales::oob_squish
+    ) +
     labs(
       title = NULL,
       subtitle = NULL,
@@ -2073,7 +2096,7 @@ if (requireNamespace("patchwork", quietly = TRUE)) {
       paper_column_header_plot("Fitted signal contribution", x = 0.53) |
       paper_column_header_plot("PIP L2 drift from baseline")
   ) +
-    patchwork::plot_layout(widths = c(0.07, 1.08, 0.90, 0.90))
+    patchwork::plot_layout(widths = c(0.07, 0.85, 1.15, 0.90))
 
   selected_locus_zoom_l2_rows <- purrr::map2(selected_zoom_l2_loci, seq_along(selected_zoom_l2_loci), function(loc, i) {
     show_x_axis <- i == length(selected_zoom_l2_loci)
@@ -2083,7 +2106,7 @@ if (requireNamespace("patchwork", quietly = TRUE)) {
         paper_signal_contribution_l2_plot(loc, show_x_axis = show_x_axis, show_legend = FALSE) |
         paper_pip_drift_l2_plot(loc, show_x_axis = show_x_axis, show_legend = FALSE)
     ) +
-      patchwork::plot_layout(widths = c(0.07, 1.08, 0.90, 0.90))
+      patchwork::plot_layout(widths = c(0.07, 0.85, 1.15, 0.90))
   })
 
   selected_locus_zoom_l2_legend <- (
