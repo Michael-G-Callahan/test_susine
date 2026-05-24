@@ -1695,7 +1695,7 @@ selected_l2_effect_xlim <- c(-1, 1) * selected_l2_effect_xlim_abs * 1.08
 # breaks (e.g. +/-50) would silently fall outside the panel and not render.
 selected_l2_effect_xlim <- range(c(
   selected_l2_effect_xlim,
-  c(-50, -10, -5, -1, 0, 1, 5, 10, 50)
+  c(-50, -5, -1, 0, 1, 5, 50)
 ))
 
 # Signed-log axis for the conditional-effect column: linear within
@@ -1703,10 +1703,10 @@ selected_l2_effect_xlim <- range(c(
 # (so values at and below the pip<0.001 hard-zero are not visually shoved
 # into a singularity), log-compressed for larger magnitudes. Labels stay on
 # the raw conditional-effect scale; only tick spacing is warped. Breaks are
-# hardcoded at {0, 1, 5, 10, 50} and mirrored to the negative side since
+# hardcoded at {0, 1, 5, 50} and mirrored to the negative side since
 # conditional effects are signed.
 selected_l2_effect_signed_log_sigma <- 0.03
-selected_l2_effect_breaks <- c(-50, -10, -5, -1, 0, 1, 5, 10, 50)
+selected_l2_effect_breaks <- c(-50, -5, -1, 0, 1, 5, 50)
 selected_l2_effect_break_labels <- as.character(selected_l2_effect_breaks)
 selected_drift_xlim <- range(selected_drift_tbl$c_value, na.rm = TRUE)
 if (!all(is.finite(selected_drift_xlim))) selected_drift_xlim <- c(0, 1)
@@ -2093,7 +2093,7 @@ if (requireNamespace("patchwork", quietly = TRUE)) {
   selected_locus_zoom_l2_header <- (
       paper_column_header_plot("") |
       paper_column_header_plot("PIPs for shifted effects") |
-      paper_column_header_plot("Fitted signal contribution", x = 0.53) |
+      paper_column_header_plot("Fitted signal contribution", x = 0.58) |
       paper_column_header_plot("PIP L2 drift from baseline")
   ) +
     patchwork::plot_layout(widths = c(0.07, 1, 1, 1))
