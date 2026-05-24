@@ -373,15 +373,27 @@ floored_conditional_load_agg_weights <- function() {
 }
 
 # Returns list(num = colSums(alpha_clip * mu), denom = colSums(alpha_clip)) or
-# NULL if the fit lacks the required slots.
+# NULL if the fit lacks the required slots. Handles both susine fits
+# (alpha and alpha-weighted b_hat live in fit$effect_fits$) and susieR fits
+# (alpha at fit$alpha, raw mu at fit$mu); see real_data_backend_matrices().
 floored_conditional_for_fit_object <- function(fit, alpha_floor = floored_conditional_alpha_floor) {
-  if (is.null(fit) || is.null(fit$priors$alpha) || is.null(fit$effect_fits$b_hat)) {
+  if (is.null(fit)) return(NULL)
+  alpha <- NULL
+  mu <- NULL
+  if (!is.null(fit$effect_fits$alpha) && !is.null(fit$effect_fits$b_hat)) {
+    # susine fit: b_hat is already alpha-weighted (alpha * mu), so recover mu.
+    alpha <- as.matrix(fit$effect_fits$alpha)
+    alpha_b_hat <- as.matrix(fit$effect_fits$b_hat)
+    if (!all(dim(alpha) == dim(alpha_b_hat))) return(NULL)
+    mu <- ifelse(alpha > 0, alpha_b_hat / alpha, 0)
+  } else if (!is.null(fit$alpha) && !is.null(fit$mu)) {
+    # susieR fit: mu is the raw per-component conditional mean.
+    alpha <- as.matrix(fit$alpha)
+    mu <- as.matrix(fit$mu)
+    if (!all(dim(alpha) == dim(mu))) return(NULL)
+  } else {
     return(NULL)
   }
-  alpha <- as.matrix(fit$priors$alpha)
-  alpha_b_hat <- as.matrix(fit$effect_fits$b_hat)
-  if (!all(dim(alpha) == dim(alpha_b_hat))) return(NULL)
-  mu <- ifelse(alpha > 0, alpha_b_hat / alpha, 0)
   alpha_clip <- pmax(alpha, alpha_floor)
   list(
     num   = colSums(alpha_clip * mu, na.rm = TRUE),
