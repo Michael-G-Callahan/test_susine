@@ -1691,23 +1691,23 @@ if (!is.finite(selected_l2_effect_xlim_abs) || selected_l2_effect_xlim_abs <= 0)
   selected_l2_effect_xlim_abs <- 1
 }
 selected_l2_effect_xlim <- c(-1, 1) * selected_l2_effect_xlim_abs * 1.08
+# Make sure the axis range covers the hardcoded breaks below; otherwise large
+# breaks (e.g. +/-50) would silently fall outside the panel and not render.
+selected_l2_effect_xlim <- range(c(
+  selected_l2_effect_xlim,
+  c(-50, -10, -5, -1, 0, 1, 5, 10, 50)
+))
 
 # Signed-log axis for the conditional-effect column: linear within
 # [-selected_l2_effect_signed_log_sigma, +selected_l2_effect_signed_log_sigma]
 # (so values at and below the pip<0.001 hard-zero are not visually shoved
 # into a singularity), log-compressed for larger magnitudes. Labels stay on
-# the raw conditional-effect scale; only tick spacing is warped.
+# the raw conditional-effect scale; only tick spacing is warped. Breaks are
+# hardcoded at {0, 1, 5, 10, 50} and mirrored to the negative side since
+# conditional effects are signed.
 selected_l2_effect_signed_log_sigma <- 0.03
-selected_l2_effect_break_candidates <- c(
-  -1, -0.3, -0.1, -0.03, 0, 0.03, 0.1, 0.3, 1
-)
-selected_l2_effect_breaks <- selected_l2_effect_break_candidates[
-  selected_l2_effect_break_candidates >= selected_l2_effect_xlim[[1]] &
-    selected_l2_effect_break_candidates <= selected_l2_effect_xlim[[2]]
-]
-selected_l2_effect_break_labels <- formatC(
-  selected_l2_effect_breaks, format = "fg", digits = 2, drop0trailing = TRUE
-)
+selected_l2_effect_breaks <- c(-50, -10, -5, -1, 0, 1, 5, 10, 50)
+selected_l2_effect_break_labels <- as.character(selected_l2_effect_breaks)
 selected_drift_xlim <- range(selected_drift_tbl$c_value, na.rm = TRUE)
 if (!all(is.finite(selected_drift_xlim))) selected_drift_xlim <- c(0, 1)
 selected_drift_ylim <- range(selected_drift_tbl$jsd_from_reference_c0_sigma02, na.rm = TRUE)
@@ -2096,7 +2096,7 @@ if (requireNamespace("patchwork", quietly = TRUE)) {
       paper_column_header_plot("Fitted signal contribution", x = 0.53) |
       paper_column_header_plot("PIP L2 drift from baseline")
   ) +
-    patchwork::plot_layout(widths = c(0.07, 0.85, 1.15, 0.90))
+    patchwork::plot_layout(widths = c(0.07, 1, 1, 1))
 
   selected_locus_zoom_l2_rows <- purrr::map2(selected_zoom_l2_loci, seq_along(selected_zoom_l2_loci), function(loc, i) {
     show_x_axis <- i == length(selected_zoom_l2_loci)
@@ -2106,7 +2106,7 @@ if (requireNamespace("patchwork", quietly = TRUE)) {
         paper_signal_contribution_l2_plot(loc, show_x_axis = show_x_axis, show_legend = FALSE) |
         paper_pip_drift_l2_plot(loc, show_x_axis = show_x_axis, show_legend = FALSE)
     ) +
-      patchwork::plot_layout(widths = c(0.07, 0.85, 1.15, 0.90))
+      patchwork::plot_layout(widths = c(0.07, 1, 1, 1))
   })
 
   selected_locus_zoom_l2_legend <- (
