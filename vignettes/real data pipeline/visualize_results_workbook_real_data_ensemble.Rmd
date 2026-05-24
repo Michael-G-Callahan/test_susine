@@ -271,6 +271,292 @@ selected_locus_R_matrix <- function(locus_id) {
   bundle$R
 }
 
+# Floored-alpha-weighted per-variant conditional effect E[b_j | gamma_j = 1].
+# For a single fit:
+#   mu_lj         = b_hat[l, j] / alpha[l, j]                  (per-component conditional)
+#   alpha_lj_clip = max(alpha[l, j], alpha_floor)              (floor at 1e-4 by default)
+#   conditional_j = sum_l(alpha_lj_clip * mu_lj) / sum_l(alpha_lj_clip)
+#
+# For the SuSiNE cluster-weight ensemble (Option B aggregation): aggregate the
+# (numerator, denominator) vectors across nominee runs r weighted by w_r:
+#   agg_conditional_j = sum_r w_r * num_r(j) / sum_r w_r * denom_r(j)
+#
+# Cached per locus. Loads the baseline susine c=0 fit, every cluster-weight
+# nominee in the ensemble, and the warm refit from their .rds files.
+floored_conditional_alpha_floor <- 0.0001
+
+floored_conditional_cache <- new.env(parent = emptyenv())
+
+# Edge cases encountered while computing floored conditionals are appended
+# here as one row each and reported by report_floored_conditional_diagnostics()
+# at the bottom of the workbook. kind values:
+#   "baseline_run_missing"       : nearest_reference_run returned NA
+#   "baseline_fit_unreadable"    : fit_rds_path missing on disk or readRDS failed
+#   "baseline_fit_invalid"       : fit lacks alpha / b_hat slots or wrong dims
+#   "refit_file_missing"         : no .rds under highest_weight_refits/<locus>/
+#   "refit_fit_unreadable"       : refit .rds present but readRDS failed
+#   "refit_fit_invalid"          : refit fit lacks alpha / b_hat slots or wrong dims
+#   "ensemble_no_nominees"       : no rows with agg_weight_run > 0 for this locus
+#   "ensemble_nominee_skipped"   : a single nominee fit was unreadable or invalid
+#   "ensemble_all_nominees_failed" : every nominee was skipped
+#   "denom_zero_variants"        : per-locus count of variants whose ensemble
+#                                  denom was 0 (so conditional is NA)
+floored_conditional_diagnostics <- new.env(parent = emptyenv())
+floored_conditional_diagnostics$rows <- list()
+
+floored_conditional_log <- function(locus_id, kind, detail = NA_character_) {
+  floored_conditional_diagnostics$rows[[
+    length(floored_conditional_diagnostics$rows) + 1L
+  ]] <- tibble::tibble(
+    locus_id = as.character(locus_id),
+    kind = as.character(kind),
+    detail = as.character(detail)
+  )
+  invisible(NULL)
+}
+
+floored_conditional_diagnostics_tbl <- function() {
+  if (!length(floored_conditional_diagnostics$rows)) {
+    return(tibble::tibble(locus_id = character(), kind = character(), detail = character()))
+  }
+  dplyr::bind_rows(floored_conditional_diagnostics$rows)
+}
+
+report_floored_conditional_diagnostics <- function() {
+  diag_tbl <- floored_conditional_diagnostics_tbl()
+  cat("\n", strrep("=", 72), "\n", sep = "")
+  cat("Floored-conditional edge-case report\n")
+  cat(strrep("=", 72), "\n", sep = "")
+  if (!nrow(diag_tbl)) {
+    cat("No edge cases encountered. All loci had baseline, ensemble, and refit",
+        "\nfloored conditionals computed cleanly.\n", sep = "")
+    return(invisible(diag_tbl))
+  }
+  cat(sprintf("%d edge-case row(s) across %d locus/loci.\n\n",
+              nrow(diag_tbl), dplyr::n_distinct(diag_tbl$locus_id)))
+  summary_tbl <- diag_tbl %>%
+    dplyr::count(.data$kind, name = "n") %>%
+    dplyr::arrange(dplyr::desc(.data$n))
+  print(summary_tbl, n = Inf)
+  cat("\nDetail (one row per event):\n")
+  print(diag_tbl, n = Inf)
+  invisible(diag_tbl)
+}
+
+floored_conditional_run_metrics_cache <- NULL
+floored_conditional_agg_weights_cache <- NULL
+
+floored_conditional_load_run_metrics <- function() {
+  if (!is.null(floored_conditional_run_metrics_cache)) {
+    return(floored_conditional_run_metrics_cache)
+  }
+  tbl <- readr::read_csv(
+    file.path(aggregated_dir, "run_metrics_full.csv"),
+    show_col_types = FALSE
+  ) %>%
+    dplyr::select(.data$locus_id, .data$run_id, .data$fit_rds_path)
+  floored_conditional_run_metrics_cache <<- tbl
+  tbl
+}
+
+floored_conditional_load_agg_weights <- function() {
+  if (!is.null(floored_conditional_agg_weights_cache)) {
+    return(floored_conditional_agg_weights_cache)
+  }
+  tbl <- readr::read_csv(
+    file.path(aggregated_dir, "aggregation_weights_cluster_weight.csv"),
+    show_col_types = FALSE
+  ) %>%
+    dplyr::select(.data$locus_id, .data$run_id, .data$agg_weight_run)
+  floored_conditional_agg_weights_cache <<- tbl
+  tbl
+}
+
+# Returns list(num = colSums(alpha_clip * mu), denom = colSums(alpha_clip)) or
+# NULL if the fit lacks the required slots.
+floored_conditional_for_fit_object <- function(fit, alpha_floor = floored_conditional_alpha_floor) {
+  if (is.null(fit) || is.null(fit$priors$alpha) || is.null(fit$effect_fits$b_hat)) {
+    return(NULL)
+  }
+  alpha <- as.matrix(fit$priors$alpha)
+  alpha_b_hat <- as.matrix(fit$effect_fits$b_hat)
+  if (!all(dim(alpha) == dim(alpha_b_hat))) return(NULL)
+  mu <- ifelse(alpha > 0, alpha_b_hat / alpha, 0)
+  alpha_clip <- pmax(alpha, alpha_floor)
+  list(
+    num   = colSums(alpha_clip * mu, na.rm = TRUE),
+    denom = colSums(alpha_clip,      na.rm = TRUE),
+    p     = ncol(alpha)
+  )
+}
+
+floored_conditional_load_fit <- function(path) {
+  if (length(path) != 1L || is.na(path) || !nzchar(path) || !file.exists(path)) return(NULL)
+  tryCatch(readRDS(path), error = function(e) NULL)
+}
+
+floored_conditional_for_locus <- function(locus_id) {
+  key <- as.character(locus_id)
+  if (exists(key, envir = floored_conditional_cache, inherits = FALSE)) {
+    return(get(key, envir = floored_conditional_cache, inherits = FALSE))
+  }
+
+  run_metrics <- floored_conditional_load_run_metrics()
+  agg_weights <- floored_conditional_load_agg_weights()
+
+  # Variant ordering: pull from variant_posteriors so the output aligns to
+  # variant_id by ld_matrix_index (fit columns are indexed by ld_matrix_index).
+  baseline_run_id <- nearest_reference_run(locus_id)
+  if (is.na(baseline_run_id)) {
+    floored_conditional_log(locus_id, "baseline_run_missing",
+                            "nearest_reference_run returned NA (no c=0 functional grid run)")
+  }
+  variant_order <- if (!is.na(baseline_run_id)) {
+    variant_posteriors %>%
+      dplyr::filter(.data$locus_id == !!locus_id,
+                    .data$run_id == !!baseline_run_id) %>%
+      dplyr::select(.data$variant_id, .data$ld_matrix_index) %>%
+      dplyr::collect() %>%
+      dplyr::arrange(.data$ld_matrix_index)
+  } else {
+    tibble::tibble(variant_id = character(), ld_matrix_index = integer())
+  }
+  p <- nrow(variant_order)
+  na_vec <- rep(NA_real_, p)
+
+  empty_result <- tibble::tibble(
+    variant_id = variant_order$variant_id,
+    baseline_conditional_effect_floored = na_vec,
+    aggregated_conditional_effect_floored = na_vec,
+    refit_conditional_effect_floored = na_vec
+  )
+
+  if (!p) {
+    assign(key, empty_result, envir = floored_conditional_cache)
+    return(empty_result)
+  }
+
+  path_for <- function(rid) {
+    if (is.na(rid)) return(NA_character_)
+    out <- run_metrics %>%
+      dplyr::filter(.data$locus_id == !!locus_id, .data$run_id == !!rid) %>%
+      dplyr::pull(.data$fit_rds_path)
+    if (!length(out)) NA_character_ else out[[1]]
+  }
+
+  # Returns either a $num/$denom list or NULL, and reports the specific reason
+  # for failure via the floored_conditional_log so the end-of-workbook report
+  # can attribute every NA to a concrete cause.
+  compute_for_path_with_diag <- function(path, role, run_id = NA) {
+    detail_run <- if (!is.na(run_id)) paste0("run_id=", run_id, ", path=", path) else paste0("path=", path)
+    if (length(path) != 1L || is.na(path) || !nzchar(path)) {
+      floored_conditional_log(locus_id, paste0(role, "_fit_unreadable"),
+                              paste0("no fit_rds_path. ", detail_run))
+      return(NULL)
+    }
+    if (!file.exists(path)) {
+      floored_conditional_log(locus_id, paste0(role, "_fit_unreadable"),
+                              paste0("file does not exist. ", detail_run))
+      return(NULL)
+    }
+    fit <- tryCatch(readRDS(path), error = function(e) {
+      floored_conditional_log(locus_id, paste0(role, "_fit_unreadable"),
+                              paste0("readRDS failed: ", conditionMessage(e), ". ", detail_run))
+      NULL
+    })
+    if (is.null(fit)) return(NULL)
+    fc <- floored_conditional_for_fit_object(fit)
+    if (is.null(fc)) {
+      floored_conditional_log(locus_id, paste0(role, "_fit_invalid"),
+                              paste0("fit lacks priors$alpha or effect_fits$b_hat. ", detail_run))
+      return(NULL)
+    }
+    if (fc$p != p) {
+      floored_conditional_log(locus_id, paste0(role, "_fit_invalid"),
+                              sprintf("variant-count mismatch: fit has p=%d, locus expects p=%d. %s",
+                                      fc$p, p, detail_run))
+      return(NULL)
+    }
+    fc
+  }
+
+  # Baseline (susine c = 0)
+  baseline_fc <- if (!is.na(baseline_run_id)) {
+    compute_for_path_with_diag(path_for(baseline_run_id),
+                               role = "baseline", run_id = baseline_run_id)
+  } else NULL
+
+  # Warm refit (separate file naming)
+  refit_dir <- file.path(aggregated_dir, "highest_weight_refits", locus_id)
+  refit_files <- if (dir.exists(refit_dir)) {
+    list.files(refit_dir, pattern = "\\.rds$", full.names = TRUE)
+  } else {
+    character(0)
+  }
+  refit_fc <- if (length(refit_files)) {
+    compute_for_path_with_diag(refit_files[[1]], role = "refit")
+  } else {
+    floored_conditional_log(locus_id, "refit_file_missing",
+                            paste0("no .rds files under ", refit_dir))
+    NULL
+  }
+
+  # Ensemble: weighted aggregate across cluster-weight nominees
+  nominees <- agg_weights %>%
+    dplyr::filter(.data$locus_id == !!locus_id, .data$agg_weight_run > 0)
+  ens_num <- rep(0, p)
+  ens_denom <- rep(0, p)
+  ens_valid <- FALSE
+  ensemble_nominees_skipped <- 0L
+  if (!nrow(nominees)) {
+    floored_conditional_log(locus_id, "ensemble_no_nominees",
+                            "agg_weight_run > 0 returned 0 rows")
+  } else {
+    for (i in seq_len(nrow(nominees))) {
+      rid <- nominees$run_id[[i]]
+      w <- nominees$agg_weight_run[[i]]
+      fc <- compute_for_path_with_diag(path_for(rid),
+                                       role = "ensemble_nominee", run_id = rid)
+      if (is.null(fc)) {
+        ensemble_nominees_skipped <- ensemble_nominees_skipped + 1L
+        next
+      }
+      ens_num <- ens_num + w * fc$num
+      ens_denom <- ens_denom + w * fc$denom
+      ens_valid <- TRUE
+    }
+    if (!ens_valid) {
+      floored_conditional_log(locus_id, "ensemble_all_nominees_failed",
+                              sprintf("%d nominee(s) attempted, all skipped",
+                                      nrow(nominees)))
+    }
+  }
+
+  safe_div <- function(n, d) {
+    out <- ifelse(d > 0, n / d, NA_real_)
+    as.numeric(out)
+  }
+
+  if (ens_valid) {
+    n_zero_denom <- sum(ens_denom <= 0)
+    if (n_zero_denom > 0L) {
+      floored_conditional_log(locus_id, "denom_zero_variants",
+                              sprintf("%d variant(s) had ensemble denom <= 0 -> conditional NA",
+                                      n_zero_denom))
+    }
+  }
+
+  result <- tibble::tibble(
+    variant_id = variant_order$variant_id,
+    baseline_conditional_effect_floored = if (!is.null(baseline_fc)) safe_div(baseline_fc$num, baseline_fc$denom) else na_vec,
+    aggregated_conditional_effect_floored = if (ens_valid) safe_div(ens_num, ens_denom) else na_vec,
+    refit_conditional_effect_floored = if (!is.null(refit_fc)) safe_div(refit_fc$num, refit_fc$denom) else na_vec
+  )
+
+  assign(key, result, envir = floored_conditional_cache)
+  result
+}
+
 signal_contribution_vec <- function(b, R) {
   b <- as.numeric(b)
   if (!length(b) || is.null(R) || nrow(R) != length(b) || ncol(R) != length(b)) {
@@ -564,16 +850,22 @@ selected_lollipop_variant_tbl <- function(
       }
     }
 
+  # Floored-alpha-weighted conditional effect (Option B aggregation across the
+  # SuSiNE ensemble). Overrides the legacy posterior_mean / pip values in
+  # reference_pip_tbl / refit_pip_tbl, and replaces the pip<0.001 hardcode
+  # for aggregated_conditional_effect entirely. See
+  # floored_conditional_for_locus() for the recipe.
+  floored_cond_tbl <- floored_conditional_for_locus(locus_id)
+
   plot_df <- locus_aggregated_variants %>%
     dplyr::left_join(reference_pip_tbl(locus_id), by = "variant_id") %>%
     dplyr::left_join(refit_pip_tbl(locus_id), by = "variant_id") %>%
+    dplyr::left_join(floored_cond_tbl, by = "variant_id") %>%
     add_signal_contribution_cols(locus_id) %>%
     dplyr::mutate(
-      aggregated_conditional_effect = dplyr::if_else(
-        is.finite(.data$aggregated_pip) & .data$aggregated_pip >= 0.001,
-        .data$aggregated_posterior_mean / .data$aggregated_pip,
-        0
-      ),
+      baseline_conditional_effect = .data$baseline_conditional_effect_floored,
+      refit_conditional_effect = .data$refit_conditional_effect_floored,
+      aggregated_conditional_effect = .data$aggregated_conditional_effect_floored,
       max_display_pip = pmax(
         .data$baseline_pip,
         .data$aggregated_pip,
@@ -602,13 +894,12 @@ selected_lollipop_variant_tbl <- function(
       dplyr::slice_head(n = n_variants) %>%
       dplyr::left_join(reference_pip_tbl(locus_id), by = "variant_id") %>%
       dplyr::left_join(refit_pip_tbl(locus_id), by = "variant_id") %>%
+      dplyr::left_join(floored_cond_tbl, by = "variant_id") %>%
       add_signal_contribution_cols(locus_id) %>%
       dplyr::mutate(
-        aggregated_conditional_effect = dplyr::if_else(
-          is.finite(.data$aggregated_pip) & .data$aggregated_pip >= 0.001,
-          .data$aggregated_posterior_mean / .data$aggregated_pip,
-          0
-        ),
+        baseline_conditional_effect = .data$baseline_conditional_effect_floored,
+        refit_conditional_effect = .data$refit_conditional_effect_floored,
+        aggregated_conditional_effect = .data$aggregated_conditional_effect_floored,
         abs_delta_posterior_mean = abs(.data$aggregated_posterior_mean - .data$baseline_posterior_mean),
         abs_delta_signal_contribution = abs(.data$aggregated_signal_contribution - .data$baseline_signal_contribution)
       )
@@ -1698,14 +1989,15 @@ selected_l2_effect_xlim <- range(c(
   c(-50, -5, -1, 0, 1, 5, 50)
 ))
 
-# Signed-log axis for the conditional-effect column: linear within
-# [-selected_l2_effect_signed_log_sigma, +selected_l2_effect_signed_log_sigma]
-# (so values at and below the pip<0.001 hard-zero are not visually shoved
-# into a singularity), log-compressed for larger magnitudes. Labels stay on
-# the raw conditional-effect scale; only tick spacing is warped. Breaks are
-# hardcoded at {0, 1, 5, 50} and mirrored to the negative side since
-# conditional effects are signed.
-selected_l2_effect_signed_log_sigma <- 0.03
+# Signed-log axis for the conditional-effect column. With sigma = 1 and
+# base = 2 below, the transform is sign(x) * log2(|x| + 1): asinh-like,
+# smoothly passes through zero, linear near the origin (slope 1 / ln 2),
+# and log-compressed at large magnitudes. Equal axis spacing now reflects
+# equal multiplicative factors (every doubling of |x| moves the same
+# distance). Labels stay on the raw conditional-effect scale; only tick
+# spacing is warped. Breaks are hardcoded at {0, 1, 5, 50} and mirrored to
+# the negative side since conditional effects are signed.
+selected_l2_effect_signed_log_sigma <- 1
 selected_l2_effect_breaks <- c(-50, -5, -1, 0, 1, 5, 50)
 selected_l2_effect_break_labels <- as.character(selected_l2_effect_breaks)
 selected_drift_xlim <- range(selected_drift_tbl$c_value, na.rm = TRUE)
@@ -1790,7 +2082,8 @@ paper_locus_row_label_plot <- function(locus_id) {
     theme_void()
 }
 
-paper_lollipop_l2_plot <- function(locus_id, show_x_axis = FALSE, show_legend = FALSE) {
+paper_lollipop_l2_plot <- function(locus_id, show_x_axis = FALSE, show_legend = FALSE,
+                                   column_title = NULL) {
   plot_aggregated_lollipop(
     locus_id,
     n_variants = selected_l2_n_variants,
@@ -1798,7 +2091,7 @@ paper_lollipop_l2_plot <- function(locus_id, show_x_axis = FALSE, show_legend = 
   ) +
     scale_x_continuous(limits = selected_lollipop_xlim) +
     labs(
-      title = NULL,
+      title = column_title,
       subtitle = NULL,
       x = if (show_x_axis) "PIP" else NULL,
       y = NULL
@@ -1807,7 +2100,9 @@ paper_lollipop_l2_plot <- function(locus_id, show_x_axis = FALSE, show_legend = 
     theme(
       legend.position = if (show_legend) "bottom" else "none",
       axis.text.y = element_text(size = 5.8),
-      plot.title = element_blank(),
+      plot.title = if (is.null(column_title)) element_blank() else element_text(
+        face = "bold", size = 9, hjust = 0.5, margin = margin(b = 4)
+      ),
       plot.subtitle = element_blank(),
       axis.title.x = if (show_x_axis) element_text(size = 8.5) else element_blank(),
       axis.text.x = if (show_x_axis) element_text(size = 7, color = "grey25") else element_blank(),
@@ -1815,7 +2110,8 @@ paper_lollipop_l2_plot <- function(locus_id, show_x_axis = FALSE, show_legend = 
     )
 }
 
-paper_pip_drift_l2_plot <- function(locus_id, show_x_axis = FALSE, show_legend = FALSE) {
+paper_pip_drift_l2_plot <- function(locus_id, show_x_axis = FALSE, show_legend = FALSE,
+                                    column_title = NULL) {
   df <- dplyr::filter(selected_l2_drift_tbl, .data$locus_id == !!locus_id)
   highlight_df <- dplyr::filter(selected_l2_highest_weight_drift_tbl, .data$locus_id == !!locus_id) %>%
     dplyr::mutate(weight_label = sprintf("%.2f", .data$agg_weight_run))
@@ -1886,7 +2182,7 @@ paper_pip_drift_l2_plot <- function(locus_id, show_x_axis = FALSE, show_legend =
     ) +
     coord_cartesian(xlim = selected_drift_xlim) +
     labs(
-      title = NULL,
+      title = column_title,
       x = if (show_x_axis) "Annotation scale c" else NULL,
       y = NULL,
       color = expression("Prior variance " * sigma[0]^2)
@@ -1894,14 +2190,17 @@ paper_pip_drift_l2_plot <- function(locus_id, show_x_axis = FALSE, show_legend =
     paper_panel_theme +
     theme(
       legend.position = if (show_legend) "bottom" else "none",
-      plot.title = element_blank(),
+      plot.title = if (is.null(column_title)) element_blank() else element_text(
+        face = "bold", size = 9, hjust = 0.5, margin = margin(b = 4)
+      ),
       axis.title.x = if (show_x_axis) element_text(size = 8.5) else element_blank(),
       axis.text.x = if (show_x_axis) element_text(size = 7, color = "grey25") else element_blank(),
       axis.ticks.x = if (show_x_axis) element_line(color = "grey35") else element_blank()
     )
 }
 
-paper_signal_contribution_l2_plot <- function(locus_id, show_x_axis = FALSE, show_legend = FALSE) {
+paper_signal_contribution_l2_plot <- function(locus_id, show_x_axis = FALSE, show_legend = FALSE,
+                                              column_title = NULL) {
   # Despite the legacy name, this panel plots the signed standardized
   # conditional posterior-mean effect E[b_j | gamma_j = 1] for the same
   # variants as the left lollipop column. Using the *conditional* effect
@@ -1949,14 +2248,14 @@ paper_signal_contribution_l2_plot <- function(locus_id, show_x_axis = FALSE, sho
       name = NULL
     ) +
     scale_x_continuous(
-      trans = scales::pseudo_log_trans(sigma = selected_l2_effect_signed_log_sigma),
+      trans = scales::pseudo_log_trans(sigma = selected_l2_effect_signed_log_sigma, base = 2),
       breaks = selected_l2_effect_breaks,
       labels = selected_l2_effect_break_labels,
       limits = selected_l2_effect_xlim,
       oob = scales::oob_squish
     ) +
     labs(
-      title = NULL,
+      title = column_title,
       subtitle = NULL,
       x = if (show_x_axis) expression("Conditional effect  " * E * "[" * b[j] * " | " * gamma[j] * " = 1]") else NULL,
       y = NULL
@@ -1964,7 +2263,9 @@ paper_signal_contribution_l2_plot <- function(locus_id, show_x_axis = FALSE, sho
     paper_panel_theme +
     theme(
       legend.position = if (show_legend) "bottom" else "none",
-      plot.title = element_blank(),
+      plot.title = if (is.null(column_title)) element_blank() else element_text(
+        face = "bold", size = 9, hjust = 0.5, margin = margin(b = 4)
+      ),
       plot.subtitle = element_blank(),
       axis.text.y = element_blank(),
       axis.ticks.y = element_blank(),
@@ -2090,21 +2391,26 @@ if (requireNamespace("patchwork", quietly = TRUE)) {
       panel.spacing.y = grid::unit(5.5, "mm")
     )
 
-  selected_locus_zoom_l2_header <- (
-      paper_column_header_plot("") |
-      paper_column_header_plot("PIPs for shifted effects") |
-      paper_column_header_plot("Fitted signal contribution", x = 0.58) |
-      paper_column_header_plot("PIP L2 drift from baseline")
-  ) +
-    patchwork::plot_layout(widths = c(0.07, 1, 1, 1))
-
+  # Column titles are now set as plot.title on the row-1 plots themselves
+  # rather than as a separate header strip above. plot.title anchors to the
+  # plot panel (data region), so titles auto-center over their column
+  # regardless of how much width each plot's y-axis labels consume. This
+  # replaces the previous per-header `x =` nudges, which were fragile and
+  # had to be re-tuned whenever axis labels or panel widths changed.
   selected_locus_zoom_l2_rows <- purrr::map2(selected_zoom_l2_loci, seq_along(selected_zoom_l2_loci), function(loc, i) {
     show_x_axis <- i == length(selected_zoom_l2_loci)
+    is_first_row <- i == 1L
+    title_lollipop <- if (is_first_row) "PIPs for shifted effects" else NULL
+    title_effect   <- if (is_first_row) "Fitted signal contribution" else NULL
+    title_drift    <- if (is_first_row) "PIP L2 drift from baseline" else NULL
     (
         paper_locus_row_label_plot(loc) |
-        paper_lollipop_l2_plot(loc, show_x_axis = show_x_axis, show_legend = FALSE) |
-        paper_signal_contribution_l2_plot(loc, show_x_axis = show_x_axis, show_legend = FALSE) |
-        paper_pip_drift_l2_plot(loc, show_x_axis = show_x_axis, show_legend = FALSE)
+        paper_lollipop_l2_plot(loc, show_x_axis = show_x_axis, show_legend = FALSE,
+                               column_title = title_lollipop) |
+        paper_signal_contribution_l2_plot(loc, show_x_axis = show_x_axis, show_legend = FALSE,
+                                          column_title = title_effect) |
+        paper_pip_drift_l2_plot(loc, show_x_axis = show_x_axis, show_legend = FALSE,
+                                column_title = title_drift)
     ) +
       patchwork::plot_layout(widths = c(0.07, 1, 1, 1))
   })
@@ -2116,11 +2422,18 @@ if (requireNamespace("patchwork", quietly = TRUE)) {
   ) +
     patchwork::plot_layout(widths = c(1, 0.95, 1.35))
 
+  # First row is a touch taller than the others to absorb the plot.title
+  # vertical space without compressing its panel area below the other rows.
+  selected_locus_zoom_l2_heights <- c(
+    0.98,
+    rep(0.90, length(selected_locus_zoom_l2_rows) - 1L),
+    0.42
+  )
   selected_locus_zoom_l2_figure <- patchwork::wrap_plots(
-    c(list(selected_locus_zoom_l2_header), selected_locus_zoom_l2_rows, list(selected_locus_zoom_l2_legend)),
+    c(selected_locus_zoom_l2_rows, list(selected_locus_zoom_l2_legend)),
     ncol = 1
   ) +
-    patchwork::plot_layout(heights = c(0.085, rep(0.90, length(selected_locus_zoom_l2_rows)), 0.42)) &
+    patchwork::plot_layout(heights = selected_locus_zoom_l2_heights) &
     theme(
       plot.margin = margin(4.5, 4.5, 2.5, 4.5),
       panel.spacing.x = grid::unit(3.2, "mm"),
@@ -2230,4 +2543,13 @@ purrr::walk(sort(unique(basin_r2_drift_tbl$locus_id)), function(loc) {
   )
   print(p)
 })
+```
+
+# 10. Floored-Conditional Edge-Case Report
+
+```{r floored-conditional-edge-case-report, message=TRUE}
+# Reports any locus/fit/variant edge case that left a floored-conditional
+# entry as NA. Kinds are documented above the floored_conditional_log helper.
+# Prints "No edge cases encountered." when everything went cleanly.
+report_floored_conditional_diagnostics()
 ```
