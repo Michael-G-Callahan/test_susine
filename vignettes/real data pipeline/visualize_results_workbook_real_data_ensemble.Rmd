@@ -202,10 +202,15 @@ reference_pip_tbl <- function(locus_id) {
       .data$variant_id,
       baseline_pip = .data$pip,
       baseline_posterior_mean = .data$posterior_mean,
+      # Hard-zero (not NA) below PIP < 0.001: variants the model gives
+      # negligible inclusion probability to do not carry a meaningful
+      # "effect given inclusion" estimate, and a numeric 0 lets them
+      # render at the natural reference point in the lollipop instead of
+      # leaving orphan ensemble markers with no baseline counterpart.
       baseline_conditional_effect = dplyr::if_else(
-        is.finite(.data$pip) & .data$pip > .Machine$double.eps,
+        is.finite(.data$pip) & .data$pip >= 0.001,
         .data$posterior_mean / .data$pip,
-        NA_real_
+        0
       )
     )
 }
@@ -228,9 +233,9 @@ refit_pip_tbl <- function(locus_id) {
       refit_pip = .data$pip,
       refit_posterior_mean = .data$posterior_mean,
       refit_conditional_effect = dplyr::if_else(
-        is.finite(.data$pip) & .data$pip > .Machine$double.eps,
+        is.finite(.data$pip) & .data$pip >= 0.001,
         .data$posterior_mean / .data$pip,
-        NA_real_
+        0
       )
     )
 }
@@ -565,9 +570,9 @@ selected_lollipop_variant_tbl <- function(
     add_signal_contribution_cols(locus_id) %>%
     dplyr::mutate(
       aggregated_conditional_effect = dplyr::if_else(
-        is.finite(.data$aggregated_pip) & .data$aggregated_pip > .Machine$double.eps,
+        is.finite(.data$aggregated_pip) & .data$aggregated_pip >= 0.001,
         .data$aggregated_posterior_mean / .data$aggregated_pip,
-        NA_real_
+        0
       ),
       max_display_pip = pmax(
         .data$baseline_pip,
@@ -600,9 +605,9 @@ selected_lollipop_variant_tbl <- function(
       add_signal_contribution_cols(locus_id) %>%
       dplyr::mutate(
         aggregated_conditional_effect = dplyr::if_else(
-          is.finite(.data$aggregated_pip) & .data$aggregated_pip > .Machine$double.eps,
+          is.finite(.data$aggregated_pip) & .data$aggregated_pip >= 0.001,
           .data$aggregated_posterior_mean / .data$aggregated_pip,
-          NA_real_
+          0
         ),
         abs_delta_posterior_mean = abs(.data$aggregated_posterior_mean - .data$baseline_posterior_mean),
         abs_delta_signal_contribution = abs(.data$aggregated_signal_contribution - .data$baseline_signal_contribution)
@@ -1153,7 +1158,7 @@ paper_drift_jsd_plot <- ggplot(
     name = NULL
   ) +
   labs(
-    title = "Shifts to PIPs and effect bases can decouple",
+    title = "Annotations refine LD ties and basin choice",
     x = expression("Effect-basis drift from SuSiE baseline (fraction of var(" * y * "))"),
     y = "PIP JSD from SuSiE baseline"
   ) +
@@ -1670,26 +1675,22 @@ selected_l2_effect_tbl <- purrr::map_dfr(
     selection_metric = "posterior_mean_delta"
   )
 )
-# Per-locus signed-effect xlims. We let each row auto-scale rather than share a
-# global x-axis, because posterior-mean magnitudes differ by 1-2 orders of
-# magnitude across loci (a noise-floor locus would otherwise collapse to zero
-# on a globally shared axis dominated by a high-PVE locus).
-selected_l2_effect_xlim_by_locus <- selected_l2_effect_tbl %>%
-  dplyr::group_by(.data$locus_id) %>%
-  dplyr::summarise(
-    lo = min(c(.data$baseline_posterior_mean,
-               .data$aggregated_posterior_mean,
-               .data$refit_posterior_mean), na.rm = TRUE),
-    hi = max(c(.data$baseline_posterior_mean,
-               .data$aggregated_posterior_mean,
-               .data$refit_posterior_mean), na.rm = TRUE),
-    .groups = "drop"
-  ) %>%
-  dplyr::mutate(
-    span = pmax(.data$hi - .data$lo, 1e-6),
-    lo = .data$lo - 0.08 * .data$span,
-    hi = .data$hi + 0.08 * .data$span
-  )
+# Shared signed-conditional-effect xlim across the selected loci. Conditional
+# effects E[b_j | gamma_j = 1] live on a roughly common scale across loci
+# (bounded by ~ sqrt(var(y) / var(X_j)) ~ 1 on standardized data), so a common
+# axis is honest and lets the reader compare effect-size magnitudes across
+# rows. Symmetric around zero so positive and negative directions read evenly.
+selected_l2_effect_xlim_raw <- range(c(
+  selected_l2_effect_tbl$baseline_conditional_effect,
+  selected_l2_effect_tbl$aggregated_conditional_effect,
+  selected_l2_effect_tbl$refit_conditional_effect
+), na.rm = TRUE)
+if (!all(is.finite(selected_l2_effect_xlim_raw))) selected_l2_effect_xlim_raw <- c(-1, 1)
+selected_l2_effect_xlim_abs <- max(abs(selected_l2_effect_xlim_raw))
+if (!is.finite(selected_l2_effect_xlim_abs) || selected_l2_effect_xlim_abs <= 0) {
+  selected_l2_effect_xlim_abs <- 1
+}
+selected_l2_effect_xlim <- c(-1, 1) * selected_l2_effect_xlim_abs * 1.08
 selected_drift_xlim <- range(selected_drift_tbl$c_value, na.rm = TRUE)
 if (!all(is.finite(selected_drift_xlim))) selected_drift_xlim <- c(0, 1)
 selected_drift_ylim <- range(selected_drift_tbl$jsd_from_reference_c0_sigma02, na.rm = TRUE)
@@ -1884,35 +1885,36 @@ paper_pip_drift_l2_plot <- function(locus_id, show_x_axis = FALSE, show_legend =
 }
 
 paper_signal_contribution_l2_plot <- function(locus_id, show_x_axis = FALSE, show_legend = FALSE) {
-  # Despite the legacy name, this panel now plots the signed standardized
-  # posterior-mean effect b_j (in z-scale units) for the same variants as the
-  # left lollipop column. The previous quantity b_j * (R b)_j was unstable
-  # under LD-induced sign cancellation: per-variant values could exceed the
-  # global b' R b by orders of magnitude, and a globally shared x-axis crushed
-  # low-PVE loci to a flat zero column. Per-locus free x-axis is intentional.
+  # Despite the legacy name, this panel plots the signed standardized
+  # conditional posterior-mean effect E[b_j | gamma_j = 1] for the same
+  # variants as the left lollipop column. Using the *conditional* effect
+  # (rather than the unconditional E[b_j] = pip_j * E[b_j | gamma_j = 1])
+  # decouples the middle column from the left: left = inclusion probability,
+  # middle = direction/magnitude given inclusion. The shared x-axis across
+  # rows is intentional and meaningful because conditional effects live on a
+  # roughly common standardized scale across loci. Variants with pip < 0.001
+  # have their conditional effect hard-coded to 0 upstream (in
+  # reference_pip_tbl / refit_pip_tbl / selected_lollipop_variant_tbl).
   plot_df <- selected_lollipop_variant_tbl(
     locus_id,
     n_variants = selected_l2_n_variants,
     selection_metric = "posterior_mean_delta"
   )
-  xlim_row <- selected_l2_effect_xlim_by_locus %>%
-    dplyr::filter(.data$locus_id == !!locus_id)
-  xlim_vec <- if (nrow(xlim_row)) c(xlim_row$lo[[1]], xlim_row$hi[[1]]) else NULL
   points_df <- dplyr::bind_rows(
     plot_df %>%
-      dplyr::transmute(variant_f, posterior_mean = baseline_posterior_mean, fit_type = "Baseline"),
+      dplyr::transmute(variant_f, conditional_effect = baseline_conditional_effect, fit_type = "Baseline"),
     plot_df %>%
-      dplyr::transmute(variant_f, posterior_mean = aggregated_posterior_mean, fit_type = "SuSiNE ensemble"),
+      dplyr::transmute(variant_f, conditional_effect = aggregated_conditional_effect, fit_type = "SuSiNE ensemble"),
     plot_df %>%
-      dplyr::transmute(variant_f, posterior_mean = refit_posterior_mean, fit_type = "Warm refit")
+      dplyr::transmute(variant_f, conditional_effect = refit_conditional_effect, fit_type = "Warm refit")
   ) %>%
-    dplyr::filter(is.finite(.data$posterior_mean)) %>%
+    dplyr::filter(is.finite(.data$conditional_effect)) %>%
     dplyr::mutate(fit_type = factor(.data$fit_type, levels = c("Baseline", "SuSiNE ensemble", "Warm refit")))
 
-  p <- ggplot(plot_df, aes(y = variant_f)) +
+  ggplot(plot_df, aes(y = variant_f)) +
     geom_vline(xintercept = 0, color = "grey78", linewidth = 0.35) +
     geom_segment(
-      aes(x = baseline_posterior_mean, xend = aggregated_posterior_mean, yend = variant_f),
+      aes(x = baseline_conditional_effect, xend = aggregated_conditional_effect, yend = variant_f),
       color = "grey35",
       linewidth = 0.8,
       alpha = 0.75,
@@ -1920,7 +1922,7 @@ paper_signal_contribution_l2_plot <- function(locus_id, show_x_axis = FALSE, sho
     ) +
     geom_point(
       data = points_df,
-      aes(x = posterior_mean, y = variant_f, color = fit_type),
+      aes(x = conditional_effect, y = variant_f, color = fit_type),
       size = 2.8,
       inherit.aes = FALSE
     ) +
@@ -1928,15 +1930,12 @@ paper_signal_contribution_l2_plot <- function(locus_id, show_x_axis = FALSE, sho
       values = c("Baseline" = "#666666", "SuSiNE ensemble" = "#0B6E4F", "Warm refit" = "#C65D00"),
       breaks = c("Baseline", "SuSiNE ensemble", "Warm refit"),
       name = NULL
-    )
-  if (!is.null(xlim_vec) && all(is.finite(xlim_vec))) {
-    p <- p + coord_cartesian(xlim = xlim_vec)
-  }
-  p +
+    ) +
+    coord_cartesian(xlim = selected_l2_effect_xlim) +
     labs(
       title = NULL,
       subtitle = NULL,
-      x = if (show_x_axis) expression("Posterior-mean effect " * E * "[" * b[j] * "]") else NULL,
+      x = if (show_x_axis) expression("Conditional effect  " * E * "[" * b[j] * " | " * gamma[j] * " = 1]") else NULL,
       y = NULL
     ) +
     paper_panel_theme +
