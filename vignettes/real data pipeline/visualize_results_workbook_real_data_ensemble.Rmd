@@ -1998,7 +1998,7 @@ selected_l2_effect_xlim <- c(-1, 1) * selected_l2_effect_xlim_abs * 1.08
 # breaks (e.g. +/-50) would silently fall outside the panel and not render.
 selected_l2_effect_xlim <- range(c(
   selected_l2_effect_xlim,
-  c(-50, -5, -1, 0, 1, 5, 50)
+  c(-22, -5, -1, 0, 1, 5, 22)
 ))
 
 # Signed-log axis for the conditional-effect column. With sigma = 1 and
@@ -2007,10 +2007,12 @@ selected_l2_effect_xlim <- range(c(
 # and log-compressed at large magnitudes. Equal axis spacing now reflects
 # equal multiplicative factors (every doubling of |x| moves the same
 # distance). Labels stay on the raw conditional-effect scale; only tick
-# spacing is warped. Breaks are hardcoded at {0, 1, 5, 50} and mirrored to
-# the negative side since conditional effects are signed.
+# spacing is warped. Breaks are hardcoded at {0, 1, 5, 20} and mirrored to
+# the negative side since conditional effects are signed. +/-20 sits at the
+# edge of the observed data max (rrp7a tops out around +/-21); the previous
+# +/-50 was pure dead space for every locus.
 selected_l2_effect_signed_log_sigma <- 1
-selected_l2_effect_breaks <- c(-50, -5, -1, 0, 1, 5, 50)
+selected_l2_effect_breaks <- c(-20, -5, -1, 0, 1, 5, 20)
 selected_l2_effect_break_labels <- as.character(selected_l2_effect_breaks)
 selected_drift_xlim <- range(selected_drift_tbl$c_value, na.rm = TRUE)
 if (!all(is.finite(selected_drift_xlim))) selected_drift_xlim <- c(0, 1)
