@@ -1,6 +1,7 @@
 # Real Data Analysis Pipeline Technical Trace
 
 Date written: 2026-05-22
+Last updated: 2026-05-26
 
 This document traces the real-data eQTL case-study pipeline that produced the
 paper figures:
@@ -57,16 +58,19 @@ Important local-state caveats at trace time:
   `test_susine/output/slurm_output/real_data_ensemble_geometric_n20/52906940/figures/real_data_ensemble/overall/`.
 - The paper copies currently live under:
   `../Writings/plots/real_data_case_study/`.
+- The final paper directory currently contains the two paper PNGs plus
+  `paper_real_data_ensemble_summary.csv`; that summary has 20 locus rows.
 - The final PNGs in the paper directory have local write times on
-  2026-05-22, while the plotting workbook was last written on 2026-05-21. This
-  is consistent with rendering or copying the final figures after editing the
-  visualization workbook.
-- The upstream annotation-prep workbook/code references the source repo as
-  `/storage/work/mgc5166/Annotations/eQTL_annotations_for_susine`, while the
-  user-provided HPC shell example points to
-  `/storage/home/mgc5166/work/Annotations/eQTL_annotations_for_susine`. These
-  may be equivalent via a filesystem convention or symlink, but that is not
-  verifiable locally.
+  2026-05-26.
+- The production upstream annotation/data-prep source root used for this run is:
+  `/storage/home/mgc5166/work/Annotations/eQTL_annotations_for_susine`.
+  Some source code and older notebooks still show
+  `/storage/work/mgc5166/Annotations/eQTL_annotations_for_susine`; treat that as
+  an outdated/default path unless the two locations are verified to be aliases
+  on HPC.
+- User-confirmed provenance updates, 2026-05-26: the real-data study uses 20
+  loci, `52906940` is the parent job id for the run used in the paper, and no
+  selected loci failed.
 - The manuscript still has placeholder real-data methods/results text. The
   pipeline traced here is more specific than the current draft.
 
@@ -250,8 +254,9 @@ The user-provided HPC example for `abca10_chr17_lung` matches this layout:
 
 ## 4. Locus selection
 
-The current production note describes the selected panel as the geometric N20
-real-data workflow. The relevant source note is:
+The paper real-data study uses the geometric N20 selected panel, i.e. 20
+protein-coding GTEx Lung eQTL loci. Earlier 10-locus wording in drafts and
+legacy notebooks is outdated. The relevant source note is:
 
 ```text
 eQTL_annotations_for_susine/real_data_geometric_n20_workflow.md
@@ -294,17 +299,36 @@ eQTL_annotations_for_susine/scripts/lock_geometric_n20_sample.py
 ```
 
 At trace time, `config/annotation_selection_geometric_n20.csv` was not present
-locally, but `loci_manifest_sample_100_per_chrom.csv` did contain the selected
+locally, but the final paper-side `paper_real_data_ensemble_summary.csv`
+contains 20 completed loci:
+
+- `arhgef37_chr5_lung`
+- `arsa_chr22_lung`
+- `cd1d_chr1_lung`
+- `erbb3_chr12_lung`
+- `lgals9_chr17_lung`
+- `nbpf19_chr1_lung`
+- `pcdhac2_chr5_lung`
+- `prpf38b_chr1_lung`
+- `pus7l_chr12_lung`
+- `pzp_chr12_lung`
+- `rnf14_chr5_lung`
+- `rrp7a_chr22_lung`
+- `serf1a_chr5_lung`
+- `sil1_chr5_lung`
+- `snrnp35_chr12_lung`
+- `supt4h1_chr17_lung`
+- `tmtc1_chr12_lung`
+- `trabd_chr22_lung`
+- `ydjc_chr22_lung`
+- `znf280b_chr22_lung`
+
+The local `loci_manifest_sample_100_per_chrom.csv` also contains the selected
 zoom-locus candidates:
 
 - `prpf38b_chr1_lung`
 - `arsa_chr22_lung`
 - `rrp7a_chr22_lung`
-
-Open provenance issue: the manuscript draft says the real-data study uses
-10 protein-coding loci, while the current source workflow and job names are
-`geometric_n20`. The final paper figures appear to come from the geometric N20
-pipeline unless a later filter reduced the displayed or successful loci.
 
 ## 5. AlphaGenome annotation generation
 
@@ -361,6 +385,16 @@ The scorer uses:
 dna_client.OutputType.RNA_SEQ
 variant_scorers.GeneMaskLFCScorer(requested_output=target_output)
 ```
+
+The code creates the remote client with:
+
+```python
+dna_model = dna_client.create(api_key)
+```
+
+No local code path or generated summary file records an AlphaGenome remote model
+version. Therefore the exact remote model/version used by the API at production
+time is not recoverable from the current repo artifacts.
 
 The runner performs a preflight request to confirm the target gene and target
 GTEx/Lung rows are present in AlphaGenome output. It filters returned rows by:
@@ -494,12 +528,17 @@ test_susine/vignettes/real data pipeline/prepare_real_data_inputs_workbook.Rmd
 Its configuration is:
 
 ```r
-source_repo_root <- "/storage/work/mgc5166/Annotations/eQTL_annotations_for_susine"
+source_repo_root <- "/storage/home/mgc5166/work/Annotations/eQTL_annotations_for_susine"
 dest_root <- here("data", "real_case_studies", "geometric_n20_loci")
 source_mu0_name <- "geometric_n20"
 source_annotation_summary <- NULL
 loci <- NULL
 ```
+
+The default argument in `test_susine/R/real_data_pipeline.R` still points to
+`/storage/work/mgc5166/Annotations/eQTL_annotations_for_susine`; override it
+with the production path above when reproducing the paper run unless the two
+HPC paths are verified aliases.
 
 The workbook calls:
 
@@ -920,7 +959,7 @@ with `temperature = 1`. This is implemented by `.cluster_weights_from_hc()` in
 The displayed annotation-weight panel uses these run-level weights through
 `functional_grid_summary$agg_weight_run`.
 
-Unified cluster-weight implementation (resolved 2026-05-22): the PIP vector
+Unified cluster-weight implementation (resolved and rechecked 2026-05-26): the PIP vector
 written to `aggregated_variant_pips_cluster_weight.parquet` is generated by
 `aggregate_pip_matrix(..., method = "cluster_weight")`, which now delegates to
 `.cluster_weights_from_hc()` via `.aggregate_cluster_weight()` in
@@ -939,6 +978,18 @@ ELBO softmax across all members, ignoring across-cluster ELBO comparisons).
 Any aggregated PIP outputs produced before the unification should be
 regenerated; the unified output is consistent with the published methods
 description and with the `agg_weight_run` table.
+
+The real-data collector calls both paths in one locus loop:
+`R/real_data_pipeline.R` first uses `.cluster_weights_from_hc()` to write
+`agg_weight_run`, then calls:
+
+```r
+aggregate_pip_matrix(..., method = "cluster_weight", hc = pip_cache$hc)
+```
+
+to compute the aggregate PIP. Since `aggregate_pip_matrix()` delegates to
+`.cluster_weights_from_hc()`, there is no remaining methods discrepancy in the
+current source.
 
 ### 10.3 Warm refit from highest-weight source
 
@@ -1362,7 +1413,7 @@ or call:
 
 ```r
 test_susine::sync_real_data_inputs(
-  source_repo_root = "/storage/work/mgc5166/Annotations/eQTL_annotations_for_susine",
+  source_repo_root = "/storage/home/mgc5166/work/Annotations/eQTL_annotations_for_susine",
   dest_root = here::here("data", "real_case_studies", "geometric_n20_loci"),
   source_mu0_name = "geometric_n20"
 )
@@ -1407,6 +1458,8 @@ The run traced here used:
 parent_job_id = 52906940
 ```
 
+This parent job id is confirmed as the run used for the paper figures.
+
 ### 12.4 Collect the real-data ensemble job
 
 Run:
@@ -1430,6 +1483,9 @@ Expected validation:
 - `aggregated_variant_pips_cluster_weight.parquet` exists.
 - `highest_weight_refit_variant_posteriors.parquet` exists.
 - `highest_weight_refit_basin_r2_drift.csv` exists.
+- No selected loci failed. The final paper-side
+  `paper_real_data_ensemble_summary.csv` has 20 rows and non-missing anchor,
+  highest-weight-source, and warm-refit run ids for all 20 loci.
 
 ### 12.5 Render paper figures
 
@@ -1494,26 +1550,28 @@ Downstream fitting inputs and outputs:
 - all files listed in the aggregated `metric_inventory.csv`;
 - the final two paper PNGs and PDFs, if PDFs were rendered.
 
-## 14. Open questions to resolve
+## 14. Resolved and remaining provenance notes
 
-These are the points that could not be verified from the local checkout alone.
+Resolved for this trace:
 
-1. Confirm whether the real-data study is intended to be described as 10 loci
-   or 20 loci. The manuscript says 10, but the pipeline and job name are
-   geometric N20.
-2. Confirm the final source root used on HPC:
-   `/storage/work/mgc5166/Annotations/eQTL_annotations_for_susine` versus
+1. The real-data study should be described as 20 loci. Earlier 10-locus claims
+   are outdated.
+2. The production eQTL data-prep source root is
    `/storage/home/mgc5166/work/Annotations/eQTL_annotations_for_susine`.
-3. Confirm that `parent_job_id = 52906940` is the exact run used for the two
-   final paper PNGs.
-4. Confirm whether any selected loci failed the `susieR` anchor fit or were
-   excluded from the final plots due to missing outputs.
-5. Confirm the AlphaGenome client/model version used by the production run.
-   The source code records the API call pattern but not the remote model
-   version.
-6. Check the cluster-weight implementation discrepancy noted in Section 10.2:
-   `agg_weight_run` and ensemble posterior means use one weighting formula,
-   while `aggregated_pip` appears to use another in the local source.
-7. If the final manuscript will claim exact reproducibility, archive the
-   generated `locus_manifest.csv`, `job_config.json`, `run_manifest.csv`, and
-   `metric_inventory.csv` for job `52906940` with checksums.
+3. `parent_job_id = 52906940` is confirmed as the run used for the paper
+   figures.
+4. No selected loci failed. The paper-side summary has 20 locus rows with
+   populated anchor, highest-weight-source, and warm-refit run ids.
+5. The cluster-weight ambiguity is resolved in the current source: both
+   `agg_weight_run` and `aggregated_pip` use the nominee-based
+   `.cluster_weights_from_hc()` rule described in Section 10.2.
+
+Remaining or intentionally deferred:
+
+1. AlphaGenome remote model/version is unknown. The source records the
+   AlphaGenome client call pattern and scorer class, but does not record a
+   remote model identifier in the generated outputs.
+2. Exact reproducibility packaging is deferred to the supplemental information
+   package. That package should archive generated `locus_manifest.csv`,
+   `job_config.json`, `run_manifest.csv`, `metric_inventory.csv`, and relevant
+   upstream annotation artifacts for job `52906940` with checksums.
