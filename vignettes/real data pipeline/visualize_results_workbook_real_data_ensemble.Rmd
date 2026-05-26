@@ -2415,7 +2415,7 @@ if (requireNamespace("patchwork", quietly = TRUE)) {
     show_x_axis <- i == length(selected_zoom_l2_loci)
     is_first_row <- i == 1L
     title_lollipop <- if (is_first_row) "PIPs for shifted effects" else NULL
-    title_effect   <- if (is_first_row) "Fitted signal contribution" else NULL
+    title_effect   <- if (is_first_row) "Fitted effect size" else NULL
     title_drift    <- if (is_first_row) "PIP L2 drift from baseline" else NULL
     (
         paper_locus_row_label_plot(loc) |
