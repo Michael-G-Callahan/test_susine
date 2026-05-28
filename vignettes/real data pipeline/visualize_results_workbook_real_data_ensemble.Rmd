@@ -1462,7 +1462,8 @@ paper_drift_jsd_plot <- ggplot(
   ) +
   labs(
     title = "Annotations refine signal within and across LD groups",
-    x = expression("Effect-basis drift from SuSiE baseline (fraction of var(" * y * "))"),
+    x = expression(Delta[widehat(y)] * " = mean squared " * widehat(y) *
+                   " drift from SuSiE baseline"),
     y = "PIP JSD from SuSiE baseline"
   ) +
   paper_panel_theme
