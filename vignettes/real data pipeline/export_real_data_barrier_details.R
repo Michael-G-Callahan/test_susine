@@ -24,6 +24,8 @@
 #   REAL_DATA_TOP_N             default 8
 
 suppressPackageStartupMessages({
+  library(here)
+  library(devtools)
   library(dplyr)
   library(readr)
   library(tidyr)
@@ -39,9 +41,16 @@ require_pkg <- function(pkg) {
 
 require_pkg("arrow")
 require_pkg("jsonlite")
-require_pkg("test_susine")
 
-repo_root <- normalizePath(getwd(), winslash = "/", mustWork = TRUE)
+here::i_am("vignettes/real data pipeline/export_real_data_barrier_details.R")
+repo_root <- normalizePath(here::here(), winslash = "/", mustWork = TRUE)
+
+susine_path <- here::here("..", "susine")
+if (file.exists(file.path(susine_path, "DESCRIPTION"))) {
+  options(test_susine.local_susine_path = normalizePath(susine_path, winslash = "/", mustWork = TRUE))
+  devtools::load_all(susine_path, quiet = TRUE)
+}
+devtools::load_all(repo_root, quiet = TRUE)
 job_name <- Sys.getenv("REAL_DATA_JOB_NAME", "real_data_ensemble_geometric_n20")
 parent_job_id <- Sys.getenv("REAL_DATA_PARENT_JOB_ID", "52906940")
 output_root <- Sys.getenv("REAL_DATA_OUTPUT_ROOT", file.path(repo_root, "output"))
