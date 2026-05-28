@@ -101,7 +101,7 @@ weighted_auprc <- function(bins, unit_weights, unit_col_chr) {
 }
 
 bootstrap_delta <- function(baseline_bins, ensemble_bins, unit_col, B, seed) {
-  unit_col_chr <- if (is.character(unit_col)) unit_col[[1]] else deparse(substitute(unit_col))
+  unit_col_chr <- as.character(unit_col)[[1]]
   shared_units <- intersect(unique(baseline_bins[[unit_col_chr]]), unique(ensemble_bins[[unit_col_chr]]))
   baseline_bins <- baseline_bins |> dplyr::filter(.data[[unit_col_chr]] %in% shared_units)
   ensemble_bins <- ensemble_bins |> dplyr::filter(.data[[unit_col_chr]] %in% shared_units)
@@ -280,7 +280,7 @@ ccs_bins_ds <- ccs_bins |> dplyr::filter(.data$dataset_bundle_id %in% shared_dat
 
 dataset_boot <- bootstrap_delta(
   baseline_bins_ds, ccs_bins_ds,
-  unit_col = dataset_bundle_id,
+  unit_col = "dataset_bundle_id",
   B = args$bootstrap_B,
   seed = args$bootstrap_seed
 )
@@ -316,7 +316,7 @@ if (file.exists(dataset_bundles_path)) {
   if (nrow(baseline_bins_matrix) && nrow(ccs_bins_matrix)) {
     matrix_boot <- bootstrap_delta(
       baseline_bins_matrix, ccs_bins_matrix,
-      unit_col = matrix_id,
+      unit_col = "matrix_id",
       B = args$bootstrap_B,
       seed = args$bootstrap_seed
     )
