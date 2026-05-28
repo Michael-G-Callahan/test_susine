@@ -40,8 +40,16 @@ parse_args <- function() {
 
 script_path <- function() {
   file_arg <- grep("^--file=", commandArgs(FALSE), value = TRUE)
-  if (length(file_arg)) return(normalizePath(sub("^--file=", "", file_arg[[1]]), winslash = "/", mustWork = TRUE))
-  if (!is.null(sys.frames()[[1]]$ofile)) return(normalizePath(sys.frames()[[1]]$ofile, winslash = "/", mustWork = TRUE))
+  if (length(file_arg)) {
+    path <- sub("^--file=", "", file_arg[[1]])
+    path <- gsub("~\\+~", " ", path, fixed = FALSE)
+    if (file.exists(path)) {
+      return(normalizePath(path, winslash = "/", mustWork = TRUE))
+    }
+  }
+  if (!is.null(sys.frames()[[1]]$ofile) && file.exists(sys.frames()[[1]]$ofile)) {
+    return(normalizePath(sys.frames()[[1]]$ofile, winslash = "/", mustWork = TRUE))
+  }
   NA_character_
 }
 
