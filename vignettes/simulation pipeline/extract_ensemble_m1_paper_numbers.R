@@ -133,6 +133,11 @@ bootstrap_delta <- function(baseline_bins, ensemble_bins, unit_col, B, seed) {
 
 near <- function(x, y, tol = 1e-8) is.finite(x) & abs(x - y) <= tol
 
+ensure_column <- function(df, name, value = NA) {
+  if (!name %in% names(df)) df[[name]] <- value
+  df
+}
+
 args <- parse_args()
 repo_root <- repo_root_from_script()
 if (is.null(args$output_root)) args$output_root <- file.path(repo_root, "output")
@@ -183,15 +188,22 @@ read_consolidated <- function(filename) {
 
 auprc_pooled_agg <- read_consolidated("auprc_pooled_aggregated.csv")
 auprc_pooled_agg_by_r2 <- read_consolidated("auprc_pooled_agg_by_r2.csv")
+auprc_pooled_individual_overall <- read_consolidated("auprc_pooled_individual_overall.csv")
 auprc_pooled_individual <- read_consolidated("auprc_pooled_individual.csv")
 confusion_bins <- read_consolidated("confusion_bins_full.csv")
 model_metrics <- read_consolidated("model_metrics_full.csv")
 
-baseline_auprc <- auprc_pooled_individual |>
+auprc_pooled_agg <- ensure_column(auprc_pooled_agg, "annotation_r2", NA_real_)
+auprc_pooled_agg_by_r2 <- ensure_column(auprc_pooled_agg_by_r2, "annotation_r2", NA_real_)
+auprc_pooled_individual_overall <- ensure_column(auprc_pooled_individual_overall, "annotation_r2", NA_real_)
+auprc_pooled_individual <- ensure_column(auprc_pooled_individual, "annotation_r2", NA_real_)
+confusion_bins <- ensure_column(confusion_bins, "annotation_r2", NA_real_)
+confusion_bins <- ensure_column(confusion_bins, "agg_method", NA_character_)
+
+baseline_auprc <- auprc_pooled_individual_overall |>
   dplyr::filter(
     .data$spec_name == "baseline-single",
-    .data$use_case_id == "susine_vanilla",
-    is.na(.data$annotation_r2)
+    .data$use_case_id == "susine_vanilla"
   ) |>
   dplyr::pull(.data$AUPRC) |>
   dplyr::first()
@@ -227,7 +239,7 @@ headline <- tibble::tibble(
 )
 readr::write_csv(headline, file.path(out_dir, "m1_headline_numbers.csv"))
 
-heatmap_focus <- auprc_pooled_agg |>
+heatmap_focus <- auprc_pooled_agg_by_r2 |>
   dplyr::filter(
     (.data$spec_name %in% c("A-R", "A-F", "A-S", "A-RF", "A-RS", "A-FS", "A-RFS") & is.na(.data$annotation_r2)) |
       (!.data$spec_name %in% c("A-R", "A-F", "A-S", "A-RF", "A-RS", "A-FS", "A-RFS") &
