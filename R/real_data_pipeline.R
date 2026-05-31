@@ -838,6 +838,18 @@ real_data_safe_js_distance <- function(pip_a, pip_b) {
   as.numeric(js_distance(a, b))
 }
 
+real_data_safe_l2_distance <- function(pip_a, pip_b) {
+  if (is.null(pip_a) || is.null(pip_b)) {
+    return(NA_real_)
+  }
+  a <- as.numeric(pip_a)
+  b <- as.numeric(pip_b)
+  if (length(a) != length(b) || !length(a)) {
+    return(NA_real_)
+  }
+  sqrt(sum((a - b)^2, na.rm = TRUE))
+}
+
 real_data_init_effect_fits_from_susine <- function(fit) {
   ef <- fit$effect_fits %||% NULL
   if (is.null(ef) || is.null(ef$alpha) || is.null(ef$b_hat) || is.null(ef$b_2_hat)) {
@@ -2613,7 +2625,12 @@ collect_real_data_results <- function(
           jsd_susie_anchor_vs_refit = real_data_safe_js_distance(anchor_pip, refit_pip),
           jsd_baseline_c0_vs_susine_ensemble = real_data_safe_js_distance(base_pip, agg_pip),
           jsd_baseline_c0_vs_refit = real_data_safe_js_distance(base_pip, refit_pip),
-          jsd_susine_ensemble_vs_refit = real_data_safe_js_distance(agg_pip, refit_pip)
+          jsd_susine_ensemble_vs_refit = real_data_safe_js_distance(agg_pip, refit_pip),
+          pip_l2_susie_anchor_vs_susine_ensemble = real_data_safe_l2_distance(anchor_pip, agg_pip),
+          pip_l2_susie_anchor_vs_refit = real_data_safe_l2_distance(anchor_pip, refit_pip),
+          pip_l2_baseline_c0_vs_susine_ensemble = real_data_safe_l2_distance(base_pip, agg_pip),
+          pip_l2_baseline_c0_vs_refit = real_data_safe_l2_distance(base_pip, refit_pip),
+          pip_l2_susine_ensemble_vs_refit = real_data_safe_l2_distance(agg_pip, refit_pip)
         )
 
         if (!is.null(locus_bundle_for_pve) && !anchor_failed && nrow(highest_weight_source)) {

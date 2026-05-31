@@ -49,6 +49,7 @@ aggregated_dir <- here("output", "slurm_output", job_name, parent_job_id, "aggre
 figure_dir <- here("output", "slurm_output", job_name, parent_job_id, "figures", "real_data_ensemble")
 overall_figure_dir <- file.path(figure_dir, "overall")
 locus_figure_dir <- file.path(figure_dir, "per_locus")
+paper_real_data_case_study_dir <- here("..", "..", "Writings", "plots", "real_data_case_study")
 dir.create(figure_dir, recursive = TRUE, showWarnings = FALSE)
 dir.create(overall_figure_dir, recursive = TRUE, showWarnings = FALSE)
 dir.create(locus_figure_dir, recursive = TRUE, showWarnings = FALSE)
@@ -1771,7 +1772,163 @@ if (requireNamespace("patchwork", quietly = TRUE)) {
 }
 ```
 
-# 8. Selected Locus Zoom Figure
+# 8. Paper Locus Summary Table
+
+The ELBO column below uses the annotation-free warm refit from the highest-weight
+SuSiNE source compared with the cold SuSiE anchor. This is the most interpretable
+ELBO contrast here because it asks whether the annotation-discovered basin remains
+preferred after removing the prior-mean annotation channel. The total off-`c=0`
+weight is reported separately as the direct ensemble-level annotation-support
+summary.
+
+```{r paper-real-data-locus-summary-table}
+paper_summary_locus_label <- function(locus_id, gene_name = NULL) {
+  out <- if (!is.null(gene_name)) as.character(gene_name) else rep(NA_character_, length(locus_id))
+  missing <- is.na(out) | !nzchar(out)
+  out[missing] <- toupper(sub("_chr.*$", "", as.character(locus_id[missing])))
+  out
+}
+
+paper_summary_locus_chromosome <- function(locus_id) {
+  x <- as.character(locus_id)
+  dplyr::if_else(
+    grepl("_chr[^_]+_", x),
+    sub("^.*_chr([^_]+)_.*$", "chr\\1", x),
+    NA_character_
+  )
+}
+
+paper_locus_pip_l2_tbl <- if ("pip_l2_susie_anchor_vs_susine_ensemble" %in% names(paper_summary)) {
+  paper_summary %>%
+    dplyr::transmute(
+      .data$locus_id,
+      pip_l2_susie_anchor_vs_susine_ensemble =
+        .data$pip_l2_susie_anchor_vs_susine_ensemble
+    )
+} else {
+  purrr::map_dfr(seq_len(nrow(paper_summary)), function(i) {
+    loc <- paper_summary$locus_id[[i]]
+    anchor_run_id <- paper_summary$susie_anchor_run_id[[i]]
+    if (is.na(anchor_run_id)) {
+      return(tibble::tibble(
+        locus_id = loc,
+        pip_l2_susie_anchor_vs_susine_ensemble = NA_real_
+      ))
+    }
+    anchor_pip <- variant_posteriors %>%
+      dplyr::filter(.data$locus_id == !!loc,
+                    .data$run_id == !!anchor_run_id) %>%
+      dplyr::select(.data$variant_id, susie_anchor_pip = .data$pip) %>%
+      dplyr::collect()
+    ensemble_pip <- aggregated_variants %>%
+      dplyr::filter(.data$locus_id == !!loc) %>%
+      dplyr::select(.data$variant_id, susine_ensemble_pip = .data$aggregated_pip)
+    pip_joined <- dplyr::inner_join(anchor_pip, ensemble_pip, by = "variant_id")
+    pip_l2 <- if (nrow(pip_joined)) {
+      sqrt(sum((pip_joined$susine_ensemble_pip - pip_joined$susie_anchor_pip)^2,
+               na.rm = TRUE))
+    } else {
+      NA_real_
+    }
+    tibble::tibble(
+      locus_id = loc,
+      pip_l2_susie_anchor_vs_susine_ensemble = pip_l2
+    )
+  })
+}
+
+real_data_locus_summary_tbl <- paper_summary %>%
+  dplyr::left_join(
+    weighted_annotation_tbl %>%
+      dplyr::select(locus_id, weighted_c_value,
+                    weighted_off_c0_weight = off_c0_weight),
+    by = "locus_id"
+  ) %>%
+  dplyr::left_join(paper_locus_pip_l2_tbl, by = "locus_id") %>%
+  dplyr::transmute(
+    locus_id = .data$locus_id,
+    locus_name = paper_summary_locus_label(.data$locus_id, .data$gene_name),
+    chromosome = paper_summary_locus_chromosome(.data$locus_id),
+    n_susie_pip_gt_05 = .data$n_pip_gt_05_susie_anchor,
+    n_susine_pip_gt_05 = .data$n_pip_gt_05_susine_ensemble,
+    n_agreed_pip_gt_05 = .data$n_pip_gt_05_susie_anchor_and_susine_ensemble,
+    delta_pve_susine_minus_susie = .data$pve_susine_ensemble - .data$pve_susie_anchor,
+    delta_elbo_warm_refit_vs_susie = .data$delta_elbo_refit_vs_susie_anchor,
+    total_off_c0_weight = dplyr::coalesce(
+      .data$ensemble_agg_weight_off_c0_total,
+      .data$weighted_off_c0_weight
+    ),
+    elbo_weighted_annotation_scale_c = .data$weighted_c_value,
+    pip_l2_susine_ensemble_vs_susie = .data$pip_l2_susie_anchor_vs_susine_ensemble
+  ) %>%
+  dplyr::arrange(dplyr::desc(.data$pip_l2_susine_ensemble_vs_susie),
+                 .data$locus_name)
+
+real_data_pip_gt05_totals <- real_data_locus_summary_tbl %>%
+  dplyr::summarise(
+    n_loci = dplyr::n(),
+    total_susie_pip_gt_05 = sum(.data$n_susie_pip_gt_05, na.rm = TRUE),
+    total_susine_pip_gt_05 = sum(.data$n_susine_pip_gt_05, na.rm = TRUE),
+    total_agreed_pip_gt_05 = sum(.data$n_agreed_pip_gt_05, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+readr::write_csv(
+  real_data_locus_summary_tbl,
+  file.path(overall_figure_dir, "paper_real_data_locus_summary_table.csv")
+)
+readr::write_csv(
+  real_data_pip_gt05_totals,
+  file.path(overall_figure_dir, "paper_real_data_pip_gt05_totals.csv")
+)
+if (dir.exists(paper_real_data_case_study_dir)) {
+  readr::write_csv(
+    real_data_locus_summary_tbl,
+    file.path(paper_real_data_case_study_dir, "paper_real_data_locus_summary_table.csv")
+  )
+  readr::write_csv(
+    real_data_pip_gt05_totals,
+    file.path(paper_real_data_case_study_dir, "paper_real_data_pip_gt05_totals.csv")
+  )
+}
+
+real_data_locus_summary_display <- real_data_locus_summary_tbl %>%
+  dplyr::transmute(
+    `Locus` = .data$locus_name,
+    `Chr` = .data$chromosome,
+    `SuSiE PIP > 0.5` = .data$n_susie_pip_gt_05,
+    `SuSiNE PIP > 0.5` = .data$n_susine_pip_gt_05,
+    `Agreed PIP > 0.5` = .data$n_agreed_pip_gt_05,
+    `Delta PVE` = sprintf("%+.3f", .data$delta_pve_susine_minus_susie),
+    `Delta ELBO` = sprintf("%+.2f", .data$delta_elbo_warm_refit_vs_susie),
+    `Off-c=0 wt.` = sprintf("%.3f", .data$total_off_c0_weight),
+    `Weighted c` = sprintf("%.3f", .data$elbo_weighted_annotation_scale_c),
+    `PIP L2` = sprintf("%.3f", .data$pip_l2_susine_ensemble_vs_susie)
+  )
+
+knitr::kable(
+  real_data_locus_summary_display,
+  align = c("l", "l", rep("r", 8)),
+  caption = paste(
+    "Real-data locus-level summary sorted by SuSiNE ensemble versus SuSiE",
+    "baseline PIP L2 drift. Delta ELBO is warm-refit minus cold SuSiE anchor."
+  )
+)
+
+real_data_pip_gt05_totals %>%
+  dplyr::transmute(
+    `Loci` = .data$n_loci,
+    `Total SuSiE PIP > 0.5` = .data$total_susie_pip_gt_05,
+    `Total SuSiNE PIP > 0.5` = .data$total_susine_pip_gt_05,
+    `Total agreed PIP > 0.5` = .data$total_agreed_pip_gt_05
+  ) %>%
+  knitr::kable(
+    align = c("r", "r", "r", "r"),
+    caption = "Across-locus totals for variants with PIP > 0.5."
+  )
+```
+
+# 9. Selected Locus Zoom Figure
 
 ```{r paper-selected-locus-zoom, fig.width=7.52, fig.height=9.2}
 resolve_locus_token <- function(token, locus_ids) {
