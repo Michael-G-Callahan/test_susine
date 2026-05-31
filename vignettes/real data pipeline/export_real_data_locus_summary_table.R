@@ -19,14 +19,25 @@ arg_flag <- function(flag) {
 }
 
 script_arg <- grep("^--file=", commandArgs(FALSE), value = TRUE)
-script_path <- if (length(script_arg)) {
-  normalizePath(sub("^--file=", "", script_arg[[1]]), winslash = "/", mustWork = TRUE)
+script_path_candidates <- c(
+  if (length(script_arg)) sub("^--file=", "", script_arg[[1]]) else character(0),
+  file.path("vignettes", "real data pipeline", "export_real_data_locus_summary_table.R")
+)
+script_path_candidates <- unique(script_path_candidates[nzchar(script_path_candidates)])
+script_path_hit <- script_path_candidates[file.exists(script_path_candidates)]
+script_path <- if (length(script_path_hit)) {
+  normalizePath(script_path_hit[[1]], winslash = "/", mustWork = TRUE)
 } else {
-  normalizePath("vignettes/real data pipeline/export_real_data_locus_summary_table.R",
+  normalizePath(script_path_candidates[[length(script_path_candidates)]],
                 winslash = "/", mustWork = FALSE)
 }
-repo_root <- normalizePath(file.path(dirname(script_path), "..", ".."),
-                           winslash = "/", mustWork = TRUE)
+repo_root <- if (file.exists(file.path(getwd(), "DESCRIPTION")) &&
+                 dir.exists(file.path(getwd(), "vignettes"))) {
+  normalizePath(getwd(), winslash = "/", mustWork = TRUE)
+} else {
+  normalizePath(file.path(dirname(script_path), "..", ".."),
+                winslash = "/", mustWork = TRUE)
+}
 
 job_name <- arg_value("--job-name", "real_data_ensemble_geometric_n20")
 parent_job_id <- arg_value("--parent-job-id", "52906940")
