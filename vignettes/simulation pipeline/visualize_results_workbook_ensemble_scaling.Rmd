@@ -841,7 +841,7 @@ make_auprc_barplot <- function(r2_filter = NULL) {
 ```{r fig-2c, fig.width=12, fig.height=6}
 make_auprc_barplot(r2_filter = NULL)  # overall (all r2 pooled)
 make_auprc_barplot(r2_filter = 0)     # annotation r2 = 0 (null annotations)
-make_auprc_barplot(r2_filter = 0.2)   # annotation r2 = 0.2
+make_auprc_barplot(r2_filter = 0.3)   # annotation r2 = 0.3
 make_auprc_barplot(r2_filter = 0.5)   # annotation r2 = 0.5
 ```
 
@@ -899,7 +899,7 @@ make_auprc_mean_barplot <- function(r2_filter = NULL) {
 ```{r fig-2c-mean, fig.width=12, fig.height=6}
 make_auprc_mean_barplot(r2_filter = NULL)
 make_auprc_mean_barplot(r2_filter = 0)
-make_auprc_mean_barplot(r2_filter = 0.2)
+make_auprc_mean_barplot(r2_filter = 0.3)
 make_auprc_mean_barplot(r2_filter = 0.5)
 ```
 
@@ -965,7 +965,7 @@ make_tpr05_barplot <- function(r2_filter = NULL) {
 ```{r fig-2d, fig.width=12, fig.height=6}
 make_tpr05_barplot(r2_filter = NULL)  # overall (all r2 pooled)
 make_tpr05_barplot(r2_filter = 0)     # annotation r2 = 0 (null annotations)
-make_tpr05_barplot(r2_filter = 0.2)   # annotation r2 = 0.2
+make_tpr05_barplot(r2_filter = 0.3)   # annotation r2 = 0.3
 make_tpr05_barplot(r2_filter = 0.5)   # annotation r2 = 0.5
 ```
 
@@ -1023,7 +1023,7 @@ make_tpr05_mean_barplot <- function(r2_filter = NULL) {
 ```{r fig-2d-mean, fig.width=12, fig.height=6}
 make_tpr05_mean_barplot(r2_filter = NULL)
 make_tpr05_mean_barplot(r2_filter = 0)
-make_tpr05_mean_barplot(r2_filter = 0.2)
+make_tpr05_mean_barplot(r2_filter = 0.3)
 make_tpr05_mean_barplot(r2_filter = 0.5)
 ```
 

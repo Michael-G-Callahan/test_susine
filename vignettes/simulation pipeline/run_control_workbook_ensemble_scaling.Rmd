@@ -61,6 +61,7 @@ architecture_grid <- "susie2_oligogenic"
 
 # ── Annotation quality levels ──
 annotation_r2_levels <- c(0, 0.3, 0.5)
+noncausal_inflation_factor <- 0.95
 
 # ── Prior variance default (for non-gridded runs) ──
 sigma_0_2_default <- 0.2
@@ -435,7 +436,7 @@ cfg <- make_job_config(
   # Annotation quality
   prior_quality = tibble::tibble(
     annotation_r2 = annotation_r2_levels,
-    inflate_match = rep(1, length(annotation_r2_levels))
+    inflate_match = rep(noncausal_inflation_factor, length(annotation_r2_levels))
   ),
 
   # Prior variance (default for non-gridded runs)
@@ -521,11 +522,12 @@ for (bi in seq_len(nrow(bundles))) {
     needs_ann <- isTRUE(uc_spec$supports_annotation[1])
 
     if (needs_ann) {
-      ann_levels <- c(0, 0.2, 0.5)
+      ann_levels <- annotation_r2_levels
     } else {
       ann_levels <- NA_real_
     }
     for (ann_r2 in ann_levels) {
+      ann_inflate <- if (is.na(ann_r2)) NA_real_ else noncausal_inflation_factor
       row <- template
       row$dataset_bundle_id <- bundle$dataset_bundle_id
       row$use_case_id <- tw$use_case_id
@@ -541,10 +543,15 @@ for (bi in seq_len(nrow(bundles))) {
       row$c_value <- tw$c_value
       row$sigma_0_2_scalar <- tw$sigma_0_2_scalar
       row$annotation_r2 <- ann_r2
-      row$inflate_match <- if (is.na(ann_r2)) NA_real_ else 1
+      row$inflate_match <- ann_inflate
       row$spec_name <- "truth-warm"
       row$group_key <- paste0("L=10|r2=", ann_r2, "|inflate=",
-                              if (is.na(ann_r2)) "NA" else "1")
+                              if (is.na(ann_inflate)) {
+                                "NA"
+                              } else {
+                                trimws(format(ann_inflate, digits = 6,
+                                              scientific = FALSE))
+                              })
       truth_warm_rows[[length(truth_warm_rows) + 1L]] <- row
     }
   }

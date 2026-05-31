@@ -53,10 +53,10 @@ Important provenance notes:
   `output/slurm_output`. The trace below is therefore based on the source code
   and workbook literals rather than re-reading the final generated CSVs.
 - The run-control workbook scheduled annotation quality as
-  `annotation_r2_levels <- c(0, 0.2, 0.5)` with `inflate_match = 1`. This maps
+  `annotation_r2_levels <- c(0, 0.3, 0.5)` with `inflate_match = 0.95`. This maps
   onto the simulator's two knobs as `annotation_r2` and `inflate_match`, not the
   full manuscript baseline grid of `(phi_a, nu_a)`. The paper-prep workflow
-  focuses on `annotation_r2_focus <- 0.2`.
+  focuses on `annotation_r2_focus <- 0.3`.
 - The final per-variant classification curves in this ensemble workflow use the
   top 8 causal variants by absolute effect size as positives. The remaining
   causal variants are not counted as positives for the confusion-bin scoring
@@ -175,8 +175,8 @@ The ensemble run-control workbook sets:
 - `seeds <- 1:4`
 - `L_grid <- 10L`
 - `architecture_grid <- "susie2_oligogenic"`
-- `annotation_r2_levels <- c(0, 0.2, 0.5)`
-- `inflate_match <- 1` for all annotation levels
+- `annotation_r2_levels <- c(0, 0.3, 0.5)`
+- `noncausal_inflation_factor <- 0.95` for all annotation levels
 - `sigma_0_2_default <- 0.2`
 - `max_iter <- 100L`
 - `credible_set_rho <- 0.95`
@@ -397,8 +397,8 @@ sqrt(inflate_match) * sqrt(theoretical_causal_mu0_var)
 
 For the ensemble study:
 
-- target `annotation_r2` values are 0, 0.2, and 0.5;
-- `inflate_match` is always 1;
+- target `annotation_r2` values are 0, 0.3, and 0.5;
+- `inflate_match` is always 0.95;
 - annotation-consuming specs are expanded over all three annotation levels;
 - annotation-agnostic specs get `annotation_r2 = NA` and `inflate_match = NA`.
 
@@ -641,7 +641,7 @@ stored as an ensemble member.
 All Group B specs use:
 
 - use case: `susine_eb_clamped_scale_var_nonneg`;
-- annotations: `annotation_r2` in 0, 0.2, 0.5 and `inflate_match = 1`;
+- annotations: `annotation_r2` in 0, 0.3, 0.5 and `inflate_match = 0.95`;
 - EB prior update method: `clamped_scale_var`;
 - nonnegative annotation scale.
 
@@ -658,7 +658,7 @@ Each Group B spec is evaluated separately at all three annotation qualities.
 All Group C specs use:
 
 - use case: `susine_functional_mu`;
-- annotations: `annotation_r2` in 0, 0.2, 0.5 and `inflate_match = 1`;
+- annotations: `annotation_r2` in 0, 0.3, 0.5 and `inflate_match = 0.95`;
 - fixed-variance SuSiNE;
 - uniform inclusion prior.
 
@@ -716,7 +716,7 @@ The truth-warm use cases are:
 | `susine_functional_mu` | `0.5` | `"0.2"` |
 
 For annotation-supporting truth-warm use cases, rows are expanded over
-annotation levels 0, 0.2, and 0.5. For `susine_vanilla`, there is a single
+annotation levels 0, 0.3, and 0.5. For `susine_vanilla`, there is a single
 annotation-agnostic row per dataset bundle.
 
 In `run_use_case()`, `warm_method = "truth_warm"` creates an `L x p` initial
@@ -803,7 +803,7 @@ For each use case:
   `annotation_r2 = NA`, `inflate_match = NA`;
 - if `supports_annotation = TRUE`, the annotation grid is all distinct rows of
   the provided prior-quality table:
-  `(0, 1)`, `(0.2, 1)`, `(0.5, 1)`.
+  `(0, 0.95)`, `(0.3, 0.95)`, `(0.5, 0.95)`.
 
 This expansion is controlled by `annotation_grid_for_spec()` in
 `make_run_tables()`.
@@ -852,7 +852,7 @@ ensemble for aggregation. It includes:
 For example:
 
 ```text
-L=10|r2=0.2|inflate=1|explore=intersect:c_gridxsigma_0_2_grid
+L=10|r2=0.3|inflate=0.95|explore=intersect:c_gridxsigma_0_2_grid
 ```
 
 For restart warm-start grids, older code can append warm-method and alpha fields
@@ -1840,7 +1840,7 @@ It uses:
 ```r
 job_name <- "ensemble_scaling_full"
 parent_job_id <- "51250228"
-annotation_r2_focus <- 0.2
+annotation_r2_focus <- 0.3
 drop_aggs <- "cluster_weight_jsd_050"
 bootstrap_B <- 2000L
 bootstrap_seed <- 20260505L
@@ -1897,12 +1897,12 @@ The paper-prep workflow defines:
 It defines `is_focus_annotation_row()`:
 
 - Group A rows are kept at `annotation_r2 = NA`;
-- Groups B and C are kept at `annotation_r2 = 0.2` for focus plots.
+- Groups B and C are kept at `annotation_r2 = 0.3` for focus plots.
 
 The main paper plots therefore compare:
 
 - annotation-agnostic Group A at its single annotation-agnostic level;
-- annotation-consuming Groups B/C at `annotation_r2 = 0.2`;
+- annotation-consuming Groups B/C at `annotation_r2 = 0.3`;
 - baseline SuSiE from `baseline-single / susine_vanilla`.
 
 ## 37. Paper-prep baseline and truth-warm references
@@ -1952,7 +1952,7 @@ The visualizer highlights the `C-CS / cluster_weight` tile with a red border.
 `ccs_by_r2` focuses on:
 
 - `spec_name == "C-CS"`;
-- annotation levels 0, 0.2, 0.5;
+- annotation levels 0, 0.3, 0.5;
 - `agg_method` in the main aggregation order, after dropping
   `cluster_weight_jsd_050`.
 
@@ -1979,7 +1979,7 @@ The bootstrap compares:
   - individual confusion bins;
 - ensemble:
   - `C-CS`;
-  - `annotation_r2 = 0.2`;
+  - `annotation_r2 = 0.3`;
   - `agg_method = "cluster_weight"`;
   - aggregated confusion bins.
 
@@ -2015,7 +2015,7 @@ Rows included:
 - C-CS:
   - `spec_name == "C-CS"`;
   - `agg_method == "cluster_weight"`;
-  - annotation r2 values 0, 0.2, 0.5.
+  - annotation r2 values 0, 0.3, 0.5.
 
 The prep workbook also computes two operating-point diagnostics:
 
@@ -2059,7 +2059,7 @@ Calibration compares:
   - individual bins;
 - ensemble:
   - `C-CS`;
-  - `annotation_r2 = 0.2`;
+  - `annotation_r2 = 0.3`;
   - `agg_method = "cluster_weight"`.
 
 The prep workflow bins by PIP threshold into width-0.10 bins:
@@ -2106,7 +2106,7 @@ The prep workbook constructs `ccs_resolution_plot_data` by combining:
 1. `ccs_resolution_cluster`:
    - from `scaling_metrics`;
    - `spec_name == "C-CS"`;
-   - `annotation_r2 = 0.2`;
+   - `annotation_r2 = 0.3`;
    - `agg_method == "cluster_weight"`;
    - resolutions `4x4` and `8x8`;
 2. `compute_ccs_resolution_oracle()`:
@@ -2264,7 +2264,7 @@ Rows:
 
 - specs in `spec_order`;
 - Group A at `annotation_r2 = NA`;
-- Groups B/C at `annotation_r2 = 0.2`;
+- Groups B/C at `annotation_r2 = 0.3`;
 - aggregation methods:
   - max ELBO;
   - uniform;
@@ -2289,7 +2289,7 @@ Data:
 Rows:
 
 - `spec_name == "C-CS"`;
-- annotation r2 values 0, 0.2, 0.5;
+- annotation r2 values 0, 0.3, 0.5;
 - plotted methods:
   - cluster weight;
   - oracle.
@@ -2311,7 +2311,7 @@ Data:
 
 Comparison:
 
-- C-CS cluster-weight at `annotation_r2 = 0.2`;
+- C-CS cluster-weight at `annotation_r2 = 0.3`;
 - minus baseline SuSiE.
 
 Bootstrap:
@@ -2373,7 +2373,7 @@ Data:
 Methods:
 
 - SuSiE baseline;
-- SuSiNE C-CS cluster-weight at `annotation_r2 = 0.2`.
+- SuSiNE C-CS cluster-weight at `annotation_r2 = 0.3`.
 
 ### 46.7 C-CS 4x4/8x8 resolution
 
@@ -2463,7 +2463,7 @@ The central paper emphasis appears to be C-CS:
 - 8 x 8 grid;
 - functional-mu SuSiNE;
 - cluster-weight aggregation;
-- focus annotation r2 0.2.
+- focus annotation r2 0.3.
 
 This is the spec highlighted in the heatmap and carried through the PR,
 bootstrap, calibration, h2, resolution, and compute figures.
@@ -2485,22 +2485,22 @@ an AlphaGenome-calibrated regime around `(0.3, 0.9)` or `(0.3, 1.0)`.
 
 The ensemble run uses:
 
-- `annotation_r2` in `{0, 0.2, 0.5}`;
-- `inflate_match = 1`.
+- `annotation_r2` in `{0, 0.3, 0.5}`;
+- `inflate_match = 0.95`.
 
 So the ensemble study is a one-dimensional annotation-accuracy sweep at fixed
 noncausal annotation scale, not the full two-dimensional baseline annotation
 grid.
 
-### 48.3 The paper focus is r2 = 0.2
+### 48.3 The paper focus is r2 = 0.3
 
 The paper-prep workflow sets:
 
 ```r
-annotation_r2_focus <- 0.2
+annotation_r2_focus <- 0.3
 ```
 
-Most main figures compare Group B/C at r2 0.2 against Group A and baseline
+Most main figures compare Group B/C at r2 0.3 against Group A and baseline
 annotation-agnostic fits.
 
 ### 48.4 Top-8 causal scoring should be stated clearly
@@ -2597,8 +2597,9 @@ most 100 IBSS iterations.
 We generated signed functional annotations by mixing the true causal effects with
 orthogonal Gaussian noise on causal SNPs to achieve target squared correlation
 `annotation_r2`, and by drawing centered noncausal annotations with RMS matched
-to the causal annotation scale (`inflate_match = 1`). Ensemble simulations used
-`annotation_r2` values 0, 0.2, and 0.5; primary paper plots focused on 0.2.
+to 95% of the causal annotation centered second moment (`inflate_match = 0.95`).
+Ensemble simulations used `annotation_r2` values 0, 0.3, and 0.5; primary paper
+plots focused on 0.3.
 
 We compared three model families: an annotation-agnostic zero-prior-mean
 SuSiE-equivalent fit through the SuSiNE backend, an empirical-Bayes SuSiNE model

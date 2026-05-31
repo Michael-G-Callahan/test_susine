@@ -26,7 +26,7 @@
 | Genotype matrices | Full 150-locus set | 150 |
 | Seeds | 3 per matrix | 3 |
 | Architecture | susie2_oligogenic | 1 |
-| Annotation R-squared | 0 (null), 0.2 (moderate), 0.5 (strong) | 3 |
+| Annotation R-squared | 0 (null), 0.3 (moderate), 0.5 (strong) | 3 |
 
 **Base datasets:** 150 x 3 = **450**
 
@@ -235,7 +235,7 @@ Key hypothesis: cluster_weight dominates for multimodal ensembles (restarts, ref
 Stratify all results by R-squared:
 
 - **R-squared = 0:** Null annotations. EB and grid methods should degrade gracefully (EB finds c~0, c_grid includes c=0). Establishes that annotations don't hurt when uninformative.
-- **R-squared = 0.2:** Moderate. Most realistic. Where we expect the biggest divergence between strategies.
+- **R-squared = 0.3:** Moderate. AlphaGenome-calibrated working point. Where we expect the biggest divergence between strategies.
 - **R-squared = 0.5:** Strong annotations. EB likely dominates since it can adapt c precisely. Grid search still useful but c_grid quickly converges.
 
 ### Final Recommendation Output
@@ -271,7 +271,7 @@ Set PIP bucket breaks to variable resolution:
 
 ### Other Settings
 
-- **inflate_match = 1** for all annotations (noncausal annotation variance = causal annotation variance)
+- **inflate_match = 0.95** for all annotations (noncausal annotation centered second moment is 95% of the causal annotation centered second moment)
 - **Aggregation methods (5 total):** cluster_weight (JSD 0.15), cluster_weight_050 (JSD 0.50), elbo_softmax, uniform, max_elbo
 - **Oracle aggregation:** do not implement as a scheduled run-table method. Add it only during consolidation / post-hoc analysis as a truth-aware ceiling.
 - **Additional standalone baselines:** include all three truth-warm-start standalone baselines in any figure/table where the corresponding ordinary single-fit baseline is shown.
@@ -425,7 +425,7 @@ Need to support Cartesian products of exploration axes (e.g., restart x refine, 
 
 ### Step 3: Verify infrastructure
 
-- annotation_r2 gridding works with {0, 0.2, 0.5}
+- annotation_r2 gridding works with {0, 0.3, 0.5}
 - architecture_grid = "susie2_oligogenic" works (h2-based, no y_noise/p_star)
 - actual refinement dispatch matches upstream `susieR` semantics where intended
 - execution cache (`execution_cache_key` in run_model.R) correctly deduplicates shared runs across specs

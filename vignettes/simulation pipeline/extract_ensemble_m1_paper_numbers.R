@@ -21,7 +21,7 @@ parse_args <- function() {
     output_root = NULL,
     bootstrap_B = 2000L,
     bootstrap_seed = 20260505L,
-    annotation_r2_focus = 0.2,
+    annotation_r2_focus = 0.3,
     out_dir = NULL
   )
   for (arg in args) {
