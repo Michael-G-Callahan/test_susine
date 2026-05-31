@@ -2368,7 +2368,7 @@ draw $B$ bootstrap resamples (with replacement) from the full set of
 datasets, pool confusion bins within each resample, compute AUPRC,
 and report the bootstrap mean $\pm$ 1.96 SE.
 
-```{r bootstrap-auprc-stability, fig.width=12, fig.height=10}
+```{r bootstrap-auprc-stability, fig.width=12, fig.height=10, eval=FALSE}
 {
   # ── Helper: pooled AUPRC from confusion bins ──
   # Computes average precision directly from binned counts (descending
@@ -2704,6 +2704,101 @@ metric_inventory <- tibble::tribble(
 )
 readr::write_csv(metric_inventory, file.path(consolidated_dir, "metric_inventory.csv"))
 cat("Metric inventory written.\n")
+```
+
+# Paper Summary Reuse
+
+```{r paper-summary-reuse}
+paper_plot_data_rds <- file.path(
+  fig_root,
+  "paper_ensemble_scaling",
+  "plot_data",
+  "paper_ensemble_plot_data.rds"
+)
+
+if (file.exists(paper_plot_data_rds)) {
+  paper_plot_data <- readRDS(paper_plot_data_rds)
+  delta_boot <- paper_plot_data$data$boot_plot_data$delta_AUPRC
+  observed_delta <- paper_plot_data$refs$observed_delta
+  delta_ci <- paper_plot_data$refs$delta_ci
+  shared_boot_n <- paper_plot_data$refs$shared_boot_n
+  annotation_r2_focus <- paper_plot_data$config$annotation_r2_focus
+
+  if (length(delta_boot) > 0L && is.finite(observed_delta)) {
+    p_two_sided <- 2 * min(
+      mean(delta_boot <= 0, na.rm = TRUE),
+      mean(delta_boot >= 0, na.rm = TRUE)
+    )
+    knitr::kable(
+      tibble::tibble(
+        comparison = "SuSiNE C-CS cluster weight - SuSiE baseline",
+        annotation_r2 = annotation_r2_focus,
+        shared_datasets = shared_boot_n,
+        bootstrap_reps = length(delta_boot),
+        observed_delta_AUPRC = observed_delta,
+        ci_low = unname(delta_ci[[1]]),
+        ci_high = unname(delta_ci[[2]]),
+        p_two_sided = min(1, p_two_sided),
+        significant_95pct = is.finite(delta_ci[[1]]) &&
+          is.finite(delta_ci[[2]]) &&
+          (delta_ci[[1]] > 0 || delta_ci[[2]] < 0)
+      ),
+      digits = 4,
+      caption = "Paired bootstrap AUPRC delta test from paper plot-data RDS"
+    )
+  }
+
+  hg2_plot_data <- paper_plot_data$data$hg2_plot_data
+  if (!is.null(hg2_plot_data) && nrow(hg2_plot_data) > 0L) {
+    hg2_wide <- hg2_plot_data %>%
+      dplyr::filter(.data$spec_name %in% c("baseline", "C-CS")) %>%
+      dplyr::mutate(
+        method = dplyr::case_when(
+          .data$spec_name == "baseline" ~ "baseline_susie",
+          .data$spec_name == "C-CS" ~ "susine_ccs",
+          TRUE ~ NA_character_
+        )
+      ) %>%
+      dplyr::filter(!is.na(.data$method), is.finite(.data$hg2)) %>%
+      dplyr::group_by(.data$dataset_bundle_id, .data$method) %>%
+      dplyr::summarise(mean_hg2 = mean(.data$hg2, na.rm = TRUE), .groups = "drop") %>%
+      tidyr::pivot_wider(names_from = method, values_from = mean_hg2)
+
+    for (nm in c("baseline_susie", "susine_ccs")) {
+      if (!nm %in% names(hg2_wide)) hg2_wide[[nm]] <- NA_real_
+    }
+
+    hg2_summary <- hg2_wide %>%
+      dplyr::filter(is.finite(.data$baseline_susie), is.finite(.data$susine_ccs)) %>%
+      dplyr::mutate(
+        delta_hg2 = .data$susine_ccs - .data$baseline_susie,
+        category = dplyr::case_when(
+          .data$delta_hg2 > 0.01 ~ "higher than baseline SuSiE",
+          abs(.data$delta_hg2) <= 0.01 ~ "near baseline SuSiE (+/- 0.01)",
+          .data$delta_hg2 < -0.01 ~ "less than baseline SuSiE",
+          TRUE ~ "unclassified"
+        )
+      ) %>%
+      dplyr::count(.data$category, name = "n_datasets") %>%
+      dplyr::mutate(
+        pct_datasets = 100 * .data$n_datasets / sum(.data$n_datasets),
+        total_datasets = sum(.data$n_datasets)
+      )
+
+    knitr::kable(
+      hg2_summary,
+      digits = 2,
+      caption = "Dataset-level mean ensemble heritability versus baseline SuSiE from paper plot-data RDS"
+    )
+  }
+} else {
+  cat(
+    "Paper plot-data RDS not found; paired bootstrap and heritability summaries ",
+    "will be printed by visualize_results_workbook_ensemble_scaling_paper.Rmd ",
+    "after the paper-prep workbook is run.\n",
+    sep = ""
+  )
+}
 ```
 
 # Session Info

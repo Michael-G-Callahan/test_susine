@@ -32,6 +32,7 @@ theme_set(theme_bw(base_size = 14))
 job_name <- "ensemble_scaling_full"
 parent_job_id <- "51250228"
 output_root <- here("output")
+write_component_pngs <- FALSE
 
 job_dir <- file.path(output_root, "slurm_output", job_name, parent_job_id)
 fig_dir <- file.path(job_dir, "figures", "paper_ensemble_scaling")
@@ -111,6 +112,9 @@ open_png_device <- function(path, width, height, res = 300, bg = "white") {
 
 save_paper_png <- function(plot, filename, width, height) {
   path <- file.path(fig_dir, filename)
+  if (!isTRUE(write_component_pngs)) {
+    return(invisible(path))
+  }
   open_png_device(path, width = width, height = height, res = 300, bg = "white")
   on.exit(grDevices::dev.off(), add = TRUE)
   print(plot)
@@ -526,7 +530,7 @@ if (nrow(ccs_by_r2_plot_data) > 0L) {
 # 5. Bootstrap AUPRC CI
 
 ```{r fig-bootstrap, fig.width=7, fig.height=4.8}
-if (nrow(boot_plot_data) > 0L) {
+if (isTRUE(write_component_pngs) && nrow(boot_plot_data) > 0L) {
   p_boot <- ggplot2::ggplot(
     boot_plot_data,
     ggplot2::aes(x = .data$delta_AUPRC)
@@ -577,7 +581,7 @@ if (nrow(boot_plot_data) > 0L) {
   )
   invisible(NULL)
 } else {
-  message("Skipping bootstrap plot: insufficient shared dataset IDs.")
+  message("Skipping bootstrap plot: component PNG output is disabled or data are unavailable.")
 }
 ```
 
@@ -773,7 +777,7 @@ if (nrow(pip_cal_data) > 0L) {
 # 9. C-CS 4x4 vs 8x8 Scaling
 
 ```{r fig-ccs-resolution, fig.width=6.5, fig.height=4.7}
-if (nrow(ccs_resolution_plot_data) > 0L) {
+if (isTRUE(write_component_pngs) && nrow(ccs_resolution_plot_data) > 0L) {
   ccs_resolution_plot_data <- ccs_resolution_plot_data %>%
     dplyr::mutate(
       resolution = factor(.data$resolution, levels = c("4x4", "8x8")),
@@ -822,7 +826,7 @@ if (nrow(ccs_resolution_plot_data) > 0L) {
   )
   invisible(NULL)
 } else {
-  message("Skipping C-CS 4x4/8x8 plot: no rows.")
+  message("Skipping C-CS 4x4/8x8 plot: component PNG output is disabled or data are unavailable.")
 }
 ```
 
@@ -1040,8 +1044,8 @@ if (length(missing_composite) == 0L) {
     B = tag_panel(p_ccs_r2, "B"),
     C = tag_panel(p_cal, "C"),
     D = tag_panel(p_pr, "D"),
-    F = tag_panel(p_hg2, "F"),
-    G = tag_panel(p_compute, "G")
+    E = tag_panel(p_hg2, "E"),
+    F = tag_panel(p_compute, "F")
   )
 
   composite_cols <- 25L
@@ -1050,7 +1054,7 @@ if (length(missing_composite) == 0L) {
     rep(NA_character_, composite_cols),
     rep("D", composite_cols),
     rep(NA_character_, composite_cols),
-    c(rep("F", 10L), rep("G", 15L))
+    c(rep("E", 10L), rep("F", 15L))
   )
 
   performance_path <- save_composite_png(
@@ -1077,10 +1081,109 @@ if (length(missing_composite) == 0L) {
 }
 ```
 
-# 12. Output Check
+# 12. Final Printed Summaries
+
+```{r final-summaries}
+bootstrap_summary <- tibble::tibble()
+if (nrow(boot_plot_data) > 0L && is.finite(observed_delta)) {
+  delta_boot <- boot_plot_data$delta_AUPRC
+  p_two_sided <- 2 * min(
+    mean(delta_boot <= 0, na.rm = TRUE),
+    mean(delta_boot >= 0, na.rm = TRUE)
+  )
+  bootstrap_summary <- tibble::tibble(
+    comparison = "SuSiNE C-CS cluster weight - SuSiE baseline",
+    annotation_r2 = annotation_r2_focus,
+    shared_datasets = shared_boot_n,
+    bootstrap_reps = length(delta_boot),
+    observed_delta_AUPRC = observed_delta,
+    ci_low = unname(delta_ci[[1]]),
+    ci_high = unname(delta_ci[[2]]),
+    p_two_sided = min(1, p_two_sided),
+    significant_95pct = is.finite(delta_ci[[1]]) &&
+      is.finite(delta_ci[[2]]) &&
+      (delta_ci[[1]] > 0 || delta_ci[[2]] < 0)
+  )
+}
+
+if (nrow(bootstrap_summary) > 0L) {
+  knitr::kable(
+    bootstrap_summary,
+    digits = 4,
+    caption = "Paired bootstrap AUPRC delta test"
+  )
+} else {
+  cat("Paired bootstrap AUPRC delta test unavailable: no bootstrap data.\n")
+}
+
+hg2_comparison <- tibble::tibble()
+hg2_summary <- tibble::tibble()
+if (exists("hg2_plot_data") && nrow(hg2_plot_data) > 0L) {
+  hg2_wide <- hg2_plot_data %>%
+    dplyr::filter(.data$spec_name %in% c("baseline", "C-CS")) %>%
+    dplyr::mutate(
+      method = dplyr::case_when(
+        .data$spec_name == "baseline" ~ "baseline_susie",
+        .data$spec_name == "C-CS" ~ "susine_ccs",
+        TRUE ~ NA_character_
+      )
+    ) %>%
+    dplyr::filter(!is.na(.data$method), is.finite(.data$hg2)) %>%
+    dplyr::group_by(.data$dataset_bundle_id, .data$method) %>%
+    dplyr::summarise(mean_hg2 = mean(.data$hg2, na.rm = TRUE), .groups = "drop") %>%
+    tidyr::pivot_wider(names_from = method, values_from = mean_hg2)
+
+  for (nm in c("baseline_susie", "susine_ccs")) {
+    if (!nm %in% names(hg2_wide)) hg2_wide[[nm]] <- NA_real_
+  }
+
+  hg2_comparison <- hg2_wide %>%
+    dplyr::filter(is.finite(.data$baseline_susie), is.finite(.data$susine_ccs)) %>%
+    dplyr::mutate(
+      delta_hg2 = .data$susine_ccs - .data$baseline_susie,
+      category = dplyr::case_when(
+        .data$delta_hg2 > 0.01 ~ "higher than baseline SuSiE",
+        abs(.data$delta_hg2) <= 0.01 ~ "near baseline SuSiE (+/- 0.01)",
+        .data$delta_hg2 < -0.01 ~ "less than baseline SuSiE",
+        TRUE ~ "unclassified"
+      )
+    )
+
+  hg2_summary <- hg2_comparison %>%
+    dplyr::count(.data$category, name = "n_datasets") %>%
+    dplyr::mutate(
+      pct_datasets = 100 * .data$n_datasets / sum(.data$n_datasets),
+      total_datasets = sum(.data$n_datasets)
+    ) %>%
+    dplyr::arrange(factor(
+      .data$category,
+      levels = c(
+        "higher than baseline SuSiE",
+        "near baseline SuSiE (+/- 0.01)",
+        "less than baseline SuSiE",
+        "unclassified"
+      )
+    ))
+}
+
+if (nrow(hg2_summary) > 0L) {
+  knitr::kable(
+    hg2_summary,
+    digits = 2,
+    caption = paste0(
+      "Dataset-level mean ensemble heritability versus baseline SuSiE",
+      " (C-CS; mean over available ensemble/annotation rows)"
+    )
+  )
+} else {
+  cat("Heritability comparison unavailable: no matched baseline/C-CS hg2 rows.\n")
+}
+```
+
+# 13. Output Check
 
 ```{r output-check}
-expected_figures <- c(
+component_figures <- c(
   paste0("paper_delta_auprc_heatmap_r2_", format_r2_tag(annotation_r2_focus), ".png"),
   "paper_ccs_aggregation_by_annotation_r2.png",
   paste0("paper_bootstrap_auprc_r2_", format_r2_tag(annotation_r2_focus), ".png"),
@@ -1096,9 +1199,15 @@ expected_figures <- c(
     "paper_compute_vs_auprc_cluster_weight_r2_",
     format_r2_tag(annotation_r2_focus),
     ".png"
-  ),
+  )
+)
+composite_figures <- c(
   "paper_ensemble_scaling_composite_heatmap.png",
   "paper_ensemble_scaling_composite_performance.png"
+)
+expected_figures <- c(
+  if (isTRUE(write_component_pngs)) component_figures else character(0L),
+  composite_figures
 )
 
 figure_paths <- file.path(fig_dir, expected_figures)
