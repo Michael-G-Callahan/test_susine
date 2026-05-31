@@ -46,7 +46,7 @@ job_name <- "ensemble_scaling_full"
 email    <- "mgc5166@psu.edu"
 
 # ── HPC resources (per SLURM array task) ──
-slurm_time <- "05:59:59"
+slurm_time <- "11:59:59"
 slurm_mem  <- "8G"
 
 # ── Dataset grid ──
@@ -60,7 +60,7 @@ p_star_grid       <- NA_integer_
 architecture_grid <- "susie2_oligogenic"
 
 # ── Annotation quality levels ──
-annotation_r2_levels <- c(0, 0.2, 0.5)
+annotation_r2_levels <- c(0, 0.3, 0.5)
 
 # ── Prior variance default (for non-gridded runs) ──
 sigma_0_2_default <- 0.2
