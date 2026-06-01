@@ -1149,6 +1149,7 @@ paper_plot_data <- list(
 )
 
 saveRDS(paper_plot_data, plot_data_rds)
+saved_plot_data <- readRDS(plot_data_rds)
 readr::write_csv(
   ccs_compute_coordinates,
   file.path(plot_data_dir, paste0(
@@ -1167,6 +1168,12 @@ readr::write_csv(
 )
 
 cat("Saved plot-data RDS:", plot_data_rds, "\n")
+cat(
+  "Saved RDS baseline provenance:",
+  saved_plot_data$config$baseline_job_name,
+  saved_plot_data$config$baseline_parent_job_id,
+  "\n"
+)
 cat("Saved diagnostic CSVs to:", plot_data_dir, "\n")
 ```
 

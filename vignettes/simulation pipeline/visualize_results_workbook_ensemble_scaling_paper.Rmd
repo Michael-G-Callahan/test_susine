@@ -56,6 +56,15 @@ cat("Figure dir:", fig_dir, "\n")
 
 ```{r load-plot-data}
 paper_plot_data <- readRDS(plot_data_rds)
+if (is.null(paper_plot_data$config$baseline_parent_job_id) ||
+    is.null(paper_plot_data$config$baseline_consolidated_dir)) {
+  stop(
+    "Prepared RDS lacks independent-baseline provenance. ",
+    "Re-run prepare_results_workbook_ensemble_scaling_paper.Rmd after moving ",
+    "or deleting the stale RDS: ", plot_data_rds,
+    call. = FALSE
+  )
+}
 
 annotation_r2_focus <- paper_plot_data$config$annotation_r2_focus
 drop_aggs <- paper_plot_data$config$drop_aggs
