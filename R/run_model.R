@@ -737,7 +737,13 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
         if (!is.null(model_result$sigma_0_2)) {
           run_data_bundle$sigma_0_2 <- model_result$sigma_0_2
         }
-        if (is.null(model_result_override)) {
+        # Only cache fits that are reproducible from the cache key alone. Fits
+        # produced with an `init_alpha_override` (refinement refit steps) depend
+        # on a perturbed warm start the key cannot encode, so writing them would
+        # poison the cold-fit key and serve a refined fit to later cold requests
+        # (baseline-single, sigma base members, refine roots). Mirror the read
+        # guard at the cache_hit check above.
+        if (is.null(model_result_override) && is.null(init_alpha_override)) {
           assign(
             cache_key,
             list(

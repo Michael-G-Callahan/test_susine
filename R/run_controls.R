@@ -921,7 +921,9 @@ make_job_config <- function(job_name,
   # Runs from sigma_0_2_grid exploration already have sigma_0_2_scalar set;
 
   # only expand sigma_0_2_scalars for runs without a pre-set value.
-  has_sigma <- "sigma_0_2_scalar" %in% names(runs_fixed) &
+  # `&&` (not `&`): short-circuit so the second test isn't evaluated when the
+  # column is absent (e.g. all-fixed-variance jobs with no sigma_0_2_grid spec).
+  has_sigma <- "sigma_0_2_scalar" %in% names(runs_fixed) &&
     !all(is.na(runs_fixed$sigma_0_2_scalar))
   if (has_sigma) {
     runs_fixed_preset <- runs_fixed %>%
@@ -930,7 +932,10 @@ make_job_config <- function(job_name,
       dplyr::filter(is.na(.data$sigma_0_2_scalar)) %>%
       dplyr::select(-.data$sigma_0_2_scalar)
   } else {
+    # No pre-set sigma column anywhere: the preset slice is empty, but still
+    # needs the column so the downstream as.character() mutate + bind_rows work.
     runs_fixed_preset <- runs_fixed[0, , drop = FALSE]
+    runs_fixed_preset$sigma_0_2_scalar <- character(0)
     runs_fixed_needs <- runs_fixed
   }
   if (nrow(runs_fixed_needs)) {

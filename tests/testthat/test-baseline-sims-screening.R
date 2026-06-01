@@ -83,6 +83,54 @@ test_that("baseline screening specs expand tuning grids and annotation cross-pro
   expect_equal(sort(unique(functional_mu_runs$inflate_match)), c(0.8, 1))
 })
 
+test_that("make_job_config builds all-fixed-variance jobs with no sigma grid", {
+  # Regression: when no spec supplies a sigma_0_2_grid, the runs table has no
+  # sigma_0_2_scalar column, and the fixed-variance expansion must not error
+  # (previously `&` instead of `&&` evaluated a missing column).
+  cfg <- test_susine::make_job_config(
+    job_name = "unit_allfixed_nogrid",
+    use_case_ids = "susine_vanilla",
+    exploration_methods = "single",
+    exploration_mode = "separate",
+    K = 1L,
+    L_grid = 2L,
+    y_noise_grid = 0.8,
+    prior_quality = test_susine::prior_quality_grid(c(0.4), c(1)),
+    p_star_grid = 2L,
+    seeds = 1L,
+    architecture_grid = "sparse",
+    sigma_0_2_scalars = "0.2",
+    data_scenarios = "simulation_n3",
+    repo_root = ".",
+    data_matrix_catalog = make_baseline_screen_catalog(),
+    task_unit = "dataset",
+    bundles_per_task = 1L,
+    output_root = tempdir(),
+    write_snps_parquet = FALSE,
+    write_confusion_bins = FALSE,
+    verbose_file_output = FALSE,
+    include_overall_pool = FALSE,
+    aggregation_methods = character(0),
+    exploration_specs = list(
+      list(
+        name = "A-F", use_case_ids = "susine_vanilla",
+        exploration_methods = "refine", exploration_mode = "separate", K = 2L,
+        refine_settings = list(n_steps = 2L, cs_source = "filtered",
+                               purity_threshold = 0)
+      ),
+      list(
+        name = "baseline-single", use_case_ids = "susine_vanilla",
+        exploration_methods = "single", exploration_mode = "separate", K = 1L
+      )
+    )
+  )
+
+  runs <- cfg$tables$runs
+  expect_setequal(unique(runs$spec_name), c("A-F", "baseline-single"))
+  expect_true("sigma_0_2_scalar" %in% names(runs))
+  expect_equal(unique(as.numeric(runs$sigma_0_2_scalar)), 0.2)
+})
+
 test_that("aggregate_staging_outputs preserves filtered and unfiltered effect metrics", {
   root <- file.path(tempdir(), "baseline-screen-agg")
   job_name <- "unit_baseline_collect"
