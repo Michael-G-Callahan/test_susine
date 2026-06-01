@@ -15,7 +15,7 @@ Paper-focused figure renderer for the ensemble scaling simulation. Run
 consolidated outputs; this workbook then reads the compact plot-data RDS and
 writes PNG figures only.
 
-```{r setup, message=FALSE}
+```{r setup, message=FALSE, fig.keep='none'}
 here::i_am("vignettes/simulation pipeline/visualize_results_workbook_ensemble_scaling_paper.Rmd")
 library(here)
 library(dplyr)
@@ -23,6 +23,9 @@ library(ggplot2)
 library(readr)
 library(knitr)
 
+if (requireNamespace("ragg", quietly = TRUE)) {
+  knitr::opts_chunk$set(dev = "ragg_png")
+}
 theme_set(theme_bw(base_size = 14))
 ```
 

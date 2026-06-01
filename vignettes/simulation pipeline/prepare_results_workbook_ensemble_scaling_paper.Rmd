@@ -15,10 +15,17 @@ Run this workbook on the HPC output after
 workbook reads the RDS written here and can be rerun quickly while iterating on
 figure styling.
 
-```{r setup, message=FALSE}
+```{r setup, message=FALSE, fig.keep='none'}
 here::i_am("vignettes/simulation pipeline/prepare_results_workbook_ensemble_scaling_paper.Rmd")
 library(here)
 library(devtools)
+library(knitr)
+
+if (requireNamespace("ragg", quietly = TRUE)) {
+  knitr::opts_chunk$set(dev = "ragg_png")
+} else {
+  knitr::opts_chunk$set(fig.keep = "none")
+}
 
 susine_path <- here("..", "susine")
 if (file.exists(file.path(susine_path, "DESCRIPTION"))) {
@@ -32,7 +39,6 @@ devtools::load_all(".")
 library(dplyr)
 library(tidyr)
 library(readr)
-library(knitr)
 
 `%||%` <- function(x, y) {
   if (is.null(x) || length(x) == 0L) y else x
