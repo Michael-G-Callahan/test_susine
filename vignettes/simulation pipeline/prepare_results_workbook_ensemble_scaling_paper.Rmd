@@ -43,11 +43,18 @@ library(knitr)
 
 ```{r config}
 job_name <- "ensemble_scaling_full"
-parent_job_id <- "51250228"
+parent_job_id <- "53398149"
 output_root <- here("output")
 
 job_dir <- file.path(output_root, "slurm_output", job_name, parent_job_id)
 consolidated_dir <- file.path(job_dir, "consolidated")
+
+baseline_job_name <- "baseline_sims_screen"
+baseline_parent_job_id <- "51509956"
+baseline_consolidated_dir <- file.path(
+  output_root, "slurm_output", baseline_job_name, baseline_parent_job_id,
+  "consolidated"
+)
 
 annotation_r2_focus <- 0.3
 drop_aggs <- "cluster_weight_jsd_050"
@@ -67,9 +74,17 @@ if (!dir.exists(consolidated_dir)) {
     call. = FALSE
   )
 }
+if (!dir.exists(baseline_consolidated_dir)) {
+  stop(
+    "Baseline consolidated output directory not found: ",
+    baseline_consolidated_dir,
+    call. = FALSE
+  )
+}
 dir.create(plot_data_dir, recursive = TRUE, showWarnings = FALSE)
 
 cat("Consolidated dir:", consolidated_dir, "\n")
+cat("Baseline reference dir:", baseline_consolidated_dir, "\n")
 cat("Plot data dir:", plot_data_dir, "\n")
 ```
 
@@ -105,6 +120,47 @@ confusion_bins <- read_required_csv("confusion_bins_full.csv") %>%
 model_metrics <- read_required_csv("model_metrics_full.csv") %>%
   test_susine:::normalize_agg_method_df()
 
+read_baseline_required_csv <- function(filename) {
+  path <- file.path(baseline_consolidated_dir, filename)
+  if (!file.exists(path)) {
+    stop("Required baseline CSV missing: ", path, call. = FALSE)
+  }
+  readr::read_csv(path, show_col_types = FALSE)
+}
+
+is_base_only_row <- function(df) {
+  out <- rep(TRUE, nrow(df))
+  if ("explore_method" %in% names(df)) {
+    out <- out & (as.character(df$explore_method) == "base")
+  }
+  if ("agg_method" %in% names(df)) {
+    out <- out & (is.na(df$agg_method) | df$agg_method == "")
+  }
+  if ("variant_id" %in% names(df)) {
+    out <- out & (is.na(df$variant_id) | df$variant_id == "")
+  }
+  out
+}
+
+filter_baseline_reference <- function(df) {
+  df <- df %>% test_susine:::normalize_agg_method_df()
+  keep <- df$use_case_id == "susine_vanilla" &
+    as.numeric(df$sigma_0_2_scalar) == 0.2 &
+    is_base_only_row(df)
+
+  df[keep %in% TRUE, , drop = FALSE] %>%
+    dplyr::mutate(
+      spec_name = "baseline-single",
+      annotation_r2 = NA_real_
+    )
+}
+
+baseline_ref_confusion_bins <- read_baseline_required_csv("confusion_bins_full.csv") %>%
+  filter_baseline_reference()
+
+baseline_ref_model_metrics <- read_baseline_required_csv("model_metrics_full.csv") %>%
+  filter_baseline_reference()
+
 hg2_by_agg <- read_optional_csv("hg2_by_agg.csv")
 if (!is.null(hg2_by_agg)) {
   hg2_by_agg <- test_susine:::normalize_agg_method_df(hg2_by_agg)
@@ -118,6 +174,11 @@ if (!is.null(scaling_bins_pooled)) {
 
 cat("Confusion-bin rows:", nrow(confusion_bins), "\n")
 cat("Model-metric rows:", nrow(model_metrics), "\n")
+cat(
+  "Baseline reference datasets:",
+  dplyr::n_distinct(baseline_ref_confusion_bins$dataset_bundle_id),
+  "\n"
+)
 cat("Scaling-bin rows:", if (is.null(scaling_bins_pooled)) 0 else nrow(scaling_bins_pooled), "\n")
 ```
 
@@ -647,7 +708,7 @@ auprc_plot_table <- test_susine:::build_shared_plot_metric_table(
 ) %>%
   dplyr::filter(is.na(.data$agg_method) | !.data$agg_method %in% drop_aggs)
 
-baseline_auprc <- extract_baseline_metric(auprc_plot_table, "AUPRC")
+baseline_auprc <- auprc_from_bins(baseline_ref_confusion_bins)
 truth_warm_refs <- extract_truth_warm_refs(auprc_plot_table, "AUPRC")
 truth_warm_vanilla_vec <- truth_warm_refs %>%
   dplyr::filter(.data$use_case_id == "susine_vanilla", is.na(.data$annotation_r2)) %>%
@@ -656,6 +717,11 @@ truth_warm_vanilla <- if (length(truth_warm_vanilla_vec)) truth_warm_vanilla_vec
 
 cat("Baseline SuSiE AUPRC:", round(baseline_auprc, 4), "\n")
 cat("Truth-warm vanilla AUPRC:", round(truth_warm_vanilla, 4), "\n")
+cat(
+  "Paper baseline source: independent",
+  baseline_job_name, baseline_parent_job_id,
+  "(ensemble baseline-single cache rows are not used for baseline references)\n"
+)
 ```
 
 # 3. Plot Data
@@ -719,12 +785,7 @@ bootstrap_auprc_from_bins <- function(bins, sample_ids) {
     auprc_from_bins()
 }
 
-baseline_boot_bins <- confusion_bins %>%
-  dplyr::filter(
-    .data$spec_name == "baseline-single",
-    .data$use_case_id == "susine_vanilla",
-    is.na(.data$agg_method)
-  )
+baseline_boot_bins <- baseline_ref_confusion_bins
 
 ccs_boot_bins <- confusion_bins %>%
   dplyr::filter(
@@ -771,12 +832,7 @@ if (length(shared_boot_ids) > 1L) {
 ```{r pr-data}
 r2_values <- sort(unique(stats::na.omit(confusion_bins$annotation_r2)))
 
-baseline_pr_bins <- confusion_bins %>%
-  dplyr::filter(
-    .data$spec_name == "baseline-single",
-    .data$use_case_id == "susine_vanilla",
-    is.na(.data$agg_method)
-  ) %>%
+baseline_pr_bins <- baseline_ref_confusion_bins %>%
   dplyr::select(dataset_bundle_id, pip_threshold, n_causal_at_bucket, n_noncausal_at_bucket) %>%
   tidyr::crossing(annotation_r2 = r2_values) %>%
   dplyr::mutate(method = "SuSiE baseline")
@@ -827,7 +883,7 @@ if (!is.null(hg2_by_agg) && nrow(hg2_by_agg) > 0L) {
       series = "ensemble"
     )
 
-  baseline_hg2 <- model_metrics %>%
+  baseline_hg2 <- baseline_ref_model_metrics %>%
     dplyr::filter(
       .data$spec_name == "baseline-single",
       .data$use_case_id == "susine_vanilla",
@@ -884,12 +940,7 @@ pip_cal_with_se <- function(bins) {
     )
 }
 
-baseline_cal_bins <- confusion_bins %>%
-  dplyr::filter(
-    .data$spec_name == "baseline-single",
-    .data$use_case_id == "susine_vanilla",
-    is.na(.data$agg_method)
-  ) %>%
+baseline_cal_bins <- baseline_ref_confusion_bins %>%
   dplyr::mutate(method = "SuSiE baseline")
 
 ccs_cal_bins <- confusion_bins %>%
@@ -998,7 +1049,7 @@ ccs_compute_coordinates <- tibble::tibble(
   n_reps = integer(),
   n_datasets_compute = integer()
 )
-baseline_compute_min <- baseline_compute_minutes(model_metrics)
+baseline_compute_min <- baseline_compute_minutes(baseline_ref_model_metrics)
 baseline_compute_sec <- baseline_compute_min * 60
 
 if (nrow(scaling_metrics) > 0L && "wall_time_sec" %in% names(model_metrics)) {
@@ -1052,8 +1103,11 @@ paper_plot_data <- list(
   config = list(
     job_name = job_name,
     parent_job_id = parent_job_id,
+    baseline_job_name = baseline_job_name,
+    baseline_parent_job_id = baseline_parent_job_id,
     job_dir = job_dir,
     consolidated_dir = consolidated_dir,
+    baseline_consolidated_dir = baseline_consolidated_dir,
     fig_dir = fig_dir,
     plot_data_dir = plot_data_dir,
     annotation_r2_focus = annotation_r2_focus,

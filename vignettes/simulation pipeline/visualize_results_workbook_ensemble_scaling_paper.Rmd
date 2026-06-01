@@ -30,7 +30,7 @@ theme_set(theme_bw(base_size = 14))
 
 ```{r config}
 job_name <- "ensemble_scaling_full"
-parent_job_id <- "51250228"
+parent_job_id <- "53398149"
 output_root <- here("output")
 write_component_pngs <- FALSE
 
