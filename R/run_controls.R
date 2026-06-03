@@ -1123,7 +1123,7 @@ make_job_config <- function(job_name,
         mem = mem,
         cpus_per_task = 1,
         partition = NULL,
-        account = NULL
+        account = "statsresearch_sc_default"
       )
     ),
     paths = list(
@@ -1223,11 +1223,10 @@ render_slurm_script <- function(job_config, run_task_script) {
     NULL
   }
 
-  account_line <- if (!is.null(slurm$account)) {
-    paste0("#SBATCH --account=", slurm$account)
-  } else {
-    NULL
-  }
+  # Always emit an account so jobs never silently fall back to the default
+  # allocation, even for configs that did not set one.
+  account_line <- paste0("#SBATCH --account=",
+                         slurm$account %||% "statsresearch_sc_default")
 
   hpc_setup <- if (isTRUE(job$HPC)) {
     c(

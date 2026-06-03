@@ -195,6 +195,7 @@ render_real_case_slurm_script <- function(job_config, run_task_script) {
     sprintf("#SBATCH --cpus-per-task=%s", slurm$cpus_per_task),
     sprintf("#SBATCH --mail-user=%s", slurm$email),
     "#SBATCH --mail-type=BEGIN,END,FAIL",
+    sprintf("#SBATCH --account=%s", slurm$account %||% "statsresearch_sc_default"),
     "#SBATCH --output=/dev/null",
     "#SBATCH --error=/dev/null",
     "",
