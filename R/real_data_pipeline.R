@@ -1924,7 +1924,8 @@ collect_real_data_results <- function(
     parent_job_id,
     output_root = "output",
     validate = TRUE,
-    output_dir = NULL
+    output_dir = NULL,
+    cluster_threshold = NULL
 ) {
   idx <- index_staging_outputs(job_name, parent_job_id, output_root = output_root)
   validation_index <- NULL
@@ -1967,7 +1968,7 @@ collect_real_data_results <- function(
   } else {
     NULL
   }
-  jsd_threshold <- as.numeric(job_config$job$jsd_threshold %||% 0.15)
+  jsd_threshold <- as.numeric(cluster_threshold %||% job_config$job$jsd_threshold %||% 0.15)
   softmax_temperature <- as.numeric(job_config$job$softmax_temperature %||% 1)
 
   run_manifest <- readr::read_csv(run_manifest_path, show_col_types = FALSE)
@@ -2141,8 +2142,7 @@ collect_real_data_results <- function(
         softmax_temperature = softmax_temperature
       )
       cluster_levels <- sort(unique(clusters))
-      weight_by_run <- rep(0, length(run_ids))
-      weight_by_run[cw$rep_idx] <- cw$w_rep
+      weight_by_run <- cw$w_full
 
       pair_rows <- list()
       for (a in seq_len(nrow(pip_mat) - 1L)) {

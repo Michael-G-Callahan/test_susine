@@ -878,7 +878,7 @@ aggregate_pip_matrix <- function(pip_mat, elbos, method, jsd_threshold = 0.15, h
     hc <- stats::hclust(stats::as.dist(jsd), method = "complete")
   }
   cw <- .cluster_weights_from_hc(hc, jsd_threshold, elbos, n_fits = N)
-  as.vector(pip_mat[, cw$rep_idx, drop = FALSE] %*% cw$w_rep)
+  as.vector(pip_mat %*% cw$w_full)
 }
 
 # Select n_ens run_ids from run_meta using the appropriate lever strategy.

@@ -45,11 +45,22 @@ if (identical(parent_job_id, "REPLACE_WITH_SLURM_JOB_ID")) {
   stop("Set parent_job_id to the SLURM job id returned by sbatch before visualizing.")
 }
 
-aggregated_dir <- here("output", "slurm_output", job_name, parent_job_id, "aggregated")
-figure_dir <- here("output", "slurm_output", job_name, parent_job_id, "figures", "real_data_ensemble")
+# Preview redirect: the cluster-metric sweep (preview_cluster_metric_sweep.R)
+# sets these env vars to a preview aggregated/figure dir. Empty -> production.
+aggregated_dir <- {
+  ov <- Sys.getenv("RD_PREVIEW_AGG_DIR", "")
+  if (nzchar(ov)) ov else here("output", "slurm_output", job_name, parent_job_id, "aggregated")
+}
+figure_dir <- {
+  ov <- Sys.getenv("RD_PREVIEW_FIG_DIR", "")
+  if (nzchar(ov)) ov else here("output", "slurm_output", job_name, parent_job_id, "figures", "real_data_ensemble")
+}
 overall_figure_dir <- file.path(figure_dir, "overall")
 locus_figure_dir <- file.path(figure_dir, "per_locus")
-paper_real_data_case_study_dir <- here("..", "..", "Writings", "plots", "real_data_case_study")
+paper_real_data_case_study_dir <- {
+  ov <- Sys.getenv("RD_PREVIEW_PAPER_DIR", "")
+  if (nzchar(ov)) ov else here("..", "..", "Writings", "plots", "real_data_case_study")
+}
 dir.create(figure_dir, recursive = TRUE, showWarnings = FALSE)
 dir.create(overall_figure_dir, recursive = TRUE, showWarnings = FALSE)
 dir.create(locus_figure_dir, recursive = TRUE, showWarnings = FALSE)

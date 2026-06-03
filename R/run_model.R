@@ -1919,7 +1919,35 @@ softmax_weights <- function(x, temperature = 1) {
   w / sum(w)
 }
 
-prepare_pip_similarity_cache <- function(pips_mat) {
+#' Pairwise distance between two PIP vectors for fit clustering.
+#'
+#' `metric` is one of `"jsd"` (default; the historical unnormalized JSD),
+#' `"l2"` (raw Euclidean), `"cosine"` (1 - cosine similarity; scale-free),
+#' or `"bernoulli_jsd"` (sum of per-variant binary JSDs, both inclusion and
+#' exclusion channels).
+#' @keywords internal
+pip_cluster_distance <- function(p, q, metric = "jsd", eps = 1e-12) {
+  p <- as.numeric(p); q <- as.numeric(q)
+  switch(metric,
+    jsd = js_distance(p, q, eps = eps),
+    l2 = sqrt(sum((p - q)^2)),
+    cosine = {
+      np <- sqrt(sum(p^2)); nq <- sqrt(sum(q^2))
+      if (np <= 0 || nq <= 0) return(1)
+      1 - sum(p * q) / (np * nq)
+    },
+    bernoulli_jsd = {
+      a <- pmin(pmax(p, eps), 1 - eps); b <- pmin(pmax(q, eps), 1 - eps)
+      m <- 0.5 * (a + b)
+      hb <- function(x) -x * log(x) - (1 - x) * log(1 - x)
+      sum(hb(m) - 0.5 * (hb(a) + hb(b)))
+    },
+    stop("Unknown pip cluster metric: ", metric)
+  )
+}
+
+prepare_pip_similarity_cache <- function(pips_mat,
+                                         metric = getOption("rd_preview.cluster_metric", "jsd")) {
   n <- nrow(pips_mat)
   if (n < 2L) {
     return(list(
@@ -1935,7 +1963,7 @@ prepare_pip_similarity_cache <- function(pips_mat) {
   idx <- 1L
   for (i in seq_len(n - 1L)) {
     for (j in seq.int(i + 1L, n)) {
-      d <- js_distance(pips_mat[i, ], pips_mat[j, ])
+      d <- pip_cluster_distance(pips_mat[i, ], pips_mat[j, ], metric = metric)
       jsd_vals[[idx]] <- d
       jsd_mat[i, j] <- d
       jsd_mat[j, i] <- d
@@ -2009,7 +2037,8 @@ aggregate_use_case_pips <- function(pip_list,
 #' @keywords internal
 .cluster_weights_from_hc <- function(hc, threshold, elbo_vec,
                                      n_fits,
-                                     softmax_temperature = 1) {
+                                     softmax_temperature = 1,
+                                     aggregation = getOption("rd_preview.cluster_aggregation", "legacy")) {
   clusters <- stats::cutree(hc, h = threshold)
   cl_levels <- sort(unique(clusters))
   rep_idx <- integer(length(cl_levels))
@@ -2023,10 +2052,29 @@ aggregate_use_case_pips <- function(pip_list,
     rep_idx[k] <- pick
     elbo_rep[k] <- elbo_vec[pick]
   }
-  w_rep <- softmax_weights(elbo_rep, temperature = softmax_temperature) / freq
-  w_rep <- w_rep / sum(w_rep)
-  list(rep_idx = rep_idx, w_rep = w_rep,
-       ess = as.numeric(1 / sum(w_rep^2)))
+
+  # w_full: length-n_fits weight vector over ALL fits. Aggregation always uses
+  # w_full, so both modes share a single downstream path.
+  w_full <- numeric(n_fits)
+  if (identical(aggregation, "method_b")) {
+    # Method B: one weight per cluster proportional to exp(max-ELBO in cluster),
+    # split within the cluster by ELBO-softmax. Frequency-free; reduces to the
+    # nominee when one fit dominates a cluster.
+    cl_w <- softmax_weights(elbo_rep, temperature = softmax_temperature)
+    for (k in seq_along(cl_levels)) {
+      idxs <- which(clusters == cl_levels[[k]])
+      within <- softmax_weights(elbo_vec[idxs], temperature = softmax_temperature)
+      w_full[idxs] <- cl_w[[k]] * within
+    }
+    w_rep <- vapply(cl_levels, function(cid) sum(w_full[clusters == cid]), numeric(1))
+  } else {
+    # Legacy (Method C): nominee-only, importance-corrected by 1 / cluster freq.
+    w_rep <- softmax_weights(elbo_rep, temperature = softmax_temperature) / freq
+    w_rep <- w_rep / sum(w_rep)
+    w_full[rep_idx] <- w_rep
+  }
+  list(rep_idx = rep_idx, w_rep = w_rep, w_full = w_full,
+       ess = as.numeric(1 / sum(w_full^2)))
 }
 
 #' Apply cluster-then-weight aggregation from a pre-computed hclust object.
@@ -2036,7 +2084,7 @@ aggregate_use_case_pips <- function(pip_list,
   cw <- .cluster_weights_from_hc(hc, threshold, elbo_vec,
                                   n_fits = nrow(pips_mat),
                                   softmax_temperature = softmax_temperature)
-  ens <- as.numeric(crossprod(cw$w_rep, pips_mat[cw$rep_idx, , drop = FALSE]))
+  ens <- as.numeric(crossprod(cw$w_full, pips_mat))
   attr(ens, "ess") <- cw$ess
   ens
 }
@@ -2697,8 +2745,7 @@ compute_hg2_by_agg <- function(pip_list,
       thr <- if (am == "cluster_weight") 0.15 else 0.50
       cw <- .cluster_weights_from_hc(hc, thr, elbo_vec,
                                       n_fits = K)
-      fy_agg <- as.numeric(crossprod(cw$w_rep,
-                                      fy_mat[cw$rep_idx, , drop = FALSE]))
+      fy_agg <- as.numeric(crossprod(cw$w_full, fy_mat))
     } else {
       w <- switch(am,
         "uniform"           = rep(1 / K, K),
