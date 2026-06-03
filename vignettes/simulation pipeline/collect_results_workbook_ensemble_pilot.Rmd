@@ -133,7 +133,7 @@ cat("Fits per locus (median):",
 ```{r build-locus-structures}
 # For each locus: pip_mat (K fits x p SNPs), elbo_vec (length K), causal (length p).
 locus_ids <- sort(unique(snps$dataset_bundle_id))
-pip_list <- list(); elbo_list <- list(); causal_list <- list()
+pip_list <- list(); elbo_list <- list(); causal_list <- list(); include_list <- list()
 for (lid in locus_ids) {
   s <- dplyr::filter(snps, .data$dataset_bundle_id == lid)
   runs_l <- sort(unique(s$run_id))
@@ -145,32 +145,43 @@ for (lid in locus_ids) {
     pm[ri, as.character(sr$snp_index)] <- sr$pip
   }
   ev <- elbo_by_run$elbo_final[match(runs_l, elbo_by_run$run_id)]
-  # Label = top-8 scored causal mask (paper metric); identical across fits.
-  cs <- s %>% dplyr::filter(.data$run_id == runs_l[[1]]) %>%
-    dplyr::arrange(.data$snp_index) %>% dplyr::pull(.data$causal_scored)
+  truth <- s %>% dplyr::filter(.data$run_id == runs_l[[1]]) %>%
+    dplyr::arrange(.data$snp_index)
+  cs <- truth$causal_scored   # label: 1 = top-8 strong causal, 0 = else
+  cf <- truth$causal          # full causal indicator (any effect size)
   keep <- length(runs_l) >= 2 && all(is.finite(ev)) && length(cs) == ncol(pm)
   if (!keep) next
-  pip_list[[as.character(lid)]]    <- pm
-  elbo_list[[as.character(lid)]]   <- as.numeric(ev)
-  causal_list[[as.character(lid)]] <- as.integer(cs)
+  # Score the top-8 strong causals (positives) against the TRUE non-causals
+  # (negatives). Weak (non-top-8) causal variants are dropped from scoring
+  # entirely -- neither positive nor negative.
+  include <- (cf == 0L) | (cs == 1L)
+  pip_list[[as.character(lid)]]     <- pm
+  elbo_list[[as.character(lid)]]    <- as.numeric(ev)
+  causal_list[[as.character(lid)]]  <- as.integer(cs)
+  include_list[[as.character(lid)]] <- as.logical(include)
 }
 cat("Usable loci:", length(pip_list), "\n")
-cat("Pooled prevalence (scored positives / all SNPs):",
-    round(mean(unlist(causal_list)), 4), "\n")
+cat("Scored SNPs/locus (excl. weak causals):",
+    round(mean(vapply(include_list, sum, numeric(1))), 1),
+    "| positives/locus:",
+    round(mean(vapply(causal_list, sum, numeric(1))), 1), "\n")
 ```
 
 # 4. Reference Aggregations (metric/threshold-independent)
 
 ```{r reference}
 auprc_pooled <- function(pip_by_locus) {
-  pooled_pip <- unlist(pip_by_locus, use.names = FALSE)
-  pooled_lab <- unlist(causal_list[names(pip_by_locus)], use.names = FALSE)
+  lids <- names(pip_by_locus)
+  inc  <- unlist(include_list[lids], use.names = FALSE)
+  pooled_pip <- unlist(pip_by_locus, use.names = FALSE)[inc]
+  pooled_lab <- unlist(causal_list[lids], use.names = FALSE)[inc]
   test_susine:::auprc_average_precision(pooled_pip, pooled_lab)
 }
 auprc_mean_perlocus <- function(pip_by_locus) {
-  mean(vapply(names(pip_by_locus), function(lid)
-    test_susine:::auprc_average_precision(pip_by_locus[[lid]], causal_list[[lid]]),
-    numeric(1)), na.rm = TRUE)
+  mean(vapply(names(pip_by_locus), function(lid) {
+    inc <- include_list[[lid]]
+    test_susine:::auprc_average_precision(pip_by_locus[[lid]][inc], causal_list[[lid]][inc])
+  }, numeric(1)), na.rm = TRUE)
 }
 
 ref_methods <- list(
