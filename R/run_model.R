@@ -45,6 +45,7 @@ run_task <- function(job_name,
     buffer_ctx$base_output <- determine_base_output(job_config)
     buffer_ctx$task_id <- task_id
     buffer_ctx$flush_index <- 0L
+    buffer_ctx$pip_only <- isTRUE(job_config$job$write_snps_pip_only)
     # Reruns should start from a clean task staging directory to avoid
     # stale/duplicate flush files and overwrite-lock surprises.
     prepare_task_staging_dir(buffer_ctx$base_output, task_id)
@@ -2835,7 +2836,8 @@ flush_task_buffers <- function(buffer_ctx) {
     scaling_bins = scaling_bins_tbl,
     prior_diagnostics = prior_diag_tbl,
     tier_cs_metrics = tier_cs_tbl,
-    hg2_by_agg = hg2_by_agg_tbl
+    hg2_by_agg = hg2_by_agg_tbl,
+    pip_only = isTRUE(buffer_ctx$pip_only)
   )
 
   if (is.null(validation_tbl) || !nrow(validation_tbl)) {
@@ -2881,7 +2883,8 @@ write_flush_outputs <- function(staging_dir,
                                 scaling_bins = NULL,
                                 prior_diagnostics = NULL,
                                 tier_cs_metrics = NULL,
-                                hg2_by_agg = NULL) {
+                                hg2_by_agg = NULL,
+                                pip_only = FALSE) {
   if (!is.null(model_metrics) && nrow(model_metrics)) {
     model_metrics <- dplyr::mutate(model_metrics, task_id = task_id, flush_id = flush_label)
     readr::write_csv(model_metrics, file.path(staging_dir, sprintf("%s_model_metrics.csv", flush_label)))
@@ -2903,7 +2906,12 @@ write_flush_outputs <- function(staging_dir,
   }
   if (!is.null(snp_tbl) && nrow(snp_tbl)) {
     snp_tbl <- dplyr::mutate(snp_tbl, task_id = task_id, flush_id = flush_label)
-    write_compact_snp_parquet(snp_tbl, file.path(staging_dir, sprintf("%s_snps.parquet", flush_label)))
+    snp_path <- file.path(staging_dir, sprintf("%s_snps.parquet", flush_label))
+    if (isTRUE(pip_only)) {
+      write_pip_only_parquet(snp_tbl, snp_path)
+    } else {
+      write_compact_snp_parquet(snp_tbl, snp_path)
+    }
   }
   if (!is.null(validation_row) && nrow(validation_row)) {
     validation_row <- dplyr::mutate(validation_row, task_id = task_id, flush_id = flush_label)
@@ -2981,6 +2989,30 @@ write_compact_snp_parquet <- function(snp_tbl, path) {
   )
   # Align columns to schema order; drop any extras to avoid schema mismatch.
   snp_tbl <- snp_tbl[, names(snp_schema), drop = FALSE]
+  snp_table <- arrow::Table$create(snp_tbl, schema = snp_schema)
+  arrow::write_parquet(snp_table, path, compression = "zstd")
+}
+
+#' Minimal per-fit PIP parquet: only the columns the post-hoc aggregation sweep
+#' needs (`run_id`, `snp_index`, `pip`, `causal`). Drops `beta`/`mu_0`/
+#' `sigma_0_2` and the string accounting columns. Triggered by the job flag
+#' `write_snps_pip_only = TRUE`. Roughly halves on-disk size vs the compact
+#' writer; use when storage is tight and only PIPs are needed downstream.
+#' @keywords internal
+write_pip_only_parquet <- function(snp_tbl, path) {
+  snp_tbl <- dplyr::transmute(
+    snp_tbl,
+    run_id    = as.integer(run_id),
+    snp_index = as.integer(snp_index),
+    pip       = as.numeric(pip),
+    causal    = as.integer(causal)
+  )
+  snp_schema <- arrow::schema(
+    run_id    = arrow::int32(),
+    snp_index = arrow::int32(),
+    pip       = arrow::float32(),
+    causal    = arrow::int8()
+  )
   snp_table <- arrow::Table$create(snp_tbl, schema = snp_schema)
   arrow::write_parquet(snp_table, path, compression = "zstd")
 }

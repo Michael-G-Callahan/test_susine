@@ -1,0 +1,236 @@
+---
+title: "Ensemble Pilot (cluster-metric sweep) — Run Control"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+A minimal pilot whose only job is to **fit and store per-fit PIPs** for a
+single functional-grid ensemble (C-CS: c-grid x sigma-grid, K = 64) on 50 loci,
+one prior-quality setting (annotation r2 = 0.3, noncausal inflation = 0.95),
+one seed each. The expensive step (the 50 x 64 = 3200 SuSiNE fits) runs once on
+SLURM. Every clustering-metric x threshold x Method-B aggregation choice is then
+a cheap post-hoc sweep in `collect_results_workbook_ensemble_pilot.Rmd` — no
+refitting. `write_snps_parquet = TRUE` is what makes that possible (per-fit PIPs
++ causal labels are stored; per-fit `elbo_final` comes from `model_metrics`).
+
+```{r setup, message=FALSE}
+here::i_am("vignettes/simulation pipeline/run_control_workbook_ensemble_pilot.Rmd")
+library(here)
+library(devtools)
+susine_path <- here("..", "susine")
+if (file.exists(file.path(susine_path, "DESCRIPTION"))) {
+  options(test_susine.local_susine_path = normalizePath(susine_path, winslash = "/", mustWork = TRUE))
+  devtools::load_all(susine_path)
+}
+devtools::load_all(".")
+library(dplyr)
+library(tidyr)
+library(readr)
+library(knitr)
+```
+
+# 0. User Configuration
+
+```{r user-config}
+job_name <- "ensemble_pilot_cluster_metric"
+email    <- "mgc5166@psu.edu"
+
+# HPC resources per SLURM array task
+slurm_time <- "03:59:59"
+slurm_mem  <- "8G"
+
+# Pilot dataset grid
+n_matrices_target <- 50L        # 50 loci
+seeds             <- 1L         # one phenotype seed per locus
+
+# Single prior-quality cell
+annotation_r2_level        <- 0.3
+noncausal_inflation_factor <- 0.95
+
+# Simulation design
+L_grid            <- 10L
+architecture_grid <- "susie2_oligogenic"
+sigma_0_2_default <- 0.2
+max_iter          <- 100L
+
+# Task packing
+task_unit            <- "dataset"
+bundles_per_task     <- 4L
+task_assignment_seed <- 42L
+
+# Output: per-fit PIPs are the whole point. Confusion/scaling bins are NOT
+# needed — all aggregation/AUPRC happens post-hoc in the collect workbook.
+verbose_file_output          <- FALSE
+write_snps_parquet           <- TRUE
+write_snps_pip_only          <- TRUE   # lean: only run_id, snp_index, pip, causal
+write_confusion_bins         <- FALSE
+write_scaling_confusion_bins <- FALSE
+write_tier_cs_metrics        <- FALSE
+
+credible_set_rho <- 0.95
+purity_threshold <- 0.50
+softmax_temperature <- 1
+jsd_threshold <- 0.15  # run-time default; irrelevant, sweep happens in collect
+
+pip_breaks <- sort(unique(c(
+  seq(0.00, 0.05, by = 0.005),
+  seq(0.05, 0.10, by = 0.01),
+  seq(0.10, 1.00, by = 0.02)
+)))
+z_top_k <- 10
+```
+
+# 1. Ensemble Spec (C-CS: c-grid x sigma-grid, K = 64)
+
+```{r spec}
+c_grid_8     <- seq(0, 1.5, length.out = 8)
+sigma_grid_8 <- c(0.01, 0.03, 0.07, 0.1, 0.2, 0.4, 0.7, 1.0)
+stopifnot(0.2 %in% sigma_grid_8)
+
+spec_C_CS <- list(
+  name = "C-CS",
+  use_case_ids = "susine_functional_mu",
+  exploration_methods = c("c_grid", "sigma_0_2_grid"),
+  exploration_mode = "intersect",
+  K = 64L,
+  c_grid_values = c_grid_8,
+  sigma_0_2_grid_values = sigma_grid_8
+)
+all_specs <- list(spec_C_CS)
+cat("Ensemble spec:", spec_C_CS$name, "K =", spec_C_CS$K, "\n")
+```
+
+# 2. Matrix Selection (M1-stratified, 50 loci from scenario_1)
+
+```{r matrix-selection}
+data_matrix_catalog_full <- test_susine:::build_data_matrix_catalog(
+  requested_scenarios = "scenario_1",
+  repo_root = here(),
+  summary_path = here("data", "sampled_simulated_genotypes",
+                      "scenario_sampling_summary.csv")
+)
+cat("Total available genotype matrices:", nrow(data_matrix_catalog_full), "\n")
+
+m1_summary_path <- here("data", "sampled_simulated_genotypes",
+                        "scenario_sampling_summary_with_m1.csv")
+if (file.exists(m1_summary_path)) {
+  catalog_with_m1 <- readr::read_csv(m1_summary_path, show_col_types = FALSE)
+} else {
+  m1_tbl <- test_susine::build_x_metrics_table(
+    matrix_paths_df = data_matrix_catalog_full %>%
+      dplyr::select(matrix_id, matrix_path),
+    base_dir = here()
+  ) %>% dplyr::select(matrix_id, M1)
+  catalog_with_m1 <- data_matrix_catalog_full %>%
+    dplyr::left_join(m1_tbl, by = "matrix_id")
+  readr::write_csv(catalog_with_m1, m1_summary_path)
+}
+if (!"matrix_id" %in% names(catalog_with_m1)) {
+  join_col <- intersect(c("dataset_label", "matrix_path"), names(catalog_with_m1))[[1L]]
+  catalog_with_m1 <- catalog_with_m1 %>%
+    dplyr::left_join(data_matrix_catalog_full %>%
+                       dplyr::select(matrix_id, dplyr::all_of(join_col)), by = join_col)
+}
+catalog_with_m1 <- catalog_with_m1 %>%
+  dplyr::filter(!is.na(M1)) %>% dplyr::arrange(M1)
+
+n_target <- min(n_matrices_target, nrow(catalog_with_m1))
+idx      <- unique(round(seq(1, nrow(catalog_with_m1), length.out = n_target)))
+selected <- catalog_with_m1[idx, , drop = FALSE]
+data_matrix_catalog <- data_matrix_catalog_full %>%
+  dplyr::semi_join(dplyr::select(selected, matrix_id), by = "matrix_id")
+
+cat("Matrices selected (M1-stratified):", nrow(data_matrix_catalog), "\n")
+cat("Seeds:", paste(seeds, collapse = ", "), "\n")
+```
+
+# 3. Build Job Config
+
+```{r build-config}
+cfg <- make_job_config(
+  job_name = job_name,
+  HPC = TRUE,
+  time = slurm_time,
+  mem = slurm_mem,
+  email = email,
+  output_root = here("output"),
+  grid_mode = "full",
+
+  use_case_ids = "susine_functional_mu",
+  exploration_specs = all_specs,
+
+  L_grid = L_grid,
+  y_noise_grid = NA_real_,
+  p_star_grid = NA_integer_,
+  architecture_grid = architecture_grid,
+  seeds = seeds,
+
+  prior_quality = tibble::tibble(
+    annotation_r2 = annotation_r2_level,
+    inflate_match = noncausal_inflation_factor
+  ),
+
+  sigma_0_2_scalars = sigma_0_2_default,
+
+  data_scenarios = "scenario_1",
+  repo_root = here(),
+  data_matrix_catalog = data_matrix_catalog,
+  sampled_scenario_summary = here("data", "sampled_simulated_genotypes",
+                                  "scenario_sampling_summary.csv"),
+
+  task_unit = task_unit,
+  bundles_per_task = bundles_per_task,
+  task_assignment_seed = task_assignment_seed,
+
+  max_iter = max_iter,
+
+  aggregation_methods = "elbo_softmax",   # placeholder; real sweep is post-hoc
+  include_overall_pool = FALSE,
+  softmax_temperature = softmax_temperature,
+
+  credible_set_rho = credible_set_rho,
+  purity_threshold = purity_threshold,
+  verbose_file_output = verbose_file_output,
+  write_snps_parquet = write_snps_parquet,
+  write_snps_pip_only = write_snps_pip_only,
+  write_confusion_bins = write_confusion_bins,
+  write_tier_cs_metrics = write_tier_cs_metrics,
+  write_scaling_confusion_bins = write_scaling_confusion_bins,
+
+  metrics_settings = list(
+    pip_breaks = pip_breaks,
+    z_top_k = z_top_k,
+    jsd_threshold = jsd_threshold
+  )
+)
+
+runs <- cfg$tables$runs
+cat("Total runs:", nrow(runs), "\n")
+cat("Datasets (loci x seed):", length(unique(runs$dataset_bundle_id)), "\n")
+cat("Fits per dataset (expect ~64):",
+    round(nrow(runs) / length(unique(runs$dataset_bundle_id)), 1), "\n")
+```
+
+# 4. Write Artifacts
+
+```{r write-artifacts}
+arts <- write_job_artifacts(
+  job_config = cfg,
+  run_task_script = here("inst", "scripts", "run_task.R")
+)
+cat("Job config written to:", arts$job_config, "\n")
+cat("SLURM script:", arts$slurm_script, "\n")
+```
+
+# 5. Submit
+
+```{r submit, eval=FALSE}
+# sbatch <slurm_script_path>
+# Then collect + sweep with collect_results_workbook_ensemble_pilot.Rmd
+```

@@ -1,0 +1,250 @@
+---
+title: "Ensemble Pilot (cluster-metric sweep) — Collect & AUPRC Sweep"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+Post-hoc sweep: load the stored per-fit PIPs + per-fit `elbo_final`, then for
+every (clustering metric x threshold) re-cluster the K=64 functional-grid fits,
+aggregate them with **Method B** (frequency-free: cluster weight ~ exp(max-ELBO),
+split within-cluster by ELBO-softmax), and compute the **overall AUPRC** of the
+aggregated PIPs. No refitting — the SLURM job already did the only expensive
+work. Re-run this as many times as you like with different grids.
+
+```{r setup, message=FALSE}
+here::i_am("vignettes/simulation pipeline/collect_results_workbook_ensemble_pilot.Rmd")
+library(here)
+library(devtools)
+susine_path <- here("..", "susine")
+if (file.exists(file.path(susine_path, "DESCRIPTION"))) {
+  options(test_susine.local_susine_path = normalizePath(susine_path, winslash = "/", mustWork = TRUE))
+  devtools::load_all(susine_path)
+}
+devtools::load_all(".")
+library(dplyr)
+library(tidyr)
+library(readr)
+library(arrow)
+library(ggplot2)
+library(knitr)
+
+# Method B everywhere in this sweep.
+options(rd_preview.cluster_aggregation = "method_b")
+
+# Headless PNG device for HPC (no X11/Cairo).
+have_ragg <- requireNamespace("ragg", quietly = TRUE)
+save_png <- function(filename, plot, width = 8, height = 5, dpi = 150) {
+  dev <- if (have_ragg) ragg::agg_png else grDevices::png
+  ggplot2::ggsave(filename, plot, width = width, height = height, dpi = dpi, device = dev)
+}
+```
+
+# 1. Locate Output
+
+```{r locate}
+job_name      <- "ensemble_pilot_cluster_metric"
+parent_job_id <- "REPLACE_WITH_SLURM_JOB_ID"
+output_root   <- here("output")
+
+stopifnot(parent_job_id != "REPLACE_WITH_SLURM_JOB_ID")
+job_dir  <- file.path(output_root, "slurm_output", job_name, parent_job_id)
+cfg_path <- file.path(output_root, "run_history", job_name, parent_job_id, "job_config.json")
+cfg <- test_susine:::load_job_config(cfg_path)
+
+out_dir <- file.path(job_dir, "consolidated")
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+fig_dir <- file.path(job_dir, "figures")
+dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
+cat("Job dir:", job_dir, "\n")
+```
+
+# 2. Sweep Grids (knobs)
+
+```{r sweep-grids}
+# First-pass WIDE log-spaced (exponential) grids. Ranges are set generously so
+# each curve spans the full regime: low threshold -> ~64 singleton clusters
+# (Method B ~ ELBO-softmax over all fits); high threshold -> 1 cluster (also
+# ~ELBO-softmax). The interesting clustering behavior lives in between; refine
+# with a denser grid there on the second pass. The whole sweep is post-hoc, so
+# width is free.
+exp_grid <- function(lo, hi, n = 24L) signif(exp(seq(log(lo), log(hi), length.out = n)), 3)
+threshold_grids <- list(
+  cosine        = exp_grid(1e-3, 1.05, 24),  # 1 - cos, distances in [0, 1]
+  l2            = exp_grid(1e-2, 6.0,  24),  # raw Euclidean on PIP vectors
+  bernoulli_jsd = exp_grid(1e-2, 15.0, 24)   # sum of per-variant binary JSDs
+)
+metrics <- names(threshold_grids)
+cat("Metrics:", paste(metrics, collapse = ", "), "\n")
+for (m in metrics) cat(sprintf("  %s: %d thresholds [%.3f, %.3f]\n",
+                                m, length(threshold_grids[[m]]),
+                                min(threshold_grids[[m]]), max(threshold_grids[[m]])))
+```
+
+# 3. Load Per-Fit PIPs, ELBOs, Causal Labels
+
+```{r load}
+staging_index <- test_susine::index_staging_outputs(job_name, parent_job_id, output_root = output_root)
+snp_files <- staging_index %>% dplyr::filter(.data$type == "snps") %>% dplyr::pull(.data$path)
+stopifnot(length(snp_files) > 0)
+
+snps <- dplyr::bind_rows(lapply(snp_files, function(p)
+  as.data.frame(arrow::read_parquet(p,
+    col_select = c("run_id", "snp_index", "pip", "causal")))))
+# The PIP-only lean parquet contains individual fits only (no aggregated rows).
+
+# Per-fit elbo_final from model_metrics (one row per run after de-dup on filtering).
+task_dirs <- list.dirs(job_dir, recursive = FALSE, full.names = TRUE)
+task_dirs <- task_dirs[grepl("task-", basename(task_dirs))]
+mm_files <- sort(unlist(lapply(task_dirs, list.files, pattern = "model_metrics\\.csv$", full.names = TRUE)))
+model_metrics <- dplyr::bind_rows(lapply(mm_files, readr::read_csv,
+  show_col_types = FALSE, progress = FALSE))
+elbo_by_run <- model_metrics %>%
+  dplyr::distinct(.data$run_id, .keep_all = TRUE) %>%
+  dplyr::select(.data$run_id, .data$elbo_final)
+
+# Run metadata: locus (dataset_bundle_id) + grid coords.
+run_info <- cfg$tables$runs %>%
+  dplyr::select(.data$run_id, .data$dataset_bundle_id, .data$spec_name,
+                .data$c_value, .data$sigma_0_2_scalar) %>%
+  dplyr::filter(.data$spec_name == "C-CS")
+
+snps <- snps %>%
+  dplyr::inner_join(run_info, by = "run_id") %>%
+  dplyr::inner_join(elbo_by_run, by = "run_id")
+
+n_loci <- dplyr::n_distinct(snps$dataset_bundle_id)
+cat("Loci:", n_loci, "\n")
+cat("Fits per locus (median):",
+    snps %>% dplyr::distinct(dataset_bundle_id, run_id) %>%
+      dplyr::count(dataset_bundle_id) %>% dplyr::pull(n) %>% stats::median(), "\n")
+```
+
+```{r build-locus-structures}
+# For each locus: pip_mat (K fits x p SNPs), elbo_vec (length K), causal (length p).
+locus_ids <- sort(unique(snps$dataset_bundle_id))
+pip_list <- list(); elbo_list <- list(); causal_list <- list()
+for (lid in locus_ids) {
+  s <- dplyr::filter(snps, .data$dataset_bundle_id == lid)
+  runs_l <- sort(unique(s$run_id))
+  p_order <- sort(unique(s$snp_index))
+  pm <- matrix(NA_real_, nrow = length(runs_l), ncol = length(p_order),
+               dimnames = list(as.character(runs_l), as.character(p_order)))
+  for (ri in seq_along(runs_l)) {
+    sr <- s[s$run_id == runs_l[[ri]], ]
+    pm[ri, as.character(sr$snp_index)] <- sr$pip
+  }
+  ev <- elbo_by_run$elbo_final[match(runs_l, elbo_by_run$run_id)]
+  cs <- s %>% dplyr::filter(.data$run_id == runs_l[[1]]) %>%
+    dplyr::arrange(.data$snp_index) %>% dplyr::pull(.data$causal)
+  keep <- length(runs_l) >= 2 && all(is.finite(ev)) && length(cs) == ncol(pm)
+  if (!keep) next
+  pip_list[[as.character(lid)]]    <- pm
+  elbo_list[[as.character(lid)]]   <- as.numeric(ev)
+  causal_list[[as.character(lid)]] <- as.integer(cs)
+}
+cat("Usable loci:", length(pip_list), "\n")
+```
+
+# 4. Reference Aggregations (metric/threshold-independent)
+
+```{r reference}
+auprc_pooled <- function(pip_by_locus) {
+  pooled_pip <- unlist(pip_by_locus, use.names = FALSE)
+  pooled_lab <- unlist(causal_list[names(pip_by_locus)], use.names = FALSE)
+  test_susine:::auprc_average_precision(pooled_pip, pooled_lab)
+}
+auprc_mean_perlocus <- function(pip_by_locus) {
+  mean(vapply(names(pip_by_locus), function(lid)
+    test_susine:::auprc_average_precision(pip_by_locus[[lid]], causal_list[[lid]]),
+    numeric(1)), na.rm = TRUE)
+}
+
+ref_methods <- list(
+  single_best  = function(pm, ev) pm[which.max(ev), ],
+  uniform      = function(pm, ev) colMeans(pm),
+  elbo_softmax = function(pm, ev) as.numeric(crossprod(test_susine:::softmax_weights(ev), pm))
+)
+reference_tbl <- dplyr::bind_rows(lapply(names(ref_methods), function(nm) {
+  pip_by_locus <- lapply(names(pip_list), function(lid) ref_methods[[nm]](pip_list[[lid]], elbo_list[[lid]]))
+  names(pip_by_locus) <- names(pip_list)
+  tibble::tibble(method = nm,
+                 auprc_pooled = auprc_pooled(pip_by_locus),
+                 auprc_mean_perlocus = auprc_mean_perlocus(pip_by_locus))
+}))
+cat("=== Reference (non-cluster) aggregations ===\n")
+print(as.data.frame(reference_tbl), row.names = FALSE)
+```
+
+# 5. Metric x Threshold Sweep (Method B)
+
+```{r sweep}
+# Cache hclust per (metric, locus): distance depends on metric only, not threshold.
+hc_cache <- list()
+for (metric in metrics) {
+  hc_cache[[metric]] <- lapply(names(pip_list), function(lid)
+    test_susine:::prepare_pip_similarity_cache(pip_list[[lid]], metric = metric)$hc)
+  names(hc_cache[[metric]]) <- names(pip_list)
+}
+
+sweep_rows <- list()
+for (metric in metrics) {
+  for (thr in threshold_grids[[metric]]) {
+    agg_by_locus <- list(); n_clust <- numeric(0)
+    for (lid in names(pip_list)) {
+      hc <- hc_cache[[metric]][[lid]]
+      agg_by_locus[[lid]] <- as.numeric(test_susine:::.cluster_weight_from_hc(
+        hc, thr, elbo_list[[lid]], pip_list[[lid]]))
+      n_clust <- c(n_clust, length(unique(stats::cutree(hc, h = thr))))
+    }
+    sweep_rows[[length(sweep_rows) + 1L]] <- tibble::tibble(
+      metric = metric, threshold = thr,
+      mean_n_clusters = mean(n_clust),
+      auprc_pooled = auprc_pooled(agg_by_locus),
+      auprc_mean_perlocus = auprc_mean_perlocus(agg_by_locus)
+    )
+  }
+  cat("  swept", metric, "\n")
+}
+auprc_sweep <- dplyr::bind_rows(sweep_rows)
+```
+
+# 6. Results
+
+```{r results}
+best <- auprc_sweep %>%
+  dplyr::group_by(.data$metric) %>%
+  dplyr::slice_max(.data$auprc_pooled, n = 1, with_ties = FALSE) %>%
+  dplyr::ungroup()
+cat("=== Best (metric, threshold) by pooled AUPRC ===\n")
+print(as.data.frame(best), row.names = FALSE)
+
+readr::write_csv(auprc_sweep, file.path(out_dir, "auprc_cluster_metric_sweep.csv"))
+readr::write_csv(reference_tbl, file.path(out_dir, "auprc_reference_methods.csv"))
+
+curve <- ggplot(auprc_sweep, aes(threshold, auprc_pooled, colour = metric)) +
+  geom_line() + geom_point(size = 1) +
+  geom_hline(data = reference_tbl, aes(yintercept = auprc_pooled, linetype = method),
+             colour = "grey40") +
+  facet_wrap(~ metric, scales = "free_x") +
+  scale_x_log10() +
+  labs(x = "clustering threshold (log scale)", y = "overall (pooled) AUPRC",
+       title = "Method-B cluster-weight AUPRC vs threshold, by metric",
+       subtitle = "grey lines: non-cluster reference aggregations") +
+  theme_bw()
+save_png(file.path(fig_dir, "auprc_vs_threshold_by_metric.png"), curve, width = 11, height = 4)
+
+clust_curve <- ggplot(auprc_sweep, aes(mean_n_clusters, auprc_pooled, colour = metric)) +
+  geom_path() + geom_point(size = 1) +
+  labs(x = "mean # clusters per locus", y = "overall (pooled) AUPRC",
+       title = "AUPRC vs ensemble fragmentation") + theme_bw()
+save_png(file.path(fig_dir, "auprc_vs_nclusters.png"), clust_curve, width = 7, height = 5)
+
+knitr::kable(auprc_sweep, digits = 4, caption = "Cluster-metric sweep (Method B)")
+cat("\nWritten to:", out_dir, "and", fig_dir, "\n")
+```
