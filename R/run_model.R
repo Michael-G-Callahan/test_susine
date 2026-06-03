@@ -2413,6 +2413,17 @@ build_snp_table <- function(run_row,
     }
   }
 
+  # Top-8 causal mask (8 largest |beta| causals) — the variants scored as
+  # positives in the paper's confusion-bin AUPRC. Matches top8_mask_local in
+  # write_run_outputs() so post-hoc AUPRC can reproduce the paper metric.
+  causal_idx <- data_bundle$causal_idx
+  top8_mask <- if (length(causal_idx) > 0L && !is.null(beta)) {
+    n_top <- min(8L, length(causal_idx))
+    causal_idx[order(abs(beta[causal_idx]), decreasing = TRUE)][seq_len(n_top)]
+  } else {
+    causal_idx
+  }
+
   tibble::tibble(
     run_id = run_row$run_id,
     snp_index = seq_len(n),
@@ -2420,7 +2431,8 @@ build_snp_table <- function(run_row,
     beta = beta,
     mu_0 = safe_vec(data_bundle$mu_0),
     sigma_0_2 = safe_vec(data_bundle$sigma_0_2),
-    causal = as.integer(seq_len(n) %in% data_bundle$causal_idx)
+    causal = as.integer(seq_len(n) %in% data_bundle$causal_idx),
+    causal_scored = as.integer(seq_len(n) %in% top8_mask)
   )
 }
 
@@ -3008,18 +3020,23 @@ write_compact_snp_parquet <- function(snp_tbl, path) {
 #' writer; use when storage is tight and only PIPs are needed downstream.
 #' @keywords internal
 write_pip_only_parquet <- function(snp_tbl, path) {
+  if (!"causal_scored" %in% names(snp_tbl)) {
+    snp_tbl$causal_scored <- snp_tbl$causal
+  }
   snp_tbl <- dplyr::transmute(
     snp_tbl,
-    run_id    = as.integer(run_id),
-    snp_index = as.integer(snp_index),
-    pip       = as.numeric(pip),
-    causal    = as.integer(causal)
+    run_id        = as.integer(run_id),
+    snp_index     = as.integer(snp_index),
+    pip           = as.numeric(pip),
+    causal        = as.integer(causal),
+    causal_scored = as.integer(causal_scored)
   )
   snp_schema <- arrow::schema(
-    run_id    = arrow::int32(),
-    snp_index = arrow::int32(),
-    pip       = arrow::float32(),
-    causal    = arrow::int8()
+    run_id        = arrow::int32(),
+    snp_index     = arrow::int32(),
+    pip           = arrow::float32(),
+    causal        = arrow::int8(),
+    causal_scored = arrow::int8()
   )
   snp_table <- arrow::Table$create(snp_tbl, schema = snp_schema)
   arrow::write_parquet(snp_table, path, compression = "zstd")
