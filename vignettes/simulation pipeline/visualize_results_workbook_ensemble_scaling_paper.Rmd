@@ -654,19 +654,18 @@ if (nrow(pr_plot_data) > 0L) {
 
 ```{r fig-hg2, fig.width=4.8, fig.height=4.8}
 if (nrow(hg2_plot_data) > 0L) {
+  series_levels <- c("susie", "susine_perfit", "susine_ensemble")
+  series_labels <- c(susie = "SuSiE",
+                     susine_perfit = "SuSiNE\n(per fit)",
+                     susine_ensemble = "SuSiNE\n(ensemble)")
   hg2_plot_data <- hg2_plot_data %>%
-    dplyr::filter(.data$spec_name %in% c("baseline", "C-CS")) %>%
+    dplyr::filter(.data$series %in% series_levels) %>%
     dplyr::mutate(
-      method_label = dplyr::case_when(
-        as.character(.data$spec_name) == "baseline" ~ "SuSiE baseline",
-        as.character(.data$spec_name) == "C-CS" ~ "SuSiNE (C-CS)",
-        TRUE ~ as.character(.data$spec_name)
-      ),
       method_label = factor(
-        .data$method_label,
-        levels = c("SuSiE baseline", "SuSiNE (C-CS)")
+        unname(series_labels[as.character(.data$series)]),
+        levels = unname(series_labels[series_levels])
       ),
-      series = factor(.data$series, levels = c("baseline", "ensemble", "C-CS"))
+      series = factor(.data$series, levels = series_levels)
     )
 
   p_hg2 <- ggplot2::ggplot(
@@ -688,7 +687,8 @@ if (nrow(hg2_plot_data) > 0L) {
       hjust = 1.2
     ) +
     ggplot2::scale_fill_manual(
-      values = c(baseline = paper_orange, ensemble = "#9BBAD7", `C-CS` = paper_blue),
+      values = c(susie = paper_orange, susine_perfit = "#9BBAD7",
+                 susine_ensemble = paper_blue),
       guide = "none"
     ) +
     ggplot2::labs(
@@ -1123,11 +1123,10 @@ hg2_comparison <- tibble::tibble()
 hg2_summary <- tibble::tibble()
 if (exists("hg2_plot_data") && nrow(hg2_plot_data) > 0L) {
   hg2_wide <- hg2_plot_data %>%
-    dplyr::filter(.data$spec_name %in% c("baseline", "C-CS")) %>%
     dplyr::mutate(
       method = dplyr::case_when(
-        .data$spec_name == "baseline" ~ "baseline_susie",
-        .data$spec_name == "C-CS" ~ "susine_ccs",
+        as.character(.data$series) == "susie" ~ "baseline_susie",
+        as.character(.data$series) == "susine_ensemble" ~ "susine_ccs",
         TRUE ~ NA_character_
       )
     ) %>%

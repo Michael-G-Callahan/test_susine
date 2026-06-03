@@ -2741,12 +2741,13 @@ compute_hg2_by_agg <- function(pip_list,
 
   agg_methods <- c("uniform", "max_elbo", "elbo_softmax",
                    "cluster_weight", "cluster_weight_jsd_050")
+  # Per-fit PVE: variance of each fit's fitted values as a fraction of var(y).
+  per_fit_hg2 <- pmin(pmax(
+    apply(fy_mat, 1L, function(fy) stats::var(fy)) / vy, 0), 1)
   rows <- lapply(agg_methods, function(am) {
     if (am %in% c("cluster_weight", "cluster_weight_jsd_050") && !is.null(hc)) {
       thr <- if (am == "cluster_weight") 0.15 else 0.50
-      cw <- .cluster_weights_from_hc(hc, thr, elbo_vec,
-                                      n_fits = K)
-      fy_agg <- as.numeric(crossprod(cw$w_full, fy_mat))
+      w <- .cluster_weights_from_hc(hc, thr, elbo_vec, n_fits = K)$w_full
     } else {
       w <- switch(am,
         "uniform"           = rep(1 / K, K),
@@ -2759,10 +2760,17 @@ compute_hg2_by_agg <- function(pip_list,
         "cluster_weight"        = softmax_weights(elbo_vec),
         "cluster_weight_jsd_050"= softmax_weights(elbo_vec)
       )
-      fy_agg <- as.numeric(crossprod(w, fy_mat))
     }
+    fy_agg <- as.numeric(crossprod(w, fy_mat))
+    # Two heritability estimands sharing the SAME ensemble weights w:
+    #   hg2              = var(weighted fitted-y) / var(y)  -- BMA point estimate;
+    #                      shrinks under between-fit dispersion -> "ensemble"
+    #   hg2_weighted_pve = sum_k w_k * (var(fy_k)/var(y))   -- weighted mean of
+    #                      per-fit PVE; no shrinkage             -> "per fit"
     hg2 <- max(0, min(1, stats::var(fy_agg) / vy))
-    tibble::tibble(agg_method = am, hg2 = hg2, n_fits = K)
+    hg2_weighted_pve <- max(0, min(1, sum(w * per_fit_hg2)))
+    tibble::tibble(agg_method = am, hg2 = hg2,
+                   hg2_weighted_pve = hg2_weighted_pve, n_fits = K)
   })
 
   dplyr::bind_rows(rows) %>%
