@@ -131,20 +131,36 @@ if (file.exists(m1_summary_path)) {
     dplyr::left_join(m1_tbl, by = "matrix_id")
   readr::write_csv(catalog_with_m1, m1_summary_path)
 }
-if (!"matrix_id" %in% names(catalog_with_m1)) {
-  join_col <- intersect(c("dataset_label", "matrix_path"), names(catalog_with_m1))[[1L]]
-  catalog_with_m1 <- catalog_with_m1 %>%
-    dplyr::left_join(data_matrix_catalog_full %>%
-                       dplyr::select(matrix_id, dplyr::all_of(join_col)), by = join_col)
+# Attach M1 to the authoritative catalog (which always carries matrix_id +
+# matrix_path), joining by whichever key both tables share. Selecting directly
+# from the joined catalog avoids the matrix_id key-mismatch that a downstream
+# semi_join can hit when the cached M1 CSV keys on gene/dataset_label instead.
+m1_src <- catalog_with_m1
+if ("gene" %in% names(m1_src) && !"dataset_label" %in% names(m1_src)) {
+  m1_src <- dplyr::rename(m1_src, dataset_label = gene)
 }
-catalog_with_m1 <- catalog_with_m1 %>%
-  dplyr::filter(!is.na(M1)) %>% dplyr::arrange(M1)
+common_keys <- intersect(c("matrix_id", "matrix_path", "dataset_label"),
+                         intersect(names(m1_src), names(data_matrix_catalog_full)))
+catalog <- if (length(common_keys) && "M1" %in% names(m1_src)) {
+  cat("Joining M1 by:", common_keys[[1L]], "\n")
+  data_matrix_catalog_full %>%
+    dplyr::left_join(
+      dplyr::select(m1_src, dplyr::all_of(c(common_keys[[1L]], "M1"))),
+      by = common_keys[[1L]]
+    )
+} else {
+  dplyr::mutate(data_matrix_catalog_full, M1 = NA_real_)
+}
+if (all(is.na(catalog$M1))) {
+  message("No M1 values matched; using catalog order (unstratified).")
+  catalog$M1 <- seq_len(nrow(catalog))
+}
+catalog <- catalog %>% dplyr::filter(!is.na(.data$M1)) %>% dplyr::arrange(.data$M1)
 
-n_target <- min(n_matrices_target, nrow(catalog_with_m1))
-idx      <- unique(round(seq(1, nrow(catalog_with_m1), length.out = n_target)))
-selected <- catalog_with_m1[idx, , drop = FALSE]
-data_matrix_catalog <- data_matrix_catalog_full %>%
-  dplyr::semi_join(dplyr::select(selected, matrix_id), by = "matrix_id")
+n_target <- min(n_matrices_target, nrow(catalog))
+idx      <- unique(round(seq(1, nrow(catalog), length.out = n_target)))
+data_matrix_catalog <- catalog[idx, , drop = FALSE] %>%
+  dplyr::select(dplyr::any_of(names(data_matrix_catalog_full)))
 
 cat("Matrices selected (M1-stratified):", nrow(data_matrix_catalog), "\n")
 cat("Seeds:", paste(seeds, collapse = ", "), "\n")
