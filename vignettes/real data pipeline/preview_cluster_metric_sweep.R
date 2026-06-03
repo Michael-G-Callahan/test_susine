@@ -24,6 +24,16 @@ here::i_am("vignettes/real data pipeline/preview_cluster_metric_sweep.R")
 devtools::load_all(here("..", "susine"))
 devtools::load_all(here())
 
+# Headless HPC (no X11/Cairo): ragg supplies a pure-C PNG device.
+if (!requireNamespace("ragg", quietly = TRUE)) {
+  stop("ragg is required for headless PNG rendering. Install with install.packages('ragg').")
+}
+
+# Skip warm refits in the sweep: they re-fit ~20 susine_rss models per config
+# and the metric/threshold effect on clustering/AUPRC/PVE does not need them.
+# (The expensive 64-fit grid is always read from raw_fits, never refit.)
+skip_refit <- TRUE
+
 job_name <- "real_data_ensemble_geometric_n20"
 parent   <- "52906940"
 out_root <- here("output")
@@ -62,7 +72,8 @@ for (metric in names(grid)) {
       output_root       = out_root,
       validate          = FALSE,
       output_dir        = agg_dir,
-      cluster_threshold = thr
+      cluster_threshold = thr,
+      skip_refit        = skip_refit
     )
 
     # Cluster-count diagnostic (per-locus, then summarized).
@@ -96,7 +107,9 @@ for (metric in names(grid)) {
                RD_PREVIEW_PAPER_DIR = fig_dir)
     message(sprintf("[%s] rendering figures -> %s", tag, fig_dir))
     ok <- tryCatch({
-      rmarkdown::render(viz_rmd, output_dir = fig_dir,
+      rmarkdown::render(viz_rmd,
+                        output_format = rmarkdown::html_document(dev = "ragg_png"),
+                        output_dir = fig_dir,
                         output_file = sprintf("viz_%s.html", tag), quiet = TRUE)
       TRUE
     }, error = function(e) { message("  render failed: ", conditionMessage(e)); FALSE })

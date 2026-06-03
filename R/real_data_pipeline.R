@@ -1925,7 +1925,8 @@ collect_real_data_results <- function(
     output_root = "output",
     validate = TRUE,
     output_dir = NULL,
-    cluster_threshold = NULL
+    cluster_threshold = NULL,
+    skip_refit = FALSE
 ) {
   idx <- index_staging_outputs(job_name, parent_job_id, output_root = output_root)
   validation_index <- NULL
@@ -2320,7 +2321,8 @@ collect_real_data_results <- function(
     next_refit_run_id <- next_refit_run_id + 1L
 
     source_fit_path <- if (nrow(highest_weight_source)) highest_weight_source$fit_rds_path[[1]] else NA_character_
-    can_refit <- !is.null(locus_bundle_for_pve) &&
+    can_refit <- !isTRUE(skip_refit) &&
+      !is.null(locus_bundle_for_pve) &&
       nrow(highest_weight_source) == 1L &&
       is.character(source_fit_path) &&
       !is.na(source_fit_path) &&
