@@ -47,14 +47,14 @@ library(readr)
 ```{r config}
 job_name <- "ensemble_scaling_full"
 # post-cache-fix ensemble re-run (the refine cache-poisoning bug is fixed).
-parent_job_id <- "53413973"
+parent_job_id <- "53520405"
 output_root <- here("output")
 
 job_dir <- file.path(output_root, "slurm_output", job_name, parent_job_id)
 consolidated_dir <- file.path(job_dir, "consolidated")
 
 annotation_r2_focus <- 0.3
-drop_aggs <- "cluster_weight_jsd_050"
+drop_aggs <- character(0)
 bootstrap_B <- 2000L
 bootstrap_seed <- 20260505L
 true_h2 <- 0.25
@@ -204,12 +204,14 @@ spec_key <- tibble::tribble(
   "C-CF", "C: grid SuSiNE", "C x refinement"
 )
 
-agg_order <- c("max_elbo", "uniform", "elbo_softmax", "cluster_weight", "oracle")
+agg_order <- c("max_elbo", "uniform", "elbo_softmax",
+               "cluster_weight_credible", "cluster_weight_max", "oracle")
 agg_labels <- c(
   max_elbo = "max ELBO",
   uniform = "uniform",
   elbo_softmax = "ELBO softmax",
-  cluster_weight = "cluster weight",
+  cluster_weight_credible = "cluster (credible)",
+  cluster_weight_max = "cluster (max)",
   oracle = "oracle"
 )
 
@@ -753,7 +755,7 @@ ccs_boot_bins <- confusion_bins %>%
   dplyr::filter(
     .data$spec_name == "C-CS",
     near_focus(.data$annotation_r2, annotation_r2_focus),
-    .data$agg_method == "cluster_weight"
+    .data$agg_method == "cluster_weight_credible"
   )
 
 shared_boot_ids <- intersect(
@@ -803,7 +805,7 @@ ccs_pr_bins <- confusion_bins %>%
   dplyr::filter(
     .data$spec_name == "C-CS",
     !is.na(.data$annotation_r2),
-    .data$agg_method == "cluster_weight"
+    .data$agg_method == "cluster_weight_credible"
   ) %>%
   dplyr::transmute(
     method = "C-CS cluster weight",
@@ -834,7 +836,7 @@ if (!is.null(hg2_by_agg) && nrow(hg2_by_agg) > 0L) {
 
   hg2_focus_rows <- hg2_plot_source %>%
     dplyr::filter(
-      .data$agg_method == "cluster_weight",
+      .data$agg_method == "cluster_weight_credible",
       .data$spec_name %in% spec_order,
       is_focus_annotation_row(.data$spec_name, .data$annotation_r2)
     )
@@ -920,7 +922,7 @@ ccs_cal_bins <- confusion_bins %>%
   dplyr::filter(
     .data$spec_name == "C-CS",
     near_focus(.data$annotation_r2, annotation_r2_focus),
-    .data$agg_method == "cluster_weight"
+    .data$agg_method == "cluster_weight_credible"
   ) %>%
   dplyr::mutate(method = "C-CS cluster weight")
 
@@ -995,7 +997,7 @@ ccs_resolution_cluster <- scaling_metrics %>%
   dplyr::filter(
     .data$spec_name == "C-CS",
     near_focus(.data$annotation_r2, annotation_r2_focus),
-    .data$agg_method == "cluster_weight",
+    .data$agg_method == "cluster_weight_credible",
     .data$resolution %in% c("4x4", "8x8")
   ) %>%
   dplyr::transmute(
@@ -1028,7 +1030,7 @@ baseline_compute_sec <- baseline_compute_min * 60
 if (nrow(scaling_metrics) > 0L && "wall_time_sec" %in% names(model_metrics)) {
   compute_scaling_points <- scaling_metrics %>%
     dplyr::filter(
-      .data$agg_method == "cluster_weight",
+      .data$agg_method == "cluster_weight_credible",
       .data$spec_name %in% spec_order,
       is_focus_annotation_row(.data$spec_name, .data$annotation_r2)
     )

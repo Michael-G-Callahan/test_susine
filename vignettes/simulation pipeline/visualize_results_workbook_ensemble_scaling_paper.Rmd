@@ -33,7 +33,7 @@ theme_set(theme_bw(base_size = 14))
 ```{r config}
 job_name <- "ensemble_scaling_full"
 # Must match the parent_job_id used in the prepare workbook.
-parent_job_id <- "53413973"
+parent_job_id <- "53520405"
 output_root <- here("output")
 write_component_pngs <- FALSE
 
@@ -365,7 +365,7 @@ if (nrow(heatmap_data) > 0L && is.finite(baseline_auprc)) {
   heatmap_highlight_data <- heatmap_plot_data %>%
     dplyr::filter(
       as.character(.data$spec_name) == "C-CS",
-      as.character(.data$agg_method) == "cluster_weight"
+      as.character(.data$agg_method) %in% c("cluster_weight_credible", "cluster_weight_max")
     )
 
   y_levels <- levels(heatmap_plot_data$spec_name)
@@ -443,12 +443,17 @@ if (nrow(heatmap_data) > 0L && is.finite(baseline_auprc)) {
 # 4. Best Methods vs Annotation Accuracy
 
 ```{r fig-ccs-by-r2, fig.width=7, fig.height=4.8}
-ccs_by_r2_keep <- c("cluster_weight", "oracle")
-ccs_by_r2_plot_data <- ccs_by_r2 %>%
-  dplyr::filter(.data$agg_method %in% ccs_by_r2_keep) %>%
-  dplyr::mutate(agg_method = factor(.data$agg_method, levels = ccs_by_r2_keep))
+for (cm_suffix in c("credible", "max")) {
+  cm <- paste0("cluster_weight_", cm_suffix)
+  ccs_by_r2_keep <- c(cm, "oracle")
+  ccs_by_r2_plot_data <- ccs_by_r2 %>%
+    dplyr::filter(.data$agg_method %in% ccs_by_r2_keep) %>%
+    dplyr::mutate(agg_method = factor(.data$agg_method, levels = ccs_by_r2_keep))
 
-if (nrow(ccs_by_r2_plot_data) > 0L) {
+  if (!nrow(ccs_by_r2_plot_data)) {
+    message("Skipping C-CS by annotation accuracy plot (", cm, "): no rows.")
+    next
+  }
   ccs_r2_label_x <- max(ccs_by_r2_plot_data$annotation_r2, na.rm = TRUE)
 
   p_ccs_r2 <- ggplot2::ggplot(
@@ -490,12 +495,12 @@ if (nrow(ccs_by_r2_plot_data) > 0L) {
     ggplot2::coord_cartesian(ylim = c(0.2, 0.4)) +
     ggplot2::scale_x_continuous(breaks = sort(unique(ccs_by_r2_plot_data$annotation_r2))) +
     ggplot2::scale_color_manual(
-      values = c(cluster_weight = paper_blue, oracle = paper_blue),
+      values = stats::setNames(c(paper_blue, paper_blue), c(cm, "oracle")),
       labels = agg_labels[ccs_by_r2_keep],
       drop = FALSE
     ) +
     ggplot2::scale_linetype_manual(
-      values = c(cluster_weight = "solid", oracle = "dashed"),
+      values = stats::setNames(c("solid", "dashed"), c(cm, "oracle")),
       labels = agg_labels[ccs_by_r2_keep],
       drop = FALSE
     ) +
@@ -520,13 +525,10 @@ if (nrow(ccs_by_r2_plot_data) > 0L) {
 
   save_paper_png(
     p_ccs_r2,
-    "paper_ccs_aggregation_by_annotation_r2.png",
+    paste0("paper_ccs_aggregation_by_annotation_r2_", cm_suffix, ".png"),
     width = 7,
     height = 4.8
   )
-  invisible(NULL)
-} else {
-  message("Skipping C-CS by annotation accuracy plot: no rows.")
 }
 ```
 
