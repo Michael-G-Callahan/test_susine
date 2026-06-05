@@ -831,6 +831,13 @@ aggregate_pip_matrix <- function(pip_mat, elbos, method, jsd_threshold = 0.15, h
   method <- normalize_agg_method_id(method)
   N <- ncol(pip_mat)
   if (N == 1L) return(as.vector(pip_mat))
+  # Locked-in metric-specific cluster-weight methods (sim pipeline): each builds
+  # its own dendrogram + Method-B weights. pip_mat is p x N (fits in columns);
+  # the helper wants fits-as-rows. The legacy "cluster_weight"/"..._jsd_050"
+  # names below stay for the real-data pipeline.
+  if (method %in% cluster_weight_method_ids()) {
+    return(.aggregate_cluster_method(method, t(pip_mat), elbos))
+  }
   switch(method,
     uniform = rowMeans(pip_mat, na.rm = TRUE),
     max_elbo = {

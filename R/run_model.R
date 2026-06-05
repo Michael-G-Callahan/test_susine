@@ -224,7 +224,14 @@ compute_confusion_bins <- function(pip, causal, pip_bucket_width = 0.01,
     stop("pip and causal lengths differ.")
   }
   if (!is.null(causal_mask)) {
-    causal <- as.integer(seq_len(n) %in% causal_mask)
+    # Positives = masked variants (top-8 strong causals); negatives = true
+    # non-causals; weak (causal-but-not-masked) variants are DROPPED entirely
+    # -- neither positive nor negative -- so AUPRC is not penalized for them.
+    scored <- as.integer(seq_len(n) %in% causal_mask)
+    keep <- !(causal == 1L & scored == 0L)
+    pip <- pip[keep]
+    causal <- scored[keep]
+    n <- length(pip)
   }
 
   # Build bin breaks: use pip_breaks if provided, else uniform grid
@@ -1131,7 +1138,7 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
         # groups still emit aggregated confusion rows when BFS never branches.
         agg_methods_full <- unique(normalize_agg_method_id(c(
           agg_methods,
-          if (need_scaling_bins && length(group_pips) > 1) "cluster_weight_jsd_050" else character(0)
+          if (need_scaling_bins && length(group_pips) > 1) cluster_weight_method_ids() else character(0)
         )))
         agg_results <- aggregate_use_case_pips(
           pip_list = group_pips,
@@ -1144,7 +1151,7 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
         full_group_bins <- list()
         if (need_scaling_bins && length(group_pips) > 1) {
           scaling_methods <- c("uniform", "max_elbo", "elbo_softmax",
-                               "cluster_weight", "cluster_weight_jsd_050")
+                               cluster_weight_method_ids())
           for (sm in scaling_methods) {
             agg_pip_scaling <- aggregate_pip_matrix(
               pip_mat_cols,
@@ -2013,29 +2020,12 @@ aggregate_use_case_pips <- function(pip_list,
     w <- softmax_weights(elbo_vec, temperature = softmax_temperature)
     res$elbo_softmax <- as.numeric(crossprod(w, pips_mat))
   }
-  if (any(methods %in% c("cluster_weight", "cluster_weight_jsd_050")) &&
-      length(elbo_vec) > 1 && nrow(pips_mat) > 1) {
-    hc_jsd <- pip_cache$hc %||% prepare_pip_similarity_cache(pips_mat)$hc
-
-    if ("cluster_weight" %in% methods) {
-      # cluster_weight: categorical JSD at jsd_threshold (default 0.15) -----
-      res$cluster_weight <- .cluster_weight_from_hc(
-        hc_jsd, jsd_threshold, elbo_vec, pips_mat, softmax_temperature
-      )
-    }
-
-    if ("cluster_weight_jsd_050" %in% methods) {
-      # cluster_weight_jsd_050: categorical JSD at 0.50 threshold -----
-      res$cluster_weight_jsd_050 <- .cluster_weight_from_hc(
-        hc_jsd, 0.50, elbo_vec, pips_mat, softmax_temperature
-      )
-    }
-  }
-  if ("cluster_weight" %in% methods && !(length(elbo_vec) > 1 && nrow(pips_mat) > 1)) {
-    res$cluster_weight <- as.numeric(crossprod(softmax_weights(elbo_vec, temperature = softmax_temperature), pips_mat))
-  }
-  if ("cluster_weight_jsd_050" %in% methods && !(length(elbo_vec) > 1 && nrow(pips_mat) > 1)) {
-    res$cluster_weight_jsd_050 <- as.numeric(crossprod(softmax_weights(elbo_vec, temperature = softmax_temperature), pips_mat))
+  # Each locked-in cluster-weight method clusters with its own metric/threshold
+  # and aggregates with Method B (handled inside .aggregate_cluster_method,
+  # including the degenerate single-fit fallback). jsd_threshold/pip_cache are
+  # no longer used for these -- each method builds its own dendrogram.
+  for (nm in intersect(methods, cluster_weight_method_ids())) {
+    res[[nm]] <- .aggregate_cluster_method(nm, pips_mat, elbo_vec, softmax_temperature)
   }
   res
 }
@@ -2098,6 +2088,40 @@ aggregate_use_case_pips <- function(pip_list,
   ens <- as.numeric(crossprod(cw$w_full, pips_mat))
   attr(ens, "ess") <- cw$ess
   ens
+}
+
+# Locked-in cluster-weight aggregation variants (pilot-selected, 2026).
+# Each clusters fits by its own (metric, threshold) and aggregates with Method B
+# (frequency-free, no nominees). The names are the agg_method ids used end-to-end.
+.cluster_weight_specs <- list(
+  cluster_weight_credible = list(metric = "credible_shift", threshold = 0.05),
+  cluster_weight_max      = list(metric = "max_shift",      threshold = 0.10)
+)
+
+#' Names of the locked-in cluster-weight aggregation methods.
+#' @keywords internal
+cluster_weight_method_ids <- function() names(.cluster_weight_specs)
+
+#' Aggregate one cluster-weight variant from a fits-as-rows PIP matrix (K x p).
+#'
+#' Builds the dendrogram with the variant's clustering metric, cuts at its
+#' threshold, and aggregates with Method B. Falls back to ELBO-softmax for a
+#' degenerate (single-fit) group.
+#' @keywords internal
+.aggregate_cluster_method <- function(name, pips_mat, elbo_vec, softmax_temperature = 1) {
+  spec <- .cluster_weight_specs[[name]]
+  if (is.null(spec)) stop("Unknown cluster-weight method: ", name)
+  K <- nrow(pips_mat)
+  softmax_fallback <- function() {
+    as.numeric(crossprod(softmax_weights(elbo_vec, temperature = softmax_temperature), pips_mat))
+  }
+  if (!(length(elbo_vec) > 1L && K > 1L)) return(softmax_fallback())
+  hc <- prepare_pip_similarity_cache(pips_mat, metric = spec$metric)$hc
+  if (is.null(hc)) return(softmax_fallback())
+  cw <- .cluster_weights_from_hc(hc, spec$threshold, elbo_vec, n_fits = K,
+                                 softmax_temperature = softmax_temperature,
+                                 aggregation = "method_b")
+  as.numeric(crossprod(cw$w_full, pips_mat))
 }
 
 js_distance <- function(p, q, eps = 1e-12) {
@@ -2570,7 +2594,7 @@ compute_scaling_confusion_bins_for_group <- function(pip_list,
   is_cs_grid_refit <- "cs_grid_refit" %in% method_ids
   is_interaction <- length(method_ids) > 1L || is_cs_grid_refit
 
-  agg_methods <- c("uniform", "max_elbo", "elbo_softmax", "cluster_weight", "cluster_weight_jsd_050")
+  agg_methods <- c("uniform", "max_elbo", "elbo_softmax", cluster_weight_method_ids())
 
   results <- list()
 
@@ -2593,13 +2617,10 @@ compute_scaling_confusion_bins_for_group <- function(pip_list,
 
     sub_pip_mat <- pip_mat[, sel_idx, drop = FALSE]
     sub_elbos   <- elbo_vec[sel_idx]
-    subset_cache <- NULL
-    if (agg_method %in% c("cluster_weight", "cluster_weight_jsd_050")) {
-      subset_cache <- prepare_pip_similarity_cache(t(sub_pip_mat))
-    }
+    # Cluster-weight methods build their own metric-specific dendrogram inside
+    # aggregate_pip_matrix(); no shared hc needed.
     agg_pip <- tryCatch(
-      aggregate_pip_matrix(sub_pip_mat, sub_elbos, agg_method,
-                           hc = subset_cache$hc %||% NULL),
+      aggregate_pip_matrix(sub_pip_mat, sub_elbos, agg_method),
       error = function(e) NULL
     )
     if (is.null(agg_pip)) return(NULL)
@@ -2762,14 +2783,21 @@ compute_hg2_by_agg <- function(pip_list,
   hc <- pip_cache$hc %||% NULL
 
   agg_methods <- c("uniform", "max_elbo", "elbo_softmax",
-                   "cluster_weight", "cluster_weight_jsd_050")
+                   cluster_weight_method_ids())
   # Per-fit PVE: variance of each fit's fitted values as a fraction of var(y).
   per_fit_hg2 <- pmin(pmax(
     apply(fy_mat, 1L, function(fy) stats::var(fy)) / vy, 0), 1)
   rows <- lapply(agg_methods, function(am) {
-    if (am %in% c("cluster_weight", "cluster_weight_jsd_050") && !is.null(hc)) {
-      thr <- if (am == "cluster_weight") 0.15 else 0.50
-      w <- .cluster_weights_from_hc(hc, thr, elbo_vec, n_fits = K)$w_full
+    if (am %in% cluster_weight_method_ids()) {
+      # Each method clusters pip_mat with its own metric; Method B weights.
+      spec <- .cluster_weight_specs[[am]]
+      hc_am <- if (K > 1L) prepare_pip_similarity_cache(pip_mat, metric = spec$metric)$hc else NULL
+      w <- if (is.null(hc_am)) {
+        softmax_weights(elbo_vec)
+      } else {
+        .cluster_weights_from_hc(hc_am, spec$threshold, elbo_vec, n_fits = K,
+                                 aggregation = "method_b")$w_full
+      }
     } else {
       w <- switch(am,
         "uniform"           = rep(1 / K, K),
@@ -2777,10 +2805,7 @@ compute_hg2_by_agg <- function(pip_list,
           idx <- which.max(elbo_vec)
           w2 <- rep(0, K); w2[idx] <- 1; w2
         },
-        "elbo_softmax"      = softmax_weights(elbo_vec),
-        # fallback for cluster methods when hc is NULL
-        "cluster_weight"        = softmax_weights(elbo_vec),
-        "cluster_weight_jsd_050"= softmax_weights(elbo_vec)
+        "elbo_softmax"      = softmax_weights(elbo_vec)
       )
     }
     fy_agg <- as.numeric(crossprod(w, fy_mat))

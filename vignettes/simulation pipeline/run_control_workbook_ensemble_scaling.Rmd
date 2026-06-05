@@ -75,8 +75,11 @@ bundles_per_task     <- 4L
 task_assignment_seed <- 42L
 
 # ── Aggregation ──
+# Locked-in cluster-weight aggregations (pilot-selected): credible_shift @ 0.05
+# and max_shift @ 0.10, both Method B (frequency-free, no nominees). Defined in
+# run_model.R `.cluster_weight_specs`. Bump `job_name` above for a fresh run.
 aggregation_methods  <- c("max_elbo", "uniform", "elbo_softmax",
-                          "cluster_weight", "cluster_weight_jsd_050")
+                          "cluster_weight_credible", "cluster_weight_max")
 include_overall_pool <- FALSE
 softmax_temperature  <- 1
 
