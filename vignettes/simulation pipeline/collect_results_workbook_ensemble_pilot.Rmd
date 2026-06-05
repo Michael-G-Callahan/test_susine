@@ -75,9 +75,14 @@ cat("Job dir:", job_dir, "\n")
 # width is free.
 exp_grid <- function(lo, hi, n = 24L) signif(exp(seq(log(lo), log(hi), length.out = n)), 3)
 threshold_grids <- list(
-  cosine        = exp_grid(1e-3, 1.05, 24),  # 1 - cos, distances in [0, 1]
-  l2            = exp_grid(1e-2, 6.0,  24),  # raw Euclidean on PIP vectors
-  bernoulli_jsd = exp_grid(1e-2, 15.0, 24)   # sum of per-variant binary JSDs
+  cosine         = exp_grid(1e-3, 1.05, 24), # 1 - cos, distances in [0, 1]
+  l2             = exp_grid(1e-2, 6.0,  24), # raw Euclidean on PIP vectors
+  bernoulli_jsd  = exp_grid(1e-2, 15.0, 24), # sum of per-variant binary JSDs
+  # credible_shift = max credibility-weighted single-variant PIP shift.
+  # 0.05 is the chosen operating point; grid brackets it to confirm robustness.
+  credible_shift = c(0.02, 0.03, 0.04, 0.05, 0.06, 0.08, 0.10, 0.15, 0.20, 0.30, 0.50),
+  # max_shift = unweighted max single-variant absolute PIP shift; op point 0.10.
+  max_shift      = c(0.02, 0.05, 0.08, 0.10, 0.12, 0.15, 0.20, 0.30, 0.50)
 )
 metrics <- names(threshold_grids)
 cat("Metrics:", paste(metrics, collapse = ", "), "\n")

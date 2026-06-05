@@ -1943,6 +1943,16 @@ pip_cluster_distance <- function(p, q, metric = "jsd", eps = 1e-12) {
       hb <- function(x) -x * log(x) - (1 - x) * log(1 - x)
       sum(hb(m) - 0.5 * (hb(a) + hb(b)))
     },
+    # Largest credibility-weighted single-variant PIP shift. Ignores diffuse
+    # sub-threshold noise (it sums nothing); fires only when one variant's PIP
+    # moves materially in a region where either fit credits it. ~0.05 separates
+    # "don't care" (uniform jitter, low-PIP wiggles) from "care" (a credible
+    # variant gaining/losing real mass).
+    credible_shift = max(pmax(p, q) * abs(p - q)),
+    # Unweighted sibling of credible_shift: the largest single-variant absolute
+    # PIP shift (Chebyshev / L-inf). Same "one big move, ignore diffuse noise"
+    # idea, but treats a move at low PIP the same as one at high PIP.
+    max_shift = max(abs(p - q)),
     stop("Unknown pip cluster metric: ", metric)
   )
 }
