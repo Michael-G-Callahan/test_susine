@@ -1143,23 +1143,37 @@ if (file.exists(mm_path)) {
       dplyr::mutate(
         spec_name = factor(.data$spec_name, levels = spec_order),
         metric = factor(unname(metric_labels[.data$metric]),
-                        levels = unname(metric_labels[metrics_present]))
+                        levels = unname(metric_labels[metrics_present])),
+        group = sub("-.*$", "", as.character(.data$spec_name))
       ) %>%
       dplyr::filter(!is.na(.data$spec_name))
 
+    # Stacked wide panels (one metric per row), specs as horizontal abbreviations
+    # along the bottom, boxes tinted by ensemble family (A/B/C).
     p_mm <- ggplot2::ggplot(
         mm_long, ggplot2::aes(x = .data$spec_name, y = .data$value)) +
-      ggplot2::geom_boxplot(fill = paper_blue, alpha = 0.45,
-                            outlier.size = 0.5, linewidth = 0.5) +
-      ggplot2::facet_wrap(~ metric, scales = "free_y", nrow = 1) +
-      ggplot2::labs(x = "Ensemble method", y = NULL,
-                    title = "Ensemble multimodality (per-locus 5-number summary)") +
+      ggplot2::geom_boxplot(
+        ggplot2::aes(fill = .data$group),
+        alpha = 0.6, width = 0.66, outlier.size = 0.45, linewidth = 0.45) +
+      ggplot2::facet_wrap(~ metric, ncol = 1, scales = "free_y") +
+      ggplot2::scale_fill_manual(
+        values = c(A = paper_orange, B = "#9BBAD7", C = paper_blue),
+        labels = c(A = "A: SuSiE", B = "B: EB SuSiNE", C = "C: grid SuSiNE"),
+        name = NULL, drop = TRUE,
+        guide = ggplot2::guide_legend(nrow = 1)) +
+      ggplot2::labs(x = NULL, y = NULL,
+                    title = "Ensemble multimodality across loci") +
       paper_theme() +
-      ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 45, hjust = 1))
+      ggplot2::theme(
+        legend.position = "top",
+        axis.text.x = ggplot2::element_text(angle = 0, hjust = 0.5),
+        panel.spacing.y = grid::unit(0.5, "lines"),
+        strip.text = ggplot2::element_text(face = "bold")
+      )
 
     ggplot2::ggsave(
       file.path(fig_dir, "paper_ensemble_multimodality.png"),
-      p_mm, width = 13, height = 4.5, dpi = 300,
+      p_mm, width = 9, height = 11.5, dpi = 300,
       device = if (requireNamespace("ragg", quietly = TRUE)) ragg::agg_png else NULL
     )
     cat("Wrote paper_ensemble_multimodality.png; metrics:",
