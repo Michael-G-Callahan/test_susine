@@ -1166,14 +1166,15 @@ if (file.exists(mm_path)) {
       paper_theme() +
       ggplot2::theme(
         legend.position = "top",
-        axis.text.x = ggplot2::element_text(angle = 0, hjust = 0.5),
-        panel.spacing.y = grid::unit(0.5, "lines"),
+        axis.text.x = ggplot2::element_text(angle = 0, hjust = 0.5, size = 9),
+        panel.spacing.y = grid::unit(0.6, "lines"),
+        panel.grid.minor = ggplot2::element_blank(),
         strip.text = ggplot2::element_text(face = "bold")
       )
 
     ggplot2::ggsave(
       file.path(fig_dir, "paper_ensemble_multimodality.png"),
-      p_mm, width = 9, height = 11.5, dpi = 300,
+      p_mm, width = 12, height = 11.5, dpi = 300,
       device = if (requireNamespace("ragg", quietly = TRUE)) ragg::agg_png else NULL
     )
     cat("Wrote paper_ensemble_multimodality.png; metrics:",
