@@ -834,15 +834,17 @@ hg2_plot_data <- tibble::tibble()
 if (!is.null(hg2_by_agg) && nrow(hg2_by_agg) > 0L) {
   hg2_plot_source <- enrich_hg2_metadata(hg2_by_agg, model_metrics)
 
-  hg2_focus_rows <- hg2_plot_source %>%
+  # Both SuSiNE boxes use the C-CS ensemble at the focus annotation only.
+  hg2_ccs <- hg2_plot_source %>%
     dplyr::filter(
-      .data$agg_method == "cluster_weight_credible",
-      .data$spec_name %in% spec_order,
+      .data$spec_name == "C-CS",
       is_focus_annotation_row(.data$spec_name, .data$annotation_r2)
     )
 
-  # SuSiNE ensemble: BMA point estimate, var(weighted fitted-y) / var(y).
-  hg2_ensemble <- hg2_focus_rows %>%
+  # SuSiNE ensemble: cluster-weight (credible) BMA point estimate,
+  # var(weighted fitted-y) / var(y).
+  hg2_ensemble <- hg2_ccs %>%
+    dplyr::filter(.data$agg_method == "cluster_weight_credible") %>%
     dplyr::transmute(
       spec_name = as.character(.data$spec_name),
       dataset_bundle_id = .data$dataset_bundle_id,
@@ -850,20 +852,17 @@ if (!is.null(hg2_by_agg) && nrow(hg2_by_agg) > 0L) {
       series = "susine_ensemble"
     )
 
-  # SuSiNE per-fit: weighted mean of per-fit PVE, sum_k w_k * (var(fy_k)/var(y))
-  # — same ensemble weights, no between-fit shrinkage. Column present only on
-  # runs produced after the two-estimand change to compute_hg2_by_agg().
-  hg2_perfit <- if ("hg2_weighted_pve" %in% names(hg2_focus_rows)) {
-    hg2_focus_rows %>%
-      dplyr::transmute(
-        spec_name = as.character(.data$spec_name),
-        dataset_bundle_id = .data$dataset_bundle_id,
-        hg2 = .data$hg2_weighted_pve,
-        series = "susine_perfit"
-      )
-  } else {
-    tibble::tibble()
-  }
+  # SuSiNE per-fit: PVE of the single best (max-ELBO) fit only. Using the best
+  # fit instead of the weighted mean over all fits avoids the many weaker grid
+  # fits dragging the per-fit estimand down toward the ensemble value.
+  hg2_perfit <- hg2_ccs %>%
+    dplyr::filter(.data$agg_method == "max_elbo") %>%
+    dplyr::transmute(
+      spec_name = as.character(.data$spec_name),
+      dataset_bundle_id = .data$dataset_bundle_id,
+      hg2 = .data$hg2,
+      series = "susine_perfit"
+    )
 
   baseline_hg2 <- baseline_ref_model_metrics %>%
     dplyr::filter(

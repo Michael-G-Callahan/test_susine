@@ -443,7 +443,9 @@ if (nrow(heatmap_data) > 0L && is.finite(baseline_auprc)) {
 # 4. Best Methods vs Annotation Accuracy
 
 ```{r fig-ccs-by-r2, fig.width=7, fig.height=4.8}
-for (cm_suffix in c("credible", "max")) {
+# credible is rendered LAST so the leftover `p_ccs_r2` (reused as panel B of the
+# composite) is the credible version, matching the credible-based panels C-F.
+for (cm_suffix in c("max", "credible")) {
   cm <- paste0("cluster_weight_", cm_suffix)
   ccs_by_r2_keep <- c(cm, "oracle")
   ccs_by_r2_plot_data <- ccs_by_r2 %>%
@@ -658,7 +660,7 @@ if (nrow(pr_plot_data) > 0L) {
 if (nrow(hg2_plot_data) > 0L) {
   series_levels <- c("susie", "susine_perfit", "susine_ensemble")
   series_labels <- c(susie = "SuSiE",
-                     susine_perfit = "SuSiNE\n(per fit)",
+                     susine_perfit = "SuSiNE\n(max-ELBO fit)",
                      susine_ensemble = "SuSiNE\n(ensemble)")
   hg2_plot_data <- hg2_plot_data %>%
     dplyr::filter(.data$series %in% series_levels) %>%
@@ -1083,6 +1085,90 @@ if (length(missing_composite) == 0L) {
     "Skipping composite figure; missing component plots: ",
     paste(missing_composite, collapse = ", ")
   )
+}
+```
+
+# 11b. Ensemble Multimodality
+
+Per-ensemble (per-locus) 5-number summaries of how multimodal each ensemble is:
+cluster counts under the two locked-in cluster-weight metrics, top-10 Jaccard
+overlap, and the largest pairwise distance between any two fits. Read directly
+from `consolidated/multimodal_metrics.csv`; falls back to whatever columns the
+run produced (credible/max columns require a run with the extended
+`compute_multimodal_metrics`).
+
+```{r fig-multimodality, fig.width=13, fig.height=4.5}
+consolidated_dir <- file.path(job_dir, "consolidated")
+mm_path <- file.path(consolidated_dir, "multimodal_metrics.csv")
+mm_spec_path <- file.path(consolidated_dir, "model_metrics_full.csv")
+
+if (file.exists(mm_path)) {
+  mm <- readr::read_csv(mm_path, show_col_types = FALSE)
+
+  # Attach spec_name via group_key (strip "model_grid|" from group_label).
+  if (!"spec_name" %in% names(mm) && "group_label" %in% names(mm) &&
+      file.exists(mm_spec_path)) {
+    spec_map <- readr::read_csv(mm_spec_path, show_col_types = FALSE) %>%
+      dplyr::distinct(.data$group_key, .data$spec_name)
+    mm <- mm %>%
+      dplyr::mutate(group_key = sub("^model_grid\\|", "", .data$group_label)) %>%
+      dplyr::left_join(spec_map, by = "group_key")
+  }
+
+  # Use the credible/max metric set when the run produced it; otherwise fall
+  # back to the JSD-based columns. Either way it's a tight 5-facet panel.
+  have_new <- all(c("n_clusters_credible", "n_clusters_max") %in% names(mm))
+  metric_labels <- if (have_new) c(
+    n_clusters_credible = "# clusters (credible 0.05)",
+    n_clusters_max      = "# clusters (max-shift 0.10)",
+    jaccard_top10       = "Jaccard top-10",
+    max_credible_dist   = "max credible dist.",
+    max_maxshift_dist   = "max PIP L-inf dist."
+  ) else c(
+    n_clusters          = "# clusters (JSD 0.15)",
+    n_clusters_jsd_050  = "# clusters (JSD 0.50)",
+    jaccard_top10       = "Jaccard top-10",
+    max_jsd             = "max JSD dist.",
+    mean_pip_var        = "mean PIP var."
+  )
+  metrics_present <- intersect(names(metric_labels), names(mm))
+
+  if (length(metrics_present) && "spec_name" %in% names(mm)) {
+    mm_long <- mm %>%
+      dplyr::filter(!is.na(.data$spec_name)) %>%
+      dplyr::select(dplyr::any_of(c("spec_name", metrics_present))) %>%
+      tidyr::pivot_longer(dplyr::any_of(metrics_present),
+                          names_to = "metric", values_to = "value") %>%
+      dplyr::filter(!is.na(.data$value)) %>%
+      dplyr::mutate(
+        spec_name = factor(.data$spec_name, levels = spec_order),
+        metric = factor(unname(metric_labels[.data$metric]),
+                        levels = unname(metric_labels[metrics_present]))
+      ) %>%
+      dplyr::filter(!is.na(.data$spec_name))
+
+    p_mm <- ggplot2::ggplot(
+        mm_long, ggplot2::aes(x = .data$spec_name, y = .data$value)) +
+      ggplot2::geom_boxplot(fill = paper_blue, alpha = 0.45,
+                            outlier.size = 0.5, linewidth = 0.5) +
+      ggplot2::facet_wrap(~ metric, scales = "free_y", nrow = 1) +
+      ggplot2::labs(x = "Ensemble method", y = NULL,
+                    title = "Ensemble multimodality (per-locus 5-number summary)") +
+      paper_theme() +
+      ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 45, hjust = 1))
+
+    ggplot2::ggsave(
+      file.path(fig_dir, "paper_ensemble_multimodality.png"),
+      p_mm, width = 13, height = 4.5, dpi = 300,
+      device = if (requireNamespace("ragg", quietly = TRUE)) ragg::agg_png else NULL
+    )
+    cat("Wrote paper_ensemble_multimodality.png; metrics:",
+        paste(metrics_present, collapse = ", "), "\n")
+  } else {
+    message("Multimodality figure skipped: no usable metrics / spec_name.")
+  }
+} else {
+  message("Multimodality figure skipped: ", mm_path, " not found.")
 }
 ```
 

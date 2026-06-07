@@ -2145,7 +2145,11 @@ compute_multimodal_metrics <- function(pip_list,
       jaccard_top10 = NA_real_,
       mean_pip_var = NA_real_,
       n_clusters = NA_integer_,
-      n_clusters_jsd_050 = NA_integer_
+      n_clusters_jsd_050 = NA_integer_,
+      n_clusters_credible = NA_integer_,
+      n_clusters_max = NA_integer_,
+      max_credible_dist = NA_real_,
+      max_maxshift_dist = NA_real_
     ))
   }
   pips_mat <- pip_cache$pips_mat %||% do.call(rbind, lapply(pip_list, as.numeric))
@@ -2171,6 +2175,12 @@ compute_multimodal_metrics <- function(pip_list,
   pip_var <- mean(apply(pips_mat, 2, stats::var, na.rm = TRUE))
   hc_jsd <- pip_cache$hc
 
+  # Cluster counts + worst-pair distances under the two locked-in cluster-weight
+  # metrics (credible_shift @ 0.05, max_shift @ 0.10). max_*_dist is the largest
+  # pairwise distance between any two fits in the ensemble under that metric.
+  cred_cache <- prepare_pip_similarity_cache(pips_mat, metric = "credible_shift")
+  maxs_cache <- prepare_pip_similarity_cache(pips_mat, metric = "max_shift")
+
   tibble::tibble(
     mean_jsd = mean(jsd_vals),
     median_jsd = stats::median(jsd_vals),
@@ -2178,7 +2188,11 @@ compute_multimodal_metrics <- function(pip_list,
     jaccard_top10 = mean(pair_jaccard, na.rm = TRUE),
     mean_pip_var = pip_var,
     n_clusters = length(unique(stats::cutree(hc_jsd, h = jsd_threshold))),
-    n_clusters_jsd_050 = length(unique(stats::cutree(hc_jsd, h = 0.50)))
+    n_clusters_jsd_050 = length(unique(stats::cutree(hc_jsd, h = 0.50))),
+    n_clusters_credible = length(unique(stats::cutree(cred_cache$hc, h = 0.05))),
+    n_clusters_max = length(unique(stats::cutree(maxs_cache$hc, h = 0.10))),
+    max_credible_dist = max(cred_cache$jsd_vals),
+    max_maxshift_dist = max(maxs_cache$jsd_vals)
   )
 }
 
