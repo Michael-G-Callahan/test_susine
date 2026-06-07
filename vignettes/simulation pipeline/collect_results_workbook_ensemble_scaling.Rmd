@@ -368,10 +368,9 @@ agg_backfill <- test_susine:::backfill_single_fit_refine_agg_confusion(
   confusion_individual = confusion_individual,
   confusion_agg = confusion_agg,
   run_info = run_info,
-  agg_methods = unique(normalize_agg_method_id(c(
-    cfg$job$compute$aggregation_methods %||% character(0),
-    "cluster_weight_jsd_050"
-  )))
+  agg_methods = unique(normalize_agg_method_id(
+    cfg$job$compute$aggregation_methods %||% character(0)
+  ))
 )
 confusion_agg <- agg_backfill$confusion_agg
 single_fit_refine_backfill_groups <- agg_backfill$repaired_groups
@@ -395,10 +394,9 @@ scaling_agg_backfill <- test_susine:::backfill_terminal_scaling_agg_confusion(
   scaling_bins_raw = scaling_bins_raw,
   confusion_agg = confusion_agg,
   run_info = run_info,
-  agg_methods = unique(normalize_agg_method_id(c(
-    cfg$job$compute$aggregation_methods %||% character(0),
-    "cluster_weight_jsd_050"
-  )))
+  agg_methods = unique(normalize_agg_method_id(
+    cfg$job$compute$aggregation_methods %||% character(0)
+  ))
 )
 confusion_agg <- scaling_agg_backfill$confusion_agg
 terminal_scaling_backfill_groups <- scaling_agg_backfill$repaired_groups
@@ -426,7 +424,9 @@ snp_agg_backfill <- test_susine:::backfill_missing_agg_confusion_from_snps(
   confusion_agg = confusion_agg,
   run_info = run_info,
   model_metrics = model_metrics,
-  agg_methods = "cluster_weight_jsd_050",
+  agg_methods = unique(normalize_agg_method_id(
+    cfg$job$compute$aggregation_methods %||% character(0)
+  )),
   pip_breaks = cfg$job$metrics$pip_breaks
 )
 confusion_agg <- snp_agg_backfill$confusion_agg
