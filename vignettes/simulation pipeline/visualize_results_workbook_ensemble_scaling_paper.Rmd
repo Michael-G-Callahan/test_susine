@@ -1097,7 +1097,7 @@ from `consolidated/multimodal_metrics.csv`; falls back to whatever columns the
 run produced (credible/max columns require a run with the extended
 `compute_multimodal_metrics`).
 
-```{r fig-multimodality, fig.width=13, fig.height=4.5}
+```{r fig-multimodality, fig.width=12.8, fig.height=10.8}
 consolidated_dir <- file.path(job_dir, "consolidated")
 mm_path <- file.path(consolidated_dir, "multimodal_metrics.csv")
 mm_spec_path <- file.path(consolidated_dir, "model_metrics_full.csv")
@@ -1116,24 +1116,51 @@ if (file.exists(mm_path)) {
   }
 
   # Use the credible/max metric set when the run produced it; otherwise fall
-  # back to the JSD-based columns. Either way it's a tight 5-facet panel.
+  # back to the JSD-based columns.
   have_new <- all(c("n_clusters_credible", "n_clusters_max") %in% names(mm))
   metric_labels <- if (have_new) c(
-    n_clusters_credible = "# clusters (credible 0.05)",
-    n_clusters_max      = "# clusters (max-shift 0.10)",
-    jaccard_top10       = "Jaccard top-10",
-    max_credible_dist   = "max credible dist.",
-    max_maxshift_dist   = "max PIP L-inf dist."
+    n_clusters_credible = "Clusters\n(credible 0.05)",
+    n_clusters_max      = "Clusters\n(max-shift 0.10)",
+    jaccard_top10       = "Top-10 Jaccard",
+    max_credible_dist   = "Max credible\ndistance",
+    max_maxshift_dist   = "Max PIP L-inf\ndistance"
   ) else c(
-    n_clusters          = "# clusters (JSD 0.15)",
-    n_clusters_jsd_050  = "# clusters (JSD 0.50)",
-    jaccard_top10       = "Jaccard top-10",
-    max_jsd             = "max JSD dist.",
-    mean_pip_var        = "mean PIP var."
+    n_clusters          = "Clusters\n(JSD 0.15)",
+    n_clusters_jsd_050  = "Clusters\n(JSD 0.50)",
+    jaccard_top10       = "Top-10 Jaccard",
+    max_jsd             = "Max JSD\ndistance",
+    mean_pip_var        = "Mean PIP\nvariance"
   )
   metrics_present <- intersect(names(metric_labels), names(mm))
 
   if (length(metrics_present) && "spec_name" %in% names(mm)) {
+    mm_family_labels <- c(
+      A = "A: SuSiE",
+      B = "B: EB SuSiNE",
+      C = "C: grid SuSiNE"
+    )
+    mm_family_palette <- c(
+      "A: SuSiE" = "#E69F00",
+      "B: EB SuSiNE" = "#009E73",
+      "C: grid SuSiNE" = "#0072B2"
+    )
+    variant_order <- unique(sub("^[ABC]-", "", spec_order))
+    variant_labels <- c(
+      R = "R",
+      F = "F",
+      S = "S",
+      RF = "R+F",
+      RS = "R+S",
+      FS = "F+S",
+      RFS = "R+F+S",
+      C = "C",
+      CS = "C+S",
+      CSR = "C+S->R",
+      CSFR = "C+S+F+R",
+      CFR = "C+F+R",
+      CF = "C+F"
+    )
+
     mm_long <- mm %>%
       dplyr::filter(!is.na(.data$spec_name)) %>%
       dplyr::select(dplyr::any_of(c("spec_name", metrics_present))) %>%
@@ -1144,37 +1171,105 @@ if (file.exists(mm_path)) {
         spec_name = factor(.data$spec_name, levels = spec_order),
         metric = factor(unname(metric_labels[.data$metric]),
                         levels = unname(metric_labels[metrics_present])),
-        group = sub("-.*$", "", as.character(.data$spec_name))
+        group = sub("-.*$", "", as.character(.data$spec_name)),
+        family = factor(
+          mm_family_labels[.data$group],
+          levels = unname(mm_family_labels)
+        ),
+        variant = factor(
+          sub("^[ABC]-", "", as.character(.data$spec_name)),
+          levels = variant_order
+        )
       ) %>%
       dplyr::filter(!is.na(.data$spec_name))
 
-    # Stacked wide panels (one metric per row), specs as horizontal abbreviations
-    # along the bottom, boxes tinted by ensemble family (A/B/C).
+    # Metric rows and method-family columns keep the distributions readable while
+    # preserving the compact A/B/C ensemble comparison.
     p_mm <- ggplot2::ggplot(
-        mm_long, ggplot2::aes(x = .data$spec_name, y = .data$value)) +
+        mm_long,
+        ggplot2::aes(
+          x = .data$variant,
+          y = .data$value,
+          fill = .data$family
+        )) +
       ggplot2::geom_boxplot(
-        ggplot2::aes(fill = .data$group),
-        alpha = 0.6, width = 0.66, outlier.size = 0.45, linewidth = 0.45) +
-      ggplot2::facet_wrap(~ metric, ncol = 1, scales = "free_y") +
+        width = 0.62,
+        alpha = 0.82,
+        color = "grey18",
+        outlier.alpha = 0.22,
+        outlier.color = "grey12",
+        outlier.size = 0.42,
+        linewidth = 0.34
+      ) +
+      ggplot2::stat_summary(
+        fun = stats::median,
+        geom = "point",
+        shape = 21,
+        size = 1.25,
+        stroke = 0.28,
+        fill = "white",
+        color = "grey15"
+      ) +
+      ggplot2::facet_grid(
+        rows = ggplot2::vars(metric),
+        cols = ggplot2::vars(family),
+        scales = "free",
+        space = "free_x",
+        switch = "y"
+      ) +
       ggplot2::scale_fill_manual(
-        values = c(A = paper_orange, B = "#9BBAD7", C = paper_blue),
-        labels = c(A = "A: SuSiE", B = "B: EB SuSiNE", C = "C: grid SuSiNE"),
-        name = NULL, drop = TRUE,
-        guide = ggplot2::guide_legend(nrow = 1)) +
-      ggplot2::labs(x = NULL, y = NULL,
-                    title = "Ensemble multimodality across loci") +
-      paper_theme() +
+        values = mm_family_palette,
+        guide = "none",
+        drop = FALSE
+      ) +
+      ggplot2::scale_x_discrete(labels = variant_labels, drop = TRUE) +
+      ggplot2::labs(
+        x = "Ensemble variant",
+        y = NULL,
+        title = "Ensemble multimodality by method variant",
+        subtitle = paste(
+          "Distributions are over loci.",
+          "Lower values indicate less multimodality except for top-10 Jaccard."
+        ),
+        caption = paste(
+          "R = restarts; F = refinement; S = prior-variance grid;",
+          "C = annotation-scale grid. White points mark medians."
+        )
+      ) +
+      paper_theme(base_size = 13) +
       ggplot2::theme(
-        legend.position = "top",
-        axis.text.x = ggplot2::element_text(angle = 0, hjust = 0.5, size = 9),
-        panel.spacing.y = grid::unit(0.6, "lines"),
+        plot.title = ggplot2::element_text(size = 24, hjust = 0.5),
+        plot.subtitle = ggplot2::element_text(
+          size = 12,
+          hjust = 0.5,
+          margin = ggplot2::margin(t = 2, b = 8)
+        ),
+        plot.caption = ggplot2::element_text(
+          size = 9,
+          hjust = 0,
+          margin = ggplot2::margin(t = 8)
+        ),
+        axis.title.x = ggplot2::element_text(size = 13, margin = ggplot2::margin(t = 8)),
+        axis.text.x = ggplot2::element_text(size = 9.5, color = "grey15"),
+        axis.text.y = ggplot2::element_text(size = 10.5, color = "grey15"),
+        panel.spacing.x = grid::unit(0.75, "lines"),
+        panel.spacing.y = grid::unit(0.62, "lines"),
         panel.grid.minor = ggplot2::element_blank(),
-        strip.text = ggplot2::element_text(face = "bold")
+        panel.grid.major.x = ggplot2::element_blank(),
+        strip.background = ggplot2::element_rect(fill = "grey92", color = "grey35"),
+        strip.placement = "outside",
+        strip.text.x = ggplot2::element_text(size = 12, face = "bold"),
+        strip.text.y.left = ggplot2::element_text(
+          size = 10.2,
+          face = "bold",
+          angle = 0,
+          lineheight = 0.92
+        )
       )
 
     ggplot2::ggsave(
       file.path(fig_dir, "paper_ensemble_multimodality.png"),
-      p_mm, width = 12, height = 11.5, dpi = 300,
+      p_mm, width = 12.8, height = 10.8, dpi = 300,
       device = if (requireNamespace("ragg", quietly = TRUE)) ragg::agg_png else NULL
     )
     cat("Wrote paper_ensemble_multimodality.png; metrics:",
