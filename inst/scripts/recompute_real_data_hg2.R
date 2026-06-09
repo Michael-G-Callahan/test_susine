@@ -215,10 +215,12 @@ long_from_fits <- function(runs_locus) {
   if (!length(rows)) return(NULL)
   dplyr::bind_rows(rows)
 }
-fit_long_row <- function(row) {
-  fp <- row$fit_rds_path[[1]]
-  if (is.na(fp) || !nzchar(fp)) return(NULL)
-  fit <- tryCatch(readRDS(fp), error = function(e) NULL)
+# Reload one saved fit and emit the long (effect, variant) moment frame. Handles
+# both susine fits (effect_fits$b_hat/b_2_hat, unconditional) and susieR fits
+# (conditional mu/mu2 + alpha). Used by the fit fallback AND the warm-refit step.
+fit_to_long <- function(fit_path, run_id) {
+  if (is.na(fit_path) || !nzchar(fit_path)) return(NULL)
+  fit <- tryCatch(readRDS(fit_path), error = function(e) NULL)
   if (is.null(fit)) return(NULL)
   ef <- fit$effect_fits
   if (!is.null(ef$b_hat) && !is.null(ef$b_2_hat)) {
@@ -230,7 +232,7 @@ fit_long_row <- function(row) {
   }
   L <- nrow(ab); p <- ncol(ab)
   tibble::tibble(
-    run_id = as.integer(row$run_id[[1]]),
+    run_id = as.integer(run_id),
     effect_l = rep(seq_len(L), each = p),
     ld_matrix_index = rep(seq_len(p), times = L),
     alpha = as.numeric(t(al)),
@@ -238,6 +240,20 @@ fit_long_row <- function(row) {
     alpha_b_2_hat = as.numeric(t(ab2))
   )
 }
+fit_long_row <- function(row) fit_to_long(row$fit_rds_path[[1]], row$run_id[[1]])
+
+# Warm-refit fits live under aggregated/highest_weight_refits/ (one per locus) and
+# are NOT in the per-task effect_posteriors parquet, so they are reloaded directly.
+refit_summary_path <- file.path(results_dir, "aggregated", "highest_weight_refit_summary.csv")
+refit_summary <- if (file.exists(refit_summary_path)) {
+  readr::read_csv(refit_summary_path, show_col_types = FALSE)
+} else {
+  tibble::tibble(locus_id = character(), refit_run_id = integer(),
+                 refit_fit_rds_path = character(), refit_elbo_final = numeric())
+}
+cat(sprintf("Warm-refit fits available for %d loci.\n",
+            sum(!is.na(refit_summary$refit_fit_rds_path) &
+                  nzchar(as.character(refit_summary$refit_fit_rds_path)))))
 
 # --- per-locus driver -------------------------------------------------------
 per_run_rows <- vector("list", length(locus_ids))
@@ -270,19 +286,44 @@ for (li in seq_along(locus_ids)) {
   if (is.null(long) || !nrow(long)) { cat("no moments; skipped.\n"); rm(R); gc(); next }
 
   comp <- compute_locus(long, R)
-  rm(long, R); gc(verbose = FALSE)
+  rm(long)
 
   fam <- runs_locus$run_family[match(comp$run_ids, runs_locus$run_id)]
   cval <- runs_locus$c_value[match(comp$run_ids, runs_locus$run_id)]
   sval <- runs_locus$sigma_0_2_scalar[match(comp$run_ids, runs_locus$run_id)]
   elbo <- elbo_lookup[as.character(comp$run_ids)]
 
-  per_run_rows[[li]] <- tibble::tibble(
+  main_row <- tibble::tibble(
     run_id = comp$run_ids, locus_id = lid,
     run_family = as.character(fam), c_value = as.numeric(cval),
     sigma_0_2_scalar = as.numeric(sval),
     hg2_postmean = comp$postmean, hg2_uncertainty = comp$uncertainty,
     hg2_expected_pve = comp$expected, elbo_final = as.numeric(elbo))
+
+  # Warm-refit fit (reloaded; uses the same R before it is freed).
+  refit_row <- NULL
+  rr <- refit_summary[as.character(refit_summary$locus_id) == lid, , drop = FALSE]
+  if (nrow(rr) == 1L && !is.na(rr$refit_fit_rds_path[[1]]) &&
+      nzchar(as.character(rr$refit_fit_rds_path[[1]]))) {
+    rlong <- fit_to_long(as.character(rr$refit_fit_rds_path[[1]]),
+                         as.integer(rr$refit_run_id[[1]]))
+    if (!is.null(rlong) && nrow(rlong)) {
+      rcomp <- tryCatch(compute_locus(rlong, R), error = function(e) NULL)
+      if (!is.null(rcomp)) {
+        refit_row <- tibble::tibble(
+          run_id = as.integer(rr$refit_run_id[[1]]), locus_id = lid,
+          run_family = "highest_weight_refit", c_value = NA_real_,
+          sigma_0_2_scalar = NA_real_,
+          hg2_postmean = rcomp$postmean[[1]], hg2_uncertainty = rcomp$uncertainty[[1]],
+          hg2_expected_pve = rcomp$expected[[1]],
+          elbo_final = as.numeric(rr$refit_elbo_final[[1]] %||% NA_real_))
+      }
+    }
+    rm(rlong)
+  }
+  rm(R); gc(verbose = FALSE)
+
+  per_run_rows[[li]] <- dplyr::bind_rows(main_row, refit_row)
 
   # Fair ensemble over functional_grid members.
   is_fun <- !is.na(fam) & fam == "functional_grid"

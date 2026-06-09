@@ -67,6 +67,31 @@ if (is.na(summary_csv) || !nzchar(summary_csv)) {
 
 paper_summary <- readr::read_csv(summary_csv, show_col_types = FALSE)
 
+# Corrected local-genetic-variance estimand (E[var(Xb)|y]/var(y)) from
+# inst/scripts/recompute_real_data_hg2.R. Maps the SuSiE anchor by its run id and
+# the SuSiNE ensemble by locus; falls back to the posterior-mean pve_* columns
+# below when the recompute outputs are absent. See
+# refs/decisions/heritability_estimand_decision_2026-06-09.md (sec 5.5).
+hg2_corrected_dir <- file.path(dirname(aggregated_dir), "hg2_corrected")
+.read_if <- function(fname) {
+  p <- file.path(hg2_corrected_dir, fname)
+  if (file.exists(p)) readr::read_csv(p, show_col_types = FALSE) else NULL
+}
+hg2_by_run <- .read_if("hg2_corrected_by_run.csv")
+hg2_by_locus <- .read_if("hg2_corrected_by_locus.csv")
+
+corrected_pve_tbl <- paper_summary %>%
+  dplyr::distinct(.data$locus_id, .data$susie_anchor_run_id)
+corrected_pve_tbl$pve_susie_anchor_expected <- if (!is.null(hg2_by_run)) {
+  hg2_by_run$hg2_expected_pve[match(as.integer(corrected_pve_tbl$susie_anchor_run_id),
+                                    as.integer(hg2_by_run$run_id))]
+} else NA_real_
+corrected_pve_tbl$pve_susine_ensemble_expected <- if (!is.null(hg2_by_locus)) {
+  hg2_by_locus$hg2_expected_pve_ensemble[match(as.character(corrected_pve_tbl$locus_id),
+                                               as.character(hg2_by_locus$locus_id))]
+} else NA_real_
+corrected_pve_tbl <- dplyr::select(corrected_pve_tbl, -dplyr::any_of("susie_anchor_run_id"))
+
 weighted_annotation_tbl <- NULL
 weighted_notes_csv <- file.path(paper_dir, "weighted_annotation_tbl_for_paper_notes.csv")
 functional_grid_csv <- file.path(aggregated_dir, "functional_grid_summary.csv")
@@ -188,6 +213,7 @@ locus_summary_tbl <- paper_summary %>%
     by = "locus_id"
   ) %>%
   dplyr::left_join(pip_l2_tbl, by = "locus_id") %>%
+  dplyr::left_join(corrected_pve_tbl, by = "locus_id") %>%
   dplyr::transmute(
     locus_id = .data$locus_id,
     locus_name = locus_label(.data$locus_id, .data$gene_name),
@@ -195,7 +221,10 @@ locus_summary_tbl <- paper_summary %>%
     n_susie_pip_gt_05 = .data$n_pip_gt_05_susie_anchor,
     n_susine_pip_gt_05 = .data$n_pip_gt_05_susine_ensemble,
     n_agreed_pip_gt_05 = .data$n_pip_gt_05_susie_anchor_and_susine_ensemble,
-    delta_pve_susine_minus_susie = .data$pve_susine_ensemble - .data$pve_susie_anchor,
+    # Corrected estimand when available, else posterior-mean point estimate.
+    delta_pve_susine_minus_susie =
+      dplyr::coalesce(.data$pve_susine_ensemble_expected, .data$pve_susine_ensemble) -
+      dplyr::coalesce(.data$pve_susie_anchor_expected, .data$pve_susie_anchor),
     delta_elbo_warm_refit_vs_susie = .data$delta_elbo_refit_vs_susie_anchor,
     total_off_c0_weight = dplyr::coalesce(
       .data$ensemble_agg_weight_off_c0_total,

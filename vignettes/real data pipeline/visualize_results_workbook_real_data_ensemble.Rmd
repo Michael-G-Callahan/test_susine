@@ -170,6 +170,77 @@ loci <- sort(unique(functional_grid_summary$locus_id))
 loci
 ```
 
+# 2b. Corrected local genetic variance (heritability estimand)
+
+Reads the corrected estimand `hg2_expected_pve = E[var(Xb)|y]/var(y)` produced by
+`inst/scripts/recompute_real_data_hg2.R` (run separately on the HPC; outputs in
+the sibling `hg2_corrected/` directory). The existing `*_pve_postmean_std`
+columns are the variance of the posterior-*mean* predictor (the point estimate,
+== `hg2_postmean`); the corrected estimand adds the within-fit posterior-variance
+term and is the fair, cross-method comparable quantity. We attach the per-fit
+corrected PVE to `anchor_summary` so the PVE exhibits below can use it.
+
+```{r corrected-pve-load}
+hg2_corrected_dir <- file.path(dirname(aggregated_dir), "hg2_corrected")
+read_hg2 <- function(fname, empty) {
+  p <- file.path(hg2_corrected_dir, fname)
+  if (file.exists(p)) readr::read_csv(p, show_col_types = FALSE) else empty
+}
+hg2_corrected_by_run <- read_hg2(
+  "hg2_corrected_by_run.csv",
+  tibble::tibble(run_id = integer(), hg2_expected_pve = numeric(),
+                 hg2_postmean = numeric())
+)
+hg2_corrected_by_locus <- read_hg2(
+  "hg2_corrected_by_locus.csv",
+  tibble::tibble(locus_id = character(), hg2_expected_pve_ensemble = numeric())
+)
+
+# Per-run lookup (run_id -> corrected expected PVE).
+pve_by_run <- if (nrow(hg2_corrected_by_run)) {
+  hg2_corrected_by_run %>% dplyr::distinct(.data$run_id, .data$hg2_expected_pve)
+} else {
+  tibble::tibble(run_id = integer(), hg2_expected_pve = numeric())
+}
+add_run_pve <- function(df, id_col, out_col) {
+  df[[out_col]] <- NA_real_
+  if (id_col %in% names(df) && nrow(pve_by_run)) {
+    m <- match(as.integer(df[[id_col]]), as.integer(pve_by_run$run_id))
+    df[[out_col]] <- pve_by_run$hg2_expected_pve[m]
+  }
+  df
+}
+anchor_summary <- add_run_pve(anchor_summary, "susie_anchor_run_id",
+                              "susie_anchor_pve_expected")
+anchor_summary <- add_run_pve(anchor_summary, "baseline_run_id",
+                              "baseline_pve_expected")
+anchor_summary <- add_run_pve(anchor_summary, "highest_weight_refit_run_id",
+                              "refit_pve_expected")
+# Ensemble corrected PVE joined by locus.
+ens_lut <- if (nrow(hg2_corrected_by_locus)) {
+  hg2_corrected_by_locus %>%
+    dplyr::transmute(locus_id = as.character(.data$locus_id),
+                     ensemble_pve_expected = .data$hg2_expected_pve_ensemble)
+} else {
+  tibble::tibble(locus_id = character(), ensemble_pve_expected = numeric())
+}
+anchor_summary <- anchor_summary %>%
+  dplyr::mutate(locus_id = as.character(.data$locus_id)) %>%
+  dplyr::left_join(ens_lut, by = "locus_id")
+
+have_corrected_pve <- any(is.finite(anchor_summary$susie_anchor_pve_expected)) ||
+  any(is.finite(anchor_summary$ensemble_pve_expected))
+if (!have_corrected_pve) {
+  warning("No corrected PVE found in ", hg2_corrected_dir,
+          "; PVE exhibits fall back to the posterior-mean estimand. ",
+          "Run inst/scripts/recompute_real_data_hg2.R first.")
+}
+# Anchor, baseline (c=0), ensemble, AND warm-refit corrected PVE are all covered:
+# the recompute reloads the saved warm-refit fits (highest_weight_refits/) and
+# emits them keyed by refit_run_id, which anchor_summary$highest_weight_refit_run_id
+# matches.
+```
+
 # 3. Plot Helpers
 
 ```{r helpers}
@@ -786,20 +857,24 @@ plot_anchor_comparison <- function(locus_id) {
   err_msg <- if ("susie_anchor_error" %in% names(row) && nrow(row))
     row$susie_anchor_error[[1]] else NA_character_
 
+  # Corrected local genetic variance (hg2_expected_pve); falls back to the
+  # posterior-mean point estimate when the corrected recompute is unavailable.
   df <- row %>%
     dplyr::transmute(
       locus_id,
-      `susieR anchor` = susie_anchor_pve_postmean_std,
-      `susine c=0` = baseline_pve_postmean_std
+      `susieR anchor` = dplyr::coalesce(.data$susie_anchor_pve_expected,
+                                        .data$susie_anchor_pve_postmean_std),
+      `susine c=0` = dplyr::coalesce(.data$baseline_pve_expected,
+                                     .data$baseline_pve_postmean_std)
     ) %>%
-    tidyr::pivot_longer(-.data$locus_id, names_to = "fit_type", values_to = "pve_postmean_std")
+    tidyr::pivot_longer(-.data$locus_id, names_to = "fit_type", values_to = "pve")
 
-  p <- ggplot(df, aes(x = fit_type, y = pve_postmean_std, fill = fit_type)) +
+  p <- ggplot(df, aes(x = fit_type, y = pve, fill = fit_type)) +
     geom_col(width = 0.6, na.rm = TRUE) +
     labs(
-      title = paste("susine vs susieR posterior-mean PVE:", locus_id),
+      title = paste("Local genetic variance (PVE):", locus_id),
       x = NULL,
-      y = "Posterior-mean PVE proxy"
+      y = expression("E[var(Xb)|y] / var(y)")
     ) +
     theme(legend.position = "none")
 
@@ -1212,6 +1287,55 @@ ggsave(
   dpi = 150
 )
 
+# Corrected-estimand version of the overall PVE comparison (the paper-facing
+# figure): E[var(Xb)|y]/var(y) instead of the posterior-mean point estimate.
+overall_pve_expected_plot <- NULL
+if (have_corrected_pve) {
+  overall_pve_exp_tbl <- anchor_summary %>%
+    dplyr::transmute(
+      locus_id,
+      susie_anchor = .data$susie_anchor_pve_expected,
+      `SuSiNE ensemble` = .data$ensemble_pve_expected,
+      `Warm refit` = .data$refit_pve_expected
+    ) %>%
+    tidyr::pivot_longer(
+      cols = dplyr::any_of(c("SuSiNE ensemble", "Warm refit")),
+      names_to = "comparison", values_to = "comparison_pve"
+    ) %>%
+    dplyr::mutate(comparison = factor(.data$comparison,
+                                      levels = c("SuSiNE ensemble", "Warm refit"))) %>%
+    dplyr::filter(is.finite(.data$susie_anchor), is.finite(.data$comparison_pve))
+
+  if (nrow(overall_pve_exp_tbl)) {
+    lim <- range(c(overall_pve_exp_tbl$susie_anchor,
+                   overall_pve_exp_tbl$comparison_pve), na.rm = TRUE)
+    if (!all(is.finite(lim))) lim <- c(0, 1)
+    pad <- max(0.02, diff(lim) * 0.05)
+    lim <- c(max(0, lim[[1]] - pad), min(1, lim[[2]] + pad))
+    overall_pve_expected_plot <- ggplot(
+      overall_pve_exp_tbl,
+      aes(x = susie_anchor, y = comparison_pve, color = comparison)
+    ) +
+      geom_abline(slope = 1, intercept = 0, color = "grey50", linewidth = 0.7) +
+      geom_point(size = 2.4) +
+      geom_text(aes(label = locus_id), size = 2.4, vjust = -0.55,
+                check_overlap = TRUE, show.legend = FALSE) +
+      scale_color_manual(values = c("SuSiNE ensemble" = "#0B6E4F",
+                                    "Warm refit" = "#C65D00"), name = NULL) +
+      coord_equal(xlim = lim, ylim = lim) +
+      labs(
+        title = "Local genetic variance (PVE): SuSiE vs Ensemble and Refit",
+        x = expression("SuSiE anchor  E[var(Xb)|y] / var(y)"),
+        y = expression("Comparison  E[var(Xb)|y] / var(y)")
+      )
+    ggsave(
+      file.path(overall_figure_dir,
+                "overall_pve_expected_susie_vs_ensemble_and_refit.png"),
+      overall_pve_expected_plot, width = 6, height = 6, dpi = 150
+    )
+  }
+}
+
 overall_jsd_triangle_tbl <- paper_summary %>%
   dplyr::transmute(
     locus_id,
@@ -1287,6 +1411,7 @@ ggsave(
 overall_weight_plot
 overall_pip_change_plot
 overall_pve_change_plot
+if (!is.null(overall_pve_expected_plot)) overall_pve_expected_plot
 overall_jsd_triangle_plot
 refit_basin_r2_drift_plot
 ```
@@ -1492,6 +1617,11 @@ paper_drift_jsd_plot <- ggplot(
   ) +
   paper_panel_theme
 
+# Use the corrected estimand (E[var(Xb)|y]/var(y)) when the recompute is present,
+# else fall back to the posterior-mean point estimate. Kept consistent across all
+# fit types (anchor, ensemble, warm refit) so the figure never mixes estimands;
+# the recompute now covers the warm-refit fit too.
+.use_expected_pve <- have_corrected_pve
 paper_pve_tbl <- anchor_summary %>%
   dplyr::left_join(
     highest_weight_refit_summary %>%
@@ -1500,9 +1630,10 @@ paper_pve_tbl <- anchor_summary %>%
   ) %>%
   dplyr::transmute(
     locus_id,
-    susie_anchor_pve = .data$susie_anchor_pve_postmean_std,
-    susine_ensemble_pve = .data$ensemble_pve_postmean_std,
-    warm_refit_pve = .data$refit_pve_postmean_std
+    susie_anchor_pve = if (.use_expected_pve) .data$susie_anchor_pve_expected else .data$susie_anchor_pve_postmean_std,
+    susine_ensemble_pve = if (.use_expected_pve) .data$ensemble_pve_expected else .data$ensemble_pve_postmean_std,
+    warm_refit_pve = if (.use_expected_pve) .data$refit_pve_expected else .data$refit_pve_postmean_std,
+    pve_estimand = if (.use_expected_pve) "expected_pve" else "postmean_pve"
   )
 
 paper_pve_long_tbl <- dplyr::bind_rows(
@@ -1591,8 +1722,8 @@ paper_pve_plot <- ggplot(
   coord_equal(xlim = paper_pve_lim, ylim = paper_pve_lim) +
   labs(
     title = "Annotations can boost explanatory signal",
-    x = expression("SuSiE baseline PVE (" * h[g]^2 * " proxy)"),
-    y = expression("Comparison PVE (" * h[g]^2 * " proxy)")
+    x = expression("SuSiE baseline local genetic variance " * h[g]^2),
+    y = expression("Comparison local genetic variance " * h[g]^2)
   ) +
   paper_panel_theme
 
