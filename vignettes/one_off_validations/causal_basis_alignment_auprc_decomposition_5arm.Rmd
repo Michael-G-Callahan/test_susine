@@ -54,7 +54,7 @@ records_rds <- file.path(study_dir, "effect_refit_records.rds")
 auprc_per_dataset_csv <- file.path(study_dir, "auprc_per_dataset_5arm.csv")
 dataset_bundles_csv <- file.path(study_dir, "dataset_bundles.csv")
 
-truth_top_k <- 23L
+truth_top_k <- 8L
 truth_fitted_y_rds <- file.path(
   study_dir, sprintf("causal_basis_truth_fitted_y_5arm_top%d.rds", truth_top_k)
 )
