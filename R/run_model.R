@@ -657,10 +657,28 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
   # Bundle-level columns (matrix_id, architecture, y_noise, p_star,
   # phenotype_seed) are stripped — re-attached during aggregation via
   # join on dataset_bundle_id to dataset_bundles.
+  # Realized true local genetic variance var(X beta)/var(y) for the dataset, on
+  # the same (n-1) convention as the hg2 estimands. This is the dataset-specific
+  # truth comparator for the heritability panel (vs the fixed design target);
+  # see refs/decisions/heritability_estimand_decision_2026-06-09.md.
+  true_hg2_realized <- tryCatch({
+    if (!is.null(data_bundle$beta)) {
+      vy_ds <- stats::var(as.numeric(data_bundle$y))
+      if (is.finite(vy_ds) && vy_ds > 0) {
+        max(0, stats::var(as.numeric(data_bundle$X %*% data_bundle$beta)) / vy_ds)
+      } else {
+        NA_real_
+      }
+    } else {
+      NA_real_
+    }
+  }, error = function(e) NA_real_)
+
   ds_metrics <- compute_dataset_metrics(data_bundle$X, data_bundle$y, top_k = z_top_k) %>%
     dplyr::mutate(
       dataset_bundle_id = bundle_id,
-      data_scenario = data_bundle$data_scenario
+      data_scenario = data_bundle$data_scenario,
+      true_hg2_realized = true_hg2_realized
     )
   write_dataset_metrics(bundle_row = bundle_row, job_config = job_config, dataset_metrics = ds_metrics, buffer_ctx = buffer_ctx)
 
@@ -681,6 +699,7 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
     primary_elbos_by_group <- list()
     primary_run_meta_by_group <- list()
     fitted_y_by_group <- list()
+    hg2_unc_by_group <- list()
     group_run_map <- list()
 
     run_and_record <- function(run_row,
@@ -843,6 +862,14 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
           if (!is.null(b_val)) fy_val <- as.numeric(data_bundle$X %*% b_val)
         }
         fitted_y_by_group[[group_key]] <<- c(fitted_y_by_group[[group_key]], list(fy_val))
+        # Per-fit within-fit uncertainty correction tr(Sigma Cov(b|y))/var(y) for
+        # the local-genetic-variance estimand (heritability.R). Only this scalar
+        # is threaded; postmean/between-fit are recovered from fitted_y downstream.
+        unc_val <- tryCatch(
+          hg2_uncertainty_scalar(fit, X = data_bundle$X, y = data_bundle$y),
+          error = function(e) NA_real_
+        )
+        hg2_unc_by_group[[group_key]] <<- c(hg2_unc_by_group[[group_key]], list(unc_val))
         primary_run_meta_by_group[[group_key]] <<- c(
           primary_run_meta_by_group[[group_key]],
           list(list(
@@ -1248,6 +1275,7 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
         pip_list    <- primary_pips_by_group[[group_key]]
         elbo_vec    <- primary_elbos_by_group[[group_key]]
         fy_list     <- fitted_y_by_group[[group_key]]
+        unc_list    <- hg2_unc_by_group[[group_key]]
         grr         <- group_run_map[[group_key]] %||% uc_runs[1, , drop = FALSE]
         if (length(pip_list) >= 2L && !is.null(fy_list)) {
           hg2_tbl <- compute_hg2_by_agg(
@@ -1257,6 +1285,15 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
             y                 = data_bundle$y,
             group_run_row     = grr,
             dataset_bundle_id = bundle_id,
+            uncertainty_list  = unc_list,
+            # Sim schema nests this under job$compute (see lines using
+            # job_config$job$compute$softmax_temperature); the flat fallback
+            # covers the real-data schema. Matching the PIP-aggregation path is
+            # required for the hg2 weights to agree with the reported ensemble.
+            softmax_temperature = as.numeric(
+              job_config$job$compute$softmax_temperature %||%
+                job_config$job$softmax_temperature %||% 1
+            ),
             pip_cache         = full_group_cache[[group_key]]$pip_cache %||% NULL
           )
           if (!is.null(hg2_tbl) && nrow(hg2_tbl) > 0L) {
@@ -1470,9 +1507,19 @@ normalize_susier_fit <- function(fit_raw, X, L) {
     pip <- 1 - apply(1 - alpha, 2, prod)
   }
   mu <- fit_raw$mu
+  mu2 <- fit_raw$mu2
   beta_std <- rep(0, ncol(X))
   if (!is.null(mu)) {
     beta_std <- colSums(alpha * as.matrix(mu))
+  }
+  # Unconditional per-effect moments for the local-genetic-variance estimand
+  # (heritability.R): b_hat = alpha * mu, b_2_hat = alpha * mu2 (susieR's mu2 is
+  # the conditional second moment E[b^2 | included]).
+  eff_b_hat <- NULL
+  eff_b_2_hat <- NULL
+  if (!is.null(mu) && !is.null(mu2)) {
+    eff_b_hat <- as.matrix(alpha * as.matrix(mu))
+    eff_b_2_hat <- as.matrix(alpha * as.matrix(mu2))
   }
   beta <- tryCatch(as.numeric(stats::coef(fit_raw)[-1]), error = function(e) NULL)
   if (is.null(beta) || length(beta) != ncol(X) || any(!is.finite(beta))) {
@@ -1494,7 +1541,7 @@ normalize_susier_fit <- function(fit_raw, X, L) {
   sigma2 <- fit_raw$sigma2 %||% fit_raw$residual_variance %||% NA_real_
   list(
     settings = list(L = L),
-    effect_fits = list(alpha = alpha),
+    effect_fits = list(alpha = alpha, b_hat = eff_b_hat, b_2_hat = eff_b_2_hat),
     model_fit = list(
       PIPs = as.numeric(pip),
       elbo = fit_raw$elbo %||% NA_real_,
@@ -2769,7 +2816,15 @@ compute_scaling_confusion_bins_for_group <- function(pip_list,
 #'
 #' Uses the full pool of K fits (no subsampling). Weights are derived from PIP
 #' vectors (same JSD-based clustering used in confusion bins), then applied to
-#' fitted_y vectors to produce an exact aggregated hg2 scalar per method.
+#' fitted_y vectors to produce aggregated heritability scalars per method.
+#'
+#' Emits both the legacy point-estimate columns (`hg2`, `hg2_weighted_pve`) and
+#' the corrected local-genetic-variance decomposition
+#' (`hg2_postmean`, `hg2_uncertainty`, `hg2_between_fit`, `hg2_expected_pve`); see
+#' refs/decisions/heritability_estimand_decision_2026-06-09.md. `uncertainty_list`
+#' carries the per-fit within-fit correction `tr(Sigma Cov(b|y))/var(y)` (from
+#' [hg2_uncertainty_scalar()]); the posterior-mean and between-fit terms are
+#' recovered here from the fitted-y vectors.
 #'
 #' @keywords internal
 compute_hg2_by_agg <- function(pip_list,
@@ -2778,11 +2833,21 @@ compute_hg2_by_agg <- function(pip_list,
                                 y,
                                 group_run_row,
                                 dataset_bundle_id = NA_character_,
+                                uncertainty_list = NULL,
+                                softmax_temperature = 1,
                                 pip_cache = NULL) {
   valid <- !vapply(fitted_y_list, is.null, logical(1L))
   pip_list      <- pip_list[valid]
   fitted_y_list <- fitted_y_list[valid]
   elbo_vec      <- elbo_vec[valid]
+  if (is.null(uncertainty_list)) {
+    per_fit_unc <- rep(NA_real_, length(valid))
+  } else {
+    per_fit_unc <- vapply(uncertainty_list, function(u) {
+      as.numeric(u %||% NA_real_)[[1]]
+    }, numeric(1L))
+  }
+  per_fit_unc <- per_fit_unc[valid]
   K <- length(fitted_y_list)
   if (K == 0L || is.null(y)) return(NULL)
   vy <- stats::var(as.numeric(y))
@@ -2807,9 +2872,10 @@ compute_hg2_by_agg <- function(pip_list,
       spec <- .cluster_weight_specs[[am]]
       hc_am <- if (K > 1L) prepare_pip_similarity_cache(pip_mat, metric = spec$metric)$hc else NULL
       w <- if (is.null(hc_am)) {
-        softmax_weights(elbo_vec)
+        softmax_weights(elbo_vec, temperature = softmax_temperature)
       } else {
         .cluster_weights_from_hc(hc_am, spec$threshold, elbo_vec, n_fits = K,
+                                 softmax_temperature = softmax_temperature,
                                  aggregation = "method_b")$w_full
       }
     } else {
@@ -2819,19 +2885,43 @@ compute_hg2_by_agg <- function(pip_list,
           idx <- which.max(elbo_vec)
           w2 <- rep(0, K); w2[idx] <- 1; w2
         },
-        "elbo_softmax"      = softmax_weights(elbo_vec)
+        "elbo_softmax"      = softmax_weights(elbo_vec, temperature = softmax_temperature)
       )
     }
     fy_agg <- as.numeric(crossprod(w, fy_mat))
-    # Two heritability estimands sharing the SAME ensemble weights w:
+    # Legacy point-estimate estimands sharing the SAME ensemble weights w:
     #   hg2              = var(weighted fitted-y) / var(y)  -- BMA point estimate;
     #                      shrinks under between-fit dispersion -> "ensemble"
     #   hg2_weighted_pve = sum_k w_k * (var(fy_k)/var(y))   -- weighted mean of
     #                      per-fit PVE; no shrinkage             -> "per fit"
     hg2 <- max(0, min(1, stats::var(fy_agg) / vy))
     hg2_weighted_pve <- max(0, min(1, sum(w * per_fit_hg2)))
+
+    # Corrected local-genetic-variance decomposition (NOT clamped at 1, to keep
+    # the additive identity exact; clamp at the display layer):
+    #   hg2_postmean   = var(weighted fitted-y)/var(y)            = m_bar' Sigma m_bar / vy
+    #   hg2_between_fit= sum_k w_k var(fy_k - fy_agg)/var(y)      (mixture dispersion)
+    #   hg2_uncertainty= sum_k w_k * within-fit correction_k
+    #   hg2_expected_pve = postmean + between_fit + uncertainty  = E[var(Xb)|y]/var(y)
+    hg2_postmean <- max(0, stats::var(fy_agg) / vy)
+    between_k <- apply(sweep(fy_mat, 2L, fy_agg, "-"), 1L,
+                       function(d) stats::var(d))
+    hg2_between_fit <- max(0, sum(w * between_k) / vy)
+    # Within-fit correction: weighted mean over POSITIVELY-weighted fits only.
+    # Restricting to w > 0 avoids 0*NA = NA poisoning from zero-weight fits that
+    # happen to lack second moments (e.g. max_elbo's discarded members); NA still
+    # (correctly) propagates if a positively-weighted fit is missing moments.
+    pos <- w > 0
+    hg2_uncertainty <- if (any(pos)) sum(w[pos] * per_fit_unc[pos]) else NA_real_
+    hg2_expected_pve <- hg2_postmean + hg2_between_fit + hg2_uncertainty
+
     tibble::tibble(agg_method = am, hg2 = hg2,
-                   hg2_weighted_pve = hg2_weighted_pve, n_fits = K)
+                   hg2_weighted_pve = hg2_weighted_pve,
+                   hg2_postmean = hg2_postmean,
+                   hg2_uncertainty = hg2_uncertainty,
+                   hg2_between_fit = hg2_between_fit,
+                   hg2_expected_pve = hg2_expected_pve,
+                   n_fits = K)
   })
 
   dplyr::bind_rows(rows) %>%

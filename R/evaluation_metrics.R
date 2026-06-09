@@ -398,6 +398,17 @@ evaluate_model <- function(fit, X, y = NULL, causal_idx = integer(0),
 
   # -------- h_g^2 --------
   hg2 <- estimate_hg2(fit, y, X)
+  # Corrected local-genetic-variance decomposition (heritability.R). For a single
+  # fit there is no between-fit term, so hg2_expected_pve = postmean + uncertainty.
+  # Returns NA components when the fit lacks per-effect second moments (b_2_hat).
+  hg2_comp <- if (is.null(y)) {
+    list(postmean = NA_real_, uncertainty = NA_real_, expected_pve = NA_real_)
+  } else {
+    tryCatch(hg2_components(fit, X = X, y = y),
+             error = function(e) list(postmean = NA_real_,
+                                      uncertainty = NA_real_,
+                                      expected_pve = NA_real_))
+  }
 
   # Optional traces if present
   elbo <- tryCatch(fit$model_fit$elbo, error = function(e) NULL)
@@ -416,6 +427,9 @@ evaluate_model <- function(fit, X, y = NULL, causal_idx = integer(0),
       AUPRC          = auprc,
       cross_entropy  = xent,
       hg2            = hg2,
+      hg2_postmean     = hg2_comp$postmean,
+      hg2_uncertainty  = hg2_comp$uncertainty,
+      hg2_expected_pve = hg2_comp$expected_pve,
       stringsAsFactors = FALSE
     ),
     tibble::as_tibble(tpr_vals)
@@ -433,6 +447,9 @@ evaluate_model <- function(fit, X, y = NULL, causal_idx = integer(0),
       AUPRC          = auprc,     # classification metrics don't change with filtering
       cross_entropy  = xent,
       hg2            = hg2,
+      hg2_postmean     = hg2_comp$postmean,
+      hg2_uncertainty  = hg2_comp$uncertainty,
+      hg2_expected_pve = hg2_comp$expected_pve,
       stringsAsFactors = FALSE
     ),
     tibble::as_tibble(tpr_vals)

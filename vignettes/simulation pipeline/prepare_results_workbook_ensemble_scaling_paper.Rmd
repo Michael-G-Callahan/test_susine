@@ -133,6 +133,21 @@ if (!is.null(hg2_by_agg)) {
   hg2_by_agg <- test_susine:::normalize_agg_method_df(hg2_by_agg)
 }
 
+# Dataset metrics carry true_hg2_realized = var(X beta)/var(y) per dataset bundle
+# (present only for jobs run after the heritability-estimand patch). Used for the
+# realized-truth diagnostics on the heritability panel.
+dataset_metrics <- read_optional_csv("dataset_metrics.csv")
+true_hg2_realized_by_bundle <- if (
+  !is.null(dataset_metrics) && "true_hg2_realized" %in% names(dataset_metrics)
+) {
+  dataset_metrics %>%
+    dplyr::mutate(dataset_bundle_id = as.character(.data$dataset_bundle_id)) %>%
+    dplyr::distinct(.data$dataset_bundle_id, .data$true_hg2_realized) %>%
+    dplyr::filter(!is.na(.data$true_hg2_realized))
+} else {
+  NULL
+}
+
 scaling_bins_pooled <- read_optional_csv("scaling_bins_pooled.csv")
 if (!is.null(scaling_bins_pooled)) {
   scaling_bins_pooled <- scaling_bins_pooled %>%
@@ -830,7 +845,27 @@ pr_same_recall_points <- pick_same_recall_operating_points(
 ```
 
 ```{r hg2-data}
+# Heritability panel uses the corrected local-genetic-variance estimand
+# hg2_expected_pve = E[var(Xb)|y]/var(y) = postmean + within-fit + between-fit;
+# see refs/decisions/heritability_estimand_decision_2026-06-09.md. The legacy
+# point-estimate column `hg2` (var of the posterior-mean predictor) is retained
+# for reference but no longer plotted.
 hg2_plot_data <- tibble::tibble()
+hg2_decomp_data <- tibble::tibble()
+hg2_truth_diag <- tibble::tibble()
+
+# Component columns expected from the patched pipeline; fall back to the legacy
+# `hg2` (no correction) when absent so the workbook still renders on old jobs.
+hg2_has_corrected <- !is.null(hg2_by_agg) &&
+  all(c("hg2_postmean", "hg2_uncertainty", "hg2_between_fit",
+        "hg2_expected_pve") %in% names(hg2_by_agg))
+mm_has_corrected <- "hg2_expected_pve" %in% names(baseline_ref_model_metrics)
+
+if (!hg2_has_corrected) {
+  warning("hg2_by_agg lacks corrected columns; falling back to legacy `hg2`. ",
+          "Re-run the patched pipeline (hotfix minibatch) for the fair estimand.")
+}
+
 if (!is.null(hg2_by_agg) && nrow(hg2_by_agg) > 0L) {
   hg2_plot_source <- enrich_hg2_metadata(hg2_by_agg, model_metrics)
 
@@ -841,28 +876,41 @@ if (!is.null(hg2_by_agg) && nrow(hg2_by_agg) > 0L) {
       is_focus_annotation_row(.data$spec_name, .data$annotation_r2)
     )
 
-  # SuSiNE ensemble: cluster-weight (credible) BMA point estimate,
-  # var(weighted fitted-y) / var(y).
-  hg2_ensemble <- hg2_ccs %>%
-    dplyr::filter(.data$agg_method == "cluster_weight_credible") %>%
-    dplyr::transmute(
-      spec_name = as.character(.data$spec_name),
-      dataset_bundle_id = .data$dataset_bundle_id,
-      hg2 = .data$hg2,
-      series = "susine_ensemble"
-    )
+  # Pull the corrected estimand + its decomposition for one agg method.
+  pull_agg_hg2 <- function(tbl, method, series_name) {
+    rows <- dplyr::filter(tbl, .data$agg_method == method)
+    if (!nrow(rows)) return(tibble::tibble())
+    if (hg2_has_corrected) {
+      dplyr::transmute(
+        rows,
+        spec_name = as.character(.data$spec_name),
+        dataset_bundle_id = as.character(.data$dataset_bundle_id),
+        hg2_postmean = .data$hg2_postmean,
+        hg2_uncertainty = .data$hg2_uncertainty,
+        hg2_between_fit = .data$hg2_between_fit,
+        hg2_expected_pve = .data$hg2_expected_pve,
+        hg2_legacy = .data$hg2,
+        series = series_name
+      )
+    } else {
+      dplyr::transmute(
+        rows,
+        spec_name = as.character(.data$spec_name),
+        dataset_bundle_id = as.character(.data$dataset_bundle_id),
+        hg2_postmean = .data$hg2,
+        hg2_uncertainty = NA_real_,
+        hg2_between_fit = NA_real_,
+        hg2_expected_pve = .data$hg2,
+        hg2_legacy = .data$hg2,
+        series = series_name
+      )
+    }
+  }
 
-  # SuSiNE per-fit: PVE of the single best (max-ELBO) fit only. Using the best
-  # fit instead of the weighted mean over all fits avoids the many weaker grid
-  # fits dragging the per-fit estimand down toward the ensemble value.
-  hg2_perfit <- hg2_ccs %>%
-    dplyr::filter(.data$agg_method == "max_elbo") %>%
-    dplyr::transmute(
-      spec_name = as.character(.data$spec_name),
-      dataset_bundle_id = .data$dataset_bundle_id,
-      hg2 = .data$hg2,
-      series = "susine_perfit"
-    )
+  # SuSiNE ensemble: cluster-weight (credible) BMA.
+  hg2_ensemble <- pull_agg_hg2(hg2_ccs, "cluster_weight_credible", "susine_ensemble")
+  # SuSiNE per-fit: single best (max-ELBO) fit (no between-fit dispersion).
+  hg2_perfit <- pull_agg_hg2(hg2_ccs, "max_elbo", "susine_perfit")
 
   baseline_hg2 <- baseline_ref_model_metrics %>%
     dplyr::filter(
@@ -874,12 +922,58 @@ if (!is.null(hg2_by_agg) && nrow(hg2_by_agg) > 0L) {
     dplyr::distinct(dataset_bundle_id, run_id, .keep_all = TRUE) %>%
     dplyr::transmute(
       spec_name = "baseline",
-      dataset_bundle_id = .data$dataset_bundle_id,
-      hg2 = .data$hg2,
+      dataset_bundle_id = as.character(.data$dataset_bundle_id),
+      hg2_postmean = if (mm_has_corrected) .data$hg2_postmean else .data$hg2,
+      hg2_uncertainty = if (mm_has_corrected) .data$hg2_uncertainty else NA_real_,
+      hg2_between_fit = 0,  # single fit: no mixture dispersion
+      hg2_expected_pve = if (mm_has_corrected) .data$hg2_expected_pve else .data$hg2,
+      hg2_legacy = .data$hg2,
       series = "susie"
     )
 
   hg2_plot_data <- dplyr::bind_rows(baseline_hg2, hg2_perfit, hg2_ensemble)
+
+  # Merge dataset-specific realized truth where available.
+  if (!is.null(true_hg2_realized_by_bundle) && nrow(hg2_plot_data)) {
+    hg2_plot_data <- hg2_plot_data %>%
+      dplyr::left_join(true_hg2_realized_by_bundle, by = "dataset_bundle_id")
+  } else {
+    hg2_plot_data$true_hg2_realized <- NA_real_
+  }
+
+  # Decomposition exhibit: mean component magnitudes per series (stacked bar).
+  if (nrow(hg2_plot_data)) {
+    hg2_decomp_data <- hg2_plot_data %>%
+      dplyr::group_by(.data$series) %>%
+      dplyr::summarise(
+        postmean = mean(.data$hg2_postmean, na.rm = TRUE),
+        within_fit = mean(.data$hg2_uncertainty, na.rm = TRUE),
+        between_fit = mean(.data$hg2_between_fit, na.rm = TRUE),
+        expected_pve = mean(.data$hg2_expected_pve, na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      tidyr::pivot_longer(
+        cols = c("postmean", "within_fit", "between_fit"),
+        names_to = "component", values_to = "value"
+      )
+  }
+
+  # Realized-truth diagnostics + truth-centered error (only when truth present).
+  if (any(!is.na(hg2_plot_data$true_hg2_realized))) {
+    hg2_truth_diag <- hg2_plot_data %>%
+      dplyr::filter(!is.na(.data$true_hg2_realized)) %>%
+      dplyr::group_by(.data$series) %>%
+      dplyr::summarise(
+        n = dplyr::n(),
+        mean_expected_pve = mean(.data$hg2_expected_pve, na.rm = TRUE),
+        mean_true_realized = mean(.data$true_hg2_realized, na.rm = TRUE),
+        sd_true_realized = stats::sd(.data$true_hg2_realized, na.rm = TRUE),
+        min_true_realized = min(.data$true_hg2_realized, na.rm = TRUE),
+        max_true_realized = max(.data$true_hg2_realized, na.rm = TRUE),
+        mean_error = mean(.data$hg2_expected_pve - .data$true_hg2_realized, na.rm = TRUE),
+        .groups = "drop"
+      )
+  }
 }
 ```
 
@@ -1108,6 +1202,8 @@ paper_plot_data <- list(
     boot_plot_data = boot_plot_data,
     pr_curve_counts = pr_curve_counts,
     hg2_plot_data = hg2_plot_data,
+    hg2_decomp_data = hg2_decomp_data,
+    hg2_truth_diag = hg2_truth_diag,
     pip_cal_data = pip_cal_data,
     ccs_resolution_plot_data = ccs_resolution_plot_data,
     compute_plot_data = compute_plot_data

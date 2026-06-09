@@ -674,7 +674,7 @@ if (nrow(hg2_plot_data) > 0L) {
 
   p_hg2 <- ggplot2::ggplot(
     hg2_plot_data,
-    ggplot2::aes(x = .data$method_label, y = .data$hg2, fill = .data$series)
+    ggplot2::aes(x = .data$method_label, y = .data$hg2_expected_pve, fill = .data$series)
   ) +
     ggplot2::geom_boxplot(outlier.size = 1.3, linewidth = 0.75) +
     ggplot2::geom_hline(
@@ -697,7 +697,7 @@ if (nrow(hg2_plot_data) > 0L) {
     ) +
     ggplot2::labs(
       x = "Method",
-      y = expression("Estimated " * h[g]^2),
+      y = expression("Local genetic variance  E[var(Xb)|y] / var(y)"),
       title = "Estimated heritability"
     ) +
     paper_theme() +
@@ -718,6 +718,120 @@ if (nrow(hg2_plot_data) > 0L) {
   invisible(NULL)
 } else {
   message("Skipping hg2 plot: no rows after filtering.")
+}
+```
+
+## 7a. Heritability estimand decomposition
+
+Stacked composition of the corrected estimand
+`E[var(Xb)|y]/var(y) = postmean + within-fit + between-fit`. The legacy panel
+plotted only the `postmean` slice; the SuSiNE ensemble's variance lives
+disproportionately in the uncertainty (within/between) slices.
+
+```{r fig-hg2-decomp, fig.width=4.8, fig.height=4.2}
+if (exists("hg2_decomp_data") && nrow(hg2_decomp_data) > 0L) {
+  series_levels <- c("susie", "susine_perfit", "susine_ensemble")
+  series_labels <- c(susie = "SuSiE",
+                     susine_perfit = "SuSiNE\n(max-ELBO fit)",
+                     susine_ensemble = "SuSiNE\n(ensemble)")
+  comp_levels <- c("postmean", "within_fit", "between_fit")
+  comp_labels <- c(postmean = "posterior mean",
+                   within_fit = "within-fit uncertainty",
+                   between_fit = "between-fit dispersion")
+
+  decomp_df <- hg2_decomp_data %>%
+    dplyr::filter(.data$series %in% series_levels) %>%
+    dplyr::mutate(
+      method_label = factor(unname(series_labels[as.character(.data$series)]),
+                            levels = unname(series_labels[series_levels])),
+      component = factor(unname(comp_labels[as.character(.data$component)]),
+                         levels = unname(comp_labels[comp_levels]))
+    )
+
+  p_hg2_decomp <- ggplot2::ggplot(
+    decomp_df,
+    ggplot2::aes(x = .data$method_label, y = .data$value, fill = .data$component)
+  ) +
+    ggplot2::geom_col(width = 0.7) +
+    ggplot2::geom_hline(yintercept = true_h2, linetype = "dashed",
+                        color = "grey25", linewidth = 0.9) +
+    ggplot2::scale_fill_manual(
+      values = stats::setNames(
+        c("#3B6B9A", "#9BBAD7", "#D9E3EE"), unname(comp_labels[comp_levels])
+      )
+    ) +
+    ggplot2::labs(
+      x = "Method",
+      y = expression("E[var(Xb)|y] / var(y)"),
+      fill = NULL,
+      title = "Heritability estimand decomposition"
+    ) +
+    paper_theme() +
+    ggplot2::theme(legend.position = "bottom")
+
+  save_paper_png(
+    p_hg2_decomp,
+    paste0("paper_hg2_decomposition_r2_", format_r2_tag(annotation_r2_focus), ".png"),
+    width = 4.8, height = 4.6
+  )
+  print(p_hg2_decomp)
+} else {
+  message("Skipping hg2 decomposition: no decomposition data ",
+          "(legacy job without corrected columns).")
+}
+```
+
+## 7b. Realized-truth diagnostics
+
+The main panel keeps the fixed design-target line (`true h2 = 0.25`). For exact
+apples-to-apples validation we compare against the dataset-specific realized
+truth `var(Xb)/var(y)` (column `true_hg2_realized`, present only for jobs run
+after the heritability patch).
+
+```{r hg2-truth-diagnostics}
+if (exists("hg2_truth_diag") && nrow(hg2_truth_diag) > 0L) {
+  knitr::kable(hg2_truth_diag, digits = 4,
+               caption = "Realized true local genetic variance vs estimates")
+
+  # Truth-centered error supplement: estimate - realized truth per dataset.
+  if (exists("hg2_plot_data") &&
+      "true_hg2_realized" %in% names(hg2_plot_data) &&
+      any(!is.na(hg2_plot_data$true_hg2_realized))) {
+    series_levels <- c("susie", "susine_perfit", "susine_ensemble")
+    series_labels <- c(susie = "SuSiE",
+                       susine_perfit = "SuSiNE\n(max-ELBO fit)",
+                       susine_ensemble = "SuSiNE\n(ensemble)")
+    err_df <- hg2_plot_data %>%
+      dplyr::filter(.data$series %in% series_levels,
+                    !is.na(.data$true_hg2_realized)) %>%
+      dplyr::mutate(
+        err = .data$hg2_expected_pve - .data$true_hg2_realized,
+        method_label = factor(unname(series_labels[as.character(.data$series)]),
+                              levels = unname(series_labels[series_levels]))
+      )
+    p_hg2_err <- ggplot2::ggplot(
+      err_df, ggplot2::aes(x = .data$method_label, y = .data$err, fill = .data$series)
+    ) +
+      ggplot2::geom_boxplot(outlier.size = 1.0, linewidth = 0.6) +
+      ggplot2::geom_hline(yintercept = 0, linetype = "dashed", color = "grey25") +
+      ggplot2::scale_fill_manual(
+        values = c(susie = paper_orange, susine_perfit = "#9BBAD7",
+                   susine_ensemble = paper_blue), guide = "none") +
+      ggplot2::labs(
+        x = "Method",
+        y = expression(hat(h)[g]^2 - "realized var(Xb)/var(y)"),
+        title = "Truth-centered heritability error") +
+      paper_theme()
+    save_paper_png(
+      p_hg2_err,
+      paste0("paper_hg2_truth_error_r2_", format_r2_tag(annotation_r2_focus), ".png"),
+      width = 4.8, height = 4.2
+    )
+    print(p_hg2_err)
+  }
+} else {
+  message("Realized-truth diagnostics unavailable ",
+          "(no true_hg2_realized; pre-patch job).")
 }
 ```
 
@@ -1328,9 +1442,9 @@ if (exists("hg2_plot_data") && nrow(hg2_plot_data) > 0L) {
         TRUE ~ NA_character_
       )
     ) %>%
-    dplyr::filter(!is.na(.data$method), is.finite(.data$hg2)) %>%
+    dplyr::filter(!is.na(.data$method), is.finite(.data$hg2_expected_pve)) %>%
     dplyr::group_by(.data$dataset_bundle_id, .data$method) %>%
-    dplyr::summarise(mean_hg2 = mean(.data$hg2, na.rm = TRUE), .groups = "drop") %>%
+    dplyr::summarise(mean_hg2 = mean(.data$hg2_expected_pve, na.rm = TRUE), .groups = "drop") %>%
     tidyr::pivot_wider(names_from = method, values_from = mean_hg2)
 
   for (nm in c("baseline_susie", "susine_ccs")) {
