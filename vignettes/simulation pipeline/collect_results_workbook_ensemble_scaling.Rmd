@@ -307,12 +307,16 @@ model_metrics <- model_metrics %>%
   dplyr::left_join(run_info, by = "run_id")
 model_metrics <- test_susine:::normalize_agg_method_df(model_metrics)
 
-tier_cs_metrics <- tier_cs_metrics %>%
-  dplyr::left_join(
-    run_info %>% dplyr::select(run_id, dataset_bundle_id, spec_name,
-                                use_case_id, group_key, annotation_r2),
-    by = "run_id"
-  )
+# Guard: jobs run with write_tier_cs_metrics = FALSE (e.g. the hg2 hotfix)
+# produce no tier-CS flush files, so tier_cs_metrics is empty / lacks run_id.
+if (nrow(tier_cs_metrics) > 0L && "run_id" %in% names(tier_cs_metrics)) {
+  tier_cs_metrics <- tier_cs_metrics %>%
+    dplyr::left_join(
+      run_info %>% dplyr::select(run_id, dataset_bundle_id, spec_name,
+                                  use_case_id, group_key, annotation_r2),
+      by = "run_id"
+    )
+}
 
 cat("Model metrics with metadata:", nrow(model_metrics), "rows\n")
 cat("Tier CS metrics with metadata:", nrow(tier_cs_metrics), "rows\n")
@@ -447,13 +451,21 @@ if (nrow(snp_agg_backfill_summary) > 0L) {
   cat("No SNP-based aggregation backfill needed.\n")
 }
 
-scaling_refine_backfill <- test_susine:::backfill_pure_refine_scaling_bins(
-  scaling_bins_raw = scaling_bins_raw,
-  confusion_agg = confusion_agg,
-  model_metrics = model_metrics,
-  run_info = run_info,
-  scaling_n_ens_sizes = cfg$job$compute$scaling_n_ens_sizes %||% c(4L, 8L, 16L, 32L, 64L)
-)
+# Guard: jobs run with write_scaling_confusion_bins = FALSE (e.g. the hg2 hotfix)
+# produce no scaling-bin flush files, so scaling_bins_raw is an empty tibble.
+scaling_refine_backfill <- if (nrow(scaling_bins_raw) > 0L) {
+  test_susine:::backfill_pure_refine_scaling_bins(
+    scaling_bins_raw = scaling_bins_raw,
+    confusion_agg = confusion_agg,
+    model_metrics = model_metrics,
+    run_info = run_info,
+    scaling_n_ens_sizes = cfg$job$compute$scaling_n_ens_sizes %||% c(4L, 8L, 16L, 32L, 64L)
+  )
+} else {
+  list(scaling_bins_raw = scaling_bins_raw,
+       repaired_groups = tibble::tibble(),
+       repair_summary = tibble::tibble())
+}
 scaling_bins_raw <- scaling_refine_backfill$scaling_bins_raw
 pure_refine_scaling_backfill_groups <- scaling_refine_backfill$repaired_groups
 pure_refine_scaling_backfill_summary <- scaling_refine_backfill$repair_summary
