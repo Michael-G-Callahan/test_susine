@@ -59,8 +59,8 @@ consolidated_dir <- file.path(job_dir, "consolidated")
 # panel reads the main job above. Set these to the hg2 hotfix job to splice the
 # corrected Panel E into the full composite; leave equal to the main job to
 # disable.
-hg2_source_job_name <- job_name        # e.g. "ensemble_scaling_hg2_hotfix"
-hg2_source_job_id   <- parent_job_id   # e.g. the hotfix SLURM job id
+hg2_source_job_name <- "ensemble_scaling_hg2_hotfix"
+hg2_source_job_id   <- "53580710"
 hg2_source_consolidated_dir <- file.path(
   output_root, "slurm_output", hg2_source_job_name, hg2_source_job_id, "consolidated"
 )
