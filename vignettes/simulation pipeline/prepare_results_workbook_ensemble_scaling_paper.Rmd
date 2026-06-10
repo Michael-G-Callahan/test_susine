@@ -1086,18 +1086,25 @@ compute_ccs_resolution_oracle <- function(confusion_bins, focus = annotation_r2_
 
 scaling_metrics <- compute_scaling_metrics(scaling_bins_pooled)
 
-ccs_resolution_cluster <- scaling_metrics %>%
-  dplyr::filter(
-    .data$spec_name == "C-CS",
-    near_focus(.data$annotation_r2, annotation_r2_focus),
-    .data$agg_method == "cluster_weight_credible",
-    .data$resolution %in% c("4x4", "8x8")
-  ) %>%
-  dplyr::transmute(
-    resolution = .data$resolution,
-    method = "cluster weight",
-    AUPRC = .data$AUPRC_mean
-  )
+# Guard: jobs without scaling-bin data (e.g. the hg2 hotfix) yield an empty
+# scaling_metrics with no spec_name column -> skip the resolution analysis.
+ccs_resolution_cluster <- if (nrow(scaling_metrics) > 0L &&
+                              "spec_name" %in% names(scaling_metrics)) {
+  scaling_metrics %>%
+    dplyr::filter(
+      .data$spec_name == "C-CS",
+      near_focus(.data$annotation_r2, annotation_r2_focus),
+      .data$agg_method == "cluster_weight_credible",
+      .data$resolution %in% c("4x4", "8x8")
+    ) %>%
+    dplyr::transmute(
+      resolution = .data$resolution,
+      method = "cluster weight",
+      AUPRC = .data$AUPRC_mean
+    )
+} else {
+  tibble::tibble(resolution = character(), method = character(), AUPRC = numeric())
+}
 
 ccs_resolution_oracle <- compute_ccs_resolution_oracle(confusion_bins)
 ccs_resolution_plot_data <- dplyr::bind_rows(
