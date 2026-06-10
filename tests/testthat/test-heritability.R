@@ -9,44 +9,53 @@ make_fake_fit <- function(alpha, mu, mu2) {
   ))
 }
 
-test_that("hg2_components: additive, postmean == var(fitted_y)/var(y)", {
+test_that("hg2_components: standardizes X (susine scale), not the raw design", {
   set.seed(1)
   n <- 200; p <- 8; L <- 3
+  # Raw design with very different per-column means/scales so raw vs
+  # standardized give materially different quadratic forms (regression guard
+  # for the X-scaling bug: susine fits coefficients on the standardized scale).
   X <- matrix(rnorm(n * p), n, p)
-  alpha <- matrix(0, L, p)
-  for (l in 1:L) {
-    w <- runif(p); w[sample(p, p - 3)] <- 0; alpha[l, ] <- w / sum(w)
-  }
-  mu <- matrix(rnorm(L * p, 0, 0.5), L, p)
-  mu2 <- mu^2 + 0.3
-  fit <- make_fake_fit(alpha, mu, mu2)
-  y <- as.numeric(X %*% colSums(fit$effect_fits$b_hat)) + rnorm(n)
-
-  ci <- hg2_components(fit, X = X, y = y)
-  expect_true(is.finite(ci$expected_pve))
-  expect_equal(ci$postmean + ci$uncertainty, ci$expected_pve, tolerance = 1e-10)
-  expect_gte(ci$uncertainty, 0)
-  fy <- as.numeric(X %*% colSums(fit$effect_fits$b_hat))
-  expect_equal(ci$postmean, stats::var(fy) / stats::var(y), tolerance = 1e-10)
-})
-
-test_that("hg2_components: RSS(R) path matches standardized individual path", {
-  set.seed(2)
-  n <- 200; p <- 8; L <- 3
-  X <- matrix(rnorm(n * p), n, p)
+  X <- sweep(X, 2L, runif(p, 0.5, 5), "*")
+  X <- sweep(X, 2L, rnorm(p, 0, 3), "+")
   alpha <- matrix(0, L, p)
   for (l in 1:L) {
     w <- runif(p); w[sample(p, p - 3)] <- 0; alpha[l, ] <- w / sum(w)
   }
   mu <- matrix(rnorm(L * p, 0, 0.5), L, p)
   fit <- make_fake_fit(alpha, mu, mu^2 + 0.3)
-  y <- as.numeric(X %*% colSums(fit$effect_fits$b_hat)) + rnorm(n)
+  m <- colSums(fit$effect_fits$b_hat)
+  y <- as.numeric(scale(X) %*% m) + rnorm(n)
 
-  Xs <- scale(X)
-  R <- crossprod(Xs) / (n - 1)
+  ci <- hg2_components(fit, X = X, y = y)
+  expect_true(is.finite(ci$expected_pve))
+  expect_equal(ci$postmean + ci$uncertainty, ci$expected_pve, tolerance = 1e-10)
+  expect_gte(ci$uncertainty, 0)
+  # postmean must use the STANDARDIZED design (matches var(fitted_y)) ...
+  fy_std <- as.numeric(scale(X) %*% m)
+  expect_equal(ci$postmean, stats::var(fy_std) / stats::var(y), tolerance = 1e-9)
+  # ... and must NOT equal the (wrong) raw-design quadratic form.
+  fy_raw <- as.numeric(X %*% m)
+  expect_false(isTRUE(all.equal(ci$postmean, stats::var(fy_raw) / stats::var(y))))
+})
+
+test_that("hg2_components: RSS(R) path matches the standardized individual path", {
+  set.seed(2)
+  n <- 200; p <- 8; L <- 3
+  X <- matrix(rnorm(n * p), n, p)
+  X <- sweep(X, 2L, runif(p, 0.5, 3), "*")
+  alpha <- matrix(0, L, p)
+  for (l in 1:L) {
+    w <- runif(p); w[sample(p, p - 3)] <- 0; alpha[l, ] <- w / sum(w)
+  }
+  mu <- matrix(rnorm(L * p, 0, 0.5), L, p)
+  fit <- make_fake_fit(alpha, mu, mu^2 + 0.3)
+  y <- as.numeric(scale(X) %*% colSums(fit$effect_fits$b_hat)) + rnorm(n)
+
+  R <- crossprod(scale(X)) / (n - 1)   # standardized Gram == helper's convention
   vy <- stats::var(y)
   rss <- hg2_components(fit, R = R, vy = vy)
-  ind <- hg2_components(fit, X = Xs, y = y, vy = vy)
+  ind <- hg2_components(fit, X = X, y = y, vy = vy)  # raw X; helper standardizes
   expect_equal(rss$postmean, ind$postmean, tolerance = 1e-8)
   expect_equal(rss$uncertainty, ind$uncertainty, tolerance = 1e-8)
 })

@@ -699,7 +699,7 @@ if (nrow(hg2_plot_data) > 0L) {
     ) +
     ggplot2::labs(
       x = "Method",
-      y = expression("Local genetic variance  E[var(Xb)|y] / var(y)"),
+      y = expression("Local genetic variance " * h[g]^2),
       title = "Estimated heritability"
     ) +
     paper_theme() +
@@ -1205,10 +1205,10 @@ if (length(missing_composite) == 0L) {
 # 11b. Ensemble Multimodality
 
 Per-ensemble (per-locus) 5-number summaries of how multimodal each ensemble is:
-cluster counts under the two locked-in cluster-weight metrics, top-10 Jaccard
-overlap, and the largest pairwise distance between any two fits. Read directly
-from `consolidated/multimodal_metrics.csv`; falls back to whatever columns the
-run produced (credible/max columns require a run with the extended
+number of clusters (credible-shift metric), top-10 Jaccard overlap, and the
+largest pairwise distance between any two fits. Read directly from
+`consolidated/multimodal_metrics.csv`; falls back to whatever columns the run
+produced (the credible columns require a run with the extended
 `compute_multimodal_metrics`).
 
 ```{r fig-multimodality, fig.width=12.8, fig.height=10.8}
@@ -1233,11 +1233,9 @@ if (file.exists(mm_path)) {
   # back to the JSD-based columns.
   have_new <- all(c("n_clusters_credible", "n_clusters_max") %in% names(mm))
   metric_labels <- if (have_new) c(
-    n_clusters_credible = "Clusters\n(credible 0.05)",
-    n_clusters_max      = "Clusters\n(max-shift 0.10)",
-    jaccard_top10       = "Top-10 Jaccard",
-    max_credible_dist   = "Max credible\ndistance",
-    max_maxshift_dist   = "Max PIP L-inf\ndistance"
+    n_clusters_credible = "Number of\nclusters",
+    jaccard_top10       = "Top-10 Jaccard\noverlap",
+    max_credible_dist   = "Max pairwise\ndistance"
   ) else c(
     n_clusters          = "Clusters\n(JSD 0.15)",
     n_clusters_jsd_050  = "Clusters\n(JSD 0.50)",

@@ -106,7 +106,23 @@ hg2_components <- function(fit, X = NULL, y = NULL, R = NULL, vy = NULL) {
   }
 
   if (!is.null(X)) {
+    # susine fits coefficients (b_hat) on the COLUMN-STANDARDIZED scale: it
+    # standardizes X internally (center = colMeans, scale = colSds) and
+    #   fitted_y = compute_Xb(X, b) = ((X - center) / scale) %*% b.
+    # So the quadratic forms must use the standardized design; a naive X %*% b on
+    # the raw genotype matrix is wrong by the per-column scaling. Prefer explicit
+    # scaling attributes if present, else standardize to unit (n-1) variance to
+    # match susine (idempotent if X is already standardized).
+    ctr <- attr(X, "scaled:center")
+    scl <- attr(X, "scaled:scale")
     Xm <- as.matrix(X)
+    if (is.null(ctr) || is.null(scl) ||
+        length(ctr) != ncol(Xm) || length(scl) != ncol(Xm)) {
+      ctr <- colMeans(Xm)
+      scl <- apply(Xm, 2L, stats::sd)
+    }
+    scl[!is.finite(scl) | scl == 0] <- 1
+    Xm <- sweep(sweep(Xm, 2L, ctr, "-"), 2L, scl, "/")
     if (is.null(vy)) {
       vy <- stats::var(as.numeric(y))
     }
