@@ -53,6 +53,18 @@ output_root <- here("output")
 job_dir <- file.path(output_root, "slurm_output", job_name, parent_job_id)
 consolidated_dir <- file.path(job_dir, "consolidated")
 
+# Heritability-input source override: pull ONLY the hg2 panel's inputs
+# (hg2_by_agg, the baseline model_metrics hg2 columns, dataset_metrics/
+# true_hg2_realized) from a different job's consolidated dir, while every other
+# panel reads the main job above. Set these to the hg2 hotfix job to splice the
+# corrected Panel E into the full composite; leave equal to the main job to
+# disable.
+hg2_source_job_name <- job_name        # e.g. "ensemble_scaling_hg2_hotfix"
+hg2_source_job_id   <- parent_job_id   # e.g. the hotfix SLURM job id
+hg2_source_consolidated_dir <- file.path(
+  output_root, "slurm_output", hg2_source_job_name, hg2_source_job_id, "consolidated"
+)
+
 annotation_r2_focus <- 0.3
 drop_aggs <- character(0)
 bootstrap_B <- 2000L
@@ -128,15 +140,40 @@ baseline_ref_model_metrics <- model_metrics %>%
     is.na(.data$agg_method)
   )
 
-hg2_by_agg <- read_optional_csv("hg2_by_agg.csv")
+# hg2 panel inputs come from hg2_source_consolidated_dir (= main job unless
+# overridden to the hotfix). Everything above reads the main job.
+read_hg2_source_csv <- function(filename) {
+  path <- file.path(hg2_source_consolidated_dir, filename)
+  if (!file.exists(path)) {
+    message("hg2-source CSV missing: ", filename, " (", hg2_source_consolidated_dir, ")")
+    return(NULL)
+  }
+  readr::read_csv(path, show_col_types = FALSE)
+}
+
+hg2_by_agg <- read_hg2_source_csv("hg2_by_agg.csv")
 if (!is.null(hg2_by_agg)) {
   hg2_by_agg <- test_susine:::normalize_agg_method_df(hg2_by_agg)
+}
+
+# Baseline (SuSiE box) for the hg2 panel: the hg2 source's own cold
+# susine_vanilla single fits, so the corrected hg2 columns come from the same
+# (patched) job as the ensemble rows. Falls back to the main-job baseline when
+# the source has no separate model_metrics.
+hg2_baseline_ref <- read_hg2_source_csv("model_metrics_full.csv")
+if (!is.null(hg2_baseline_ref)) {
+  hg2_baseline_ref <- test_susine:::normalize_agg_method_df(hg2_baseline_ref) %>%
+    dplyr::filter(.data$spec_name == "baseline-single",
+                  .data$use_case_id == "susine_vanilla",
+                  is.na(.data$agg_method))
+} else {
+  hg2_baseline_ref <- baseline_ref_model_metrics
 }
 
 # Dataset metrics carry true_hg2_realized = var(X beta)/var(y) per dataset bundle
 # (present only for jobs run after the heritability-estimand patch). Used for the
 # realized-truth diagnostics on the heritability panel.
-dataset_metrics <- read_optional_csv("dataset_metrics.csv")
+dataset_metrics <- read_hg2_source_csv("dataset_metrics.csv")
 true_hg2_realized_by_bundle <- if (
   !is.null(dataset_metrics) && "true_hg2_realized" %in% names(dataset_metrics)
 ) {
@@ -859,7 +896,7 @@ hg2_truth_diag <- tibble::tibble()
 hg2_has_corrected <- !is.null(hg2_by_agg) &&
   all(c("hg2_postmean", "hg2_uncertainty", "hg2_between_fit",
         "hg2_expected_pve") %in% names(hg2_by_agg))
-mm_has_corrected <- "hg2_expected_pve" %in% names(baseline_ref_model_metrics)
+mm_has_corrected <- "hg2_expected_pve" %in% names(hg2_baseline_ref)
 
 if (!hg2_has_corrected) {
   warning("hg2_by_agg lacks corrected columns; falling back to legacy `hg2`. ",
@@ -912,7 +949,7 @@ if (!is.null(hg2_by_agg) && nrow(hg2_by_agg) > 0L) {
   # SuSiNE per-fit: single best (max-ELBO) fit (no between-fit dispersion).
   hg2_perfit <- pull_agg_hg2(hg2_ccs, "max_elbo", "susine_perfit")
 
-  baseline_hg2 <- baseline_ref_model_metrics %>%
+  baseline_hg2 <- hg2_baseline_ref %>%
     dplyr::filter(
       .data$spec_name == "baseline-single",
       .data$use_case_id == "susine_vanilla",

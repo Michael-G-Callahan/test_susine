@@ -351,7 +351,11 @@ knitr::kable(
 
 ```{r fig-delta-heatmap, fig.width=11, fig.height=8}
 if (nrow(heatmap_data) > 0L && is.finite(baseline_auprc)) {
+  # Heatmap shows only the credible cluster-weight aggregation (drop the max
+  # variant). Local order so the global agg_order (other panels) is untouched.
+  heatmap_agg_order <- setdiff(agg_order, "cluster_weight_max")
   heatmap_plot_data <- heatmap_data %>%
+    dplyr::filter(.data$agg_method != "cluster_weight_max") %>%
     dplyr::mutate(
       tile_label = dplyr::if_else(
         is.finite(.data$delta_pct),
@@ -360,12 +364,12 @@ if (nrow(heatmap_data) > 0L && is.finite(baseline_auprc)) {
       ),
       tile_text_color = heatmap_text_color(.data$delta_auprc),
       spec_name = factor(.data$spec_name, levels = rev(spec_order)),
-      agg_method = factor(.data$agg_method, levels = agg_order)
+      agg_method = factor(.data$agg_method, levels = heatmap_agg_order)
     )
   heatmap_highlight_data <- heatmap_plot_data %>%
     dplyr::filter(
       as.character(.data$spec_name) == "C-CS",
-      as.character(.data$agg_method) %in% c("cluster_weight_credible", "cluster_weight_max")
+      as.character(.data$agg_method) == "cluster_weight_credible"
     )
 
   y_levels <- levels(heatmap_plot_data$spec_name)
@@ -375,7 +379,7 @@ if (nrow(heatmap_data) > 0L && is.finite(baseline_auprc)) {
   } else {
     numeric(0L)
   }
-  oracle_x <- match("oracle", agg_order) - 0.5
+  oracle_x <- match("oracle", heatmap_agg_order) - 0.5
 
   p_heatmap <- ggplot2::ggplot(
     heatmap_plot_data,
@@ -658,9 +662,8 @@ if (nrow(pr_plot_data) > 0L) {
 
 ```{r fig-hg2, fig.width=4.8, fig.height=4.8}
 if (nrow(hg2_plot_data) > 0L) {
-  series_levels <- c("susie", "susine_perfit", "susine_ensemble")
+  series_levels <- c("susie", "susine_ensemble")
   series_labels <- c(susie = "SuSiE",
-                     susine_perfit = "SuSiNE\n(max-ELBO fit)",
                      susine_ensemble = "SuSiNE\n(ensemble)")
   hg2_plot_data <- hg2_plot_data %>%
     dplyr::filter(.data$series %in% series_levels) %>%
@@ -691,8 +694,7 @@ if (nrow(hg2_plot_data) > 0L) {
       hjust = 1.2
     ) +
     ggplot2::scale_fill_manual(
-      values = c(susie = paper_orange, susine_perfit = "#9BBAD7",
-                 susine_ensemble = paper_blue),
+      values = c(susie = paper_orange, susine_ensemble = paper_blue),
       guide = "none"
     ) +
     ggplot2::labs(
@@ -730,9 +732,8 @@ disproportionately in the uncertainty (within/between) slices.
 
 ```{r fig-hg2-decomp, fig.width=4.8, fig.height=4.2}
 if (exists("hg2_decomp_data") && nrow(hg2_decomp_data) > 0L) {
-  series_levels <- c("susie", "susine_perfit", "susine_ensemble")
+  series_levels <- c("susie", "susine_ensemble")
   series_labels <- c(susie = "SuSiE",
-                     susine_perfit = "SuSiNE\n(max-ELBO fit)",
                      susine_ensemble = "SuSiNE\n(ensemble)")
   comp_levels <- c("postmean", "within_fit", "between_fit")
   comp_labels <- c(postmean = "posterior mean",
@@ -797,9 +798,8 @@ if (exists("hg2_truth_diag") && nrow(hg2_truth_diag) > 0L) {
   if (exists("hg2_plot_data") &&
       "true_hg2_realized" %in% names(hg2_plot_data) &&
       any(!is.na(hg2_plot_data$true_hg2_realized))) {
-    series_levels <- c("susie", "susine_perfit", "susine_ensemble")
+    series_levels <- c("susie", "susine_ensemble")
     series_labels <- c(susie = "SuSiE",
-                       susine_perfit = "SuSiNE\n(max-ELBO fit)",
                        susine_ensemble = "SuSiNE\n(ensemble)")
     err_df <- hg2_plot_data %>%
       dplyr::filter(.data$series %in% series_levels,
@@ -815,8 +815,8 @@ if (exists("hg2_truth_diag") && nrow(hg2_truth_diag) > 0L) {
       ggplot2::geom_boxplot(outlier.size = 1.0, linewidth = 0.6) +
       ggplot2::geom_hline(yintercept = 0, linetype = "dashed", color = "grey25") +
       ggplot2::scale_fill_manual(
-        values = c(susie = paper_orange, susine_perfit = "#9BBAD7",
-                   susine_ensemble = paper_blue), guide = "none") +
+        values = c(susie = paper_orange, susine_ensemble = paper_blue),
+        guide = "none") +
       ggplot2::labs(
         x = "Method",
         y = expression(hat(h)[g]^2 - "realized var(Xb)/var(y)"),
