@@ -689,7 +689,7 @@ if (nrow(hg2_plot_data) > 0L) {
     reference_label_layer(
       tail(levels(hg2_plot_data$method_label), 1L),
       true_h2,
-      sprintf("true h2 = %.2f", true_h2),
+      sprintf("target h2 = %.2f", true_h2),
       size = 6.4,
       hjust = 1.2
     ) +
@@ -784,7 +784,7 @@ if (exists("hg2_decomp_data") && nrow(hg2_decomp_data) > 0L) {
 
 ## 7b. Realized-truth diagnostics
 
-The main panel keeps the fixed design-target line (`true h2 = 0.25`). For exact
+The main panel keeps the fixed design-target line (`target h2 = 0.25`). For exact
 apples-to-apples validation we compare against the dataset-specific realized
 truth `var(Xb)/var(y)` (column `true_hg2_realized`, present only for jobs run
 after the heritability patch).
@@ -1205,13 +1205,13 @@ if (length(missing_composite) == 0L) {
 # 11b. Ensemble Multimodality
 
 Per-ensemble (per-locus) 5-number summaries of how multimodal each ensemble is:
-number of clusters (credible-shift metric), top-10 Jaccard overlap, and the
-largest pairwise distance between any two fits. Read directly from
+number of clusters (credible-shift metric) and the largest pairwise distance
+between any two fits. Read directly from
 `consolidated/multimodal_metrics.csv`; falls back to whatever columns the run
 produced (the credible columns require a run with the extended
 `compute_multimodal_metrics`).
 
-```{r fig-multimodality, fig.width=12.8, fig.height=10.8}
+```{r fig-multimodality, fig.width=12.8, fig.height=6.8}
 consolidated_dir <- file.path(job_dir, "consolidated")
 mm_path <- file.path(consolidated_dir, "multimodal_metrics.csv")
 mm_spec_path <- file.path(consolidated_dir, "model_metrics_full.csv")
@@ -1234,12 +1234,10 @@ if (file.exists(mm_path)) {
   have_new <- all(c("n_clusters_credible", "n_clusters_max") %in% names(mm))
   metric_labels <- if (have_new) c(
     n_clusters_credible = "Number of\nclusters",
-    jaccard_top10       = "Top-10 Jaccard\noverlap",
     max_credible_dist   = "Max pairwise\ndistance"
   ) else c(
     n_clusters          = "Clusters\n(JSD 0.15)",
     n_clusters_jsd_050  = "Clusters\n(JSD 0.50)",
-    jaccard_top10       = "Top-10 Jaccard",
     max_jsd             = "Max JSD\ndistance",
     mean_pip_var        = "Mean PIP\nvariance"
   )
@@ -1297,7 +1295,7 @@ if (file.exists(mm_path)) {
 
     # Metric rows and method-family columns keep the distributions readable while
     # preserving the compact A/B/C ensemble comparison.
-    p_mm <- ggplot2::ggplot(
+    p_mm <- tag_panel(ggplot2::ggplot(
         mm_long,
         ggplot2::aes(
           x = .data$variant,
@@ -1338,50 +1336,50 @@ if (file.exists(mm_path)) {
       ggplot2::labs(
         x = "Ensemble variant",
         y = NULL,
+        tag = "G",
         title = "Ensemble multimodality by method variant",
-        subtitle = paste(
-          "Distributions are over loci.",
-          "Lower values indicate less multimodality except for top-10 Jaccard."
-        ),
+        subtitle = "Distributions are over loci; lower values indicate less multimodality.",
         caption = paste(
           "R = restarts; F = refinement; S = prior-variance grid;",
           "C = annotation-scale grid. White points mark medians."
         )
       ) +
-      paper_theme(base_size = 13) +
+      paper_theme(base_size = 11) +
       ggplot2::theme(
-        plot.title = ggplot2::element_text(size = 24, hjust = 0.5),
+        plot.tag = ggplot2::element_text(size = 18, face = "bold"),
+        plot.tag.position = c(0.01, 0.99),
+        plot.title = ggplot2::element_text(size = 14, hjust = 0.5),
         plot.subtitle = ggplot2::element_text(
-          size = 12,
+          size = 10,
           hjust = 0.5,
-          margin = ggplot2::margin(t = 2, b = 8)
+          margin = ggplot2::margin(t = 2, b = 6)
         ),
         plot.caption = ggplot2::element_text(
-          size = 9,
+          size = 8,
           hjust = 0,
-          margin = ggplot2::margin(t = 8)
+          margin = ggplot2::margin(t = 6)
         ),
-        axis.title.x = ggplot2::element_text(size = 13, margin = ggplot2::margin(t = 8)),
-        axis.text.x = ggplot2::element_text(size = 9.5, color = "grey15"),
-        axis.text.y = ggplot2::element_text(size = 10.5, color = "grey15"),
+        axis.title.x = ggplot2::element_text(size = 10, margin = ggplot2::margin(t = 6)),
+        axis.text.x = ggplot2::element_text(size = 8.5, color = "grey15"),
+        axis.text.y = ggplot2::element_text(size = 9, color = "grey15"),
         panel.spacing.x = grid::unit(0.75, "lines"),
-        panel.spacing.y = grid::unit(0.62, "lines"),
+        panel.spacing.y = grid::unit(0.5, "lines"),
         panel.grid.minor = ggplot2::element_blank(),
         panel.grid.major.x = ggplot2::element_blank(),
         strip.background = ggplot2::element_rect(fill = "grey92", color = "grey35"),
         strip.placement = "outside",
-        strip.text.x = ggplot2::element_text(size = 12, face = "bold"),
+        strip.text.x = ggplot2::element_text(size = 9.5, face = "bold"),
         strip.text.y.left = ggplot2::element_text(
-          size = 10.2,
+          size = 8.8,
           face = "bold",
           angle = 0,
           lineheight = 0.92
         )
-      )
+      ), "G")
 
     ggplot2::ggsave(
       file.path(fig_dir, "paper_ensemble_multimodality.png"),
-      p_mm, width = 12.8, height = 10.8, dpi = 300,
+      p_mm, width = 12.8, height = 6.8, dpi = 300,
       device = if (requireNamespace("ragg", quietly = TRUE)) ragg::agg_png else NULL
     )
     cat("Wrote paper_ensemble_multimodality.png; metrics:",
@@ -1515,7 +1513,8 @@ component_figures <- c(
 )
 composite_figures <- c(
   "paper_ensemble_scaling_composite_heatmap.png",
-  "paper_ensemble_scaling_composite_performance.png"
+  "paper_ensemble_scaling_composite_performance.png",
+  "paper_ensemble_multimodality.png"
 )
 expected_figures <- c(
   if (isTRUE(write_component_pngs)) component_figures else character(0L),

@@ -262,7 +262,7 @@ agg_labels <- c(
   max_elbo = "max ELBO",
   uniform = "uniform",
   elbo_softmax = "ELBO softmax",
-  cluster_weight_credible = "cluster (credible)",
+  cluster_weight_credible = "cluster softmax",
   cluster_weight_max = "cluster (max)",
   oracle = "oracle"
 )
