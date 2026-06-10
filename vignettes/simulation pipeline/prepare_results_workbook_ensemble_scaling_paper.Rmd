@@ -47,7 +47,7 @@ library(readr)
 ```{r config}
 job_name <- "ensemble_scaling_full"
 # post-cache-fix ensemble re-run (the refine cache-poisoning bug is fixed).
-parent_job_id <- "53520405"
+parent_job_id <- "53547760"
 output_root <- here("output")
 
 job_dir <- file.path(output_root, "slurm_output", job_name, parent_job_id)
@@ -60,7 +60,7 @@ consolidated_dir <- file.path(job_dir, "consolidated")
 # corrected Panel E into the full composite; leave equal to the main job to
 # disable.
 hg2_source_job_name <- "ensemble_scaling_hg2_hotfix"
-hg2_source_job_id   <- "53580710"
+hg2_source_job_id   <- "53588814"
 hg2_source_consolidated_dir <- file.path(
   output_root, "slurm_output", hg2_source_job_name, hg2_source_job_id, "consolidated"
 )
