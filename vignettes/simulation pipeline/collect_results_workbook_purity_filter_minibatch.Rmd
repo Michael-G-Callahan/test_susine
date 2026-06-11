@@ -289,7 +289,95 @@ kable(diag_summary, digits = 4,
       caption = "Decoupling of classical (purity) and effect-level (accuracy / k_eff) diagnostics")
 ```
 
-# 6. Export Consolidated Files
+# 6. Paper Figure Composite
+
+```{r paper-figure-composite, eval = exists("p_auprc") && exists("p_purity_acc") && exists("p_size_keff") && exists("p_purity_keff")}
+paper_panel_theme <- ggplot2::theme(
+  plot.title = ggplot2::element_text(size = 11, face = "bold", hjust = 0.5),
+  plot.subtitle = ggplot2::element_blank(),
+  plot.caption = ggplot2::element_blank(),
+  axis.title = ggplot2::element_text(size = 10),
+  axis.text = ggplot2::element_text(size = 9),
+  legend.title = ggplot2::element_text(size = 9),
+  legend.text = ggplot2::element_text(size = 8),
+  plot.margin = ggplot2::margin(7, 7, 7, 7)
+)
+
+open_png_device <- function(filename, width, height, dpi = 300) {
+  if (requireNamespace("ragg", quietly = TRUE)) {
+    ragg::agg_png(filename, width = width, height = height, units = "in",
+                  res = dpi, background = "white")
+  } else {
+    grDevices::png(filename, width = width, height = height, units = "in",
+                   res = dpi, bg = "white")
+  }
+}
+
+save_paper_grid <- function(filename, panels, labels, width = 13.5,
+                            height = 9.0, dpi = 300) {
+  stopifnot(length(panels) == 4L, length(labels) == 4L)
+
+  open_png_device(filename, width = width, height = height, dpi = dpi)
+  on.exit(grDevices::dev.off(), add = TRUE)
+
+  grid::grid.newpage()
+  layout <- grid::grid.layout(
+    nrow = 2, ncol = 2,
+    widths = grid::unit(c(1, 1), "null"),
+    heights = grid::unit(c(1, 1), "null")
+  )
+  grid::pushViewport(grid::viewport(layout = layout))
+  on.exit(grid::popViewport(), add = TRUE)
+
+  positions <- data.frame(row = c(1, 1, 2, 2), col = c(1, 2, 1, 2))
+  for (i in seq_along(panels)) {
+    grid::pushViewport(grid::viewport(
+      layout.pos.row = positions$row[i],
+      layout.pos.col = positions$col[i]
+    ))
+    print(panels[[i]], newpage = FALSE)
+    grid::grid.text(
+      labels[[i]],
+      x = grid::unit(0.01, "npc"),
+      y = grid::unit(0.99, "npc"),
+      just = c("left", "top"),
+      gp = grid::gpar(fontsize = 17, fontface = "bold")
+    )
+    grid::popViewport()
+  }
+
+  invisible(filename)
+}
+
+paper_panels <- list(
+  p_auprc +
+    ggplot2::labs(title = "AUPRC by credible-set filter") +
+    paper_panel_theme +
+    ggplot2::theme(legend.position = "bottom"),
+  p_purity_acc +
+    ggplot2::labs(title = "Purity versus causal coverage") +
+    paper_panel_theme,
+  p_size_keff +
+    ggplot2::labs(title = "Credible-set size versus k_eff") +
+    paper_panel_theme +
+    ggplot2::theme(legend.position = "none"),
+  p_purity_keff +
+    ggplot2::labs(title = "Purity versus k_eff") +
+    paper_panel_theme +
+    ggplot2::theme(legend.position = "none")
+)
+
+paper_purity_filter_path <- file.path(plot_dir, "paper_purity_filter_composite.png")
+save_paper_grid(
+  paper_purity_filter_path,
+  panels = paper_panels,
+  labels = LETTERS[1:4]
+)
+
+cat("Paper composite written to:", paper_purity_filter_path, "\n")
+```
+
+# 7. Export Consolidated Files
 
 ```{r export}
 write_if_present <- function(df, filename) {
