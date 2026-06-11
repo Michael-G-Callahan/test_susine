@@ -36,6 +36,7 @@ Main files traced:
   - `R/run_model.R`
   - `R/simulate_data.R`
   - `R/evaluation_metrics.R`
+  - `R/heritability.R`
   - `R/visualize_results.R`
   - `R/collect_results.R`
   - `R/use_cases.R`
@@ -319,6 +320,20 @@ Important metric definitions from `R/evaluation_metrics.R`:
 - effect accuracy:
   - `accuracy_ratio = max alpha on true causal variants / max alpha on any variant`.
 
+`evaluate_model()` also emits local-genetic-variance (PVE/heritability) columns
+on each model-metric row. Two estimands are emitted:
+
+- legacy `hg2` (still emitted) = `var(fitted_y) / var(y)`, clipped to `[0, 1]`,
+  via `estimate_hg2()` in `R/evaluation_metrics.R`;
+- a corrected local-genetic-variance decomposition (the now-reported estimand),
+  via `hg2_components()` with its engine in `R/heritability.R`. It emits
+  `hg2_postmean = var(E[Xβ|y]) / var(y)`, `hg2_uncertainty` (a within-fit
+  posterior-variance correction), and
+  `hg2_expected_pve = hg2_postmean + hg2_uncertainty = E[var(Xβ)|y] / var(y)`
+  for a single fit. An additional `hg2_between_fit` term appears only under
+  multi-fit/ensemble aggregation. Provenance: commits `4e0721b` / `236820b`
+  (2026-06-09).
+
 `evaluate_model()` produces both unfiltered and purity-filtered views. The
 filtered view keeps credible sets with `purity >= 0.50`.
 
@@ -333,18 +348,24 @@ The baseline study uses a top-8 causal mask for PIP-threshold classification:
 - the top 8 causal variants are treated as positives;
 - the `causal_mask` argument replaces the full causal label vector inside
   `compute_confusion_bins()`;
-- all variants outside the top-8 mask are counted as non-causal for the
-  confusion-bin table.
+- positives are the top-8 mask; negatives are true non-causal variants only.
+  Variants that are truly causal but outside the top-8 mask (the weak /
+  polygenic-tier causals) are DROPPED from the confusion-bin table entirely --
+  neither positive nor negative. The code does
+  `scored <- as.integer(seq_len(n) %in% causal_mask)` and then
+  `keep <- !(causal == 1L & scored == 0L)`, removing those weak causals so
+  AUPRC is not penalized for them.
 
 This convention corresponds to the sparse plus oligogenic tiers under the
-23-causal oligogenic architecture. It is also the convention used by the 5-arm
-drift PR regeneration notebook, whose comments state that non-top causal
-variants are negatives in the PR scoring.
+23-causal oligogenic architecture. The 5-arm drift PR regeneration notebook is
+intended to match this same convention.
 
-This is a point to watch when writing prose. Some manuscript captions describe
-the polygenic-tier causals as excluded from negatives, but the source code path
-for confusion-bin AUPRC uses the top-8 mask as the positive set and treats all
-other variants as non-positive in the binary classification table.
+This is a point to watch when writing prose. The source code path for
+confusion-bin AUPRC uses the top-8 mask as the positive set, true non-causal
+variants as the negative set, and DROPS the weak/polygenic-tier causals (true
+causals outside the top-8 mask) from the table entirely. Manuscript captions
+that describe the polygenic-tier causals as excluded from negatives are
+therefore correct: those weak causals are neither positives nor negatives.
 
 ## 11. Collection workflow
 

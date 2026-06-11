@@ -2119,7 +2119,14 @@ collect_real_data_results <- function(
     }
     elbo_vec <- locus_run_metrics_present$elbo_final
 
+    # JSD cache drives the *reported* PIP-divergence diagnostics (pairwise JSD,
+    # multimodal metrics, jsd_to_representative) that the manuscript figures use.
     pip_cache <- prepare_pip_similarity_cache(pip_mat)
+    # Clustering + aggregation use the locked-in cluster_weight_credible spec
+    # (credible_shift metric @ 0.05 + Method B), matching the simulation pipeline.
+    cw_spec <- .cluster_weight_specs[["cluster_weight_credible"]]
+    cred_cache <- prepare_pip_similarity_cache(pip_mat, metric = cw_spec$metric)
+    cred_threshold <- cw_spec$threshold
     mm <- compute_multimodal_metrics(
       pip_list = lapply(seq_len(nrow(pip_mat)), function(j) pip_mat[j, ]),
       jsd_threshold = jsd_threshold,
@@ -2134,16 +2141,22 @@ collect_real_data_results <- function(
     multimodal_rows[[length(multimodal_rows) + 1L]] <- mm
 
     if (nrow(pip_mat) > 1L) {
-      clusters <- stats::cutree(pip_cache$hc, h = jsd_threshold)
+      clusters <- stats::cutree(cred_cache$hc, h = cred_threshold)
       cw <- .cluster_weights_from_hc(
-        pip_cache$hc,
-        jsd_threshold,
+        cred_cache$hc,
+        cred_threshold,
         elbo_vec,
         n_fits = nrow(pip_mat),
-        softmax_temperature = softmax_temperature
+        softmax_temperature = softmax_temperature,
+        aggregation = "method_b"
       )
       cluster_levels <- sort(unique(clusters))
       weight_by_run <- cw$w_full
+      # `pairwise_pip_jsd` is a JSD-named diagnostic artifact, so its
+      # `same_cluster` flag reflects JSD co-membership (not the credible-shift
+      # clusters that drive aggregation). Credible-shift co-membership is
+      # recoverable from `cluster_membership.csv` (cluster_id).
+      jsd_clusters <- stats::cutree(pip_cache$hc, h = jsd_threshold)
 
       pair_rows <- list()
       for (a in seq_len(nrow(pip_mat) - 1L)) {
@@ -2158,7 +2171,7 @@ collect_real_data_results <- function(
             c_j = functional_runs_present$c_value[match(run_ids[[b]], functional_runs_present$run_id)],
             sigma_j = functional_runs_present$sigma_0_2_scalar[match(run_ids[[b]], functional_runs_present$run_id)],
             jsd = as.numeric(pip_cache$jsd_mat[a, b]),
-            same_cluster = as.logical(clusters[[a]] == clusters[[b]])
+            same_cluster = as.logical(jsd_clusters[[a]] == jsd_clusters[[b]])
           )
         }
       }
@@ -2213,13 +2226,13 @@ collect_real_data_results <- function(
         )
       })
 
-      agg_pip <- aggregate_pip_matrix(
-        pip_mat = t(pip_mat),
-        elbos = elbo_vec,
-        method = "cluster_weight",
-        jsd_threshold = jsd_threshold,
-        hc = pip_cache$hc
-      )
+      # Aggregate directly from the Method-B weights computed above so the
+      # reported run weights (`agg_weight_run = cw$w_full`) and the aggregated
+      # PIP are a single source of truth at any `softmax_temperature`. This is
+      # exactly what aggregate_pip_matrix(method = "cluster_weight_credible")
+      # computes internally, but without re-deriving weights at a fixed
+      # temperature = 1.
+      agg_pip <- as.numeric(crossprod(cw$w_full, pip_mat))
     } else {
       membership_tbl <- tibble::tibble(
         locus_id = locus_id,
@@ -2711,7 +2724,7 @@ collect_real_data_results <- function(
     "fit_file_index", file.path(output_dir, "fit_file_index.csv"), "csv", "run", "Index of persisted raw fit RDS files",
     "elbo_trace_full", file.path(output_dir, "elbo_trace_full.csv"), "csv", "run-iteration", "ELBO trace for each run",
     "multimodal_metrics", file.path(output_dir, "multimodal_metrics.csv"), "csv", "locus", "PIP diversity metrics across the functional grid",
-    "cluster_membership", file.path(output_dir, "cluster_membership.csv"), "csv", "run", "Per-run JSD cluster assignments",
+    "cluster_membership", file.path(output_dir, "cluster_membership.csv"), "csv", "run", "Per-run credible-shift cluster assignments (cluster_weight_credible)",
     "aggregation_weights_cluster_weight", file.path(output_dir, "aggregation_weights_cluster_weight.csv"), "csv", "run", "Cluster-weight aggregation weights per run",
     "cluster_summary", file.path(output_dir, "cluster_summary.csv"), "csv", "locus-cluster", "Representative runs and cluster weights",
     "functional_grid_summary", file.path(output_dir, "functional_grid_summary.csv"), "csv", "run", "Functional grid summary joined to cluster and drift metrics",

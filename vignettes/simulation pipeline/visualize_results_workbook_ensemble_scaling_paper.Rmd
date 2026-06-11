@@ -1344,42 +1344,49 @@ if (file.exists(mm_path)) {
           "C = annotation-scale grid. White points mark medians."
         )
       ) +
-      paper_theme(base_size = 11) +
+      # Font sizes are pulled from the shared `font_sizes` scale so this figure
+      # matches the other ensemble composites when placed at \linewidth.
+      paper_theme() +
       ggplot2::theme(
-        plot.tag = ggplot2::element_text(size = 18, face = "bold"),
+        plot.tag = ggplot2::element_text(size = font_sizes$tag, face = "bold"),
         plot.tag.position = c(0.01, 0.99),
-        plot.title = ggplot2::element_text(size = 14, hjust = 0.5),
+        plot.title = ggplot2::element_text(size = font_sizes$title, hjust = 0.5),
         plot.subtitle = ggplot2::element_text(
-          size = 10,
+          size = font_sizes$subtitle,
           hjust = 0.5,
           margin = ggplot2::margin(t = 2, b = 6)
         ),
         plot.caption = ggplot2::element_text(
-          size = 8,
+          size = font_sizes$caption,
           hjust = 0,
           margin = ggplot2::margin(t = 6)
         ),
-        axis.title.x = ggplot2::element_text(size = 10, margin = ggplot2::margin(t = 6)),
-        axis.text.x = ggplot2::element_text(size = 8.5, color = "grey15"),
-        axis.text.y = ggplot2::element_text(size = 9, color = "grey15"),
+        axis.title.x = ggplot2::element_text(
+          size = font_sizes$axis_title,
+          margin = ggplot2::margin(t = 6)
+        ),
+        axis.text.x = ggplot2::element_text(size = font_sizes$axis_text, color = "grey15"),
+        axis.text.y = ggplot2::element_text(size = font_sizes$axis_text, color = "grey15"),
         panel.spacing.x = grid::unit(0.75, "lines"),
         panel.spacing.y = grid::unit(0.5, "lines"),
         panel.grid.minor = ggplot2::element_blank(),
         panel.grid.major.x = ggplot2::element_blank(),
         strip.background = ggplot2::element_rect(fill = "grey92", color = "grey35"),
         strip.placement = "outside",
-        strip.text.x = ggplot2::element_text(size = 9.5, face = "bold"),
+        strip.text.x = ggplot2::element_text(size = font_sizes$axis_text, face = "bold"),
         strip.text.y.left = ggplot2::element_text(
-          size = 8.8,
+          size = font_sizes$strip,
           face = "bold",
           angle = 0,
           lineheight = 0.92
         )
       ), "G")
 
+    # 3:1 aspect ratio at the same canvas width as the heatmap composite (18in),
+    # so on-page text scale matches the other two ensemble figures.
     ggplot2::ggsave(
       file.path(fig_dir, "paper_ensemble_multimodality.png"),
-      p_mm, width = 12.8, height = 6.8, dpi = 300,
+      p_mm, width = 18, height = 6, dpi = 300,
       device = if (requireNamespace("ragg", quietly = TRUE)) ragg::agg_png else NULL
     )
     cat("Wrote paper_ensemble_multimodality.png; metrics:",

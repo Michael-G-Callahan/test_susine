@@ -1,0 +1,309 @@
+---
+title: "Purity-Filter Minibatch - Collect Results"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+Post-run collection for the purity-filter minibatch. Merges the staged
+confusion-bin flush files (tagged by `filter_type`) and the per-effect diagnostic
+records, then:
+
+1. computes one pooled AUPRC per filter type (and per-dataset deltas vs the
+   unfiltered PIP), the headline "AUPRC with vs without purity filtering" number;
+2. builds the old-vs-new credible-set diagnostic figures that contrast the
+   classical metrics (purity, size) with the effect-level metrics (core-95%
+   $k_{\mathrm{eff}}$, accuracy ratio).
+
+```{r setup, message=FALSE}
+here::i_am("vignettes/simulation pipeline/collect_results_workbook_purity_filter_minibatch.Rmd")
+library(here)
+library(devtools)
+
+susine_path <- here("..", "susine")
+if (file.exists(file.path(susine_path, "DESCRIPTION"))) {
+  options(test_susine.local_susine_path = normalizePath(susine_path, winslash = "/", mustWork = TRUE))
+  devtools::load_all(susine_path)
+}
+devtools::load_all(".")
+
+library(dplyr)
+library(readr)
+library(tidyr)
+library(ggplot2)
+library(knitr)
+```
+
+# 1. Locate Output
+
+```{r locate}
+job_name <- "purity_filter_minibatch"
+parent_job_id <- "REPLACE_WITH_SLURM_JOB_ID"   # set after the array job finishes
+output_root <- here("output")
+
+job_dir <- file.path(output_root, "slurm_output", job_name, parent_job_id)
+cfg_path <- file.path(output_root, "run_history", job_name, parent_job_id, "job_config.json")
+cfg <- test_susine:::load_job_config(cfg_path)
+
+aggregated_dir <- file.path(job_dir, "aggregated")
+consolidated_dir <- file.path(job_dir, "consolidated")
+plot_dir <- file.path(consolidated_dir, "plots")
+dir.create(consolidated_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
+
+cat("Job dir:", job_dir, "\n")
+```
+
+# 2. Aggregate Staging Outputs
+
+```{r aggregate}
+agg <- test_susine::aggregate_staging_outputs(
+  job_name = job_name,
+  parent_job_id = parent_job_id,
+  output_root = output_root,
+  validate = TRUE,
+  output_dir = aggregated_dir,
+  write_snps_dataset = FALSE
+)
+```
+
+# 3. Load Aggregated Tables
+
+```{r load-aggregated}
+read_optional_csv <- function(path) {
+  if (!file.exists(path)) return(NULL)
+  readr::read_csv(path, show_col_types = FALSE)
+}
+
+confusion_bins <- read_optional_csv(file.path(aggregated_dir, "confusion_bins.csv"))
+effect_unfiltered <- read_optional_csv(file.path(aggregated_dir, "effect_metrics_unfiltered.csv"))
+
+stopifnot(!is.null(confusion_bins), "filter_type" %in% names(confusion_bins))
+cat("Confusion-bin rows:", nrow(confusion_bins), "\n")
+cat("Filter types:", paste(sort(unique(confusion_bins$filter_type)), collapse = ", "), "\n")
+cat("Per-effect rows:", if (is.null(effect_unfiltered)) 0 else nrow(effect_unfiltered), "\n")
+
+filter_levels <- c("no_filter", "purity_95", "purity_90", "purity_50",
+                   "keff_core95_le_100")
+filter_labels <- c(
+  no_filter           = "No filter",
+  purity_95           = "Purity ≥ 0.95",
+  purity_90           = "Purity ≥ 0.90",
+  purity_50           = "Purity ≥ 0.50",
+  keff_core95_le_100  = "k_eff(core95) ≤ 100"
+)
+filter_levels <- intersect(filter_levels, unique(confusion_bins$filter_type))
+```
+
+# 4. AUPRC by Filter Type (headline)
+
+```{r auprc-by-filter}
+# Pooled AUPRC across all 600 datasets, one value per filter type.
+auprc_pooled <- test_susine::compute_auprc_from_confusion(
+  confusion_bins,
+  group_vars = "filter_type"
+) %>%
+  dplyr::mutate(filter_type = factor(.data$filter_type, levels = filter_levels)) %>%
+  dplyr::arrange(.data$filter_type)
+
+auprc_no_filter <- auprc_pooled$AUPRC[auprc_pooled$filter_type == "no_filter"]
+auprc_pooled <- auprc_pooled %>%
+  dplyr::mutate(
+    delta_vs_unfiltered = .data$AUPRC - auprc_no_filter,
+    filter_label = filter_labels[as.character(.data$filter_type)]
+  )
+
+kable(
+  auprc_pooled %>%
+    dplyr::select(.data$filter_label, .data$AUPRC, .data$delta_vs_unfiltered),
+  digits = 4,
+  col.names = c("Filter", "Pooled AUPRC", "Δ vs unfiltered"),
+  caption = "Pooled causal-recovery AUPRC (top-8 positives) by credible-set filter, 600 datasets"
+)
+
+# Per-dataset AUPRC -> paired delta vs no_filter (sign test on the filtering cost).
+auprc_per_dataset <- test_susine::compute_auprc_from_confusion(
+  confusion_bins,
+  group_vars = c("filter_type", "dataset_bundle_id")
+)
+
+per_dataset_delta <- auprc_per_dataset %>%
+  dplyr::select(.data$filter_type, .data$dataset_bundle_id, .data$AUPRC) %>%
+  tidyr::pivot_wider(names_from = .data$filter_type, values_from = .data$AUPRC) %>%
+  tidyr::pivot_longer(
+    cols = dplyr::any_of(setdiff(filter_levels, "no_filter")),
+    names_to = "filter_type", values_to = "AUPRC_filtered"
+  ) %>%
+  dplyr::mutate(delta = .data$AUPRC_filtered - .data$no_filter)
+
+per_dataset_summary <- per_dataset_delta %>%
+  dplyr::filter(is.finite(.data$delta)) %>%
+  dplyr::group_by(.data$filter_type) %>%
+  dplyr::summarise(
+    n = dplyr::n(),
+    mean_delta = mean(.data$delta),
+    median_delta = stats::median(.data$delta),
+    frac_hurt = mean(.data$delta < 0),
+    frac_help = mean(.data$delta > 0),
+    .groups = "drop"
+  ) %>%
+  dplyr::mutate(filter_type = factor(.data$filter_type, levels = filter_levels)) %>%
+  dplyr::arrange(.data$filter_type)
+
+kable(per_dataset_summary, digits = 4,
+      caption = "Per-dataset paired AUPRC change vs unfiltered (negative = filter hurts)")
+```
+
+```{r auprc-plot}
+p_auprc <- ggplot2::ggplot(
+  auprc_pooled,
+  ggplot2::aes(x = stats::reorder(.data$filter_label, -.data$AUPRC), y = .data$AUPRC)
+) +
+  ggplot2::geom_col(fill = "#1F77B4", width = 0.7) +
+  ggplot2::geom_hline(yintercept = auprc_no_filter, linetype = "dashed", color = "grey30") +
+  ggplot2::geom_text(ggplot2::aes(label = sprintf("%.3f", .data$AUPRC)),
+                     vjust = -0.4, size = 3.5) +
+  ggplot2::labs(
+    x = NULL, y = "Pooled AUPRC",
+    title = "Credible-set filtering changes per-variant AUPRC",
+    subtitle = "Dashed line: unfiltered PIP. Lower bars = the filter discarded useful signal."
+  ) +
+  ggplot2::theme_bw(base_size = 12) +
+  ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 20, hjust = 1))
+
+ggplot2::ggsave(file.path(plot_dir, "auprc_by_filter_type.png"),
+                p_auprc, width = 8, height = 5, dpi = 300)
+p_auprc
+```
+
+# 5. Old vs New Credible-Set Diagnostics
+
+The per-effect record contrasts the classical metrics (purity, size) with the
+effect-level metrics introduced in the paper (core-95% $k_{\mathrm{eff}}$,
+accuracy ratio). `coverage = 1` marks effects whose credible set actually
+contains a true causal variant.
+
+```{r effect-diagnostics, eval = !is.null(effect_unfiltered)}
+eff <- effect_unfiltered %>%
+  dplyr::filter(.data$size > 0) %>%                 # active effects only
+  dplyr::mutate(
+    coverage_lab = factor(ifelse(.data$coverage > 0, "CS contains causal", "CS has no causal"),
+                          levels = c("CS contains causal", "CS has no causal")),
+    purity = as.numeric(.data$purity),
+    accuracy_ratio = as.numeric(.data$accuracy_ratio),
+    k_eff_core95 = as.numeric(.data$effect_k_eff_signal_core95),
+    size = as.numeric(.data$size)
+  )
+
+cov_palette <- c("CS contains causal" = "#2CA02C", "CS has no causal" = "#D62728")
+
+# (A) Purity vs accuracy: are low-purity sets actually inaccurate?
+p_purity_acc <- ggplot2::ggplot(
+  eff %>% dplyr::filter(is.finite(.data$purity), is.finite(.data$accuracy_ratio)),
+  ggplot2::aes(x = .data$purity, y = .data$accuracy_ratio, color = .data$coverage_lab)
+) +
+  ggplot2::geom_point(alpha = 0.25, size = 0.8) +
+  ggplot2::geom_vline(xintercept = 0.95, linetype = "dashed", color = "grey25") +
+  ggplot2::scale_color_manual(values = cov_palette, name = NULL) +
+  ggplot2::labs(
+    x = "Credible-set purity (min pairwise |r|)",
+    y = "Accuracy ratio A (top causal PIP / top PIP)",
+    title = "Purity vs accuracy",
+    subtitle = "Dashed line: 0.95 purity filter. Green points left of it are accurate sets the filter would discard."
+  ) +
+  ggplot2::theme_bw(base_size = 11) +
+  ggplot2::theme(legend.position = "bottom")
+
+# (B) Size vs core-95 k_eff: size overstates diffuseness.
+p_size_keff <- ggplot2::ggplot(
+  eff %>% dplyr::filter(is.finite(.data$size), is.finite(.data$k_eff_core95)),
+  ggplot2::aes(x = .data$size, y = .data$k_eff_core95, color = .data$coverage_lab)
+) +
+  ggplot2::geom_abline(slope = 1, intercept = 0, linetype = "dotted", color = "grey50") +
+  ggplot2::geom_point(alpha = 0.25, size = 0.8) +
+  ggplot2::scale_x_log10() +
+  ggplot2::scale_y_log10() +
+  ggplot2::scale_color_manual(values = cov_palette, name = NULL) +
+  ggplot2::labs(
+    x = "Credible-set size (count)",
+    y = "Core-95% effective support k_eff",
+    title = "Size vs core-95% diffuseness",
+    subtitle = "Dotted line: y = x. Points below it have a peaked core despite a large set."
+  ) +
+  ggplot2::theme_bw(base_size = 11) +
+  ggplot2::theme(legend.position = "bottom")
+
+# (C) Purity vs core-95 k_eff: purity is only weakly tied to diffuseness.
+p_purity_keff <- ggplot2::ggplot(
+  eff %>% dplyr::filter(is.finite(.data$purity), is.finite(.data$k_eff_core95)),
+  ggplot2::aes(x = .data$purity, y = .data$k_eff_core95, color = .data$coverage_lab)
+) +
+  ggplot2::geom_point(alpha = 0.25, size = 0.8) +
+  ggplot2::geom_vline(xintercept = 0.95, linetype = "dashed", color = "grey25") +
+  ggplot2::scale_y_log10() +
+  ggplot2::scale_color_manual(values = cov_palette, name = NULL) +
+  ggplot2::labs(
+    x = "Credible-set purity (min pairwise |r|)",
+    y = "Core-95% effective support k_eff",
+    title = "Purity vs diffuseness",
+    subtitle = "Weak association: low-purity sets are not reliably more diffuse."
+  ) +
+  ggplot2::theme_bw(base_size = 11) +
+  ggplot2::theme(legend.position = "bottom")
+
+ggplot2::ggsave(file.path(plot_dir, "diag_purity_vs_accuracy.png"),
+                p_purity_acc, width = 7, height = 5.5, dpi = 300)
+ggplot2::ggsave(file.path(plot_dir, "diag_size_vs_keff.png"),
+                p_size_keff, width = 7, height = 5.5, dpi = 300)
+ggplot2::ggsave(file.path(plot_dir, "diag_purity_vs_keff.png"),
+                p_purity_keff, width = 7, height = 5.5, dpi = 300)
+
+p_purity_acc
+p_size_keff
+p_purity_keff
+```
+
+```{r effect-diagnostics-summary, eval = !is.null(effect_unfiltered)}
+# Quantify "high-quality but low-purity" and "high-purity but inaccurate" effects.
+diag_summary <- eff %>%
+  dplyr::filter(is.finite(.data$purity), is.finite(.data$accuracy_ratio)) %>%
+  dplyr::summarise(
+    n_effects = dplyr::n(),
+    cor_purity_keff = suppressWarnings(stats::cor(.data$purity, .data$k_eff_core95,
+                                                  use = "complete.obs", method = "spearman")),
+    cor_purity_accuracy = suppressWarnings(stats::cor(.data$purity, .data$accuracy_ratio,
+                                                      use = "complete.obs", method = "spearman")),
+    # Accurate (A >= 0.9) AND covers a causal, yet would be dropped at purity 0.95:
+    frac_accurate_dropped_at_095 = mean(.data$purity < 0.95 & .data$accuracy_ratio >= 0.9 &
+                                          .data$coverage > 0),
+    # High purity (>= 0.95) but inaccurate (A < 0.5):
+    frac_pure_but_inaccurate = mean(.data$purity >= 0.95 & .data$accuracy_ratio < 0.5)
+  )
+
+kable(diag_summary, digits = 4,
+      caption = "Decoupling of classical (purity) and effect-level (accuracy / k_eff) diagnostics")
+```
+
+# 6. Export Consolidated Files
+
+```{r export}
+write_if_present <- function(df, filename) {
+  if (!is.null(df) && nrow(df)) {
+    readr::write_csv(df, file.path(consolidated_dir, filename))
+  }
+}
+
+write_if_present(auprc_pooled, "auprc_by_filter_type.csv")
+write_if_present(auprc_per_dataset, "auprc_per_dataset_by_filter.csv")
+write_if_present(per_dataset_summary, "auprc_per_dataset_delta_summary.csv")
+if (exists("diag_summary")) write_if_present(diag_summary, "effect_diagnostic_summary.csv")
+write_if_present(effect_unfiltered, "effect_metrics_unfiltered_full.csv")
+
+cat("Consolidated files written to:", consolidated_dir, "\n")
+cat("Plots written to:", plot_dir, "\n")
+```

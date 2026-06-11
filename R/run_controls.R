@@ -806,6 +806,8 @@ make_job_config <- function(job_name,
                             write_scaling_confusion_bins = FALSE,
                             scaling_n_ens_sizes = c(4L, 8L, 16L, 32L, 64L),
                             scaling_restart_reps = 50L,
+                            purity_filter_sweep = FALSE,
+                            purity_filter_specs = NULL,
                             metrics_settings = list(
                               pip_bucket_width = 0.01,
                               z_top_k = 10,
@@ -1091,7 +1093,13 @@ make_job_config <- function(job_name,
     softmax_temperature = as.numeric(softmax_temperature),
     write_scaling_confusion_bins = isTRUE(write_scaling_confusion_bins),
     scaling_n_ens_sizes = as.integer(scaling_n_ens_sizes),
-    scaling_restart_reps = as.integer(scaling_restart_reps)
+    scaling_restart_reps = as.integer(scaling_restart_reps),
+    # Purity-filter minibatch: when TRUE, write_run_outputs emits confusion bins
+    # under multiple credible-set filter types (recomputing the combined PIP from
+    # surviving effects) instead of the single unfiltered set. See
+    # purity_filter_confusion_sweep().
+    purity_filter_sweep = isTRUE(purity_filter_sweep),
+    purity_filter_specs = purity_filter_specs
   )
 
   list(

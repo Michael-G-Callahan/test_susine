@@ -2425,7 +2425,8 @@ write_run_outputs <- function(run_row,
   }
 
   conf_bins <- NULL
-  if (isTRUE(job_config$job$write_confusion_bins)) {
+  purity_sweep_on <- isTRUE(job_config$job$compute$purity_filter_sweep)
+  if (isTRUE(job_config$job$write_confusion_bins) || purity_sweep_on) {
     # Top-8 causal mask: score only the 8 largest-effect causal variants
     top8_mask_local <- if (length(data_bundle$causal_idx) > 0L && !is.null(data_bundle$beta)) {
       n_top <- min(8L, length(data_bundle$causal_idx))
@@ -2435,13 +2436,33 @@ write_run_outputs <- function(run_row,
     } else {
       data_bundle$causal_idx
     }
-    conf_bins <- compute_confusion_bins(
-      evaluation$combined_pip,
-      as.integer(seq_along(data_bundle$beta) %in% data_bundle$causal_idx),
-      pip_bucket_width = job_config$job$metrics$pip_bucket_width %||% 0.01,
-      pip_breaks = job_config$job$metrics$pip_breaks,
-      causal_mask = top8_mask_local
-    )
+    causal_vec_local <- as.integer(seq_along(data_bundle$beta) %in% data_bundle$causal_idx)
+    if (purity_sweep_on) {
+      # Purity-filter minibatch: emit confusion bins under several credible-set
+      # filter types, recomputing the combined PIP from surviving effects so the
+      # AUPRC actually reflects the filter (the standard path is filter-invariant).
+      sweep_specs <- job_config$job$compute$purity_filter_specs
+      alpha_mat <- model_result$fit$effect_fits$alpha
+      if (is.list(alpha_mat)) alpha_mat <- do.call(rbind, alpha_mat)
+      conf_bins <- purity_filter_confusion_sweep(
+        alpha = alpha_mat,
+        effects_unfiltered = evaluation$effects_unfiltered,
+        causal_vec = causal_vec_local,
+        causal_mask = top8_mask_local,
+        pip_breaks = job_config$job$metrics$pip_breaks,
+        pip_bucket_width = job_config$job$metrics$pip_bucket_width %||% 0.01,
+        purity_thresholds = sweep_specs$purity_thresholds %||% c(0.95, 0.90, 0.50),
+        keff_core95_max = sweep_specs$keff_core95_max %||% 100
+      )
+    } else {
+      conf_bins <- compute_confusion_bins(
+        evaluation$combined_pip,
+        causal_vec_local,
+        pip_bucket_width = job_config$job$metrics$pip_bucket_width %||% 0.01,
+        pip_breaks = job_config$job$metrics$pip_breaks,
+        causal_mask = top8_mask_local
+      )
+    }
     write_confusion_bins(
       run_row = run_row,
       job_config = job_config,

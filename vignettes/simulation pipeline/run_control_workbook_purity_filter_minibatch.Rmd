@@ -1,0 +1,269 @@
+---
+title: "Purity-Filter Minibatch - Run Control"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+Slim minibatch that quantifies how credible-set filtering changes per-variant
+AUPRC on the **same 600 oligogenic datasets** as the baseline / ensemble studies.
+A single annotation-agnostic SuSiE-vanilla fit ($c = 0$, $\sigma_0^2 = 0.2$) is run
+per dataset; the run-time evaluator then recomputes the combined PIP after
+dropping credible sets under several filters and writes confusion bins tagged by
+`filter_type`:
+
+- `no_filter` (the standard unfiltered PIP),
+- `purity_95`, `purity_90`, `purity_50` (drop CSs with min-pairwise-$|r|$ below
+  the threshold),
+- `keff_core95_le_100` (drop diffuse effects whose core-95% effective support
+  size exceeds 100).
+
+Outputs are deliberately slim: per-filter confusion bins (for pooled AUPRC) plus
+the per-effect diagnostic record (purity, coverage, size, core-95% $k_{\mathrm{eff}}$,
+accuracy ratio) that the standard pipeline already emits. The post-run collect
+workbook turns the confusion bins into one AUPRC per filter type.
+
+```{r setup, message=FALSE}
+here::i_am("vignettes/simulation pipeline/run_control_workbook_purity_filter_minibatch.Rmd")
+library(here)
+library(devtools)
+
+susine_path <- here("..", "susine")
+if (file.exists(file.path(susine_path, "DESCRIPTION"))) {
+  options(test_susine.local_susine_path = normalizePath(susine_path, winslash = "/", mustWork = TRUE))
+  devtools::load_all(susine_path)
+}
+devtools::load_all(".")
+
+library(dplyr)
+library(readr)
+library(knitr)
+library(tidyr)
+```
+
+# 0. User Configuration
+
+```{r user-config}
+job_name <- "purity_filter_minibatch"
+email <- "mgc5166@psu.edu"
+
+slurm_time <- "02:59:59"
+slurm_mem <- "8G"
+
+# Match the baseline / ensemble substrate exactly so the 600 datasets are
+# identical (same matrices, seeds, architecture, task assignment).
+n_matrices_target <- 150L
+seeds <- 1:4
+
+L_grid <- 10L
+y_noise_grid <- NA_real_
+p_star_grid <- NA_integer_
+architecture_grid <- "susie2_oligogenic"
+
+# SuSiE-vanilla single fit, c = 0, sigma_0_2 = 0.2 (baseline-SuSiE equivalent).
+sigma_0_2_default <- 0.2
+
+max_iter <- 100L
+
+task_unit <- "dataset"
+bundles_per_task <- 4L
+task_assignment_seed <- 42L
+
+credible_set_rho <- 0.95
+# This per-run purity_threshold only gates the *filtered* CS view that feeds
+# power/size/coverage; the AUPRC sweep below uses its own thresholds.
+purity_threshold <- 0.50
+verbose_file_output <- FALSE
+write_snps_parquet <- FALSE
+write_confusion_bins <- FALSE        # the sweep replaces the single set
+write_tier_cs_metrics <- FALSE
+
+# Purity-filter sweep specification (drives confusion bins by filter_type).
+purity_filter_sweep <- TRUE
+purity_filter_specs <- list(
+  purity_thresholds = c(0.95, 0.90, 0.50),
+  keff_core95_max = 100
+)
+
+pip_breaks <- sort(unique(c(
+  seq(0.00, 0.05, by = 0.005),
+  seq(0.05, 0.10, by = 0.01),
+  seq(0.10, 1.00, by = 0.02)
+)))
+z_top_k <- 10L
+jsd_threshold <- 0.15
+```
+
+# 1. Spec Catalog (single SuSiE-vanilla fit)
+
+```{r specs}
+spec_susie_vanilla_single <- list(
+  name = "susie_vanilla_single",
+  use_case_ids = "susie_vanilla",
+  exploration_methods = "single",
+  exploration_mode = "separate",
+  K = 1L
+)
+
+all_specs <- list(spec_susie_vanilla_single)
+
+cat("Total specs:", length(all_specs), "\n")
+for (s in all_specs) {
+  cat(sprintf("  %-30s methods=%s\n", s$name,
+              paste(s$exploration_methods, collapse = "x")))
+}
+```
+
+# 2. Matrix Selection (identical to baseline / ensemble)
+
+```{r matrix-selection}
+data_matrix_catalog_full <- test_susine:::build_data_matrix_catalog(
+  requested_scenarios = "scenario_1",
+  repo_root = here(),
+  summary_path = here(
+    "data", "sampled_simulated_genotypes", "scenario_sampling_summary.csv"
+  )
+)
+cat("Total available genotype matrices:", nrow(data_matrix_catalog_full), "\n")
+
+m1_summary_path <- here(
+  "data", "sampled_simulated_genotypes", "scenario_sampling_summary_with_m1.csv"
+)
+if (file.exists(m1_summary_path)) {
+  catalog_with_m1 <- readr::read_csv(m1_summary_path, show_col_types = FALSE)
+} else {
+  m1_tbl <- test_susine::build_x_metrics_table(
+    matrix_paths_df = data_matrix_catalog_full %>%
+      dplyr::select(matrix_id, matrix_path),
+    base_dir = here()
+  ) %>%
+    dplyr::select(matrix_id, M1)
+  catalog_with_m1 <- data_matrix_catalog_full %>%
+    dplyr::left_join(m1_tbl, by = "matrix_id")
+  readr::write_csv(catalog_with_m1, m1_summary_path)
+}
+
+if (!"matrix_id" %in% names(catalog_with_m1)) {
+  if ("gene" %in% names(catalog_with_m1)) {
+    catalog_with_m1 <- dplyr::rename(catalog_with_m1, dataset_label = gene)
+  }
+  join_col <- intersect(c("dataset_label", "matrix_path"), names(catalog_with_m1))[[1L]]
+  catalog_with_m1 <- catalog_with_m1 %>%
+    dplyr::left_join(
+      data_matrix_catalog_full %>%
+        dplyr::select(matrix_id, dplyr::all_of(join_col)),
+      by = join_col
+    )
+}
+
+catalog_with_m1 <- catalog_with_m1 %>%
+  dplyr::filter(!is.na(.data$M1)) %>%
+  dplyr::arrange(.data$M1)
+
+n_target <- min(n_matrices_target, nrow(catalog_with_m1))
+idx <- unique(round(seq(1, nrow(catalog_with_m1), length.out = n_target)))
+selected <- catalog_with_m1[idx, , drop = FALSE]
+
+data_matrix_catalog <- data_matrix_catalog_full %>%
+  dplyr::semi_join(dplyr::select(selected, .data$matrix_id), by = "matrix_id")
+
+cat("Matrices selected (M1-stratified):", nrow(data_matrix_catalog), "\n")
+cat("Phenotype seeds:", paste(seeds, collapse = ", "), "\n")
+```
+
+# 3. Build Job Config
+
+```{r build-config}
+cfg <- make_job_config(
+  job_name = job_name,
+  HPC = TRUE,
+  time = slurm_time,
+  mem = slurm_mem,
+  email = email,
+  output_root = here("output"),
+  grid_mode = "full",
+  use_case_ids = "susie_vanilla",
+  exploration_specs = all_specs,
+  L_grid = L_grid,
+  y_noise_grid = y_noise_grid,
+  p_star_grid = p_star_grid,
+  architecture_grid = architecture_grid,
+  seeds = seeds,
+  # Annotation-agnostic: a single (annotation_r2, inflate_match) row yields one
+  # fit per dataset = 600 runs total.
+  prior_quality = tibble::tibble(annotation_r2 = 0, inflate_match = 1),
+  sigma_0_2_scalars = sigma_0_2_default,
+  data_scenarios = "scenario_1",
+  repo_root = here(),
+  data_matrix_catalog = data_matrix_catalog,
+  sampled_scenario_summary = here(
+    "data", "sampled_simulated_genotypes", "scenario_sampling_summary.csv"
+  ),
+  task_unit = task_unit,
+  bundles_per_task = bundles_per_task,
+  task_assignment_seed = task_assignment_seed,
+  max_iter = max_iter,
+  aggregation_methods = character(0),
+  include_overall_pool = FALSE,
+  credible_set_rho = credible_set_rho,
+  purity_threshold = purity_threshold,
+  verbose_file_output = verbose_file_output,
+  write_snps_parquet = write_snps_parquet,
+  write_confusion_bins = write_confusion_bins,
+  write_tier_cs_metrics = write_tier_cs_metrics,
+  write_scaling_confusion_bins = FALSE,
+  purity_filter_sweep = purity_filter_sweep,
+  purity_filter_specs = purity_filter_specs,
+  metrics_settings = list(
+    pip_breaks = pip_breaks,
+    z_top_k = z_top_k,
+    jsd_threshold = jsd_threshold
+  )
+)
+```
+
+# 4. Budget Summary
+
+```{r budget-summary}
+runs <- cfg$tables$runs
+
+cat("Total runs:", nrow(runs), "\n")
+cat("Datasets:", dplyr::n_distinct(runs$dataset_bundle_id), "\n")
+cat("Use cases:", paste(sort(unique(runs$use_case_id)), collapse = ", "), "\n")
+cat("Purity-filter sweep enabled:",
+    isTRUE(cfg$job$compute$purity_filter_sweep), "\n")
+cat("Filter specs:\n")
+str(cfg$job$compute$purity_filter_specs)
+```
+
+# 5. Smoke Checks
+
+```{r smoke-checks}
+stopifnot(nrow(runs) == 600L)
+stopifnot(identical(sort(unique(runs$use_case_id)), "susie_vanilla"))
+stopifnot(isTRUE(cfg$job$compute$purity_filter_sweep))
+stopifnot(dplyr::n_distinct(runs$dataset_bundle_id) == 600L)
+cat("Smoke checks passed.\n")
+```
+
+# 6. Write Artifacts
+
+```{r write-artifacts, eval=FALSE}
+arts <- write_job_artifacts(
+  job_config = cfg,
+  run_task_script = here("inst", "scripts", "run_task.R")
+)
+cat("Job config written to:", arts$job_config, "\n")
+cat("SLURM script:", arts$slurm_script, "\n")
+```
+
+# 7. Submit
+
+```{r submit, eval=FALSE}
+# sbatch <slurm_script_path>
+```

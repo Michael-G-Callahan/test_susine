@@ -78,6 +78,13 @@ Applied post-hoc to each spec's pool of fits.
 | **max_elbo** | Select single best fit by ELBO |
 | **uniform** | Average PIPs equally across all fits |
 | **elbo_softmax** | ELBO-softmax weighted average of PIPs |
-| **cluster_weight** | JSD-cluster fits (threshold 0.15), ELBO-softmax within clusters, uniform across clusters |
-| **cluster_weight_050** | Same as above but with JSD threshold 0.50 (coarser clustering) |
+| **cluster_weight_credible** | Cluster fits by `credible_shift` = max_j[ max(p_j,q_j)·\|p_j−q_j\| ], complete-linkage cut at 0.05; aggregate with Method B (frequency-free). Primary scheduled cluster-weight method. |
+| **cluster_weight_max** | Cluster fits by `max_shift` = max_j \|p_j−q_j\| (L-infinity), complete-linkage cut at 0.10; aggregate with Method B (frequency-free). |
 | **oracle** | Best individual fit by AUPRC (truth-aware; reference only) |
+
+**Method B (frequency-free):** each cluster gets weight proportional to
+`exp(max-ELBO-in-cluster)`; that weight is split within the cluster across member
+fits by ELBO-softmax. All fits contribute (no single nominee), so no 1/frequency
+correction is applied. The legacy JSD-0.15 + frequency `cluster_weight` method
+(Method C, max-ELBO nominee + inverse-frequency) still exists in code but is now
+used only by the real-data pipeline, not the ensemble-sim run.

@@ -548,6 +548,84 @@ compute_bins_from_pip_vec <- function(pip_vec, causal_vec, pip_breaks) {
     dplyr::arrange(dplyr::desc(.data$pip_threshold))
 }
 
+# Combined (model-level) PIP from a set of per-effect alpha rows: 1 - prod(1-α).
+# Empty selection -> zero vector.
+#' @keywords internal
+combined_pip_from_alpha <- function(alpha_mat) {
+  if (is.null(dim(alpha_mat))) alpha_mat <- matrix(alpha_mat, nrow = 1L)
+  if (!nrow(alpha_mat)) return(rep(0, ncol(alpha_mat)))
+  1 - apply(1 - alpha_mat, 2, prod)
+}
+
+# Purity-filter / diffuseness-filter confusion-bin sweep.
+#
+# For a single SuSiE/SuSiNE fit, recompute the combined PIP vector after DROPPING
+# the per-effect components whose credible set fails a filter, then emit confusion
+# bins for each filter type. This is the only place in the production pipeline
+# where credible-set filtering feeds back into the per-variant PIP ranking (and
+# hence AUPRC); the standard evaluate_model() keeps AUPRC purity-invariant by
+# scoring the full combined PIP. Used by the purity-filter minibatch.
+#
+# Args:
+#   alpha             : L x p matrix of per-effect PIPs (fit$effect_fits$alpha).
+#   effects_unfiltered: evaluate_model()$effects_unfiltered, aligned row-for-row
+#                       with `alpha` (carries per-effect $purity and
+#                       $effect_k_eff_signal_core95).
+#   causal_vec        : length-p 0/1 indicator of the true causal support.
+#   causal_mask       : variant indices treated as positives (e.g. top-8 by
+#                       |beta|); passed straight to compute_confusion_bins().
+#   pip_breaks        : confusion-bin breakpoints.
+#   purity_thresholds : credible-set purity cut-offs; one filter per value.
+#   keff_core95_max   : diffuseness cut-off on the core-95% effective support
+#                       size; effects with k_eff_core95 above this are dropped.
+#
+# Returns a long tibble with columns:
+#   filter_type, n_effects_kept, pip_threshold,
+#   n_causal_at_bucket, n_noncausal_at_bucket
+#' @keywords internal
+purity_filter_confusion_sweep <- function(alpha,
+                                          effects_unfiltered,
+                                          causal_vec,
+                                          causal_mask,
+                                          pip_breaks,
+                                          purity_thresholds = c(0.95, 0.90, 0.50),
+                                          keff_core95_max = 100,
+                                          pip_bucket_width = 0.01) {
+  alpha <- as.matrix(alpha)
+  L <- nrow(alpha)
+  purity <- effects_unfiltered$purity
+  keff   <- effects_unfiltered$effect_k_eff_signal_core95
+  if (length(purity) != L || length(keff) != L) {
+    stop("effects_unfiltered must align row-for-row with alpha.")
+  }
+
+  # Filter list: each entry is a logical keep-mask over the L effects.
+  filters <- list(no_filter = rep(TRUE, L))
+  for (thr in purity_thresholds) {
+    nm <- sprintf("purity_%02d", as.integer(round(thr * 100)))
+    filters[[nm]] <- is.finite(purity) & purity >= thr
+  }
+  keff_name <- sprintf("keff_core95_le_%d", as.integer(keff_core95_max))
+  filters[[keff_name]] <- is.finite(keff) & keff <= keff_core95_max
+
+  purrr::imap_dfr(filters, function(keep, fname) {
+    pip_f <- combined_pip_from_alpha(alpha[keep, , drop = FALSE])
+    bins <- compute_confusion_bins(
+      pip_f,
+      causal_vec,
+      pip_bucket_width = pip_bucket_width,
+      pip_breaks = pip_breaks,
+      causal_mask = causal_mask
+    )
+    dplyr::mutate(
+      bins,
+      filter_type = fname,
+      n_effects_kept = sum(keep),
+      .before = 1L
+    )
+  })
+}
+
 # TPR at a fixed FPR threshold from a pooled confusion-bins tibble.
 # pooled_bins must have columns: pip_threshold, n_causal_at_bucket, n_noncausal_at_bucket.
 # Mirrors the compute_tpr05_from_confusion() logic in the collect workbook.

@@ -43,13 +43,13 @@ Important provenance notes:
   currently just `\subsection{Simulation study --- ensemble}` and the ensemble
   results subsection is also empty. The baseline simulation methods/results and
   the introductory framing provide the relevant context.
-- The collection workbook literal is stale relative to the paper plot workbooks:
+- The collection workbook literal differs from the paper plot workbooks:
   `collect_results_workbook_ensemble_scaling.Rmd` has
-  `parent_job_id <- "50452623"`, while both paper-prep and paper-rendering
-  workbooks use `parent_job_id <- "51250228"`. The paper figures therefore point
-  to consolidated outputs for job `ensemble_scaling_full/51250228`.
-- In this local checkout, the full `ensemble_scaling_full/51250228` output
-  directory was not present under `test_susine/output/slurm_output` or
+  `parent_job_id <- "53520405"`, while both paper-prep and paper-rendering
+  workbooks use `parent_job_id <- "53547760"`. The paper figures therefore point
+  to consolidated outputs for job `ensemble_scaling_full/53547760`.
+- In this local checkout, the full `ensemble_scaling_full/53547760` output
+  directory may not be present under `test_susine/output/slurm_output` or
   `output/slurm_output`. The trace below is therefore based on the source code
   and workbook literals rather than re-reading the final generated CSVs.
 - The run-control workbook scheduled annotation quality as
@@ -59,19 +59,28 @@ Important provenance notes:
   focuses on `annotation_r2_focus <- 0.3`.
 - The final per-variant classification curves in this ensemble workflow use the
   top 8 causal variants by absolute effect size as positives. The remaining
-  causal variants are not counted as positives for the confusion-bin scoring
-  used in pooled AUPRC and precision-recall plots.
-- Cluster-weight aggregation is unified across the package (resolved
-  2026-05-22). Both the primary full-ensemble aggregation in `run_model.R`
-  (via `.cluster_weight_from_hc()`) and the scaling-bin helper in
-  `collect_results.R` (via `aggregate_pip_matrix(..., method = "cluster_weight")`
-  -> `.aggregate_cluster_weight()`) now delegate to `.cluster_weights_from_hc()`,
-  which selects the highest-ELBO nominee per JSD cluster and applies
-  frequency-adjusted softmax(ELBO) weights across nominees. Scaling-curve
-  outputs produced before the unification used a different rule
-  (each cluster weighted `1/K`, all members contributing via within-cluster
-  softmax) and should be regenerated before being read as the published
-  cluster-weight method.
+  (weak) causal variants are not counted as positives -- and, critically, they
+  are not counted as negatives either: `compute_confusion_bins()` DROPS them
+  entirely (`keep <- !(causal == 1L & scored == 0L)`), so the confusion-bin
+  scoring used in pooled AUPRC and precision-recall plots is neither rewarded
+  nor penalized for them.
+- The scheduled cluster-weight methods are now the pilot-locked
+  `cluster_weight_credible` (clustering metric `credible_shift` =
+  max_j[ max(p_j,q_j) * |p_j - q_j| ], complete-linkage cut at 0.05) and
+  `cluster_weight_max` (clustering metric `max_shift` = max_j |p_j - q_j|,
+  L-infinity, complete-linkage cut at 0.10). Both aggregate with **Method B**
+  (frequency-free): each cluster gets weight proportional to
+  `exp(max-ELBO-in-cluster)`, split within the cluster across all member fits by
+  ELBO-softmax. All fits contribute -- there is no single nominee and no
+  1/frequency correction. Ground truth: `run_model.R` ~line 2005
+  (`credible_shift`), ~2009 (`max_shift`), ~2086-2126
+  (`.cluster_weights_from_hc(..., aggregation = "method_b")`), ~2143-2146
+  (`.cluster_weight_specs`). For these scheduled methods both the full-ensemble
+  path and the scaling-bin path now route through Method B identically, so the
+  older full-vs-scaling discrepancy is obsolete for them. The legacy JSD-0.15 +
+  frequency `cluster_weight` method (Method C) still exists in code but is now
+  used only by the real-data pipeline, not the ensemble-sim run. The paper-prep
+  workbook highlights `cluster_weight_credible` as the primary method.
 
 ## 2. Manuscript context
 
@@ -205,11 +214,11 @@ The scheduled aggregation methods are:
 - `max_elbo`
 - `uniform`
 - `elbo_softmax`
-- `cluster_weight`
-- `cluster_weight_jsd_050`
+- `cluster_weight_credible` (clustering metric `credible_shift`, cut 0.05, Method B)
+- `cluster_weight_max` (clustering metric `max_shift` / L-infinity, cut 0.10, Method B)
 
-However, the paper-prep workflow drops `cluster_weight_jsd_050` from the main
-paper plot tables via `drop_aggs <- "cluster_weight_jsd_050"`.
+The paper-prep workflow now keeps all scheduled methods: `drop_aggs <- character(0)`.
+The paper-prep workbook highlights `cluster_weight_credible` as the primary method.
 
 The scaling-subset sizes are:
 
@@ -515,8 +524,8 @@ The core aggregation methods are:
 - `max_elbo`;
 - `uniform`;
 - `elbo_softmax`;
-- `cluster_weight`;
-- `cluster_weight_jsd_050`.
+- `cluster_weight_credible` (clustering metric `credible_shift`, cut 0.05, Method B);
+- `cluster_weight_max` (clustering metric `max_shift` / L-infinity, cut 0.10, Method B).
 
 Compatibility rules are in:
 
@@ -1135,10 +1144,14 @@ The function takes:
 - PIP bucket breaks;
 - optional `causal_mask`.
 
-If `causal_mask` is supplied, it replaces the causal vector:
+If `causal_mask` is supplied, it builds the scored-positive vector and then
+DROPS the weak (true-causal-but-not-masked) variants:
 
 ```r
-causal <- as.integer(seq_len(n) %in% causal_mask)
+scored <- as.integer(seq_len(n) %in% causal_mask)
+keep <- !(causal == 1L & scored == 0L)
+pip <- pip[keep]
+causal <- scored[keep]
 ```
 
 In `execute_dataset_bundle()`, the mask is:
@@ -1149,14 +1162,15 @@ In `execute_dataset_bundle()`, the mask is:
 Therefore:
 
 - positives = 8 largest-effect causal SNPs per dataset;
-- all other SNPs, including smaller-effect causal SNPs, are counted as
-  non-positive for confusion-bin purposes.
+- true non-causal SNPs are negatives;
+- the smaller-effect (weak) causal SNPs are DROPPED entirely -- neither
+  positive nor negative -- so AUPRC is not penalized for failing to recover
+  them.
 
 The manuscript baseline figure caption for the 5-arm refit chain similarly says
-positives are the top 8 causal SNPs per dataset by absolute beta, with
-polygenic-tier causals excluded from the negative set. The implementation here
-is stricter in the confusion-bin function: once the top-8 mask is passed, every
-non-top-8 SNP has `causal = 0` for the bucket counts.
+positives are the top 8 causal SNPs per dataset by absolute beta, with the weak
+(non-top-8) causals excluded from the negative set. The confusion-bin function
+implements exactly that exclusion via the `keep` filter above.
 
 The confusion bins record, for each PIP bucket lower edge:
 
@@ -1218,40 +1232,45 @@ Then aggregate:
 crossprod(w, pips_mat)
 ```
 
-### 21.4 `cluster_weight`
+### 21.4 `cluster_weight_credible` and `cluster_weight_max`
 
-Primary `cluster_weight` uses PIP-vector Jensen-Shannon divergence and complete
-linkage clustering:
+The two scheduled cluster-weight methods each build their own dendrogram with a
+single-variant PIP-shift metric and complete-linkage clustering, then aggregate
+with Method B (frequency-free):
 
-- prepare similarity cache:
-  `prepare_pip_similarity_cache()`;
-- cluster with `hclust(as.dist(jsd_mat), method = "complete")`;
-- cut the tree at `jsd_threshold = 0.15`;
-- within each cluster, choose the max-ELBO representative;
-- compute representative ELBO-softmax weights;
-- divide each representative weight by the cluster's frequency;
-- renormalize weights;
-- aggregate only representatives.
+- `cluster_weight_credible`: clustering metric `credible_shift` =
+  max_j[ max(p_j,q_j) * |p_j - q_j| ] (largest credibility-weighted single-variant
+  PIP shift), complete-linkage cut at threshold 0.05;
+- `cluster_weight_max`: clustering metric `max_shift` = max_j |p_j - q_j|
+  (Chebyshev / L-infinity), complete-linkage cut at 0.10.
 
-The representative weighting helper is:
+The per-method (metric, threshold) pairs are locked in
+`.cluster_weight_specs` (`run_model.R` ~lines 2143-2146). Each method builds its
+dendrogram via `prepare_pip_similarity_cache(pips_mat, metric = spec$metric)`,
+then aggregates via `.aggregate_cluster_method()` ->
+`.cluster_weights_from_hc(..., aggregation = "method_b")`.
 
-- `test_susine/R/run_model.R:1987` (`.cluster_weights_from_hc`)
+**Method B** (`.cluster_weights_from_hc`, `run_model.R` ~lines 2086-2126):
 
-The frequency adjustment means that large clusters do not dominate merely
-because many similar fits landed in the same basin.
+- cut the dendrogram at the method's threshold;
+- each cluster gets weight proportional to `exp(max-ELBO-in-cluster)`
+  (softmax over per-cluster max ELBOs);
+- that cluster weight is split within the cluster across ALL member fits by
+  ELBO-softmax;
+- there is no single nominee and no 1/frequency correction; the weight vector
+  `w_full` spans all fits.
+
+A degenerate single-fit group falls back to plain ELBO-softmax.
 
 The final aggregated PIP vector gets an `ess` attribute:
 
 ```r
-1 / sum(w_rep^2)
+1 / sum(w_full^2)
 ```
 
-### 21.5 `cluster_weight_jsd_050`
-
-This is the same representative cluster-weight procedure, but it cuts the JSD
-tree at 0.50 instead of 0.15.
-
-The paper-prep workflow drops this method from main paper plots.
+The legacy JSD-0.15 + frequency-corrected `cluster_weight` (Method C: max-ELBO
+nominee per JSD cluster, weight divided by cluster frequency) still exists in
+code but is now used only by the real-data pipeline, not the ensemble-sim run.
 
 ## 22. Scaling-bin aggregation and the cluster-weight discrepancy
 
@@ -1267,23 +1286,17 @@ That function uses:
 For `uniform`, `max_elbo`, and `elbo_softmax`, this is equivalent to the primary
 aggregation logic.
 
-For `cluster_weight`, it is not the same implementation:
+For the scheduled `cluster_weight_credible` and `cluster_weight_max` methods,
+both the full-ensemble path and the scaling-bin path now route through the same
+Method B logic (each method's own metric + threshold, frequency-free cluster
+weights split by within-cluster ELBO-softmax). The older full-vs-scaling
+cluster-weight discrepancy -- where the scaling helper weighted clusters
+uniformly (`1/K`) without representatives or frequency adjustment -- is therefore
+obsolete for the scheduled methods; both paths agree at full resolution.
 
-- `aggregate_pip_matrix()` clusters by JSD;
-- within each cluster, it assigns ELBO-softmax weights to all fits in that
-  cluster;
-- each cluster receives weight `1 / K`, where `K` is the number of clusters;
-- it does not choose a single representative per cluster;
-- it does not apply the representative frequency-adjustment used by
-  `aggregate_use_case_pips()`.
-
-This means scaling-curve cluster-weight AUPRCs can differ slightly from primary
-full-ensemble cluster-weight AUPRCs, even at the full resolution, unless the
-runtime full-group cache supplies already-computed bins or the collection
-backfill overwrites missing rows in a particular way.
-
-This is the most important implementation caveat for interpreting compute-vs-
-AUPRC and 4x4/8x8 scaling figures.
+(The legacy JSD-0.15 + frequency `cluster_weight` method, used only by the
+real-data pipeline now, is the one for which the historical discrepancy was
+defined.)
 
 ## 23. Scaling-subset construction
 
@@ -1393,19 +1406,33 @@ These diagnostics are written to `multimodal_metrics`.
 
 Aggregated fitted-value heritability is computed in:
 
-- `test_susine/R/run_model.R:2646` (`compute_hg2_by_agg`)
+- `test_susine/R/run_model.R:2850` (`compute_hg2_by_agg`)
 
-For each aggregation method, it combines fitted values using the corresponding
-aggregation weights and computes:
+The code now emits a corrected "fair" local-genetic-variance decomposition rather
+than only the old posterior-mean point estimate. For each aggregation method it
+combines fitted values with the method's aggregation weights `w` and computes:
 
-```r
-hg2 = var(fitted_y_agg) / var(y)
-```
+- `hg2_postmean` = var(weighted posterior-mean fitted y) / var(y);
+- `hg2_between_fit` = Σ_k w_k var(fy_k − fy_agg) / var(y) (mixture dispersion);
+- `hg2_uncertainty` = Σ_k w_k * within-fit posterior-variance correction
+  (`tr(Σ Cov(b|y))/var(y)`, weighted over positively-weighted fits);
+- the REPORTED estimand
+  `hg2_expected_pve = hg2_postmean + hg2_between_fit + hg2_uncertainty`
+  = E[var(Xβ)|y] / var(y).
 
-Then it clips to `[0, 1]`.
+The additive decomposition is kept exact (not clamped at 1); clamping happens at
+the display layer. The legacy point-estimate columns `hg2` (=
+var(weighted fitted y)/var(y), the old estimand) and `hg2_weighted_pve` (=
+Σ_k w_k var(fy_k)/var(y)) are still emitted for backward compatibility. The
+decomposition engine lives in the new file `test_susine/R/heritability.R`
+(`hg2_uncertainty_scalar()` supplies the per-fit correction). Provenance commits
+`4e0721b` / `236820b` (2026-06-09); see
+`refs/decisions/heritability_estimand_decision_2026-06-09.md`.
 
-For cluster-weight aggregation, this uses the same representative/frequency
-logic as primary `run_model.R` cluster-weight PIP aggregation.
+For cluster-weight aggregation, each scheduled method uses its own metric +
+threshold dendrogram and Method B weights (same logic as primary `run_model.R`
+cluster-weight PIP aggregation). The paper-prep workbook consumes
+`hg2_expected_pve` / `hg2_postmean`.
 
 ## 25. Runtime output shape
 
@@ -1446,12 +1473,12 @@ At the top of the currently inspected file:
 
 ```r
 job_name      <- "ensemble_scaling_full"
-parent_job_id <- "50452623"
+parent_job_id <- "53520405"
 output_root   <- here("output")
 ```
 
 Again, this parent ID differs from the paper-prep and paper-rendering workbooks,
-which use `51250228`.
+which use `53547760`.
 
 The collection workflow:
 
@@ -1796,7 +1823,9 @@ It uses:
 parent_job_id <- "51250228"
 ```
 
-and reads the consolidated CSVs for that job.
+(this exploratory workbook still points at the older job; the paper-prep and
+paper-rendering workbooks use `53547760`) and reads the consolidated CSVs for
+that job.
 
 It creates a wider set of exploratory plots, organized into categories:
 
@@ -1839,9 +1868,9 @@ It uses:
 
 ```r
 job_name <- "ensemble_scaling_full"
-parent_job_id <- "51250228"
+parent_job_id <- "53547760"
 annotation_r2_focus <- 0.3
-drop_aggs <- "cluster_weight_jsd_050"
+drop_aggs <- character(0)
 bootstrap_B <- 2000L
 bootstrap_seed <- 20260505L
 true_h2 <- 0.25
@@ -1850,13 +1879,13 @@ true_h2 <- 0.25
 It reads from:
 
 ```text
-output/slurm_output/ensemble_scaling_full/51250228/consolidated
+output/slurm_output/ensemble_scaling_full/53547760/consolidated
 ```
 
 and writes plot data to:
 
 ```text
-output/slurm_output/ensemble_scaling_full/51250228/figures/paper_ensemble_scaling/plot_data
+output/slurm_output/ensemble_scaling_full/53547760/figures/paper_ensemble_scaling/plot_data
 ```
 
 The primary cached output is:
@@ -1891,7 +1920,8 @@ The paper-prep workflow defines:
   - `max_elbo`;
   - `uniform`;
   - `elbo_softmax`;
-  - `cluster_weight`;
+  - `cluster_weight_credible` (primary);
+  - `cluster_weight_max`;
   - `oracle`.
 
 It defines `is_focus_annotation_row()`:
@@ -1931,7 +1961,7 @@ truth-warm ceiling.
 `heatmap_data` is built from the shared pooled AUPRC plot table:
 
 - keep focus annotation rows;
-- drop `cluster_weight_jsd_050`;
+- `drop_aggs` is now `character(0)`, so no aggregation methods are dropped;
 - keep aggregations in `agg_order`;
 - keep specs in `spec_order`;
 - compute:
@@ -1945,7 +1975,8 @@ This feeds:
 
 - `paper_delta_auprc_heatmap_r2_0p2.png`
 
-The visualizer highlights the `C-CS / cluster_weight` tile with a red border.
+The visualizer highlights the `C-CS / cluster_weight_credible` tile with a red
+border.
 
 ## 39. Paper-prep C-CS by annotation data
 
@@ -1953,12 +1984,12 @@ The visualizer highlights the `C-CS / cluster_weight` tile with a red border.
 
 - `spec_name == "C-CS"`;
 - annotation levels 0, 0.3, 0.5;
-- `agg_method` in the main aggregation order, after dropping
-  `cluster_weight_jsd_050`.
+- `agg_method` in the main aggregation order (`drop_aggs` is now `character(0)`,
+  so nothing is dropped).
 
 The paper-rendering workbook further keeps:
 
-- `cluster_weight`;
+- `cluster_weight_credible`;
 - `oracle`.
 
 This feeds:
@@ -1980,7 +2011,7 @@ The bootstrap compares:
 - ensemble:
   - `C-CS`;
   - `annotation_r2 = 0.3`;
-  - `agg_method = "cluster_weight"`;
+  - `agg_method = "cluster_weight_credible"`;
   - aggregated confusion bins.
 
 The bootstrap unit is `dataset_bundle_id`.
@@ -1993,7 +2024,7 @@ Procedure:
    - weight each dataset's bins by how many times it was sampled;
    - pool weighted bins;
    - compute AUPRC for baseline;
-   - compute AUPRC for C-CS cluster-weight;
+   - compute AUPRC for C-CS cluster_weight_credible;
    - store the delta.
 3. Compute the observed paired delta using the unresampled shared dataset set.
 4. Compute the 2.5 percent and 97.5 percent bootstrap quantiles.
@@ -2014,7 +2045,7 @@ Rows included:
   - crossed with all annotation r2 values for plotting alongside C-CS;
 - C-CS:
   - `spec_name == "C-CS"`;
-  - `agg_method == "cluster_weight"`;
+  - `agg_method == "cluster_weight_credible"`;
   - annotation r2 values 0, 0.3, 0.5.
 
 The prep workbook also computes two operating-point diagnostics:
@@ -2035,7 +2066,7 @@ If `hg2_by_agg.csv` is available, the prep workbook:
 - normalizes aggregation-method IDs;
 - enriches metadata from `model_metrics`;
 - keeps focus annotation rows;
-- keeps `agg_method == "cluster_weight"`;
+- keeps `agg_method == "cluster_weight_credible"`;
 - labels `C-CS` specially;
 - adds baseline `hg2` rows from `model_metrics` for
   `baseline-single / susine_vanilla`.
@@ -2060,7 +2091,7 @@ Calibration compares:
 - ensemble:
   - `C-CS`;
   - `annotation_r2 = 0.3`;
-  - `agg_method = "cluster_weight"`.
+  - `agg_method = "cluster_weight_credible"`.
 
 The prep workflow bins by PIP threshold into width-0.10 bins:
 
@@ -2088,7 +2119,7 @@ Function:
 
 It:
 
-- drops `cluster_weight_jsd_050`;
+- applies `drop_aggs` (now `character(0)`, so no aggregation methods are dropped);
 - splits pure scaling rows from interaction rows:
   - pure rows have `resolution = NA`;
   - interaction rows have non-missing `resolution`;
@@ -2107,7 +2138,7 @@ The prep workbook constructs `ccs_resolution_plot_data` by combining:
    - from `scaling_metrics`;
    - `spec_name == "C-CS"`;
    - `annotation_r2 = 0.3`;
-   - `agg_method == "cluster_weight"`;
+   - `agg_method == "cluster_weight_credible"`;
    - resolutions `4x4` and `8x8`;
 2. `compute_ccs_resolution_oracle()`:
    - recomputes an oracle from individual C-CS confusion bins;
@@ -2161,7 +2192,7 @@ It uses:
 
 ```r
 job_name <- "ensemble_scaling_full"
-parent_job_id <- "51250228"
+parent_job_id <- "53547760"
 ```
 
 and reads:
@@ -2236,7 +2267,7 @@ annotation squared-correlation parameter as stored in code as `annotation_r2`.
 Visible values in panel A of the local composite provide a useful sanity check
 against the code trace:
 
-- the highlighted primary method, `C-CS` with `cluster_weight`, has
+- the highlighted primary method, `C-CS` with `cluster_weight_credible`, has
   `Delta AUPRC = +0.059 (+25%)` at the focus annotation setting;
 - `C-CS` with `oracle` has `Delta AUPRC = +0.090 (+38%)`;
 - among non-oracle aggregators, C-CS cluster-weight is the largest visible gain
@@ -2269,7 +2300,8 @@ Rows:
   - max ELBO;
   - uniform;
   - ELBO softmax;
-  - cluster weight;
+  - cluster_weight_credible (primary);
+  - cluster_weight_max;
   - oracle.
 
 Displayed value:
@@ -2291,7 +2323,7 @@ Rows:
 - `spec_name == "C-CS"`;
 - annotation r2 values 0, 0.3, 0.5;
 - plotted methods:
-  - cluster weight;
+  - cluster_weight_credible;
   - oracle.
 
 References:
@@ -2311,7 +2343,7 @@ Data:
 
 Comparison:
 
-- C-CS cluster-weight at `annotation_r2 = 0.3`;
+- C-CS cluster_weight_credible at `annotation_r2 = 0.3`;
 - minus baseline SuSiE.
 
 Bootstrap:
@@ -2510,7 +2542,10 @@ by absolute effect size as positives. This is a major methods detail.
 
 The data-generating model has 23 causal SNPs, but AUPRC/PR paper plots are not
 asking the methods to recover all 23 equally. They score recovery of the largest
-8 causal effects.
+8 causal effects. The remaining (weak) causal SNPs are DROPPED from the scoring
+entirely -- they are neither positives nor negatives
+(`keep <- !(causal == 1L & scored == 0L)` in `compute_confusion_bins()`) -- so
+the curves are not penalized for failing to recover them.
 
 ### 48.5 Purity thresholds differ by purpose
 
@@ -2540,25 +2575,20 @@ runtime scaling helper emits one deterministic subset per scaling size. Restart
 and refine subsets use the first IDs/steps, while c/sigma subsets use evenly
 spaced grid values.
 
-### 48.8 Cluster-weight aggregation differs between full and scaling paths
+### 48.8 Cluster-weight aggregation now agrees between full and scaling paths
 
-Full primary aggregation:
+For the scheduled `cluster_weight_credible` and `cluster_weight_max` methods,
+both the full-ensemble path and the scaling-bin path route through the same
+Method B logic (each method's own metric + threshold, frequency-free cluster
+weights split by within-cluster ELBO-softmax, all fits contributing). The older
+full-vs-scaling discrepancy -- full path used a max-ELBO representative per JSD
+cluster with a 1/frequency correction, while the scaling helper weighted clusters
+uniformly with no representative -- is obsolete for the scheduled methods; both
+paths agree at full resolution.
 
-- representative per JSD cluster;
-- max ELBO representative;
-- ELBO-softmax over representatives;
-- divide by cluster frequency;
-- renormalize.
-
-Scaling helper aggregation:
-
-- all fits retained;
-- ELBO-softmax within cluster;
-- clusters weighted uniformly;
-- no representative/frequency adjustment.
-
-If scaling cluster-weight results are described in the paper, this implementation
-detail should either be harmonized in code or described accurately.
+That historical discrepancy was defined only for the legacy JSD-0.15 +
+frequency `cluster_weight` method (Method C), which is now used solely by the
+real-data pipeline.
 
 ### 48.9 Truth-warm is an upper-bound diagnostic, not a method
 
@@ -2576,11 +2606,11 @@ effect fits. It tests basin durability after removing the annotation prior.
 If rerunning collection for the paper figures, update:
 
 ```r
-parent_job_id <- "51250228"
+parent_job_id <- "53520405"
 ```
 
 in `collect_results_workbook_ensemble_scaling.Rmd`, or parameterize it. The
-paper-prep and paper-rendering workbooks already use `51250228`.
+paper-prep and paper-rendering workbooks already use `53547760`.
 
 ## 49. Methods-section distillation
 
@@ -2612,16 +2642,22 @@ combinations. The main fixed-grid SuSiNE ensemble (`C-CS`) crossed 8 values of
 
 Within each dataset and ensemble group, we aggregated PIPs using several rules:
 selecting the max-ELBO fit, uniformly averaging PIPs, ELBO-softmax averaging,
-and a JSD-clustered ELBO-weighted rule. The primary cluster-weight rule clustered
-PIP vectors by complete-linkage Jensen-Shannon divergence, selected the max-ELBO
-representative from each cluster, applied ELBO-softmax weights to cluster
-representatives, adjusted by inverse cluster frequency, and renormalized.
+and two cluster-weighted rules. The primary cluster-weight rule
+(`cluster_weight_credible`) clustered PIP vectors by complete linkage on a
+single-variant credibility-weighted shift metric,
+`credible_shift = max_j[ max(p_j,q_j) * |p_j - q_j| ]`, cut at 0.05; a companion
+rule (`cluster_weight_max`) used the unweighted L-infinity shift
+`max_j |p_j - q_j|` cut at 0.10. Both aggregated with a frequency-free scheme
+(Method B): each cluster received weight proportional to exp(max-ELBO-in-cluster),
+split within the cluster across all member fits by ELBO-softmax, so every fit
+contributes and no inverse-frequency correction is applied.
 
 Performance curves were computed from PIP confusion bins pooled across datasets.
 For classification-style AUPRC/PR analyses, positives were defined as the top 8
-true causal SNPs per dataset by absolute effect size. The oracle aggregator was
-a truth-aware diagnostic that selected the best individual ensemble member per
-dataset by AUPRC before pooling its confusion bins.
+true causal SNPs per dataset by absolute effect size; the remaining (weak) causal
+SNPs were excluded from scoring entirely (neither positive nor negative). The
+oracle aggregator was a truth-aware diagnostic that selected the best individual
+ensemble member per dataset by AUPRC before pooling its confusion bins.
 
 ## 50. Key code reference index
 
@@ -2654,7 +2690,10 @@ Execution:
 - `test_susine/R/run_model.R:2029` - `compute_multimodal_metrics`
 - `test_susine/R/run_model.R:2165` - `write_run_outputs`
 - `test_susine/R/run_model.R:2454` - `compute_scaling_confusion_bins_for_group`
-- `test_susine/R/run_model.R:2646` - `compute_hg2_by_agg`
+- `test_susine/R/run_model.R:2086` - `.cluster_weights_from_hc` (Method B)
+- `test_susine/R/run_model.R:2143` - `.cluster_weight_specs` (locked-in cluster-weight metrics/thresholds)
+- `test_susine/R/run_model.R:2850` - `compute_hg2_by_agg`
+- `test_susine/R/heritability.R` - fair-PVE decomposition engine (`hg2_uncertainty_scalar`, etc.)
 
 Metrics:
 

@@ -30,6 +30,7 @@ Main files traced:
 - Relevant helpers:
   - `R/run_model.R`
   - `R/evaluation_metrics.R`
+  - `R/heritability.R`
   - `R/simulate_data.R`
   - `R/run_controls.R`
 
@@ -292,6 +293,20 @@ Each effect row records:
   - `var_y_explained_frac`;
 - model-level AUPRC and TPR@FPR=0.05 copied onto the row.
 
+The model-level metrics copied onto each row come from `evaluate_model()`, which
+also emits two local-genetic-variance (PVE/heritability) estimands: the legacy
+`hg2` (still emitted) = `var(fitted_y) / var(y)`, clipped to `[0, 1]`, via
+`estimate_hg2()` in `R/evaluation_metrics.R`; and the corrected
+local-genetic-variance decomposition (the now-reported estimand) via
+`hg2_components()` with its engine in `R/heritability.R`, emitting
+`hg2_postmean = var(E[Xβ|y]) / var(y)`, `hg2_uncertainty` (a within-fit
+posterior-variance correction), and
+`hg2_expected_pve = hg2_postmean + hg2_uncertainty = E[var(Xβ)|y] / var(y)` for a
+single fit (an additional `hg2_between_fit` term appears only under
+multi-fit/ensemble aggregation). Provenance: commits `4e0721b` / `236820b`
+(2026-06-09). Note this model-level PVE is distinct from the per-effect
+`var_y_explained_frac` above.
+
 The export workbook reconstructs per-effect fitted-y vectors from the effect
 coefficient matrix and the original `X`. It explicitly checks reconstructed
 total fitted-y against `model_fit$fitted_y` when available, after centering and
@@ -470,10 +485,14 @@ For pooled PR curves:
 - `pr_top_k <- 8L`;
 - causals are ranked by `abs(beta)` within each dataset;
 - the top 8 are positives;
-- all other variants, including non-top causal variants, are negatives.
+- true non-causal variants are negatives; non-top causal variants (true causals
+  outside the top 8) are DROPPED entirely -- neither positive nor negative.
 
-The notebook comments explicitly state that this matches the baseline-sims
-confusion-bin AUPRC convention.
+This matches the baseline-sims confusion-bin AUPRC convention in
+`compute_confusion_bins()` (`R/run_model.R`), which does
+`scored <- as.integer(seq_len(n) %in% causal_mask)` then
+`keep <- !(causal == 1L & scored == 0L)` so weak causals are removed and AUPRC
+is not penalized for them.
 
 Outputs intended by the heavy notebook:
 
@@ -639,13 +658,14 @@ manuscript caption as the operational source: all five arms are treated as
 ### 19.2 Top-8 positives versus polygenic causals
 
 Both baseline confusion bins and the 5-arm PR regeneration code use top-8
-causal variants by `abs(beta)` as positives. In source code, variants outside
-that top-8 set are not labelled positive in the binary PR table, even if they
-are members of the 15-variant polygenic causal tier.
+causal variants by `abs(beta)` as positives. In source code, true non-causal
+variants are the negatives, and variants that are truly causal but outside the
+top-8 set (including members of the 15-variant polygenic causal tier) are
+DROPPED from the table entirely -- neither positive nor negative -- so AUPRC is
+not penalized for them.
 
-Manuscript prose should be checked for any phrasing that says polygenic-tier
-causals are excluded from negatives. The code convention is binary top-8
-classification.
+Manuscript prose that says polygenic-tier causals are excluded from negatives is
+therefore correct: those weak causals are dropped, not scored as negatives.
 
 ### 19.3 Chord drift versus `1 - r^2` drift
 
