@@ -1265,9 +1265,9 @@ if (file.exists(mm_path)) {
       RFS = "R+F+S",
       C = "C",
       CS = "C+S",
-      CSR = "C+S->R",
-      CSFR = "C+S+F+R",
-      CFR = "C+F+R",
+      CSR = "C+S\n->R",
+      CSFR = "C+S\n+F+R",
+      CFR = "C+F\n+R",
       CF = "C+F"
     )
 
@@ -1306,17 +1306,17 @@ if (file.exists(mm_path)) {
         width = 0.62,
         alpha = 0.82,
         color = "grey18",
-        outlier.alpha = 0.22,
+        outlier.alpha = 0.14,
         outlier.color = "grey12",
-        outlier.size = 0.42,
+        outlier.size = 0.36,
         linewidth = 0.34
       ) +
       ggplot2::stat_summary(
         fun = stats::median,
         geom = "point",
         shape = 21,
-        size = 1.25,
-        stroke = 0.28,
+        size = 1.45,
+        stroke = 0.32,
         fill = "white",
         color = "grey15"
       ) +
@@ -1344,42 +1344,49 @@ if (file.exists(mm_path)) {
           "C = annotation-scale grid. White points mark medians."
         )
       ) +
-      # Font sizes are pulled from the shared `font_sizes` scale so this figure
-      # matches the other ensemble composites when placed at \linewidth.
+      # Local typography is slightly tighter than the shared composite scale
+      # because this panel has many x-axis categories in the C-family facet.
       paper_theme() +
       ggplot2::theme(
-        plot.tag = ggplot2::element_text(size = font_sizes$tag, face = "bold"),
-        plot.tag.position = c(0.01, 0.99),
-        plot.title = ggplot2::element_text(size = font_sizes$title, hjust = 0.5),
+        plot.tag = ggplot2::element_text(size = 25, face = "bold"),
+        plot.tag.position = c(0.016, 0.975),
+        plot.title = ggplot2::element_text(size = 21, hjust = 0.5),
         plot.subtitle = ggplot2::element_text(
-          size = font_sizes$subtitle,
+          size = 11,
           hjust = 0.5,
-          margin = ggplot2::margin(t = 2, b = 6)
+          margin = ggplot2::margin(t = 1, b = 5)
         ),
         plot.caption = ggplot2::element_text(
-          size = font_sizes$caption,
+          size = 9,
           hjust = 0,
-          margin = ggplot2::margin(t = 6)
+          margin = ggplot2::margin(t = 4)
         ),
         axis.title.x = ggplot2::element_text(
-          size = font_sizes$axis_title,
-          margin = ggplot2::margin(t = 6)
+          size = 18,
+          margin = ggplot2::margin(t = 2)
         ),
-        axis.text.x = ggplot2::element_text(size = font_sizes$axis_text, color = "grey15"),
-        axis.text.y = ggplot2::element_text(size = font_sizes$axis_text, color = "grey15"),
+        axis.text.x = ggplot2::element_text(
+          size = 15,
+          color = "grey15",
+          lineheight = 0.9,
+          margin = ggplot2::margin(t = 1)
+        ),
+        axis.text.y = ggplot2::element_text(size = 16, color = "grey15"),
         panel.spacing.x = grid::unit(0.75, "lines"),
         panel.spacing.y = grid::unit(0.5, "lines"),
         panel.grid.minor = ggplot2::element_blank(),
         panel.grid.major.x = ggplot2::element_blank(),
         strip.background = ggplot2::element_rect(fill = "grey92", color = "grey35"),
         strip.placement = "outside",
-        strip.text.x = ggplot2::element_text(size = font_sizes$axis_text, face = "bold"),
+        strip.text.x = ggplot2::element_text(size = 18, face = "bold"),
         strip.text.y.left = ggplot2::element_text(
-          size = font_sizes$strip,
+          size = 9,
           face = "bold",
           angle = 0,
-          lineheight = 0.92
-        )
+          lineheight = 0.9,
+          margin = ggplot2::margin(t = 2, r = 4, b = 2, l = 4)
+        ),
+        strip.switch.pad.grid = grid::unit(0.04, "lines")
       ), "G")
 
     # 3:1 aspect ratio at the same canvas width as the heatmap composite (18in),
