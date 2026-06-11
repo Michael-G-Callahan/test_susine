@@ -1338,7 +1338,7 @@ if (file.exists(mm_path)) {
         y = NULL,
         tag = "G",
         title = "Ensemble multimodality by method variant",
-        subtitle = "Distributions are over loci; lower values indicate less multimodality.",
+        subtitle = NULL,
         caption = paste(
           "R = restarts; F = refinement; S = prior-variance grid;",
           "C = annotation-scale grid. White points mark medians."
@@ -1351,15 +1351,11 @@ if (file.exists(mm_path)) {
         plot.tag = ggplot2::element_text(size = 25, face = "bold"),
         plot.tag.position = c(0.016, 0.975),
         plot.title = ggplot2::element_text(size = 21, hjust = 0.5),
-        plot.subtitle = ggplot2::element_text(
-          size = 11,
-          hjust = 0.5,
-          margin = ggplot2::margin(t = 1, b = 5)
-        ),
+        plot.subtitle = ggplot2::element_blank(),
         plot.caption = ggplot2::element_text(
-          size = 9,
+          size = 12,
           hjust = 0,
-          margin = ggplot2::margin(t = 4)
+          margin = ggplot2::margin(t = 6)
         ),
         axis.title.x = ggplot2::element_text(
           size = 18,
@@ -1380,10 +1376,10 @@ if (file.exists(mm_path)) {
         strip.placement = "outside",
         strip.text.x = ggplot2::element_text(size = 18, face = "bold"),
         strip.text.y.left = ggplot2::element_text(
-          size = 9,
+          size = 12,
           face = "bold",
           angle = 0,
-          lineheight = 0.9,
+          lineheight = 0.95,
           margin = ggplot2::margin(t = 2, r = 4, b = 2, l = 4)
         ),
         strip.switch.pad.grid = grid::unit(0.04, "lines")
