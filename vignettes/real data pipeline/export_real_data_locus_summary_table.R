@@ -206,6 +206,7 @@ compute_pip_l2_tbl <- function(paper_summary, aggregated_dir) {
 pip_l2_tbl <- compute_pip_l2_tbl(paper_summary, aggregated_dir)
 
 locus_summary_tbl <- paper_summary %>%
+  dplyr::select(-dplyr::any_of("pip_l2_susie_anchor_vs_susine_ensemble")) %>%
   dplyr::left_join(
     weighted_annotation_tbl %>%
       dplyr::select(locus_id, weighted_c_value,
