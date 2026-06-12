@@ -43,12 +43,12 @@ library(knitr)
 
 ```{r locate}
 job_name <- "purity_filter_minibatch"
-parent_job_id <- "REPLACE_WITH_SLURM_JOB_ID"   # set after the array job finishes
+parent_job_id <- Sys.getenv("PURITY_FILTER_PARENT_JOB_ID", unset = "53615664")
 output_root <- here("output")
 
 job_dir <- file.path(output_root, "slurm_output", job_name, parent_job_id)
 cfg_path <- file.path(output_root, "run_history", job_name, parent_job_id, "job_config.json")
-cfg <- test_susine:::load_job_config(cfg_path)
+cfg <- if (file.exists(cfg_path)) test_susine:::load_job_config(cfg_path) else NULL
 
 aggregated_dir <- file.path(job_dir, "aggregated")
 consolidated_dir <- file.path(job_dir, "consolidated")
@@ -56,12 +56,33 @@ plot_dir <- file.path(consolidated_dir, "plots")
 dir.create(consolidated_dir, recursive = TRUE, showWarnings = FALSE)
 dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
 
+task_dirs <- list.dirs(job_dir, recursive = FALSE, full.names = TRUE)
+staging_flush_files <- list.files(
+  task_dirs,
+  pattern = "^flush-[0-9]+_",
+  full.names = TRUE
+)
+consolidated_cache_available <- all(file.exists(file.path(
+  consolidated_dir,
+  c("auprc_by_filter_type.csv", "auprc_per_dataset_by_filter.csv",
+    "auprc_per_dataset_delta_summary.csv", "effect_metrics_unfiltered_full.csv")
+)))
+use_consolidated_cache <- !length(staging_flush_files) && consolidated_cache_available
+
 cat("Job dir:", job_dir, "\n")
+cat("Using consolidated cache only:", use_consolidated_cache, "\n")
 ```
 
 # 2. Aggregate Staging Outputs
 
-```{r aggregate}
+```{r aggregate, eval = !use_consolidated_cache}
+if (!length(staging_flush_files)) {
+  stop(
+    "No staging flush files found and consolidated recovery files are incomplete: ",
+    job_dir
+  )
+}
+
 agg <- test_susine::aggregate_staging_outputs(
   job_name = job_name,
   parent_job_id = parent_job_id,
@@ -82,14 +103,14 @@ read_optional_csv <- function(path) {
 
 confusion_bins <- read_optional_csv(file.path(aggregated_dir, "confusion_bins.csv"))
 effect_unfiltered <- read_optional_csv(file.path(aggregated_dir, "effect_metrics_unfiltered.csv"))
+if (is.null(effect_unfiltered)) {
+  effect_unfiltered <- read_optional_csv(file.path(consolidated_dir, "effect_metrics_unfiltered_full.csv"))
+}
 
-stopifnot(!is.null(confusion_bins), "filter_type" %in% names(confusion_bins))
-cat("Confusion-bin rows:", nrow(confusion_bins), "\n")
-cat("Filter types:", paste(sort(unique(confusion_bins$filter_type)), collapse = ", "), "\n")
-cat("Per-effect rows:", if (is.null(effect_unfiltered)) 0 else nrow(effect_unfiltered), "\n")
+auprc_pooled_cached <- read_optional_csv(file.path(consolidated_dir, "auprc_by_filter_type.csv"))
+auprc_per_dataset_cached <- read_optional_csv(file.path(consolidated_dir, "auprc_per_dataset_by_filter.csv"))
+per_dataset_summary_cached <- read_optional_csv(file.path(consolidated_dir, "auprc_per_dataset_delta_summary.csv"))
 
-filter_levels <- c("no_filter", "purity_95", "purity_90", "purity_50",
-                   "keff_core95_le_100")
 filter_labels <- c(
   no_filter           = "No filter",
   purity_95           = "Purity ≥ 0.95",
@@ -97,26 +118,55 @@ filter_labels <- c(
   purity_50           = "Purity ≥ 0.50",
   keff_core95_le_100  = "k_eff(core95) ≤ 100"
 )
-filter_levels <- intersect(filter_levels, unique(confusion_bins$filter_type))
+filter_level_template <- c("no_filter", "purity_95", "purity_90", "purity_50",
+                           "keff_core95_le_100")
+observed_filter_types <- unique(c(
+  if (!is.null(confusion_bins) && "filter_type" %in% names(confusion_bins)) confusion_bins$filter_type else NULL,
+  if (!is.null(auprc_pooled_cached) && "filter_type" %in% names(auprc_pooled_cached)) auprc_pooled_cached$filter_type else NULL,
+  if (!is.null(auprc_per_dataset_cached) && "filter_type" %in% names(auprc_per_dataset_cached)) auprc_per_dataset_cached$filter_type else NULL
+))
+filter_levels <- intersect(filter_level_template, observed_filter_types)
+
+if (!use_consolidated_cache) {
+  stopifnot(!is.null(confusion_bins), "filter_type" %in% names(confusion_bins))
+}
+if (use_consolidated_cache && is.null(auprc_pooled_cached)) {
+  stop("Consolidated recovery mode requires auprc_by_filter_type.csv")
+}
+
+cat("Confusion-bin rows:", if (is.null(confusion_bins)) 0 else nrow(confusion_bins), "\n")
+cat("Filter types:", paste(sort(filter_levels), collapse = ", "), "\n")
+cat("Per-effect rows:", if (is.null(effect_unfiltered)) 0 else nrow(effect_unfiltered), "\n")
 ```
 
 # 4. AUPRC by Filter Type (headline)
 
 ```{r auprc-by-filter}
 # Pooled AUPRC across all 600 datasets, one value per filter type.
-auprc_pooled <- test_susine::compute_auprc_from_confusion(
-  confusion_bins,
-  group_vars = "filter_type"
-) %>%
-  dplyr::mutate(filter_type = factor(.data$filter_type, levels = filter_levels)) %>%
+if (use_consolidated_cache) {
+  auprc_pooled <- auprc_pooled_cached
+  auprc_per_dataset <- auprc_per_dataset_cached
+  per_dataset_summary <- per_dataset_summary_cached
+} else {
+  auprc_pooled <- test_susine::compute_auprc_from_confusion(
+    confusion_bins,
+    group_vars = "filter_type"
+  )
+}
+
+auprc_pooled <- auprc_pooled %>%
+  dplyr::mutate(filter_type = factor(as.character(.data$filter_type), levels = filter_levels)) %>%
   dplyr::arrange(.data$filter_type)
 
-auprc_no_filter <- auprc_pooled$AUPRC[auprc_pooled$filter_type == "no_filter"]
-auprc_pooled <- auprc_pooled %>%
-  dplyr::mutate(
-    delta_vs_unfiltered = .data$AUPRC - auprc_no_filter,
-    filter_label = filter_labels[as.character(.data$filter_type)]
-  )
+auprc_no_filter <- auprc_pooled$AUPRC[as.character(auprc_pooled$filter_type) == "no_filter"]
+if (!"delta_vs_unfiltered" %in% names(auprc_pooled)) {
+  auprc_pooled <- auprc_pooled %>%
+    dplyr::mutate(delta_vs_unfiltered = .data$AUPRC - auprc_no_filter)
+}
+if (!"filter_label" %in% names(auprc_pooled)) {
+  auprc_pooled <- auprc_pooled %>%
+    dplyr::mutate(filter_label = filter_labels[as.character(.data$filter_type)])
+}
 
 kable(
   auprc_pooled %>%
@@ -127,33 +177,39 @@ kable(
 )
 
 # Per-dataset AUPRC -> paired delta vs no_filter (sign test on the filtering cost).
-auprc_per_dataset <- test_susine::compute_auprc_from_confusion(
-  confusion_bins,
-  group_vars = c("filter_type", "dataset_bundle_id")
-)
+if (!use_consolidated_cache) {
+  auprc_per_dataset <- test_susine::compute_auprc_from_confusion(
+    confusion_bins,
+    group_vars = c("filter_type", "dataset_bundle_id")
+  )
 
-per_dataset_delta <- auprc_per_dataset %>%
-  dplyr::select(.data$filter_type, .data$dataset_bundle_id, .data$AUPRC) %>%
-  tidyr::pivot_wider(names_from = .data$filter_type, values_from = .data$AUPRC) %>%
-  tidyr::pivot_longer(
-    cols = dplyr::any_of(setdiff(filter_levels, "no_filter")),
-    names_to = "filter_type", values_to = "AUPRC_filtered"
-  ) %>%
-  dplyr::mutate(delta = .data$AUPRC_filtered - .data$no_filter)
+  per_dataset_delta <- auprc_per_dataset %>%
+    dplyr::select(.data$filter_type, .data$dataset_bundle_id, .data$AUPRC) %>%
+    tidyr::pivot_wider(names_from = .data$filter_type, values_from = .data$AUPRC) %>%
+    tidyr::pivot_longer(
+      cols = dplyr::any_of(setdiff(filter_levels, "no_filter")),
+      names_to = "filter_type", values_to = "AUPRC_filtered"
+    ) %>%
+    dplyr::mutate(delta = .data$AUPRC_filtered - .data$no_filter)
 
-per_dataset_summary <- per_dataset_delta %>%
-  dplyr::filter(is.finite(.data$delta)) %>%
-  dplyr::group_by(.data$filter_type) %>%
-  dplyr::summarise(
-    n = dplyr::n(),
-    mean_delta = mean(.data$delta),
-    median_delta = stats::median(.data$delta),
-    frac_hurt = mean(.data$delta < 0),
-    frac_help = mean(.data$delta > 0),
-    .groups = "drop"
-  ) %>%
-  dplyr::mutate(filter_type = factor(.data$filter_type, levels = filter_levels)) %>%
-  dplyr::arrange(.data$filter_type)
+  per_dataset_summary <- per_dataset_delta %>%
+    dplyr::filter(is.finite(.data$delta)) %>%
+    dplyr::group_by(.data$filter_type) %>%
+    dplyr::summarise(
+      n = dplyr::n(),
+      mean_delta = mean(.data$delta),
+      median_delta = stats::median(.data$delta),
+      frac_hurt = mean(.data$delta < 0),
+      frac_help = mean(.data$delta > 0),
+      .groups = "drop"
+    )
+}
+
+if (!is.null(per_dataset_summary)) {
+  per_dataset_summary <- per_dataset_summary %>%
+    dplyr::mutate(filter_type = factor(as.character(.data$filter_type), levels = filter_levels)) %>%
+    dplyr::arrange(.data$filter_type)
+}
 
 kable(per_dataset_summary, digits = 4,
       caption = "Per-dataset paired AUPRC change vs unfiltered (negative = filter hurts)")
