@@ -43,7 +43,7 @@ library(knitr)
 
 ```{r locate}
 job_name <- "purity_filter_minibatch"
-parent_job_id <- Sys.getenv("PURITY_FILTER_PARENT_JOB_ID", unset = "53615664")
+parent_job_id <- "53615664"
 output_root <- here("output")
 
 job_dir <- file.path(output_root, "slurm_output", job_name, parent_job_id)
@@ -75,22 +75,26 @@ cat("Using consolidated cache only:", use_consolidated_cache, "\n")
 
 # 2. Aggregate Staging Outputs
 
-```{r aggregate, eval = !use_consolidated_cache}
-if (!length(staging_flush_files)) {
-  stop(
-    "No staging flush files found and consolidated recovery files are incomplete: ",
-    job_dir
+```{r aggregate}
+if (isTRUE(use_consolidated_cache)) {
+  message("Skipping staging aggregation; using consolidated recovery files.")
+} else {
+  if (!length(staging_flush_files)) {
+    stop(
+      "No staging flush files found and consolidated recovery files are incomplete: ",
+      job_dir
+    )
+  }
+
+  agg <- test_susine::aggregate_staging_outputs(
+    job_name = job_name,
+    parent_job_id = parent_job_id,
+    output_root = output_root,
+    validate = TRUE,
+    output_dir = aggregated_dir,
+    write_snps_dataset = FALSE
   )
 }
-
-agg <- test_susine::aggregate_staging_outputs(
-  job_name = job_name,
-  parent_job_id = parent_job_id,
-  output_root = output_root,
-  validate = TRUE,
-  output_dir = aggregated_dir,
-  write_snps_dataset = FALSE
-)
 ```
 
 # 3. Load Aggregated Tables
