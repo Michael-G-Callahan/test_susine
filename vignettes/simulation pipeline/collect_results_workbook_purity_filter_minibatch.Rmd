@@ -354,7 +354,7 @@ kable(diag_summary, digits = 4,
 ```{r paper-figure-composite}
 required_paper_plot_objects <- c("p_auprc", "p_purity_acc", "p_size_keff", "p_purity_keff")
 missing_paper_plot_objects <- required_paper_plot_objects[
-  !vapply(required_paper_plot_objects, exists, logical(1), inherits = FALSE)
+  !vapply(required_paper_plot_objects, exists, logical(1), inherits = TRUE)
 ]
 if (length(missing_paper_plot_objects)) {
   stop(
