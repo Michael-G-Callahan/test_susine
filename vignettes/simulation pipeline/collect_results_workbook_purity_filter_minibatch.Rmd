@@ -351,7 +351,18 @@ kable(diag_summary, digits = 4,
 
 # 6. Paper Figure Composite
 
-```{r paper-figure-composite, eval = exists("p_auprc") && exists("p_purity_acc") && exists("p_size_keff") && exists("p_purity_keff")}
+```{r paper-figure-composite}
+required_paper_plot_objects <- c("p_auprc", "p_purity_acc", "p_size_keff", "p_purity_keff")
+missing_paper_plot_objects <- required_paper_plot_objects[
+  !vapply(required_paper_plot_objects, exists, logical(1), inherits = FALSE)
+]
+if (length(missing_paper_plot_objects)) {
+  stop(
+    "Paper composite requires these plot objects; rerun the plot chunks first: ",
+    paste(missing_paper_plot_objects, collapse = ", ")
+  )
+}
+
 paper_panel_theme <- ggplot2::theme(
   plot.title = ggplot2::element_text(size = 11, face = "bold", hjust = 0.5),
   plot.subtitle = ggplot2::element_blank(),
@@ -454,4 +465,7 @@ write_if_present(effect_unfiltered, "effect_metrics_unfiltered_full.csv")
 
 cat("Consolidated files written to:", consolidated_dir, "\n")
 cat("Plots written to:", plot_dir, "\n")
+if (exists("paper_purity_filter_path")) {
+  cat("Paper composite:", paper_purity_filter_path, "\n")
+}
 ```
