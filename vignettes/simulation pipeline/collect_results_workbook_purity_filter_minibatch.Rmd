@@ -120,7 +120,7 @@ filter_labels <- c(
   purity_95           = "Purity ≥ 0.95",
   purity_90           = "Purity ≥ 0.90",
   purity_50           = "Purity ≥ 0.50",
-  keff_core95_le_100  = "k_eff(core95) ≤ 100"
+  keff_core95_le_100  = "Core-95% effective support ≤ 100"
 )
 filter_level_template <- c("no_filter", "purity_95", "purity_90", "purity_50",
                            "keff_core95_le_100")
@@ -167,10 +167,19 @@ if (!"delta_vs_unfiltered" %in% names(auprc_pooled)) {
   auprc_pooled <- auprc_pooled %>%
     dplyr::mutate(delta_vs_unfiltered = .data$AUPRC - auprc_no_filter)
 }
-if (!"filter_label" %in% names(auprc_pooled)) {
-  auprc_pooled <- auprc_pooled %>%
-    dplyr::mutate(filter_label = filter_labels[as.character(.data$filter_type)])
-}
+auprc_pooled <- auprc_pooled %>%
+  dplyr::mutate(
+    filter_label = dplyr::coalesce(
+      unname(filter_labels[as.character(.data$filter_type)]),
+      as.character(.data$filter_type)
+    ),
+    filter_label_plot = gsub(
+      " effective support ",
+      " effective\nsupport ",
+      .data$filter_label,
+      fixed = TRUE
+    )
+  )
 
 kable(
   auprc_pooled %>%
@@ -222,7 +231,7 @@ kable(per_dataset_summary, digits = 4,
 ```{r auprc-plot}
 p_auprc <- ggplot2::ggplot(
   auprc_pooled,
-  ggplot2::aes(x = stats::reorder(.data$filter_label, -.data$AUPRC), y = .data$AUPRC)
+  ggplot2::aes(x = stats::reorder(.data$filter_label_plot, -.data$AUPRC), y = .data$AUPRC)
 ) +
   ggplot2::geom_col(fill = "#1F77B4", width = 0.7) +
   ggplot2::geom_hline(yintercept = auprc_no_filter, linetype = "dashed", color = "grey30") +
@@ -252,29 +261,33 @@ contains a true causal variant.
 eff <- effect_unfiltered %>%
   dplyr::filter(.data$size > 0) %>%                 # active effects only
   dplyr::mutate(
-    coverage_lab = factor(ifelse(.data$coverage > 0, "CS contains causal", "CS has no causal"),
-                          levels = c("CS contains causal", "CS has no causal")),
+    coverage_lab = factor(
+      ifelse(.data$coverage > 0, "Contains causal variant", "No causal variant"),
+      levels = c("Contains causal variant", "No causal variant")
+    ),
     purity = as.numeric(.data$purity),
     accuracy_ratio = as.numeric(.data$accuracy_ratio),
     k_eff_core95 = as.numeric(.data$effect_k_eff_signal_core95),
     size = as.numeric(.data$size)
   )
 
-cov_palette <- c("CS contains causal" = "#2CA02C", "CS has no causal" = "#D62728")
+cov_palette <- c("Contains causal variant" = "#0072B2", "No causal variant" = "#D55E00")
+purity_cutoff <- 0.50
+scatter_point_size <- 1.35
 
 # (A) Purity vs accuracy: are low-purity sets actually inaccurate?
 p_purity_acc <- ggplot2::ggplot(
   eff %>% dplyr::filter(is.finite(.data$purity), is.finite(.data$accuracy_ratio)),
   ggplot2::aes(x = .data$purity, y = .data$accuracy_ratio, color = .data$coverage_lab)
 ) +
-  ggplot2::geom_point(alpha = 0.25, size = 0.8) +
-  ggplot2::geom_vline(xintercept = 0.95, linetype = "dashed", color = "grey25") +
-  ggplot2::scale_color_manual(values = cov_palette, name = NULL) +
+  ggplot2::geom_point(alpha = 0.3, size = scatter_point_size) +
+  ggplot2::geom_vline(xintercept = purity_cutoff, linetype = "dashed", color = "grey25") +
+  ggplot2::scale_color_manual(values = cov_palette, name = "Credible set") +
   ggplot2::labs(
-    x = "Credible-set purity (min pairwise |r|)",
-    y = "Accuracy ratio A (top causal PIP / top PIP)",
+    x = "Credible-set purity (minimum pairwise |r|)",
+    y = "Accuracy ratio, A (top causal PIP / top PIP)",
     title = "Purity vs accuracy",
-    subtitle = "Dashed line: 0.95 purity filter. Green points left of it are accurate sets the filter would discard."
+    subtitle = "Dashed line: 0.50 purity threshold."
   ) +
   ggplot2::theme_bw(base_size = 11) +
   ggplot2::theme(legend.position = "bottom")
@@ -285,31 +298,71 @@ p_size_keff <- ggplot2::ggplot(
   ggplot2::aes(x = .data$size, y = .data$k_eff_core95, color = .data$coverage_lab)
 ) +
   ggplot2::geom_abline(slope = 1, intercept = 0, linetype = "dotted", color = "grey50") +
-  ggplot2::geom_point(alpha = 0.25, size = 0.8) +
+  ggplot2::geom_point(alpha = 0.3, size = scatter_point_size) +
   ggplot2::scale_x_log10() +
   ggplot2::scale_y_log10() +
-  ggplot2::scale_color_manual(values = cov_palette, name = NULL) +
+  ggplot2::scale_color_manual(values = cov_palette, name = "Credible set") +
   ggplot2::labs(
     x = "Credible-set size (count)",
-    y = "Core-95% effective support k_eff",
+    y = expression("Core-95% effective support (" * k[eff] * ")"),
     title = "Size vs core-95% diffuseness",
     subtitle = "Dotted line: y = x. Points below it have a peaked core despite a large set."
   ) +
   ggplot2::theme_bw(base_size = 11) +
   ggplot2::theme(legend.position = "bottom")
 
+purity_keff_plot_data <- eff %>%
+  dplyr::filter(is.finite(.data$purity), is.finite(.data$k_eff_core95))
+
+purity_side_summary <- purity_keff_plot_data %>%
+  dplyr::mutate(
+    purity_side = dplyr::if_else(.data$purity < purity_cutoff, "left", "right")
+  ) %>%
+  dplyr::group_by(.data$purity_side) %>%
+  dplyr::summarise(
+    n_effects = dplyr::n(),
+    pct_no_causal = 100 * mean(.data$coverage <= 0),
+    .groups = "drop"
+  ) %>%
+  dplyr::right_join(
+    data.frame(purity_side = c("left", "right")),
+    by = "purity_side"
+  ) %>%
+  dplyr::mutate(
+    n_effects = dplyr::coalesce(.data$n_effects, 0L),
+    pct_no_causal = dplyr::coalesce(.data$pct_no_causal, 0),
+    x = dplyr::if_else(.data$purity_side == "left", purity_cutoff - 0.02, purity_cutoff + 0.02),
+    hjust = dplyr::if_else(.data$purity_side == "left", 1, 0),
+    label = sprintf(
+      "%s\nn = %s\nNo causal: %.1f%%",
+      dplyr::if_else(.data$purity_side == "left", "Purity < 0.50", "Purity >= 0.50"),
+      format(.data$n_effects, big.mark = ",", scientific = FALSE),
+      .data$pct_no_causal
+    )
+  )
+
 # (C) Purity vs core-95 k_eff: purity is only weakly tied to diffuseness.
 p_purity_keff <- ggplot2::ggplot(
-  eff %>% dplyr::filter(is.finite(.data$purity), is.finite(.data$k_eff_core95)),
+  purity_keff_plot_data,
   ggplot2::aes(x = .data$purity, y = .data$k_eff_core95, color = .data$coverage_lab)
 ) +
-  ggplot2::geom_point(alpha = 0.25, size = 0.8) +
-  ggplot2::geom_vline(xintercept = 0.95, linetype = "dashed", color = "grey25") +
+  ggplot2::geom_point(alpha = 0.3, size = scatter_point_size) +
+  ggplot2::geom_vline(xintercept = purity_cutoff, linetype = "dashed", color = "grey25") +
+  ggplot2::geom_label(
+    data = purity_side_summary,
+    ggplot2::aes(x = .data$x, y = Inf, label = .data$label, hjust = .data$hjust),
+    inherit.aes = FALSE,
+    vjust = 1.15,
+    size = 3.1,
+    label.size = 0,
+    fill = "white",
+    alpha = 0.85
+  ) +
   ggplot2::scale_y_log10() +
-  ggplot2::scale_color_manual(values = cov_palette, name = NULL) +
+  ggplot2::scale_color_manual(values = cov_palette, name = "Credible set") +
   ggplot2::labs(
-    x = "Credible-set purity (min pairwise |r|)",
-    y = "Core-95% effective support k_eff",
+    x = "Credible-set purity (minimum pairwise |r|)",
+    y = expression("Core-95% effective support (" * k[eff] * ")"),
     title = "Purity vs diffuseness",
     subtitle = "Weak association: low-purity sets are not reliably more diffuse."
   ) +
@@ -371,8 +424,17 @@ paper_panel_theme <- ggplot2::theme(
   axis.text = ggplot2::element_text(size = 9),
   legend.title = ggplot2::element_text(size = 9),
   legend.text = ggplot2::element_text(size = 8),
+  legend.position = "bottom",
+  legend.direction = "horizontal",
   plot.margin = ggplot2::margin(7, 7, 7, 7)
 )
+
+extract_plot_legend <- function(plot) {
+  plot_grob <- ggplot2::ggplotGrob(plot)
+  guide_index <- which(vapply(plot_grob$grobs, function(grob) grob$name, character(1)) == "guide-box")
+  if (!length(guide_index)) return(NULL)
+  plot_grob$grobs[[guide_index[1]]]
+}
 
 open_png_device <- function(filename, width, height, dpi = 300) {
   if (requireNamespace("ragg", quietly = TRUE)) {
@@ -384,21 +446,33 @@ open_png_device <- function(filename, width, height, dpi = 300) {
   }
 }
 
-save_paper_grid <- function(filename, panels, labels, width = 13.5,
-                            height = 9.0, dpi = 300) {
+save_paper_grid <- function(filename, panels, labels, legend_grob = NULL,
+                            width = 13.5, height = 9.3, dpi = 300) {
   stopifnot(length(panels) == 4L, length(labels) == 4L)
 
   open_png_device(filename, width = width, height = height, dpi = dpi)
-  on.exit(grDevices::dev.off(), add = TRUE)
+  layout_pushed <- FALSE
+  on.exit({
+    if (layout_pushed) grid::popViewport()
+    grDevices::dev.off()
+  }, add = TRUE)
 
   grid::grid.newpage()
-  layout <- grid::grid.layout(
-    nrow = 2, ncol = 2,
-    widths = grid::unit(c(1, 1), "null"),
-    heights = grid::unit(c(1, 1), "null")
-  )
+  if (is.null(legend_grob)) {
+    layout <- grid::grid.layout(
+      nrow = 2, ncol = 2,
+      widths = grid::unit(c(1, 1), "null"),
+      heights = grid::unit(c(1, 1), "null")
+    )
+  } else {
+    layout <- grid::grid.layout(
+      nrow = 3, ncol = 2,
+      widths = grid::unit(c(1, 1), "null"),
+      heights = grid::unit.c(grid::unit(c(1, 1), "null"), grid::unit(0.42, "in"))
+    )
+  }
   grid::pushViewport(grid::viewport(layout = layout))
-  on.exit(grid::popViewport(), add = TRUE)
+  layout_pushed <- TRUE
 
   positions <- data.frame(row = c(1, 1, 2, 2), col = c(1, 2, 1, 2))
   for (i in seq_along(panels)) {
@@ -417,23 +491,41 @@ save_paper_grid <- function(filename, panels, labels, width = 13.5,
     grid::popViewport()
   }
 
+  if (!is.null(legend_grob)) {
+    grid::pushViewport(grid::viewport(layout.pos.row = 3, layout.pos.col = 1:2))
+    grid::grid.draw(legend_grob)
+    grid::popViewport()
+  }
+
   invisible(filename)
 }
 
+paper_shared_legend <- extract_plot_legend(
+  p_purity_acc +
+    paper_panel_theme +
+    ggplot2::guides(
+      color = ggplot2::guide_legend(
+        nrow = 1,
+        override.aes = list(alpha = 0.75, size = 1.8)
+      )
+    )
+)
+
 paper_panels <- list(
   p_auprc +
-    ggplot2::labs(title = "AUPRC by credible-set filter") +
+    ggplot2::labs(title = "Pooled AUPRC by credible-set filter") +
     paper_panel_theme +
-    ggplot2::theme(legend.position = "bottom"),
+    ggplot2::theme(legend.position = "none"),
   p_purity_acc +
     ggplot2::labs(title = "Purity versus causal coverage") +
-    paper_panel_theme,
+    paper_panel_theme +
+    ggplot2::theme(legend.position = "none"),
   p_size_keff +
-    ggplot2::labs(title = "Credible-set size versus k_eff") +
+    ggplot2::labs(title = "Credible-set size versus effective support") +
     paper_panel_theme +
     ggplot2::theme(legend.position = "none"),
   p_purity_keff +
-    ggplot2::labs(title = "Purity versus k_eff") +
+    ggplot2::labs(title = "Purity versus effective support") +
     paper_panel_theme +
     ggplot2::theme(legend.position = "none")
 )
@@ -442,7 +534,8 @@ paper_purity_filter_path <- file.path(plot_dir, "paper_purity_filter_composite.p
 save_paper_grid(
   paper_purity_filter_path,
   panels = paper_panels,
-  labels = LETTERS[1:4]
+  labels = LETTERS[1:4],
+  legend_grob = paper_shared_legend
 )
 
 cat("Paper composite written to:", paper_purity_filter_path, "\n")
