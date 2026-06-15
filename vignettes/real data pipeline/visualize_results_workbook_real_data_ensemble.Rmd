@@ -1883,7 +1883,7 @@ paper_drift_pip_l2_plot <- ggplot(
     title = "Annotations refine signal within and across LD groups",
     x = expression(Delta[widehat(y)] * " = mean squared " * widehat(y) *
                    " drift from SuSiE baseline"),
-    y = "PIP L2 distance from SuSiE baseline"
+    y = expression("PIP shift from SuSiE baseline  " * "||" * Delta * "PIP" * "||"[2])
   ) +
   paper_panel_theme
 
