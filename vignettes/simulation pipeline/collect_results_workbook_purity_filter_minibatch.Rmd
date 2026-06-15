@@ -73,26 +73,31 @@ staging_flush_files <- list.files(
   pattern = "^flush-[0-9]+_",
   full.names = TRUE
 )
-cache_files <- c(
+summary_cache_files <- c(
   "auprc_by_filter_type.csv",
   "auprc_per_dataset_by_filter.csv",
   "auprc_per_dataset_delta_summary.csv",
   "effect_metrics_unfiltered_full.csv"
 )
-consolidated_cache_available <- all(file.exists(file.path(consolidated_dir, cache_files)))
-aggregated_cache_available <- all(file.exists(file.path(aggregated_dir, cache_files)))
-cache_dir <- if (consolidated_cache_available) {
+raw_cache_files <- c("confusion_bins.csv", "effect_metrics_unfiltered.csv")
+consolidated_summary_cache_available <- all(file.exists(file.path(consolidated_dir, summary_cache_files)))
+aggregated_summary_cache_available <- all(file.exists(file.path(aggregated_dir, summary_cache_files)))
+consolidated_raw_cache_available <- all(file.exists(file.path(consolidated_dir, raw_cache_files)))
+aggregated_raw_cache_available <- all(file.exists(file.path(aggregated_dir, raw_cache_files)))
+summary_cache_available <- consolidated_summary_cache_available || aggregated_summary_cache_available
+raw_cache_available <- consolidated_raw_cache_available || aggregated_raw_cache_available
+cache_dir <- if (consolidated_summary_cache_available || consolidated_raw_cache_available) {
   consolidated_dir
-} else if (aggregated_cache_available) {
+} else if (aggregated_summary_cache_available || aggregated_raw_cache_available) {
   aggregated_dir
 } else {
   consolidated_dir
 }
 use_consolidated_cache <- !run_collection
 
-if (use_consolidated_cache && !consolidated_cache_available && !aggregated_cache_available) {
+if (use_consolidated_cache && !summary_cache_available && !raw_cache_available) {
   stop(
-    "Visualization-only mode requires cached CSVs in ",
+    "Visualization-only mode requires either summary CSVs or raw aggregate CSVs in ",
     consolidated_dir,
     " or ",
     aggregated_dir,
@@ -183,11 +188,8 @@ observed_filter_types <- unique(c(
 ))
 filter_levels <- intersect(filter_level_template, observed_filter_types)
 
-if (!use_consolidated_cache) {
+if (!use_consolidated_cache || is.null(auprc_pooled_cached)) {
   stopifnot(!is.null(confusion_bins), "filter_type" %in% names(confusion_bins))
-}
-if (use_consolidated_cache && is.null(auprc_pooled_cached)) {
-  stop("Visualization-only mode requires auprc_by_filter_type.csv in the cache directory")
 }
 
 cat("Confusion-bin rows:", if (is.null(confusion_bins)) 0 else nrow(confusion_bins), "\n")
@@ -199,16 +201,25 @@ cat("Per-effect rows:", if (is.null(effect_unfiltered)) 0 else nrow(effect_unfil
 
 ```{r auprc-by-filter}
 # Pooled AUPRC across all 600 datasets, one value per filter type.
-if (use_consolidated_cache) {
+if (!is.null(auprc_pooled_cached)) {
   auprc_pooled <- auprc_pooled_cached
-  auprc_per_dataset <- auprc_per_dataset_cached
-  per_dataset_summary <- per_dataset_summary_cached
 } else {
   auprc_pooled <- test_susine::compute_auprc_from_confusion(
     confusion_bins,
     group_vars = "filter_type"
   )
 }
+
+if (!is.null(auprc_per_dataset_cached)) {
+  auprc_per_dataset <- auprc_per_dataset_cached
+} else {
+  auprc_per_dataset <- test_susine::compute_auprc_from_confusion(
+    confusion_bins,
+    group_vars = c("filter_type", "dataset_bundle_id")
+  )
+}
+
+per_dataset_summary <- per_dataset_summary_cached
 
 auprc_pooled <- auprc_pooled %>%
   dplyr::mutate(filter_type = factor(as.character(.data$filter_type), levels = filter_levels)) %>%
@@ -242,12 +253,7 @@ kable(
 )
 
 # Per-dataset AUPRC -> paired delta vs no_filter (sign test on the filtering cost).
-if (!use_consolidated_cache) {
-  auprc_per_dataset <- test_susine::compute_auprc_from_confusion(
-    confusion_bins,
-    group_vars = c("filter_type", "dataset_bundle_id")
-  )
-
+if (is.null(per_dataset_summary)) {
   per_dataset_delta <- auprc_per_dataset %>%
     dplyr::select(.data$filter_type, .data$dataset_bundle_id, .data$AUPRC) %>%
     tidyr::pivot_wider(names_from = .data$filter_type, values_from = .data$AUPRC) %>%
@@ -602,7 +608,7 @@ write_if_present <- function(df, filename) {
   }
 }
 
-if (isTRUE(run_collection)) {
+if (isTRUE(run_collection) || !consolidated_summary_cache_available) {
   write_if_present(auprc_pooled, "auprc_by_filter_type.csv")
   write_if_present(auprc_per_dataset, "auprc_per_dataset_by_filter.csv")
   write_if_present(per_dataset_summary, "auprc_per_dataset_delta_summary.csv")
@@ -611,7 +617,7 @@ if (isTRUE(run_collection)) {
 
   cat("Consolidated files written to:", consolidated_dir, "\n")
 } else {
-  cat("Skipped consolidated data export; params$run_collection is FALSE.\n")
+  cat("Skipped consolidated data export; consolidated summary cache already exists.\n")
 }
 cat("Plots written to:", plot_dir, "\n")
 if (exists("paper_purity_filter_path")) {
