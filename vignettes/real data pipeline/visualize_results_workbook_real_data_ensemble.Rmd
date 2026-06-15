@@ -1880,7 +1880,7 @@ paper_drift_pip_l2_plot <- ggplot(
     name = NULL
   ) +
   labs(
-    title = "Annotations refine signal within and across LD groups",
+    title = "Annotations change inference and prediction",
     x = expression(Delta[widehat(y)] * " = mean squared " * widehat(y) *
                    " drift from SuSiE baseline"),
     y = expression("PIP shift from SuSiE baseline  " * "||" * Delta * "PIP" * "||"[2])
