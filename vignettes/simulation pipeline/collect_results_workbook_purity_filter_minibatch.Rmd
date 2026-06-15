@@ -49,7 +49,7 @@ library(knitr)
 
 ```{r locate}
 job_name <- "purity_filter_minibatch"
-parent_job_id <- "53615664"
+parent_job_id <- "53617896"
 output_root <- here("output")
 run_collection <- if (exists("params") && "run_collection" %in% names(params)) {
   isTRUE(params$run_collection)
@@ -73,17 +73,29 @@ staging_flush_files <- list.files(
   pattern = "^flush-[0-9]+_",
   full.names = TRUE
 )
-consolidated_cache_available <- all(file.exists(file.path(
-  consolidated_dir,
-  c("auprc_by_filter_type.csv", "auprc_per_dataset_by_filter.csv",
-    "auprc_per_dataset_delta_summary.csv", "effect_metrics_unfiltered_full.csv")
-)))
+cache_files <- c(
+  "auprc_by_filter_type.csv",
+  "auprc_per_dataset_by_filter.csv",
+  "auprc_per_dataset_delta_summary.csv",
+  "effect_metrics_unfiltered_full.csv"
+)
+consolidated_cache_available <- all(file.exists(file.path(consolidated_dir, cache_files)))
+aggregated_cache_available <- all(file.exists(file.path(aggregated_dir, cache_files)))
+cache_dir <- if (consolidated_cache_available) {
+  consolidated_dir
+} else if (aggregated_cache_available) {
+  aggregated_dir
+} else {
+  consolidated_dir
+}
 use_consolidated_cache <- !run_collection
 
-if (use_consolidated_cache && !consolidated_cache_available) {
+if (use_consolidated_cache && !consolidated_cache_available && !aggregated_cache_available) {
   stop(
-    "Visualization-only mode requires consolidated CSVs in ",
+    "Visualization-only mode requires cached CSVs in ",
     consolidated_dir,
+    " or ",
+    aggregated_dir,
     ". Re-knit with params$run_collection = TRUE to rebuild them from staging files."
   )
 }
@@ -91,17 +103,18 @@ if (use_consolidated_cache && !consolidated_cache_available) {
 cat("Job dir:", job_dir, "\n")
 cat("Run collection:", run_collection, "\n")
 cat("Using consolidated cache only:", use_consolidated_cache, "\n")
+cat("Reading cached tables from:", cache_dir, "\n")
 ```
 
 # 2. Aggregate Staging Outputs
 
 ```{r aggregate}
 if (!isTRUE(run_collection)) {
-  message("Skipping staging aggregation; using consolidated recovery files.")
+  message("Skipping staging aggregation; using cached recovery files.")
 } else {
   if (!length(staging_flush_files)) {
     stop(
-      "No staging flush files found and consolidated recovery files are incomplete: ",
+      "No staging flush files found and cached recovery files are incomplete: ",
       job_dir
     )
   }
@@ -111,7 +124,7 @@ if (!isTRUE(run_collection)) {
     parent_job_id = parent_job_id,
     output_root = output_root,
     validate = TRUE,
-    output_dir = aggregated_dir,
+    output_dir = consolidated_dir,
     write_snps_dataset = FALSE
   )
 }
@@ -125,15 +138,34 @@ read_optional_csv <- function(path) {
   readr::read_csv(path, show_col_types = FALSE)
 }
 
-confusion_bins <- read_optional_csv(file.path(aggregated_dir, "confusion_bins.csv"))
-effect_unfiltered <- read_optional_csv(file.path(aggregated_dir, "effect_metrics_unfiltered.csv"))
-if (is.null(effect_unfiltered)) {
-  effect_unfiltered <- read_optional_csv(file.path(consolidated_dir, "effect_metrics_unfiltered_full.csv"))
+read_first_csv <- function(paths) {
+  paths <- unique(paths)
+  existing_path <- paths[file.exists(paths)][1]
+  if (is.na(existing_path)) return(NULL)
+  read_optional_csv(existing_path)
 }
 
-auprc_pooled_cached <- read_optional_csv(file.path(consolidated_dir, "auprc_by_filter_type.csv"))
-auprc_per_dataset_cached <- read_optional_csv(file.path(consolidated_dir, "auprc_per_dataset_by_filter.csv"))
-per_dataset_summary_cached <- read_optional_csv(file.path(consolidated_dir, "auprc_per_dataset_delta_summary.csv"))
+confusion_bins <- read_first_csv(file.path(
+  c(consolidated_dir, aggregated_dir),
+  "confusion_bins.csv"
+))
+effect_unfiltered <- read_first_csv(c(
+  file.path(c(consolidated_dir, aggregated_dir), "effect_metrics_unfiltered.csv"),
+  file.path(c(cache_dir, consolidated_dir, aggregated_dir), "effect_metrics_unfiltered_full.csv")
+))
+
+auprc_pooled_cached <- read_first_csv(file.path(
+  c(cache_dir, consolidated_dir, aggregated_dir),
+  "auprc_by_filter_type.csv"
+))
+auprc_per_dataset_cached <- read_first_csv(file.path(
+  c(cache_dir, consolidated_dir, aggregated_dir),
+  "auprc_per_dataset_by_filter.csv"
+))
+per_dataset_summary_cached <- read_first_csv(file.path(
+  c(cache_dir, consolidated_dir, aggregated_dir),
+  "auprc_per_dataset_delta_summary.csv"
+))
 
 filter_labels <- c(
   no_filter           = "No filter",
@@ -155,7 +187,7 @@ if (!use_consolidated_cache) {
   stopifnot(!is.null(confusion_bins), "filter_type" %in% names(confusion_bins))
 }
 if (use_consolidated_cache && is.null(auprc_pooled_cached)) {
-  stop("Consolidated recovery mode requires auprc_by_filter_type.csv")
+  stop("Visualization-only mode requires auprc_by_filter_type.csv in the cache directory")
 }
 
 cat("Confusion-bin rows:", if (is.null(confusion_bins)) 0 else nrow(confusion_bins), "\n")
