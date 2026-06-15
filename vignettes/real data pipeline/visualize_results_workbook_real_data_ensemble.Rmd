@@ -1226,12 +1226,14 @@ if (file.exists(simulation_multimodality_path)) {
       )
 
     if (nrow(sim_benchmark_tbl) && nrow(real_benchmark_tbl)) {
+      x_min <- floor(min(c(sim_benchmark_tbl$n_clusters_credible,
+                           real_benchmark_tbl$n_clusters_credible), na.rm = TRUE))
+      x_max <- ceiling(max(c(sim_benchmark_tbl$n_clusters_credible,
+                             real_benchmark_tbl$n_clusters_credible), na.rm = TRUE))
       x_breaks <- seq(
-        floor(min(c(sim_benchmark_tbl$n_clusters_credible,
-                    real_benchmark_tbl$n_clusters_credible), na.rm = TRUE)),
-        ceiling(max(c(sim_benchmark_tbl$n_clusters_credible,
-                      real_benchmark_tbl$n_clusters_credible), na.rm = TRUE)),
-        by = 1
+        5 * floor(x_min / 5),
+        5 * ceiling(x_max / 5),
+        by = 5
       )
       fill_label <- "Simulation loci"
       subtitle_text <- paste0(
@@ -1263,7 +1265,7 @@ if (file.exists(simulation_multimodality_path)) {
       ) +
         geom_bin2d(
           bins = c(max(1L, length(x_breaks)), 18L),
-          alpha = 0.9,
+          alpha = 0.48,
           na.rm = TRUE
         ) +
         scale_fill_viridis_c(
@@ -1280,8 +1282,23 @@ if (file.exists(simulation_multimodality_path)) {
           size = 2.8,
           stroke = 0.55,
           color = "black",
-          fill = "#C65D00",
-          alpha = 0.92
+          fill = "#2CA02C",
+          alpha = 0.96
+        ) +
+        geom_locus_text(
+          data = real_benchmark_tbl,
+          aes(
+            x = n_clusters_credible,
+            y = max_credible_dist,
+            label = locus_label
+          ),
+          inherit.aes = FALSE,
+          size = 2.35,
+          seed = 29,
+          box.padding = 0.22,
+          point.padding = 0.28,
+          segment.size = 0.22,
+          color = "grey12"
         ) +
         scale_x_continuous(breaks = x_breaks) +
         labs(
@@ -2647,7 +2664,7 @@ paper_lollipop_l2_plot <- function(locus_id, show_x_axis = FALSE, show_legend = 
 
 paper_pip_drift_metric_plot <- function(locus_id, drift_col, y_label,
                                         show_x_axis = FALSE, show_legend = FALSE,
-                                        column_title = NULL) {
+                                        column_title = NULL, y_limits = NULL) {
   df <- dplyr::filter(selected_l2_drift_tbl, .data$locus_id == !!locus_id)
   highlight_df <- dplyr::filter(selected_l2_highest_weight_drift_tbl, .data$locus_id == !!locus_id) %>%
     dplyr::mutate(weight_label = sprintf("%.2f", .data$agg_weight_run))
@@ -2716,7 +2733,7 @@ paper_pip_drift_metric_plot <- function(locus_id, drift_col, y_label,
       labels = scales::label_number(accuracy = 0.1),
       breaks = scales::breaks_extended(n = 4)
     ) +
-    coord_cartesian(xlim = selected_drift_xlim) +
+    coord_cartesian(xlim = selected_drift_xlim, ylim = y_limits) +
     labs(
       title = column_title,
       x = if (show_x_axis) "Annotation scale c" else NULL,
@@ -2743,7 +2760,8 @@ paper_pip_drift_l2_plot <- function(locus_id, show_x_axis = FALSE, show_legend =
     y_label = "PIP L2 drift",
     show_x_axis = show_x_axis,
     show_legend = show_legend,
-    column_title = column_title
+    column_title = column_title,
+    y_limits = NULL
   )
 }
 
@@ -2755,7 +2773,8 @@ paper_pip_drift_credible_plot <- function(locus_id, show_x_axis = FALSE, show_le
     y_label = "Credible-shift distance",
     show_x_axis = show_x_axis,
     show_legend = show_legend,
-    column_title = column_title
+    column_title = column_title,
+    y_limits = c(0, 1)
   )
 }
 
@@ -2838,8 +2857,8 @@ paper_signal_contribution_l2_plot <- function(locus_id, show_x_axis = FALSE, sho
 paper_lollipop_l2_legend_plot <- function() {
   df <- tibble::tibble(
     fit_type = factor(
-      c("SuSiNE c=0", "SuSiNE ensemble", "SuSiE warm refit"),
-      levels = c("SuSiNE c=0", "SuSiNE ensemble", "SuSiE warm refit")
+      c("SuSiE Baseline", "SuSiNE ensemble", "SuSiE warm refit"),
+      levels = c("SuSiE Baseline", "SuSiNE ensemble", "SuSiE warm refit")
     ),
     x = c(0.07, 0.43, 0.07),
     y = c(0.68, 0.68, 0.30)
@@ -2849,7 +2868,7 @@ paper_lollipop_l2_legend_plot <- function() {
     geom_text(aes(label = fit_type), x = df$x + 0.055, hjust = 0,
               size = 2.55, color = "grey15") +
     scale_color_manual(
-      values = c("SuSiNE c=0" = "#666666", "SuSiNE ensemble" = "#0B6E4F", "SuSiE warm refit" = "#C65D00"),
+      values = c("SuSiE Baseline" = "#666666", "SuSiNE ensemble" = "#0B6E4F", "SuSiE warm refit" = "#C65D00"),
       guide = "none"
     ) +
     coord_cartesian(xlim = c(0, 1), ylim = c(0, 1), expand = FALSE, clip = "off") +
