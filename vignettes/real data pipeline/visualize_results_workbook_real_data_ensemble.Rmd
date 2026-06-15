@@ -724,8 +724,22 @@ safe_pip_credible_shift <- function(x, y) {
   if (is.infinite(out)) NA_real_ else as.numeric(out)
 }
 
+safe_pip_l2 <- function(x, y) {
+  if (is.null(x) || is.null(y) || length(x) != length(y) || !length(x)) {
+    return(NA_real_)
+  }
+  sqrt(sum((x - y)^2, na.rm = TRUE))
+}
+
 run_pip_credible_shift <- function(locus_id, run_id_a, run_id_b) {
   safe_pip_credible_shift(
+    run_pip_vec(locus_id, run_id_a),
+    run_pip_vec(locus_id, run_id_b)
+  )
+}
+
+run_pip_l2 <- function(locus_id, run_id_a, run_id_b) {
+  safe_pip_l2(
     run_pip_vec(locus_id, run_id_a),
     run_pip_vec(locus_id, run_id_b)
   )
@@ -743,6 +757,20 @@ refit_pip_credible_shift <- function(locus_id, anchor_run_id) {
   joined <- dplyr::inner_join(anchor_pip, refit_pip, by = "variant_id")
   if (!nrow(joined)) return(NA_real_)
   safe_pip_credible_shift(joined$anchor_pip, joined$refit_pip)
+}
+
+refit_pip_l2 <- function(locus_id, anchor_run_id) {
+  if (length(anchor_run_id) != 1L || is.na(anchor_run_id)) return(NA_real_)
+  anchor_pip <- variant_posteriors %>%
+    dplyr::filter(.data$locus_id == !!locus_id,
+                  .data$run_id == !!as.integer(anchor_run_id)) %>%
+    dplyr::select(.data$variant_id, anchor_pip = .data$pip) %>%
+    dplyr::collect()
+  refit_pip <- refit_pip_tbl(locus_id) %>%
+    dplyr::select(.data$variant_id, .data$refit_pip)
+  joined <- dplyr::inner_join(anchor_pip, refit_pip, by = "variant_id")
+  if (!nrow(joined)) return(NA_real_)
+  safe_pip_l2(joined$anchor_pip, joined$refit_pip)
 }
 
 core95_entropy <- function(prob, rho = 0.95) {
@@ -1768,25 +1796,25 @@ paper_annotation_weight_plot <- ggplot(
   ) +
   paper_panel_theme
 
-source_credible_shift_tbl <- paper_summary %>%
+source_pip_l2_tbl <- paper_summary %>%
   dplyr::transmute(
     locus_id,
     highest_weight_source_run_id,
     susie_anchor_run_id,
     # Match the fitted-model basin drift x-axis: this is highest-weight SuSiNE fit
-    # credible-shift distance, not cluster-weight aggregated ensemble distance.
-    credible_shift_susie_anchor_vs_highest_weight_source = purrr::pmap_dbl(
+    # PIP L2 distance, not cluster-weight aggregated ensemble distance.
+    pip_l2_susie_anchor_vs_highest_weight_source = purrr::pmap_dbl(
       list(.data$locus_id, .data$susie_anchor_run_id, .data$highest_weight_source_run_id),
-      run_pip_credible_shift
+      run_pip_l2
     ),
-    credible_shift_susie_anchor_vs_refit = purrr::map2_dbl(
+    pip_l2_susie_anchor_vs_refit = purrr::map2_dbl(
       .data$locus_id,
       .data$susie_anchor_run_id,
-      refit_pip_credible_shift
+      refit_pip_l2
     )
   )
 
-drift_credible_shift_tbl <- highest_weight_refit_basin %>%
+drift_pip_l2_tbl <- highest_weight_refit_basin %>%
   dplyr::left_join(
     paper_summary %>%
       dplyr::select(
@@ -1795,23 +1823,23 @@ drift_credible_shift_tbl <- highest_weight_refit_basin %>%
       ),
     by = "locus_id"
   ) %>%
-  dplyr::left_join(source_credible_shift_tbl, by = "locus_id")
+  dplyr::left_join(source_pip_l2_tbl, by = "locus_id")
 
-drift_credible_shift_long_tbl <- dplyr::bind_rows(
-  drift_credible_shift_tbl %>%
+drift_pip_l2_long_tbl <- dplyr::bind_rows(
+  drift_pip_l2_tbl %>%
     dplyr::transmute(
       locus_id,
       fit_type = "Highest-weight SuSiNE fit",
       basis_drift_var_y = .data$basis_drift_var_y_highest_weight_vs_susie_anchor,
-      pip_credible_shift = .data$credible_shift_susie_anchor_vs_highest_weight_source,
+      pip_l2 = .data$pip_l2_susie_anchor_vs_highest_weight_source,
       source_weight = .data$highest_weight_source_agg_weight_run
     ),
-  drift_credible_shift_tbl %>%
+  drift_pip_l2_tbl %>%
     dplyr::transmute(
       locus_id,
       fit_type = "SuSiE warm refit",
       basis_drift_var_y = .data$basis_drift_var_y_refit_vs_susie_anchor,
-      pip_credible_shift = .data$credible_shift_susie_anchor_vs_refit,
+      pip_l2 = .data$pip_l2_susie_anchor_vs_refit,
       source_weight = .data$highest_weight_source_agg_weight_run
     )
   ) %>%
@@ -1819,16 +1847,16 @@ drift_credible_shift_long_tbl <- dplyr::bind_rows(
     fit_type = factor(.data$fit_type, levels = c("Highest-weight SuSiNE fit", "SuSiE warm refit")),
     locus_label = dplyr::if_else(
       .data$fit_type == "Highest-weight SuSiNE fit" &
-        (.data$basis_drift_var_y > 0.05 | .data$pip_credible_shift > 0.05),
+        (.data$basis_drift_var_y > 0.05 | .data$pip_l2 > 1.0),
       sub("_lung$", "", .data$locus_id),
       ""
     )
   ) %>%
-  dplyr::filter(is.finite(.data$basis_drift_var_y), is.finite(.data$pip_credible_shift))
+  dplyr::filter(is.finite(.data$basis_drift_var_y), is.finite(.data$pip_l2))
 
-paper_drift_credible_shift_plot <- ggplot(
-  drift_credible_shift_long_tbl,
-  aes(x = basis_drift_var_y, y = pip_credible_shift)
+paper_drift_pip_l2_plot <- ggplot(
+  drift_pip_l2_long_tbl,
+  aes(x = basis_drift_var_y, y = pip_l2)
 ) +
   geom_path(
     aes(group = locus_id),
@@ -1843,7 +1871,7 @@ paper_drift_credible_shift_plot <- ggplot(
     na.rm = TRUE
   ) +
   geom_locus_text(
-    data = drift_credible_shift_long_tbl,
+    data = drift_pip_l2_long_tbl,
     aes(label = locus_label),
     seed = 2
   ) +
@@ -1855,7 +1883,7 @@ paper_drift_credible_shift_plot <- ggplot(
     title = "Annotations refine signal within and across LD groups",
     x = expression(Delta[widehat(y)] * " = mean squared " * widehat(y) *
                    " drift from SuSiE baseline"),
-    y = "Credible-shift PIP distance from SuSiE baseline"
+    y = "PIP L2 distance from SuSiE baseline"
   ) +
   paper_panel_theme
 
@@ -2110,7 +2138,7 @@ ggsave(
 )
 ggsave(
   file.path(overall_figure_dir, "paper_overall_annotation_drift_pve_panel_b.png"),
-  paper_drift_credible_shift_plot,
+  paper_drift_pip_l2_plot,
   width = 3.76,
   height = 3.9,
   dpi = 300,
@@ -2135,7 +2163,7 @@ ggsave(
 
 if (requireNamespace("patchwork", quietly = TRUE)) {
   paper_overall_figure <- (
-    (paper_annotation_weight_plot | paper_drift_credible_shift_plot) /
+    (paper_annotation_weight_plot | paper_drift_pip_l2_plot) /
       patchwork::plot_spacer() /
       (paper_pve_plot | paper_effect_diffuseness_plot)
   ) +
@@ -2173,7 +2201,7 @@ if (requireNamespace("patchwork", quietly = TRUE)) {
   warning("patchwork is not installed; saved individual paper panels only.")
   list(
     annotation = paper_annotation_weight_plot,
-    drift_credible_shift = paper_drift_credible_shift_plot,
+    drift_pip_l2 = paper_drift_pip_l2_plot,
     pve = paper_pve_plot,
     effect_diffuseness = paper_effect_diffuseness_plot
   )
@@ -2376,6 +2404,12 @@ ensure_basin_r2_drift_tbl <- function() {
   if (file.exists(basin_r2_drift_path) && !isTRUE(force_recompute_basin_r2_drift)) {
     return(readr::read_csv(basin_r2_drift_path, show_col_types = FALSE))
   }
+  basin_r2_drift_cache_dir <- file.path(overall_figure_dir, "basin_r2_drift_by_locus")
+  dir.create(basin_r2_drift_cache_dir, recursive = TRUE, showWarnings = FALSE)
+  basin_r2_locus_cache_path <- function(locus_id) {
+    safe_locus <- gsub("[^A-Za-z0-9_.-]+", "_", as.character(locus_id))
+    file.path(basin_r2_drift_cache_dir, paste0(safe_locus, ".csv"))
+  }
 
   run_metrics <- readr::read_csv(
     file.path(aggregated_dir, "run_metrics_full.csv"),
@@ -2445,6 +2479,15 @@ ensure_basin_r2_drift_tbl <- function() {
     drift_loci,
     function(loc) {
       runs_tbl <- dplyr::filter(functional_runs_for_drift, .data$locus_id == loc)
+      locus_cache_path <- basin_r2_locus_cache_path(loc)
+      if (file.exists(locus_cache_path) && !isTRUE(force_recompute_basin_r2_drift)) {
+        basin_r2_progress(
+          sprintf("%s: loaded cached locus drift", loc),
+          units = 1L + 2L * nrow(runs_tbl),
+          force = TRUE
+        )
+        return(readr::read_csv(locus_cache_path, show_col_types = FALSE))
+      }
       basin_r2_progress(
         sprintf("%s: loading bundle (%d runs)", loc, nrow(runs_tbl)),
         units = 0L,
@@ -2482,7 +2525,9 @@ ensure_basin_r2_drift_tbl <- function() {
         )
       }
       if (!nrow(drift)) return(tibble::tibble())
-      drift %>% dplyr::mutate(locus_id = loc, .before = 1L)
+      drift <- drift %>% dplyr::mutate(locus_id = loc, .before = 1L)
+      readr::write_csv(drift, locus_cache_path)
+      drift
     }
   )
   basin_r2_progress("finished", units = 0L, force = TRUE)
