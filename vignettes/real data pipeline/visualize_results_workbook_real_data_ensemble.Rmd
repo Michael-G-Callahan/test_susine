@@ -52,6 +52,8 @@ if (nzchar(Sys.getenv("RD_PREVIEW_FIG_DIR")) && requireNamespace("ragg", quietly
 job_name <- "real_data_ensemble_geometric_n20"
 parent_job_id <- "52906940"
 force_recompute_basin_r2_drift <- FALSE
+simulation_multimodality_job_name <- "ensemble_scaling_full"
+simulation_multimodality_parent_job_id <- "53547760"
 
 if (identical(parent_job_id, "REPLACE_WITH_SLURM_JOB_ID")) {
   stop("Set parent_job_id to the SLURM job id returned by sbatch before visualizing.")
@@ -1029,14 +1031,14 @@ plot_aggregated_lollipop <- function(locus_id, n_variants = 15L, selection_metri
   )
   points_df <- dplyr::bind_rows(
     plot_df %>%
-      dplyr::transmute(variant_f, pip = baseline_pip, fit_type = "Baseline"),
+      dplyr::transmute(variant_f, pip = baseline_pip, fit_type = "SuSiNE c=0"),
     plot_df %>%
       dplyr::transmute(variant_f, pip = aggregated_pip, fit_type = "SuSiNE ensemble"),
     plot_df %>%
-      dplyr::transmute(variant_f, pip = refit_pip, fit_type = "Warm refit")
+      dplyr::transmute(variant_f, pip = refit_pip, fit_type = "SuSiE warm refit")
   ) %>%
     dplyr::filter(is.finite(.data$pip)) %>%
-    dplyr::mutate(fit_type = factor(.data$fit_type, levels = c("Baseline", "SuSiNE ensemble", "Warm refit")))
+    dplyr::mutate(fit_type = factor(.data$fit_type, levels = c("SuSiNE c=0", "SuSiNE ensemble", "SuSiE warm refit")))
 
   ggplot(plot_df, aes(y = variant_f)) +
     geom_segment(
@@ -1053,13 +1055,13 @@ plot_aggregated_lollipop <- function(locus_id, n_variants = 15L, selection_metri
       inherit.aes = FALSE
     ) +
     scale_color_manual(
-      values = c("Baseline" = "#666666", "SuSiNE ensemble" = "#0B6E4F", "Warm refit" = "#C65D00"),
-      breaks = c("Baseline", "SuSiNE ensemble", "Warm refit"),
+      values = c("SuSiNE c=0" = "#666666", "SuSiNE ensemble" = "#0B6E4F", "SuSiE warm refit" = "#C65D00"),
+      breaks = c("SuSiNE c=0", "SuSiNE ensemble", "SuSiE warm refit"),
       name = NULL
     ) +
     labs(
-      title = paste("Baseline vs Ensemble Variant PIPs:", locus_id),
-      subtitle = paste0("Top ", n_variants, " variants by absolute baseline-to-ensemble PIP difference"),
+      title = paste("SuSiNE c=0 vs SuSiNE Ensemble Variant PIPs:", locus_id),
+      subtitle = paste0("Top ", n_variants, " variants by absolute SuSiNE-c=0-to-SuSiNE-ensemble PIP difference"),
       x = "PIP",
       y = "Variant"
     ) +
@@ -1141,6 +1143,195 @@ ggsave(
 multimodal_plot
 ```
 
+# 5b. Real vs Simulation Multimodality Benchmark
+
+```{r supplement-real-vs-sim-multimodality, fig.width=7, fig.height=5}
+simulation_multimodality_consolidated_dir <- {
+  ov <- Sys.getenv("RD_SIM_MULTIMODALITY_CONSOLIDATED_DIR", "")
+  if (nzchar(ov)) {
+    ov
+  } else {
+    here(
+      "output", "slurm_output",
+      simulation_multimodality_job_name,
+      simulation_multimodality_parent_job_id,
+      "consolidated"
+    )
+  }
+}
+simulation_multimodality_path <- file.path(
+  simulation_multimodality_consolidated_dir,
+  "multimodal_metrics.csv"
+)
+simulation_model_metrics_path <- file.path(
+  simulation_multimodality_consolidated_dir,
+  "model_metrics_full.csv"
+)
+supplement_real_vs_sim_multimodality_plot <- NULL
+
+if (file.exists(simulation_multimodality_path)) {
+  sim_multimodal_metrics <- readr::read_csv(
+    simulation_multimodality_path,
+    show_col_types = FALSE
+  )
+
+  if (!"spec_name" %in% names(sim_multimodal_metrics) &&
+      "group_label" %in% names(sim_multimodal_metrics) &&
+      file.exists(simulation_model_metrics_path)) {
+    sim_spec_map <- readr::read_csv(
+      simulation_model_metrics_path,
+      show_col_types = FALSE
+    ) %>%
+      dplyr::distinct(.data$group_key, .data$spec_name)
+    sim_multimodal_metrics <- sim_multimodal_metrics %>%
+      dplyr::mutate(group_key = sub("^model_grid\\|", "", .data$group_label)) %>%
+      dplyr::left_join(sim_spec_map, by = "group_key")
+  }
+
+  required_multimodality_cols <- c("n_clusters_credible", "max_credible_dist")
+  have_multimodality_cols <- all(required_multimodality_cols %in% names(sim_multimodal_metrics)) &&
+    all(required_multimodality_cols %in% names(multimodal_metrics))
+
+  if (have_multimodality_cols) {
+    sim_benchmark_tbl <- sim_multimodal_metrics
+    if ("architecture" %in% names(sim_benchmark_tbl)) {
+      sim_benchmark_tbl <- sim_benchmark_tbl %>%
+        dplyr::filter(.data$architecture == "susie2_oligogenic")
+    }
+    if ("spec_name" %in% names(sim_benchmark_tbl) &&
+        any(sim_benchmark_tbl$spec_name == "C-CS", na.rm = TRUE)) {
+      sim_benchmark_tbl <- sim_benchmark_tbl %>%
+        dplyr::filter(.data$spec_name == "C-CS")
+    }
+
+    sim_benchmark_tbl <- sim_benchmark_tbl %>%
+      dplyr::transmute(
+        n_clusters_credible = as.numeric(.data$n_clusters_credible),
+        max_credible_dist = .data$max_credible_dist
+      ) %>%
+      dplyr::filter(
+        is.finite(.data$n_clusters_credible),
+        is.finite(.data$max_credible_dist)
+      )
+    real_benchmark_tbl <- multimodal_metrics %>%
+      dplyr::transmute(
+        locus_id,
+        locus_label = sub("_lung$", "", .data$locus_id),
+        n_clusters_credible = as.numeric(.data$n_clusters_credible),
+        max_credible_dist = .data$max_credible_dist
+      ) %>%
+      dplyr::filter(
+        is.finite(.data$n_clusters_credible),
+        is.finite(.data$max_credible_dist)
+      )
+
+    if (nrow(sim_benchmark_tbl) && nrow(real_benchmark_tbl)) {
+      x_breaks <- seq(
+        floor(min(c(sim_benchmark_tbl$n_clusters_credible,
+                    real_benchmark_tbl$n_clusters_credible), na.rm = TRUE)),
+        ceiling(max(c(sim_benchmark_tbl$n_clusters_credible,
+                      real_benchmark_tbl$n_clusters_credible), na.rm = TRUE)),
+        by = 1
+      )
+      fill_label <- "Simulation loci"
+      subtitle_text <- paste0(
+        "Background: oligogenic simulation ensembles",
+        if ("spec_name" %in% names(sim_multimodal_metrics) &&
+            any(sim_multimodal_metrics$spec_name == "C-CS", na.rm = TRUE)) {
+          " (C-CS)"
+        } else {
+          ""
+        },
+        "; points: real-data loci"
+      )
+      density_layer <- NULL
+      if (nrow(sim_benchmark_tbl) >= 10L &&
+          length(unique(sim_benchmark_tbl$n_clusters_credible)) > 1L &&
+          length(unique(sim_benchmark_tbl$max_credible_dist)) > 1L) {
+        density_layer <- stat_density_2d(
+          color = "white",
+          linewidth = 0.25,
+          alpha = 0.55,
+          bins = 5,
+          na.rm = TRUE
+        )
+      }
+
+      supplement_real_vs_sim_multimodality_plot <- ggplot(
+        sim_benchmark_tbl,
+        aes(x = n_clusters_credible, y = max_credible_dist)
+      ) +
+        geom_bin2d(
+          bins = c(max(1L, length(x_breaks)), 18L),
+          alpha = 0.9,
+          na.rm = TRUE
+        ) +
+        scale_fill_viridis_c(
+          option = "C",
+          trans = "sqrt",
+          name = fill_label
+        ) +
+        density_layer +
+        geom_point(
+          data = real_benchmark_tbl,
+          aes(x = n_clusters_credible, y = max_credible_dist),
+          inherit.aes = FALSE,
+          shape = 21,
+          size = 2.8,
+          stroke = 0.55,
+          color = "black",
+          fill = "#C65D00",
+          alpha = 0.92
+        ) +
+        scale_x_continuous(breaks = x_breaks) +
+        labs(
+          title = "Real-data ensemble multimodality against oligogenic simulations",
+          subtitle = subtitle_text,
+          x = "Number of credible-shift clusters",
+          y = "Maximum credible-shift distance"
+        ) +
+        theme_bw(base_size = 10) +
+        theme(
+          panel.grid.minor = element_blank(),
+          legend.position = "right",
+          plot.title.position = "plot"
+        )
+
+      ggsave(
+        file.path(overall_figure_dir, "paper_supplement_real_vs_sim_multimodality.png"),
+        supplement_real_vs_sim_multimodality_plot,
+        width = 7,
+        height = 5,
+        dpi = 300,
+        bg = "white"
+      )
+      ggsave(
+        file.path(overall_figure_dir, "paper_supplement_real_vs_sim_multimodality.pdf"),
+        supplement_real_vs_sim_multimodality_plot,
+        width = 7,
+        height = 5,
+        bg = "white"
+      )
+    } else {
+      message("Real-vs-simulation multimodality benchmark skipped: no finite rows.")
+    }
+  } else {
+    message(
+      "Real-vs-simulation multimodality benchmark skipped: missing required columns ",
+      paste(required_multimodality_cols, collapse = ", ")
+    )
+  }
+} else {
+  message(
+    "Real-vs-simulation multimodality benchmark skipped: ",
+    simulation_multimodality_path,
+    " not found."
+  )
+}
+
+supplement_real_vs_sim_multimodality_plot
+```
+
 # 6. Study-Level Ensemble Effects
 
 ```{r overall-ensemble-effects, fig.width=8, fig.height=6}
@@ -1196,9 +1387,9 @@ overall_pip_long_tbl <- overall_pip_change_tbl %>%
     comparison = dplyr::recode(
       .data$comparison,
       aggregated_pip = "SuSiNE ensemble",
-      refit_pip = "Warm refit"
+      refit_pip = "SuSiE warm refit"
     ),
-    comparison = factor(.data$comparison, levels = c("SuSiNE ensemble", "Warm refit"))
+    comparison = factor(.data$comparison, levels = c("SuSiNE ensemble", "SuSiE warm refit"))
   ) %>%
   dplyr::filter(is.finite(.data$comparison_pip))
 
@@ -1208,12 +1399,12 @@ overall_pip_change_plot <- ggplot(
 ) +
   geom_abline(slope = 1, intercept = 0, color = "grey50", linewidth = 0.7) +
   geom_point(alpha = 0.18, size = 0.8) +
-  scale_color_manual(values = c("SuSiNE ensemble" = "#0B6E4F", "Warm refit" = "#C65D00"), name = NULL) +
+  scale_color_manual(values = c("SuSiNE ensemble" = "#0B6E4F", "SuSiE warm refit" = "#C65D00"), name = NULL) +
   coord_equal(xlim = c(0, 1), ylim = c(0, 1)) +
   labs(
     title = "Variant PIP Changes Across Loci",
-    x = "Baseline PIP",
-    y = "Comparison PIP"
+    x = "SuSiNE c=0 PIP",
+    y = "SuSiNE / SuSiE warm-refit PIP"
   )
 
 ggsave(
@@ -1255,9 +1446,9 @@ overall_pve_long_tbl <- overall_pve_tbl %>%
     comparison = dplyr::recode(
       .data$comparison,
       ensemble_pve_postmean_std = "SuSiNE ensemble",
-      refit_pve_postmean_std = "Warm refit"
+      refit_pve_postmean_std = "SuSiE warm refit"
     ),
-    comparison = factor(.data$comparison, levels = c("SuSiNE ensemble", "Warm refit"))
+    comparison = factor(.data$comparison, levels = c("SuSiNE ensemble", "SuSiE warm refit"))
   ) %>%
   dplyr::filter(
     is.finite(.data$susie_anchor_pve_postmean_std),
@@ -1271,12 +1462,12 @@ overall_pve_change_plot <- ggplot(
   geom_abline(slope = 1, intercept = 0, color = "grey50", linewidth = 0.7) +
   geom_point(size = 2.4) +
   geom_text(aes(label = locus_id), size = 2.4, vjust = -0.55, check_overlap = TRUE, show.legend = FALSE) +
-  scale_color_manual(values = c("SuSiNE ensemble" = "#0B6E4F", "Warm refit" = "#C65D00"), name = NULL) +
+  scale_color_manual(values = c("SuSiNE ensemble" = "#0B6E4F", "SuSiE warm refit" = "#C65D00"), name = NULL) +
   coord_equal(xlim = pve_lim, ylim = pve_lim) +
   labs(
-    title = "Posterior-Mean PVE Proxy: SuSiE vs Ensemble and Refit",
+    title = "Posterior-Mean PVE Proxy: SuSiE vs SuSiNE and SuSiE Warm Refit",
     x = "SuSiE anchor posterior-mean PVE",
-    y = "Comparison posterior-mean PVE"
+    y = "SuSiNE / SuSiE warm-refit posterior-mean PVE"
   )
 
 ggsave(
@@ -1296,14 +1487,14 @@ if (have_corrected_pve) {
       locus_id,
       susie_anchor = .data$susie_anchor_pve_expected,
       `SuSiNE ensemble` = .data$ensemble_pve_expected,
-      `Warm refit` = .data$refit_pve_expected
+      `SuSiE warm refit` = .data$refit_pve_expected
     ) %>%
     tidyr::pivot_longer(
-      cols = dplyr::any_of(c("SuSiNE ensemble", "Warm refit")),
+      cols = dplyr::any_of(c("SuSiNE ensemble", "SuSiE warm refit")),
       names_to = "comparison", values_to = "comparison_pve"
     ) %>%
     dplyr::mutate(comparison = factor(.data$comparison,
-                                      levels = c("SuSiNE ensemble", "Warm refit"))) %>%
+                                      levels = c("SuSiNE ensemble", "SuSiE warm refit"))) %>%
     dplyr::filter(is.finite(.data$susie_anchor), is.finite(.data$comparison_pve))
 
   if (nrow(overall_pve_exp_tbl)) {
@@ -1321,12 +1512,12 @@ if (have_corrected_pve) {
       geom_text(aes(label = locus_id), size = 2.4, vjust = -0.55,
                 check_overlap = TRUE, show.legend = FALSE) +
       scale_color_manual(values = c("SuSiNE ensemble" = "#0B6E4F",
-                                    "Warm refit" = "#C65D00"), name = NULL) +
+                                    "SuSiE warm refit" = "#C65D00"), name = NULL) +
       coord_equal(xlim = lim, ylim = lim) +
       labs(
-        title = "Local genetic variance (PVE): SuSiE vs Ensemble and Refit",
+        title = "Local genetic variance (PVE): SuSiE vs SuSiNE and SuSiE Warm Refit",
         x = expression("SuSiE anchor  E[var(Xb)|y] / var(y)"),
-        y = expression("Comparison  E[var(Xb)|y] / var(y)")
+        y = expression("SuSiNE / SuSiE warm-refit  E[var(Xb)|y] / var(y)")
       )
     ggsave(
       file.path(overall_figure_dir,
@@ -1367,13 +1558,13 @@ overall_jsd_triangle_plot <- ggplot(
   geom_abline(slope = 1, intercept = 0, color = "grey50", linewidth = 0.7) +
   geom_point(alpha = 0.85, na.rm = TRUE) +
   geom_text(aes(label = locus_id), size = 2.4, vjust = -0.55, check_overlap = TRUE, show.legend = FALSE, na.rm = TRUE) +
-  scale_color_viridis_c(option = "C", name = "SuSiNE vs refit JSD") +
-  scale_size_continuous(range = c(1.8, 5), name = "SuSiNE vs refit JSD") +
+  scale_color_viridis_c(option = "C", name = "SuSiNE vs SuSiE warm refit JSD") +
+  scale_size_continuous(range = c(1.8, 5), name = "SuSiNE vs SuSiE warm refit JSD") +
   coord_equal(xlim = jsd_lim, ylim = jsd_lim) +
   labs(
-    title = "PIP JSD Triangle: SuSiE, SuSiNE, and Warm Refit",
+    title = "PIP JSD Triangle: SuSiE, SuSiNE, and SuSiE Warm Refit",
     x = "SuSiE baseline to SuSiNE ensemble JSD",
-    y = "SuSiE baseline to warm refit JSD"
+    y = "SuSiE baseline to SuSiE warm refit JSD"
   )
 
 ggsave(
@@ -1397,7 +1588,7 @@ refit_basin_r2_drift_plot <- ggplot(
   labs(
     title = "Basin r2 Drift From SuSiE Baseline",
     x = "Highest-weight SuSiNE fit vs SuSiE baseline",
-    y = "Warm refit vs SuSiE baseline"
+    y = "SuSiE warm refit vs SuSiE baseline"
   )
 
 ggsave(
@@ -1535,7 +1726,7 @@ source_jsd_tbl <- paper_summary %>%
     locus_id,
     highest_weight_source_run_id,
     susie_anchor_run_id,
-    # Match the fitted-model basin drift x-axis: this is highest-weight model
+    # Match the fitted-model basin drift x-axis: this is highest-weight SuSiNE fit
     # PIP JSD, not cluster-weight aggregated ensemble PIP JSD.
     jsd_susie_anchor_vs_highest_weight_source = purrr::pmap_dbl(
       list(.data$locus_id, .data$susie_anchor_run_id, .data$highest_weight_source_run_id),
@@ -1559,7 +1750,7 @@ drift_jsd_long_tbl <- dplyr::bind_rows(
   drift_jsd_tbl %>%
     dplyr::transmute(
       locus_id,
-      fit_type = "Highest-weight model",
+      fit_type = "Highest-weight SuSiNE fit",
       basis_drift_var_y = .data$basis_drift_var_y_highest_weight_vs_susie_anchor,
       pip_jsd = .data$jsd_susie_anchor_vs_highest_weight_source,
       source_weight = .data$highest_weight_source_agg_weight_run
@@ -1567,16 +1758,16 @@ drift_jsd_long_tbl <- dplyr::bind_rows(
   drift_jsd_tbl %>%
     dplyr::transmute(
       locus_id,
-      fit_type = "Warm refit",
+      fit_type = "SuSiE warm refit",
       basis_drift_var_y = .data$basis_drift_var_y_refit_vs_susie_anchor,
       pip_jsd = .data$jsd_susie_anchor_vs_refit,
       source_weight = .data$highest_weight_source_agg_weight_run
     )
   ) %>%
   dplyr::mutate(
-    fit_type = factor(.data$fit_type, levels = c("Highest-weight model", "Warm refit")),
+    fit_type = factor(.data$fit_type, levels = c("Highest-weight SuSiNE fit", "SuSiE warm refit")),
     locus_label = dplyr::if_else(
-      .data$fit_type == "Highest-weight model" &
+      .data$fit_type == "Highest-weight SuSiNE fit" &
         (.data$basis_drift_var_y > 0.05 | .data$pip_jsd > 0.3),
       sub("_lung$", "", .data$locus_id),
       ""
@@ -1606,7 +1797,7 @@ paper_drift_jsd_plot <- ggplot(
     seed = 2
   ) +
   scale_color_manual(
-    values = c("Highest-weight model" = "#0B6E4F", "Warm refit" = "#C65D00"),
+    values = c("Highest-weight SuSiNE fit" = "#0B6E4F", "SuSiE warm refit" = "#C65D00"),
     name = NULL
   ) +
   labs(
@@ -1633,7 +1824,16 @@ paper_pve_tbl <- anchor_summary %>%
     susie_anchor_pve = if (.use_expected_pve) .data$susie_anchor_pve_expected else .data$susie_anchor_pve_postmean_std,
     susine_ensemble_pve = if (.use_expected_pve) .data$ensemble_pve_expected else .data$ensemble_pve_postmean_std,
     warm_refit_pve = if (.use_expected_pve) .data$refit_pve_expected else .data$refit_pve_postmean_std,
-    pve_estimand = if (.use_expected_pve) "expected_pve" else "postmean_pve"
+    pve_estimand = if (.use_expected_pve) "expected_pve" else "postmean_pve",
+    label_pve = pmax(
+      .data$susie_anchor_pve,
+      .data$susine_ensemble_pve,
+      .data$warm_refit_pve,
+      na.rm = TRUE
+    )
+  ) %>%
+  dplyr::mutate(
+    label_pve = dplyr::if_else(is.infinite(.data$label_pve), NA_real_, .data$label_pve)
   )
 
 paper_pve_long_tbl <- dplyr::bind_rows(
@@ -1642,21 +1842,24 @@ paper_pve_long_tbl <- dplyr::bind_rows(
       locus_id,
       fit_type = "SuSiNE ensemble",
       susie_anchor_pve,
-      comparison_pve = .data$susine_ensemble_pve
+      comparison_pve = .data$susine_ensemble_pve,
+      label_pve
     ),
   paper_pve_tbl %>%
     dplyr::transmute(
       locus_id,
-      fit_type = "Warm refit",
+      fit_type = "SuSiE warm refit",
       susie_anchor_pve,
-      comparison_pve = .data$warm_refit_pve
+      comparison_pve = .data$warm_refit_pve,
+      label_pve
     )
 ) %>%
   dplyr::mutate(
-    fit_type = factor(.data$fit_type, levels = c("SuSiNE ensemble", "Warm refit")),
+    fit_type = factor(.data$fit_type, levels = c("SuSiNE ensemble", "SuSiE warm refit")),
     locus_label = dplyr::if_else(
       .data$fit_type == "SuSiNE ensemble" &
-        (.data$susie_anchor_pve > 0.15 | .data$comparison_pve > 0.15),
+        is.finite(.data$label_pve) &
+        .data$label_pve >= 0.19,
       sub("_lung$", "", .data$locus_id),
       ""
     )
@@ -1699,7 +1902,7 @@ paper_pve_plot <- ggplot(
     inherit.aes = FALSE
   ) +
   geom_point(
-    data = dplyr::filter(paper_pve_long_tbl, .data$fit_type == "Warm refit"),
+    data = dplyr::filter(paper_pve_long_tbl, .data$fit_type == "SuSiE warm refit"),
     aes(color = fit_type),
     size = 2.4,
     alpha = 0.9
@@ -1716,14 +1919,14 @@ paper_pve_plot <- ggplot(
     seed = 3
   ) +
   scale_color_manual(
-    values = c("SuSiNE ensemble" = "#0B6E4F", "Warm refit" = "#C65D00"),
+    values = c("SuSiNE ensemble" = "#0B6E4F", "SuSiE warm refit" = "#C65D00"),
     name = NULL
   ) +
   coord_equal(xlim = paper_pve_lim, ylim = paper_pve_lim) +
   labs(
     title = "Annotations can boost explanatory signal",
     x = expression("SuSiE baseline local genetic variance " * h[g]^2),
-    y = expression("Comparison local genetic variance " * h[g]^2)
+    y = expression("SuSiNE / SuSiE warm-refit local genetic variance " * h[g]^2)
   ) +
   paper_panel_theme
 
@@ -1742,9 +1945,9 @@ effect_diffuseness_run_tbl <- paper_summary %>%
     fit_type = dplyr::recode(
       .data$fit_type,
       susie_anchor_run_id = "SuSiE baseline",
-      highest_weight_source_run_id = "Highest-weight model"
+      highest_weight_source_run_id = "Highest-weight SuSiNE fit"
     ),
-    fit_type = factor(.data$fit_type, levels = c("SuSiE baseline", "Highest-weight model"))
+    fit_type = factor(.data$fit_type, levels = c("SuSiE baseline", "Highest-weight SuSiNE fit"))
   ) %>%
   dplyr::filter(!is.na(.data$run_id)) %>%
   dplyr::distinct(.data$locus_id, .data$fit_type, .data$run_id)
@@ -1773,7 +1976,7 @@ effect_diffuseness_tbl <- if (nrow(effect_diffuseness_run_tbl)) {
     tibble::tibble(
       locus_id = character(),
       run_id = integer(),
-      fit_type = factor(levels = c("SuSiE baseline", "Highest-weight model")),
+      fit_type = factor(levels = c("SuSiE baseline", "Highest-weight SuSiNE fit")),
       effect_l = integer(),
       effect_pip_entropy_core95 = numeric(),
       effect_k_eff_core95 = numeric(),
@@ -1784,7 +1987,7 @@ effect_diffuseness_tbl <- if (nrow(effect_diffuseness_run_tbl)) {
   tibble::tibble(
     locus_id = character(),
     run_id = integer(),
-    fit_type = factor(levels = c("SuSiE baseline", "Highest-weight model")),
+    fit_type = factor(levels = c("SuSiE baseline", "Highest-weight SuSiNE fit")),
     effect_l = integer(),
     effect_pip_entropy_core95 = numeric(),
     effect_k_eff_core95 = numeric(),
@@ -1810,8 +2013,8 @@ effect_diffuseness_count_tbl <- effect_diffuseness_tbl %>%
   dplyr::filter(!is.na(.data$diffuseness_bin)) %>%
   dplyr::count(.data$fit_type, .data$diffuseness_bin, name = "n") %>%
   tidyr::complete(
-    fit_type = factor(c("SuSiE baseline", "Highest-weight model"),
-                      levels = c("SuSiE baseline", "Highest-weight model")),
+    fit_type = factor(c("SuSiE baseline", "Highest-weight SuSiNE fit"),
+                      levels = c("SuSiE baseline", "Highest-weight SuSiNE fit")),
     diffuseness_bin = factor(diffuseness_labels, levels = diffuseness_labels),
     fill = list(n = 0L)
   ) %>%
@@ -1831,11 +2034,11 @@ paper_effect_diffuseness_plot <- ggplot(
     na.rm = TRUE
   ) +
   scale_color_manual(
-    values = c("SuSiE baseline" = "grey20", "Highest-weight model" = "#0B6E4F"),
+    values = c("SuSiE baseline" = "grey20", "Highest-weight SuSiNE fit" = "#0B6E4F"),
     name = NULL
   ) +
   scale_fill_manual(
-    values = c("SuSiE baseline" = "grey20", "Highest-weight model" = "#0B6E4F"),
+    values = c("SuSiE baseline" = "grey20", "Highest-weight SuSiNE fit" = "#0B6E4F"),
     name = NULL
   ) +
   labs(
@@ -1928,7 +2131,7 @@ if (requireNamespace("patchwork", quietly = TRUE)) {
 
 # 8. Paper Locus Summary Table
 
-The ELBO column below uses the annotation-free warm refit from the highest-weight
+The ELBO column below uses the annotation-free SuSiE warm refit from the highest-weight
 SuSiNE source compared with the cold SuSiE anchor. This is the most interpretable
 ELBO contrast here because it asks whether the annotation-discovered basin remains
 preferred after removing the prior-mean annotation channel. The total off-`c=0`
@@ -2066,7 +2269,7 @@ knitr::kable(
   align = c("l", "l", rep("r", 8)),
   caption = paste(
     "Real-data locus-level summary sorted by SuSiNE ensemble versus SuSiE",
-    "baseline PIP L2 drift. Delta ELBO is warm-refit minus cold SuSiE anchor."
+    "baseline PIP L2 drift. Delta ELBO is SuSiE warm refit minus cold SuSiE anchor."
   )
 )
 
@@ -2267,14 +2470,19 @@ build_selected_drift_tbl <- function(selected_loci) {
       if (is.null(x) || !nrow(x)) return(NA_real_)
       if (identical(kind, "jsd")) {
         js_distance(x$pip, x$baseline_pip)
-      } else {
+      } else if (identical(kind, "l2")) {
         sqrt(sum((x$pip - x$baseline_pip)^2, na.rm = TRUE))
+      } else if (identical(kind, "credible")) {
+        max(pmax(x$pip, x$baseline_pip) * abs(x$pip - x$baseline_pip), na.rm = TRUE)
+      } else {
+        stop("Unknown drift metric: ", kind, call. = FALSE)
       }
     }
     run_tbl %>%
       dplyr::mutate(
         jsd_from_reference_c0_sigma02 = purrr::map_dbl(.data$run_id, drift_for_run, kind = "jsd"),
         l2_from_reference_c0_sigma02 = purrr::map_dbl(.data$run_id, drift_for_run, kind = "l2"),
+        credible_from_reference_c0_sigma02 = purrr::map_dbl(.data$run_id, drift_for_run, kind = "credible"),
         locus_id = loc,
         .before = 1L
       )
@@ -2437,23 +2645,24 @@ paper_lollipop_l2_plot <- function(locus_id, show_x_axis = FALSE, show_legend = 
     )
 }
 
-paper_pip_drift_l2_plot <- function(locus_id, show_x_axis = FALSE, show_legend = FALSE,
-                                    column_title = NULL) {
+paper_pip_drift_metric_plot <- function(locus_id, drift_col, y_label,
+                                        show_x_axis = FALSE, show_legend = FALSE,
+                                        column_title = NULL) {
   df <- dplyr::filter(selected_l2_drift_tbl, .data$locus_id == !!locus_id)
   highlight_df <- dplyr::filter(selected_l2_highest_weight_drift_tbl, .data$locus_id == !!locus_id) %>%
     dplyr::mutate(weight_label = sprintf("%.2f", .data$agg_weight_run))
-  y_span <- diff(range(df$l2_from_reference_c0_sigma02, na.rm = TRUE))
+  y_span <- diff(range(df[[drift_col]], na.rm = TRUE))
   if (!is.finite(y_span) || y_span <= 0) y_span <- 1
   label_nudge_x <- if (nrow(highlight_df) && highlight_df$c_value[[1]] > mean(selected_drift_xlim)) -0.12 else 0.12
   label_nudge_y <- 0.08 * y_span
 
-  p <- ggplot(df, aes(x = c_value, y = l2_from_reference_c0_sigma02,
+  p <- ggplot(df, aes(x = c_value, y = .data[[drift_col]],
                       color = factor(sigma_0_2_scalar))) +
     geom_line(linewidth = 0.7, na.rm = TRUE) +
     geom_point(size = 2, na.rm = TRUE) +
     geom_point(
       data = highlight_df,
-      aes(x = c_value, y = l2_from_reference_c0_sigma02),
+      aes(x = c_value, y = .data[[drift_col]]),
       inherit.aes = FALSE,
       shape = 21,
       size = 4.0,
@@ -2468,7 +2677,7 @@ paper_pip_drift_l2_plot <- function(locus_id, show_x_axis = FALSE, show_legend =
       p <- p +
         ggrepel::geom_label_repel(
           data = highlight_df,
-          aes(x = c_value, y = l2_from_reference_c0_sigma02, label = weight_label),
+          aes(x = c_value, y = .data[[drift_col]], label = weight_label),
           inherit.aes = FALSE,
           color = "black",
           fill = "white",
@@ -2489,7 +2698,7 @@ paper_pip_drift_l2_plot <- function(locus_id, show_x_axis = FALSE, show_legend =
       p <- p +
         geom_label(
           data = highlight_df,
-          aes(x = c_value, y = l2_from_reference_c0_sigma02, label = weight_label),
+          aes(x = c_value, y = .data[[drift_col]], label = weight_label),
           inherit.aes = FALSE,
           color = "black",
           fill = "white",
@@ -2511,7 +2720,7 @@ paper_pip_drift_l2_plot <- function(locus_id, show_x_axis = FALSE, show_legend =
     labs(
       title = column_title,
       x = if (show_x_axis) "Annotation scale c" else NULL,
-      y = NULL,
+      y = if (show_x_axis) y_label else NULL,
       color = expression("Prior variance " * sigma[0]^2)
     ) +
     paper_panel_theme +
@@ -2524,6 +2733,30 @@ paper_pip_drift_l2_plot <- function(locus_id, show_x_axis = FALSE, show_legend =
       axis.text.x = if (show_x_axis) element_text(size = 7, color = "grey25") else element_blank(),
       axis.ticks.x = if (show_x_axis) element_line(color = "grey35") else element_blank()
     )
+}
+
+paper_pip_drift_l2_plot <- function(locus_id, show_x_axis = FALSE, show_legend = FALSE,
+                                    column_title = NULL) {
+  paper_pip_drift_metric_plot(
+    locus_id,
+    drift_col = "l2_from_reference_c0_sigma02",
+    y_label = "PIP L2 drift",
+    show_x_axis = show_x_axis,
+    show_legend = show_legend,
+    column_title = column_title
+  )
+}
+
+paper_pip_drift_credible_plot <- function(locus_id, show_x_axis = FALSE, show_legend = FALSE,
+                                          column_title = NULL) {
+  paper_pip_drift_metric_plot(
+    locus_id,
+    drift_col = "credible_from_reference_c0_sigma02",
+    y_label = "Credible-shift distance",
+    show_x_axis = show_x_axis,
+    show_legend = show_legend,
+    column_title = column_title
+  )
 }
 
 paper_signal_contribution_l2_plot <- function(locus_id, show_x_axis = FALSE, show_legend = FALSE,
@@ -2545,14 +2778,14 @@ paper_signal_contribution_l2_plot <- function(locus_id, show_x_axis = FALSE, sho
   )
   points_df <- dplyr::bind_rows(
     plot_df %>%
-      dplyr::transmute(variant_f, conditional_effect = baseline_conditional_effect, fit_type = "Baseline"),
+      dplyr::transmute(variant_f, conditional_effect = baseline_conditional_effect, fit_type = "SuSiNE c=0"),
     plot_df %>%
       dplyr::transmute(variant_f, conditional_effect = aggregated_conditional_effect, fit_type = "SuSiNE ensemble"),
     plot_df %>%
-      dplyr::transmute(variant_f, conditional_effect = refit_conditional_effect, fit_type = "Warm refit")
+      dplyr::transmute(variant_f, conditional_effect = refit_conditional_effect, fit_type = "SuSiE warm refit")
   ) %>%
     dplyr::filter(is.finite(.data$conditional_effect)) %>%
-    dplyr::mutate(fit_type = factor(.data$fit_type, levels = c("Baseline", "SuSiNE ensemble", "Warm refit")))
+    dplyr::mutate(fit_type = factor(.data$fit_type, levels = c("SuSiNE c=0", "SuSiNE ensemble", "SuSiE warm refit")))
 
   ggplot(plot_df, aes(y = variant_f)) +
     geom_vline(xintercept = 0, color = "grey78", linewidth = 0.35) +
@@ -2570,8 +2803,8 @@ paper_signal_contribution_l2_plot <- function(locus_id, show_x_axis = FALSE, sho
       inherit.aes = FALSE
     ) +
     scale_color_manual(
-      values = c("Baseline" = "#666666", "SuSiNE ensemble" = "#0B6E4F", "Warm refit" = "#C65D00"),
-      breaks = c("Baseline", "SuSiNE ensemble", "Warm refit"),
+      values = c("SuSiNE c=0" = "#666666", "SuSiNE ensemble" = "#0B6E4F", "SuSiE warm refit" = "#C65D00"),
+      breaks = c("SuSiNE c=0", "SuSiNE ensemble", "SuSiE warm refit"),
       name = NULL
     ) +
     scale_x_continuous(
@@ -2605,8 +2838,8 @@ paper_signal_contribution_l2_plot <- function(locus_id, show_x_axis = FALSE, sho
 paper_lollipop_l2_legend_plot <- function() {
   df <- tibble::tibble(
     fit_type = factor(
-      c("Baseline", "SuSiNE ensemble", "Warm refit"),
-      levels = c("Baseline", "SuSiNE ensemble", "Warm refit")
+      c("SuSiNE c=0", "SuSiNE ensemble", "SuSiE warm refit"),
+      levels = c("SuSiNE c=0", "SuSiNE ensemble", "SuSiE warm refit")
     ),
     x = c(0.07, 0.43, 0.07),
     y = c(0.68, 0.68, 0.30)
@@ -2616,7 +2849,7 @@ paper_lollipop_l2_legend_plot <- function() {
     geom_text(aes(label = fit_type), x = df$x + 0.055, hjust = 0,
               size = 2.55, color = "grey15") +
     scale_color_manual(
-      values = c("Baseline" = "#666666", "SuSiNE ensemble" = "#0B6E4F", "Warm refit" = "#C65D00"),
+      values = c("SuSiNE c=0" = "#666666", "SuSiNE ensemble" = "#0B6E4F", "SuSiE warm refit" = "#C65D00"),
       guide = "none"
     ) +
     coord_cartesian(xlim = c(0, 1), ylim = c(0, 1), expand = FALSE, clip = "off") +
@@ -2650,7 +2883,7 @@ paper_highlight_l2_legend_plot <- function() {
       "text",
       x = 0.25,
       y = 0.48,
-      label = "circle: highest-weight setting\nnumber: aggregation weight",
+      label = "circle: highest-weight SuSiNE setting\nnumber: aggregation weight",
       hjust = 0,
       size = 2.55,
       color = "grey15"
@@ -2742,6 +2975,24 @@ if (requireNamespace("patchwork", quietly = TRUE)) {
       patchwork::plot_layout(widths = c(0.07, 1, 1, 1))
   })
 
+  selected_locus_zoom_credible_rows <- purrr::map2(selected_zoom_l2_loci, seq_along(selected_zoom_l2_loci), function(loc, i) {
+    show_x_axis <- i == length(selected_zoom_l2_loci)
+    is_first_row <- i == 1L
+    title_lollipop <- if (is_first_row) "PIPs for shifted effects" else NULL
+    title_effect   <- if (is_first_row) "Fitted effect size" else NULL
+    title_drift    <- if (is_first_row) "Credible-shift drift from baseline" else NULL
+    (
+        paper_locus_row_label_plot(loc) |
+        paper_lollipop_l2_plot(loc, show_x_axis = show_x_axis, show_legend = FALSE,
+                               column_title = title_lollipop) |
+        paper_signal_contribution_l2_plot(loc, show_x_axis = show_x_axis, show_legend = FALSE,
+                                          column_title = title_effect) |
+        paper_pip_drift_credible_plot(loc, show_x_axis = show_x_axis, show_legend = FALSE,
+                                      column_title = title_drift)
+    ) +
+      patchwork::plot_layout(widths = c(0.07, 1, 1, 1))
+  })
+
   selected_locus_zoom_l2_legend <- (
     paper_lollipop_l2_legend_plot() |
       paper_highlight_l2_legend_plot() |
@@ -2758,6 +3009,17 @@ if (requireNamespace("patchwork", quietly = TRUE)) {
   )
   selected_locus_zoom_l2_figure <- patchwork::wrap_plots(
     c(selected_locus_zoom_l2_rows, list(selected_locus_zoom_l2_legend)),
+    ncol = 1
+  ) +
+    patchwork::plot_layout(heights = selected_locus_zoom_l2_heights) &
+    theme(
+      plot.margin = margin(4.5, 4.5, 2.5, 4.5),
+      panel.spacing.x = grid::unit(3.2, "mm"),
+      panel.spacing.y = grid::unit(2.0, "mm")
+    )
+
+  selected_locus_zoom_credible_figure <- patchwork::wrap_plots(
+    c(selected_locus_zoom_credible_rows, list(selected_locus_zoom_l2_legend)),
     ncol = 1
   ) +
     patchwork::plot_layout(heights = selected_locus_zoom_l2_heights) &
@@ -2801,10 +3063,28 @@ if (requireNamespace("patchwork", quietly = TRUE)) {
     bg = "white",
     limitsize = FALSE
   )
+  ggsave(
+    file.path(overall_figure_dir, "paper_selected_locus_zoom_lollipop_credible_drift.png"),
+    selected_locus_zoom_credible_figure,
+    width = 7.52,
+    height = 8.4,
+    dpi = 300,
+    bg = "white",
+    limitsize = FALSE
+  )
+  ggsave(
+    file.path(overall_figure_dir, "paper_selected_locus_zoom_lollipop_credible_drift.pdf"),
+    selected_locus_zoom_credible_figure,
+    width = 7.52,
+    height = 8.4,
+    bg = "white",
+    limitsize = FALSE
+  )
 
   list(
     jsd = selected_locus_zoom_figure,
-    l2 = selected_locus_zoom_l2_figure
+    l2 = selected_locus_zoom_l2_figure,
+    credible = selected_locus_zoom_credible_figure
   )
 } else {
   warning("patchwork is not installed; selected-locus zoom figure skipped.")
