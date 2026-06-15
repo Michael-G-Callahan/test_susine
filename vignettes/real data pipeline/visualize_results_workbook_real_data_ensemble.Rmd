@@ -716,6 +716,35 @@ run_pip_jsd <- function(locus_id, run_id_a, run_id_b) {
   safe_pip_jsd(run_pip_vec(locus_id, run_id_a), run_pip_vec(locus_id, run_id_b))
 }
 
+safe_pip_credible_shift <- function(x, y) {
+  if (is.null(x) || is.null(y) || length(x) != length(y) || !length(x)) {
+    return(NA_real_)
+  }
+  out <- max(pmax(x, y) * abs(x - y), na.rm = TRUE)
+  if (is.infinite(out)) NA_real_ else as.numeric(out)
+}
+
+run_pip_credible_shift <- function(locus_id, run_id_a, run_id_b) {
+  safe_pip_credible_shift(
+    run_pip_vec(locus_id, run_id_a),
+    run_pip_vec(locus_id, run_id_b)
+  )
+}
+
+refit_pip_credible_shift <- function(locus_id, anchor_run_id) {
+  if (length(anchor_run_id) != 1L || is.na(anchor_run_id)) return(NA_real_)
+  anchor_pip <- variant_posteriors %>%
+    dplyr::filter(.data$locus_id == !!locus_id,
+                  .data$run_id == !!as.integer(anchor_run_id)) %>%
+    dplyr::select(.data$variant_id, anchor_pip = .data$pip) %>%
+    dplyr::collect()
+  refit_pip <- refit_pip_tbl(locus_id) %>%
+    dplyr::select(.data$variant_id, .data$refit_pip)
+  joined <- dplyr::inner_join(anchor_pip, refit_pip, by = "variant_id")
+  if (!nrow(joined)) return(NA_real_)
+  safe_pip_credible_shift(joined$anchor_pip, joined$refit_pip)
+}
+
 core95_entropy <- function(prob, rho = 0.95) {
   p <- as.numeric(prob)
   p[!is.finite(p) | p < 0] <- 0
@@ -1265,7 +1294,7 @@ if (file.exists(simulation_multimodality_path)) {
       ) +
         geom_bin2d(
           bins = c(max(1L, length(x_breaks)), 18L),
-          alpha = 0.48,
+          alpha = 0.7,
           na.rm = TRUE
         ) +
         scale_fill_viridis_c(
@@ -1295,8 +1324,9 @@ if (file.exists(simulation_multimodality_path)) {
           inherit.aes = FALSE,
           size = 2.35,
           seed = 29,
-          box.padding = 0.22,
-          point.padding = 0.28,
+          box.padding = 0.38,
+          point.padding = 0.45,
+          force = 2.2,
           segment.size = 0.22,
           color = "grey12"
         ) +
@@ -1738,46 +1768,50 @@ paper_annotation_weight_plot <- ggplot(
   ) +
   paper_panel_theme
 
-source_jsd_tbl <- paper_summary %>%
+source_credible_shift_tbl <- paper_summary %>%
   dplyr::transmute(
     locus_id,
     highest_weight_source_run_id,
     susie_anchor_run_id,
     # Match the fitted-model basin drift x-axis: this is highest-weight SuSiNE fit
-    # PIP JSD, not cluster-weight aggregated ensemble PIP JSD.
-    jsd_susie_anchor_vs_highest_weight_source = purrr::pmap_dbl(
+    # credible-shift distance, not cluster-weight aggregated ensemble distance.
+    credible_shift_susie_anchor_vs_highest_weight_source = purrr::pmap_dbl(
       list(.data$locus_id, .data$susie_anchor_run_id, .data$highest_weight_source_run_id),
-      run_pip_jsd
+      run_pip_credible_shift
+    ),
+    credible_shift_susie_anchor_vs_refit = purrr::map2_dbl(
+      .data$locus_id,
+      .data$susie_anchor_run_id,
+      refit_pip_credible_shift
     )
   )
 
-drift_jsd_tbl <- highest_weight_refit_basin %>%
+drift_credible_shift_tbl <- highest_weight_refit_basin %>%
   dplyr::left_join(
     paper_summary %>%
       dplyr::select(
         .data$locus_id,
-        .data$highest_weight_source_agg_weight_run,
-        .data$jsd_susie_anchor_vs_refit
+        .data$highest_weight_source_agg_weight_run
       ),
     by = "locus_id"
   ) %>%
-  dplyr::left_join(source_jsd_tbl, by = "locus_id")
+  dplyr::left_join(source_credible_shift_tbl, by = "locus_id")
 
-drift_jsd_long_tbl <- dplyr::bind_rows(
-  drift_jsd_tbl %>%
+drift_credible_shift_long_tbl <- dplyr::bind_rows(
+  drift_credible_shift_tbl %>%
     dplyr::transmute(
       locus_id,
       fit_type = "Highest-weight SuSiNE fit",
       basis_drift_var_y = .data$basis_drift_var_y_highest_weight_vs_susie_anchor,
-      pip_jsd = .data$jsd_susie_anchor_vs_highest_weight_source,
+      pip_credible_shift = .data$credible_shift_susie_anchor_vs_highest_weight_source,
       source_weight = .data$highest_weight_source_agg_weight_run
     ),
-  drift_jsd_tbl %>%
+  drift_credible_shift_tbl %>%
     dplyr::transmute(
       locus_id,
       fit_type = "SuSiE warm refit",
       basis_drift_var_y = .data$basis_drift_var_y_refit_vs_susie_anchor,
-      pip_jsd = .data$jsd_susie_anchor_vs_refit,
+      pip_credible_shift = .data$credible_shift_susie_anchor_vs_refit,
       source_weight = .data$highest_weight_source_agg_weight_run
     )
   ) %>%
@@ -1785,16 +1819,16 @@ drift_jsd_long_tbl <- dplyr::bind_rows(
     fit_type = factor(.data$fit_type, levels = c("Highest-weight SuSiNE fit", "SuSiE warm refit")),
     locus_label = dplyr::if_else(
       .data$fit_type == "Highest-weight SuSiNE fit" &
-        (.data$basis_drift_var_y > 0.05 | .data$pip_jsd > 0.3),
+        (.data$basis_drift_var_y > 0.05 | .data$pip_credible_shift > 0.05),
       sub("_lung$", "", .data$locus_id),
       ""
     )
   ) %>%
-  dplyr::filter(is.finite(.data$basis_drift_var_y), is.finite(.data$pip_jsd))
+  dplyr::filter(is.finite(.data$basis_drift_var_y), is.finite(.data$pip_credible_shift))
 
-paper_drift_jsd_plot <- ggplot(
-  drift_jsd_long_tbl,
-  aes(x = basis_drift_var_y, y = pip_jsd)
+paper_drift_credible_shift_plot <- ggplot(
+  drift_credible_shift_long_tbl,
+  aes(x = basis_drift_var_y, y = pip_credible_shift)
 ) +
   geom_path(
     aes(group = locus_id),
@@ -1809,7 +1843,7 @@ paper_drift_jsd_plot <- ggplot(
     na.rm = TRUE
   ) +
   geom_locus_text(
-    data = drift_jsd_long_tbl,
+    data = drift_credible_shift_long_tbl,
     aes(label = locus_label),
     seed = 2
   ) +
@@ -1821,7 +1855,7 @@ paper_drift_jsd_plot <- ggplot(
     title = "Annotations refine signal within and across LD groups",
     x = expression(Delta[widehat(y)] * " = mean squared " * widehat(y) *
                    " drift from SuSiE baseline"),
-    y = "PIP JSD from SuSiE baseline"
+    y = "Credible-shift PIP distance from SuSiE baseline"
   ) +
   paper_panel_theme
 
@@ -2076,7 +2110,7 @@ ggsave(
 )
 ggsave(
   file.path(overall_figure_dir, "paper_overall_annotation_drift_pve_panel_b.png"),
-  paper_drift_jsd_plot,
+  paper_drift_credible_shift_plot,
   width = 3.76,
   height = 3.9,
   dpi = 300,
@@ -2101,7 +2135,7 @@ ggsave(
 
 if (requireNamespace("patchwork", quietly = TRUE)) {
   paper_overall_figure <- (
-    (paper_annotation_weight_plot | paper_drift_jsd_plot) /
+    (paper_annotation_weight_plot | paper_drift_credible_shift_plot) /
       patchwork::plot_spacer() /
       (paper_pve_plot | paper_effect_diffuseness_plot)
   ) +
@@ -2139,7 +2173,7 @@ if (requireNamespace("patchwork", quietly = TRUE)) {
   warning("patchwork is not installed; saved individual paper panels only.")
   list(
     annotation = paper_annotation_weight_plot,
-    drift_jsd = paper_drift_jsd_plot,
+    drift_credible_shift = paper_drift_credible_shift_plot,
     pve = paper_pve_plot,
     effect_diffuseness = paper_effect_diffuseness_plot
   )
@@ -2860,8 +2894,8 @@ paper_lollipop_l2_legend_plot <- function() {
       c("SuSiE Baseline", "SuSiNE ensemble", "SuSiE warm refit"),
       levels = c("SuSiE Baseline", "SuSiNE ensemble", "SuSiE warm refit")
     ),
-    x = c(0.07, 0.43, 0.07),
-    y = c(0.68, 0.68, 0.30)
+    x = c(0.07, 0.07, 0.07),
+    y = c(0.78, 0.50, 0.22)
   )
   ggplot(df, aes(x = x, y = y, color = fit_type)) +
     geom_point(size = 2.8) +
