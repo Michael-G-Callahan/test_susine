@@ -190,9 +190,8 @@ basin_vs_pip_jsd_r2_png <- file.path(
 )
 
 # Number of causals counted as positives in pooled PR scoring (top-K by
-# |beta| per dataset). This matches the baseline simulation study, which
-# uses the top 8 = 3 sparse + 5 oligogenic tier of the SuSiE 2.0
-# oligogenic architecture.
+# |beta| per dataset). Non-top causal variants are excluded from PR scoring,
+# matching the baseline simulation confusion-bin convention.
 pr_top_k <- 8L
 
 cat("Study dir:", study_dir, "\n")
@@ -2068,10 +2067,10 @@ causal_idx_lookup <- lapply(causal_truth_lookup, `[[`, "causal_idx")
 pip_records_for_pr <- readRDS(pip_records_rds) %>%
   dplyr::mutate(dataset_bundle_id = as.character(.data$dataset_bundle_id))
 
-# Pool PIPs and binary positive labels across all (dataset, variant)
+# Pool PIPs and binary positive labels across all scored (dataset, variant)
 # observations, separately for each of the 5 methods. Positives are the
-# top pr_top_k causal positions per dataset, ranked by |beta|. All other
-# variants, including non-top causal variants, are negatives; this matches
+# top pr_top_k causal positions per dataset, ranked by |beta|. True causals
+# outside the top set are dropped, neither positive nor negative, matching
 # the baseline-sims confusion-bin AUPRC convention.
 pooled_rows <- list()
 for (i in seq_len(nrow(pip_records_for_pr))) {
@@ -2084,13 +2083,16 @@ for (i in seq_len(nrow(pip_records_for_pr))) {
   }
   p_len <- length(pip_vec)
   top_idx <- truth$top_idx[truth$top_idx >= 1L & truth$top_idx <= p_len]
+  causal_idx <- truth$causal_idx[truth$causal_idx >= 1L & truth$causal_idx <= p_len]
+  weak_causal_idx <- setdiff(causal_idx, top_idx)
+  keep_idx <- setdiff(seq_len(p_len), weak_causal_idx)
   is_top <- integer(p_len)
   is_top[top_idx] <- 1L
   pooled_rows[[length(pooled_rows) + 1L]] <- tibble::tibble(
     dataset_bundle_id = ds_id,
     model_method = method,
-    pip = as.numeric(pip_vec),
-    is_causal = is_top
+    pip = as.numeric(pip_vec[keep_idx]),
+    is_causal = is_top[keep_idx]
   )
 }
 pooled_df <- dplyr::bind_rows(pooled_rows)

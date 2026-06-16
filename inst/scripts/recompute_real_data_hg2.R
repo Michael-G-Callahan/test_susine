@@ -20,8 +20,8 @@
 #   * Batched BLAS: all per-(run,effect) quadratic forms are a single R %*% B_all.
 #
 # Per locus the fair ensemble aggregate is sum_k w_k * hg2_expected_pve_k using
-# the SAME cluster weights the pipeline uses (.cluster_weights_from_hc with the
-# job's jsd_threshold / softmax_temperature). See
+# the SAME cluster weights the pipeline uses for real-data PIP aggregation:
+# cluster_weight_credible = credible_shift @ 0.05 plus Method B weights. See
 # refs/decisions/heritability_estimand_decision_2026-06-09.md (sec 5.5).
 #
 # Run on the HPC where output/ and data/ live (allocate enough RAM for one R):
@@ -95,7 +95,6 @@ run_manifest_path <- pick_existing(file.path(temp_dir, "run_manifest.csv"),
                                    file.path(history_dir, "run_manifest.csv"))
 
 cfg <- jsonlite::read_json(job_config_path, simplifyVector = TRUE)
-jsd_threshold <- as.numeric(cfg$job$jsd_threshold %||% 0.15)
 softmax_temperature <- as.numeric(cfg$job$softmax_temperature %||% 1)
 manifest_path <- cfg$job$manifest_path
 repo_root <- cfg$paths$repo_root %||% getwd()
@@ -338,10 +337,18 @@ for (li in seq_along(locus_ids)) {
     w <- tryCatch({
       if (K > 1L) {
         pip_mat <- do.call(rbind, comp$pip_list[as.character(fun_ids)])
-        pc <- test_susine:::prepare_pip_similarity_cache(pip_mat)
+        cw_spec <- test_susine:::.cluster_weight_specs[["cluster_weight_credible"]]
+        if (is.null(cw_spec)) {
+          stop("Missing cluster_weight_credible spec in test_susine")
+        }
+        pc <- test_susine:::prepare_pip_similarity_cache(
+          pip_mat,
+          metric = cw_spec$metric
+        )
         test_susine:::.cluster_weights_from_hc(
-          pc$hc, jsd_threshold, elbo_vec, n_fits = K,
-          softmax_temperature = softmax_temperature)$w_full
+          pc$hc, cw_spec$threshold, elbo_vec, n_fits = K,
+          softmax_temperature = softmax_temperature,
+          aggregation = "method_b")$w_full
       } else 1
     }, error = function(e) rep(1 / K, K))
 

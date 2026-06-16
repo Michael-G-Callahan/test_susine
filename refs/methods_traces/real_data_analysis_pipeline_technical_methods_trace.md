@@ -1,7 +1,7 @@
 # Real Data Analysis Pipeline Technical Trace
 
 Date written: 2026-05-22
-Last updated: 2026-06-15
+Last updated: 2026-06-16
 
 This document traces the real-data eQTL case-study pipeline that produced the
 paper figures:
@@ -828,10 +828,50 @@ When those files are present, the plotted quantity is:
 hg2_expected_pve = E[var(Xb)|y] / var(y)
 ```
 
-This adds the within-fit posterior-variance term to the posterior-mean
-predictor variance and is used consistently for the SuSiE anchor, SuSiNE
-ensemble, and warm refit. If `hg2_corrected/` is absent, the workbook falls back
-to the posterior-mean proxy above and emits a warning.
+This is the estimand switched in by commit `4e0721b` (see
+`R/heritability.R`, `hg2_components()` / `hg2_components_from_moments()`, and
+`refs/decisions/heritability_estimand_decision_2026-06-09.md`). It replaces the
+old "variance of the posterior-mean predictor" point estimate
+`var(E[Xb|y])/var(y)` with the posterior mean of the genetic variance, which
+decomposes additively as
+
+```text
+E[var(Xb)|y] / var(y)  =  m' R m / var(y)            (postmean part, = hg2_postmean)
+                       +  tr(R Cov(b|y)) / var(y)    (within-fit correction, = hg2_uncertainty)
+```
+
+with `m = colSums(b_hat)` the unconditional posterior-mean coefficient vector
+and, under the SuSiE/SuSiNE single-effect (SER) structure,
+`Cov(b_l) = diag(b_2_hat[l, ]) - m_l m_l'`, so
+`tr(R Cov(b|y)) = sum_l [ sum_j R_jj b_2_hat[l, j] - m_l' R m_l ]`. For
+standardized RSS `var(y) = 1`, the Gram matrix is `R`, and `b_hat`/`b_2_hat` are
+the unconditional per-effect moments stored on the susine fit (`alpha * mu_1`,
+`alpha * (sigma_1_2 + mu_1^2)`); for a susieR fit they are reconstructed as
+`alpha * mu` and `alpha * mu2`. Components are floored at 0 and `expected_pve` is
+NOT capped at 1, so the additive decomposition holds exactly.
+
+The recompute is downstream-only (no refitting): the per-effect unconditional
+moments are read from the persisted `effect_posteriors` parquet
+(`alpha`, `alpha_b_hat`, `alpha_b_2_hat`), falling back to reloading the saved
+`.rds` fits only when those columns are absent. The estimand is computed per fit
+(SuSiE anchor, every functional-grid fit, and the warm refit reloaded from
+`aggregated/highest_weight_refits/`). The **between-fit** term enters at the
+ensemble level: the per-locus ensemble PVE
+`hg2_expected_pve_ensemble = sum_k w_k * hg2_expected_pve_k` is a convex
+combination of the functional-grid fits' expected PVEs, so it may lie above or
+below the max-ELBO member (the script also reports
+`hg2_expected_pve_pos_min/max` to bound it). As of the 2026-06-16 source fix,
+the recompute uses the same credible-shift + Method-B weights as the collector:
+`cluster_weight_credible` (`credible_shift` at threshold `0.05`) followed by
+`.cluster_weights_from_hc(..., aggregation = "method_b")$w_full`. This matches
+the `agg_weight_run` / `aggregated_pip` rule written to
+`aggregation_weights_cluster_weight.csv` (Section 10.2). Corrected
+`hg2_corrected/` outputs should be regenerated after this source fix before the
+PVE numbers are quoted.
+
+The estimand is used consistently for the SuSiE anchor, SuSiNE ensemble, and
+warm refit. If `hg2_corrected/` is absent, the workbook (and the export script)
+fall back to the posterior-mean proxy below and emit a warning.
 
 For SuSiNE RSS fits:
 
@@ -1034,36 +1074,53 @@ aggregated/highest_weight_refit_summary.csv
 aggregated/highest_weight_refit_variant_posteriors.parquet
 ```
 
-### 10.4 Effect-basis `r^2` drift
+### 10.4 Effect-basis drift (two distinct metrics)
 
-Effect-basis drift compares the per-effect coefficient vectors of two fits.
+The collector computes two different per-pair drift scalars and writes both to
+`highest_weight_refit_basin_r2_drift.csv`. They are easy to conflate; the paper
+overall figure (Panel B) uses the **second** one.
 
-For each effect, define:
+(1) Hungarian effect-basis `r^2` drift
+(`real_data_basin_r2_drift_pair_cached`, `R/real_data_pipeline.R`). For each
+effect, define:
 
 ```text
-b_l = alpha_l * posterior_mean_l
+b_l = colSums-free per-effect vector alpha_l * mu_l  (one row of the effect basis)
 var(X b_l) = b_l' R b_l
 cor(X b_i, X b_j) = (b_i' R b_j) / sqrt((b_i' R b_i)(b_j' R b_j))
 ```
 
 Effects are matched one-to-one by maximum assignment using the Hungarian
-algorithm (`clue::solve_LSAP`). The pairwise drift is:
+algorithm (`clue::solve_LSAP`, with cosines shifted by `+1` and the cost matrix
+padded to square with zeros). The pairwise drift is the weighted mean of
+`(1 - cor^2)` over matched effects, with weights
+`min(var_explained_effect_a, var_explained_effect_b)`. This is stored in the
+`basin_r2_drift_*` columns and is the y-axis of the supplementary
+`overall_basin_r2_drift_highest_weight_vs_refit.png` plot, not of any paper
+panel.
+
+(2) Global basis drift in standardized-phenotype units
+(`real_data_basis_drift_var_y_pair_cached`, `R/real_data_pipeline.R`). This is a
+single scalar with NO per-effect matching:
 
 ```text
-weighted mean of (1 - cor^2)
+b = colSums(alpha * mu)        (global posterior-mean effect vector of a fit)
+basis_drift_var_y = (b_a - b_b)' R (b_a - b_b) = ||b_a - b_b||_R^2
 ```
 
-with weights:
+floored at 0. With `var(y) = 1` it is directly a fraction of `var(y)`: the
+variance of the difference in the two fits' linear predictors. Unlike (1) it is
+not scale-invariant — a locus whose two fits explain very different amounts of
+`var(y)` registers larger drift. This is stored in the `basis_drift_var_y_*`
+columns and is the **x-axis of paper overall Panel B**
+(`Delta_yhat = mean squared yhat drift from SuSiE baseline`).
 
-```text
-min(var_explained_effect_a, var_explained_effect_b)
-```
+Both metrics are written for the same three comparisons:
 
-The collector writes three comparisons:
-
-- highest-weight source vs SuSiE anchor;
-- warm refit vs SuSiE anchor;
-- warm refit vs highest-weight source.
+- highest-weight source vs SuSiE anchor
+  (`*_highest_weight_vs_susie_anchor`);
+- warm refit vs SuSiE anchor (`*_refit_vs_susie_anchor`);
+- warm refit vs highest-weight source (`*_refit_vs_highest_weight`).
 
 These are stored in:
 
@@ -1166,12 +1223,13 @@ weighted_sigma_0_2_scalar =
   sum(agg_weight_run * sigma_0_2_scalar) / sum(agg_weight_run)
 
 off_c0_weight =
-  sum(agg_weight_run[c_value > 0]) / sum(agg_weight_run)
+  sum(agg_weight_run[abs(c_value) > 1e-12]) / sum(agg_weight_run)
 
 max_model_weight = max(agg_weight_run)
 ```
 
-Loci are labeled when:
+The point fill is `off_c0_weight` (viridis "D", limits `[0, 1]`, legend "Total
+c>0 weight"). Loci are labeled when:
 
 ```text
 weighted_c_value > 0.1 OR weighted_sigma_0_2_scalar > 0.1
@@ -1187,31 +1245,32 @@ paper_real_data_ensemble_summary.csv
 variant_posteriors_dataset/
 ```
 
-The x-axis is effect-basis drift from the SuSiE baseline, measured as the
-variance-weighted basis-drift term in standardized phenotype units. The y-axis
-is PIP L2 distance from the SuSiE baseline. Each locus contributes up to two
-points:
+The x-axis is the global basis drift in standardized-phenotype units from the
+SuSiE baseline — the `basis_drift_var_y_*` scalar of Section 10.4(2),
+`||b_a - b_b||_R^2`, NOT the Hungarian-matched `1 - cor^2` term. The axis title
+in the workbook is `Delta_yhat = mean squared yhat drift from SuSiE baseline`.
+The y-axis is PIP L2 distance from the SuSiE baseline. Each locus contributes up
+to two points, joined by a grey path:
 
-- highest-weight model;
-- warm refit.
+- highest-weight SuSiNE fit (point color `#0B6E4F`);
+- SuSiE warm refit (point color `#C65D00`).
 
-For the highest-weight model, PIP L2 distance is recomputed directly between:
+The x-coordinates come straight from `highest_weight_refit_basin` columns
+`basis_drift_var_y_highest_weight_vs_susie_anchor` and
+`basis_drift_var_y_refit_vs_susie_anchor`. The y-coordinates (PIP L2) are
+recomputed live in the workbook from the variant-posterior parquet, not read
+from a stored column:
 
-```text
-susie_anchor_run_id
-highest_weight_source_run_id
-```
+- highest-weight fit: `run_pip_l2(locus_id, susie_anchor_run_id,
+  highest_weight_source_run_id)`;
+- warm refit: `refit_pip_l2(locus_id, susie_anchor_run_id)`, which joins the
+  anchor variant posteriors to `highest_weight_refit_variant_posteriors.parquet`
+  by `variant_id`.
 
-For the warm refit, PIP L2 distance is recomputed from the anchor and warm-refit
-variant-posterior tables. JSD values are still collected in
-`paper_real_data_ensemble_summary.csv` and auxiliary diagnostics, but the
-paper-facing overall panel is the L2 version.
+JSD values are still collected in `paper_real_data_ensemble_summary.csv` and
+auxiliary diagnostics, but the paper-facing overall panel is the L2 version.
 
-```text
-paper_real_data_ensemble_summary.csv: pip_l2_susie_anchor_vs_refit
-```
-
-Loci are labeled for the highest-weight-model point when:
+Loci are labeled (only on the highest-weight-fit point) when:
 
 ```text
 basis_drift_var_y > 0.05 OR pip_l2 > 1.0
@@ -1238,14 +1297,21 @@ The preferred plotted estimand is:
 hg2_expected_pve = E[var(Xb)|y] / var(y)
 ```
 
-When corrected-PVE files are unavailable, the workbook falls back to
-`b' R b`, where `b` is the posterior mean effect vector on standardized
-genotype and standardized phenotype scale.
+selected per fit via `.use_expected_pve <- have_corrected_pve`: anchor uses
+`susie_anchor_pve_expected`, ensemble uses `ensemble_pve_expected` (joined by
+locus from `hg2_corrected_by_locus.csv`), warm refit uses `refit_pve_expected`.
+The figure never mixes estimands within a panel. The axis title uses `h_g^2`.
+When corrected-PVE files are unavailable, the workbook falls back to the
+posterior-mean proxy `*_pve_postmean_std` (i.e. `b' R b` with `b` the
+posterior-mean effect vector on the standardized genotype / phenotype scale).
+For each locus a grey vertical segment connects the ensemble and warm-refit
+points at the shared anchor x.
 
 Loci are labeled for the SuSiNE ensemble point when:
 
 ```text
-susie_anchor_pve > 0.15 OR comparison_pve > 0.15
+label_pve = pmax(susie_anchor_pve, susine_ensemble_pve, warm_refit_pve)
+label_pve >= 0.19
 ```
 
 Panel D: effect diffuseness.
@@ -1322,40 +1388,173 @@ selected_l2_locus_tokens <- c("ydjc", "arsa", "rrp7a", "tmtc1", "lgals9", "znf28
 selected_l2_n_variants <- 6L
 ```
 
-Each token is resolved by first matching `^token` against `locus_id`, then by a
-case-insensitive substring fallback.
+Each token is resolved (`resolve_locus_token`) by first matching `^token`
+against `locus_id` (case-insensitive), then by a case-insensitive substring
+fallback. (A separate deprecated JSD figure uses
+`selected_locus_tokens <- c("rrp7a", "arsa", "prpf38b")`.)
 
-For each locus, the left panel is a lollipop plot of the 6 variants with the
-largest absolute baseline-to-ensemble PIP difference:
+The L2-drift figure is a one-row-per-locus grid; each row is FOUR patchwork
+cells (`plot_layout(widths = c(0.07, 1, 1, 1))`): a rotated locus-name strip,
+then three data columns. Column titles appear only on the first row.
 
-```text
-abs_delta_baseline_ensemble = abs(aggregated_pip - baseline_pip)
-```
+Column 1 — "PIPs for shifted effects" (`paper_lollipop_l2_plot` ->
+`plot_aggregated_lollipop(locus, n_variants = 6, selection_metric =
+"posterior_mean_delta")`). The 6 displayed variants are the top variants by
+`abs_delta_posterior_mean = abs(aggregated_posterior_mean -
+baseline_posterior_mean)` (NOT the PIP delta — note the standalone
+`plot_aggregated_lollipop` default is `selection_metric = "pip_delta"`, but the
+paper L2 column overrides it to `posterior_mean_delta`). Each variant shows three
+points plus a grey segment from baseline to ensemble PIP:
 
-The three plotted point types are:
-
-- Baseline: nearest functional-grid run to `c = 0`, `sigma_0^2 = 0.2`;
+- SuSiNE c=0 baseline: nearest functional-grid run to `c = 0`, `sigma_0^2 = 0.2`
+  (`nearest_reference_run`, ties broken by `c_distance`, then
+  `abs(log(sigma/0.2))`, then `run_id`);
 - SuSiNE ensemble: `aggregated_pip`;
-- Warm refit: PIP from `highest_weight_refit_variant_posteriors.parquet`.
+- SuSiE warm refit: PIP from `highest_weight_refit_variant_posteriors.parquet`.
 
-The right panel in the final L2 version plots, for each functional-grid run:
+Column 2 — "Fitted effect size" (`paper_signal_contribution_l2_plot`; despite
+the legacy function name it plots the signed conditional posterior-mean effect,
+not a signal contribution). For the same 6 variants it plots the
+floored-alpha-weighted conditional effect `E[b_j | gamma_j = 1]` for baseline,
+ensemble, and warm refit. Per fit:
+`mu_lj = b_hat[l,j]/alpha[l,j]`, `alpha_lj_clip = max(alpha[l,j], 1e-4)`,
+`conditional_j = sum_l(alpha_lj_clip * mu_lj) / sum_l(alpha_lj_clip)`; the
+ensemble aggregates `(numerator, denominator)` across cluster-weight nominees
+weighted by `agg_weight_run` (Option-B aggregation,
+`floored_conditional_for_locus`). The x-axis is a signed-log
+(`scales::pseudo_log_trans(sigma = 1, base = 2)`) with hardcoded breaks
+`{0, +/-1, +/-5, +/-20}`.
+
+Column 3 — "PIP L2 drift from baseline" (`paper_pip_drift_l2_plot` ->
+`paper_pip_drift_metric_plot(drift_col = "l2_from_reference_c0_sigma02")`). For
+each functional-grid run it plots:
 
 ```text
 x = c_value
-y = sqrt(sum((pip_run - baseline_pip)^2))
-color = sigma_0_2_scalar
+y = sqrt(sum((pip_run - baseline_pip)^2))   (l2_from_reference_c0_sigma02)
+color = factor(sigma_0_2_scalar)
 ```
 
-The black open circle marks the highest-weight source run for that locus, using
-the same selection rule as the warm-refit stage:
+where `baseline_pip` is the nearest-`(c=0, sigma_0^2=0.2)` reference run. A black
+open circle marks the highest-weight source run for that locus, labeled with its
+`agg_weight_run` (formatted `%.2f`), selected by:
 
 ```text
 desc(agg_weight_run), desc(elbo_final), run_id
 ```
 
-The figure also renders a deprecated JSD version (`selected_locus_zoom_figure`)
-and a six-locus credible-shift drift version. The final paper PNG named in this
-trace is the six-locus L2-drift version above.
+`build_selected_drift_tbl` also computes JSD and credible-shift drift columns
+(`jsd_from_reference_c0_sigma02`, `credible_from_reference_c0_sigma02`) for the
+sibling figures. The figure additionally renders a deprecated two-column JSD
+version (`selected_locus_zoom_figure`, tokens `rrp7a/arsa/prpf38b`) and a
+six-locus credible-shift drift version
+(`paper_selected_locus_zoom_lollipop_credible_drift.*`, column 3 uses
+`credible_from_reference_c0_sigma02`). The final paper PNG named in this trace is
+the six-locus L2-drift version above (saved at `width = 7.52`, `height = 8.4`,
+even though the chunk header sets `fig.height = 9.2`).
+
+### 11.3 Real-vs-simulation multimodality supplement
+
+Final paper file:
+
+```text
+paper_supplement_real_vs_sim_multimodality.png
+```
+
+Workbook chunk: `supplement-real-vs-sim-multimodality` (section "5b. Real vs
+Simulation Multimodality Benchmark"). Rendered at `width = 7`, `height = 5`,
+`dpi = 300`, `bg = "white"`. Also emits a `.pdf`.
+
+This figure benchmarks the real-data loci's posterior multimodality against an
+oligogenic *simulation* ensemble. The simulation source is a separate job,
+configured in the same workbook:
+
+```r
+simulation_multimodality_job_name <- "ensemble_scaling_full"
+simulation_multimodality_parent_job_id <- "53547760"
+```
+
+read from
+`output/slurm_output/ensemble_scaling_full/53547760/consolidated/multimodal_metrics.csv`
+(with `model_metrics_full.csv` joined to recover `spec_name`). The simulation
+background is filtered to `architecture == "susie2_oligogenic"` and, when
+present, `spec_name == "C-CS"`.
+
+IMPORTANT — both axes use the **credible-shift** multimodal metrics, NOT the JSD
+metrics. The figure plots:
+
+```text
+x = n_clusters_credible   (number of credible-shift clusters at threshold 0.05)
+y = max_credible_dist     (largest pairwise credible-shift distance)
+```
+
+Both come from `compute_multimodal_metrics()` in `R/run_model.R`:
+`n_clusters_credible = length(unique(cutree(cred_cache$hc, h = 0.05)))` and
+`max_credible_dist = max(cred_cache$jsd_vals)` where `cred_cache` is built with
+`metric = "credible_shift"` (`credible_shift(p,q) = max_j max(p_j,q_j)|p_j-q_j|`).
+The JSD-based fields (`mean_jsd`, `median_jsd`, `max_jsd`, `jaccard_top10`,
+`mean_pip_var`, `n_clusters` at `jsd_threshold = 0.15`) are still computed and
+power the older `multimodality_summary.png` in-workbook diagnostic, but the paper
+supplement does NOT use them. The simulation ensemble is drawn as a `geom_bin2d`
+density (viridis "C", sqrt-scaled) with an optional white 2D-density contour; the
+20 real-data loci are overlaid as labeled green points (label = `locus_id`
+stripped of `_lung`).
+
+The chunk skips gracefully (message only) if the simulation
+`multimodal_metrics.csv` is missing or the required columns
+(`n_clusters_credible`, `max_credible_dist`) are absent.
+
+### 11.4 Paper locus summary CSVs
+
+Two paper-facing CSVs are written to
+`../Writings/plots/real_data_case_study/` (and to the job `overall/` dir):
+
+```text
+paper_real_data_locus_summary_table.csv   (one row per locus, 20 rows)
+paper_real_data_pip_gt05_totals.csv       (one across-locus totals row)
+```
+
+There are TWO generators that produce identical schemas:
+
+1. the visualization workbook, section "8. Paper Locus Summary Table" (chunk
+   `paper-real-data-locus-summary-table`), which writes both into
+   `overall/` and, when the writing directory exists, into the paper dir;
+2. the standalone script
+   `vignettes/real data pipeline/export_real_data_locus_summary_table.R`
+   (defaults `--job-name real_data_ensemble_geometric_n20`,
+   `--parent-job-id 52906940`, `--out-dir` = paper dir). Use this to refresh the
+   CSVs without re-rendering the full workbook.
+
+Both read `paper_real_data_ensemble_summary.csv` and join the corrected PVE from
+`hg2_corrected/` (anchor by `susie_anchor_run_id` -> `hg2_corrected_by_run.csv`;
+ensemble by `locus_id` -> `hg2_corrected_by_locus.csv`). The locus-summary
+columns are:
+
+```text
+locus_id
+locus_name                          (gene_name, else upper-cased locus prefix)
+chromosome                          (parsed from locus_id "_chr<X>_")
+n_susie_pip_gt_05                   = n_pip_gt_05_susie_anchor
+n_susine_pip_gt_05                  = n_pip_gt_05_susine_ensemble
+n_agreed_pip_gt_05                  = n_pip_gt_05_susie_anchor_and_susine_ensemble
+delta_pve_susine_minus_susie        (corrected expected-PVE delta when available,
+                                     else postmean: coalesce(pve_*_expected, pve_*))
+delta_elbo_warm_refit_vs_susie      = delta_elbo_refit_vs_susie_anchor
+total_off_c0_weight                 = coalesce(ensemble_agg_weight_off_c0_total,
+                                               weighted off_c0_weight)
+elbo_weighted_annotation_scale_c    = weighted_c_value
+pip_l2_susine_ensemble_vs_susie     = pip_l2_susie_anchor_vs_susine_ensemble
+```
+
+Rows are sorted by descending `pip_l2_susine_ensemble_vs_susie`, then
+`locus_name`. PIP counts use threshold `0.5`
+(`real_data_pip_count`/`real_data_pip_intersection_count`,
+`R/real_data_pipeline.R`). The export script recomputes
+`pip_l2_susie_anchor_vs_susine_ensemble` from the anchor `variant_posteriors`
+and the aggregated PIP parquet when the column is not already present in the
+summary (anchor vs aggregated-ensemble L2 — distinct from the Panel B
+anchor-vs-highest-weight-fit L2). The totals CSV is `n_loci`,
+`total_susie_pip_gt_05`, `total_susine_pip_gt_05`, `total_agreed_pip_gt_05`.
 
 ## 12. Reproduction recipe
 
@@ -1517,6 +1716,25 @@ Expected validation:
   `paper_real_data_ensemble_summary.csv` has 20 rows and non-missing anchor,
   highest-weight-source, and warm-refit run ids for all 20 loci.
 
+### 12.4b Recompute the corrected heritability estimand
+
+The corrected PVE estimand `E[var(Xb)|y]/var(y)` is computed downstream (no
+refitting) by:
+
+```bash
+Rscript inst/scripts/recompute_real_data_hg2.R \
+  --job-name real_data_ensemble_geometric_n20 \
+  --parent-job-id 52906940 --output-root output
+```
+
+This writes
+`output/slurm_output/real_data_ensemble_geometric_n20/52906940/hg2_corrected/{hg2_corrected_by_run.csv,hg2_corrected_by_locus.csv}`.
+Run it before rendering figures so Panel C and the locus summary table use the
+corrected estimand instead of the posterior-mean fallback. After the 2026-06-16
+source fix, the script's ensemble PVE uses the same credible-shift + Method-B
+weights as the collector; rerun this script to refresh any older
+`hg2_corrected/` outputs.
+
 ### 12.5 Render paper figures
 
 Run:
@@ -1597,10 +1815,21 @@ Resolved for this trace:
 4. No selected loci failed. The paper-side summary has 20 locus rows with
    populated anchor, highest-weight-source, and warm-refit run ids.
 5. The cluster-weight ambiguity is resolved in the current source: both
-   `agg_weight_run` and `aggregated_pip` use the credible-shift, Method-B,
-   frequency-free `.cluster_weights_from_hc(..., aggregation = "method_b")`
-   rule described in Section 10.2. Every fit can receive nonzero weight; the
-   representative run ids remain cluster descriptors, not the only contributors.
+   `agg_weight_run` and `aggregated_pip` (in `real_data_pipeline.R` lines
+   ~2124-2235) use the credible-shift, Method-B, frequency-free
+   `.cluster_weights_from_hc(..., aggregation = "method_b")` rule described in
+   Section 10.2. Every fit can receive nonzero weight; the representative run ids
+   remain cluster descriptors, not the only contributors.
+6. The PVE/heritability estimand switched (commit `4e0721b`) to
+   `E[var(Xb)|y]/var(y)` via `R/heritability.R` (`hg2_components()`), recomputed
+   downstream for real data by `inst/scripts/recompute_real_data_hg2.R`. Panel C
+   and the locus summary table plot the corrected estimand when `hg2_corrected/`
+   is present, falling back to the posterior-mean proxy otherwise (Section 9).
+7. The supplement real-vs-sim multimodality figure
+   (`paper_supplement_real_vs_sim_multimodality.png`) uses the credible-shift
+   multimodal metrics `n_clusters_credible` / `max_credible_dist`, not the JSD
+   metrics; benchmarked against simulation job `ensemble_scaling_full` /
+   `53547760` (Section 11.3).
 
 Remaining or intentionally deferred:
 
@@ -1611,3 +1840,17 @@ Remaining or intentionally deferred:
    package. That package should archive generated `locus_manifest.csv`,
    `job_config.json`, `run_manifest.csv`, `metric_inventory.csv`, and relevant
    upstream annotation artifacts for job `52906940` with checksums.
+3. **Resolved 2026-06-16 source fix, rerun still required**:
+   `recompute_real_data_hg2.R` was migrated from legacy JSD + Method-C weights
+   to the collector's credible-shift + Method-B `cluster_weight_credible` rule.
+   Regenerate `hg2_corrected/` before quoting the corrected ensemble-PVE numbers
+   or rerendering Panel C.
+4. The `ensemble_scaling_full` simulation `parent_job_id = 53547760` used as the
+   multimodality background (Section 11.3) is set in the visualization workbook
+   but was not independently verified against the simulation trace. FLAG for
+   Michael to confirm it matches the simulation figures' job id.
+5. The "selected" zoom loci for the L2 figure
+   (`ydjc, arsa, rrp7a, tmtc1, lgals9, znf280b`) are hardcoded tokens in the
+   workbook; which loci are "selected" is an editorial choice, not derivable
+   from outputs. Recorded here verbatim from the source, not independently
+   justified.

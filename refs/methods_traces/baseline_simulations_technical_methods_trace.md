@@ -1,7 +1,7 @@
 # Baseline Simulation Study Technical Trace
 
 Date written: 2026-05-20
-Last updated: 2026-06-15
+Last updated: 2026-06-16
 
 This document traces the baseline single-fit simulation study as implemented in
 the `test_susine` codebase and as represented in the current manuscript draft.
@@ -326,6 +326,18 @@ Important metric definitions from `R/evaluation_metrics.R`:
 - effect accuracy:
   - `accuracy_ratio = max alpha on true causal variants / max alpha on any variant`.
 
+`evaluate_model()` also emits a per-fit `AUPRC` model-metric column computed by
+`auprc_average_precision(combined_pip, labels)` (`R/evaluation_metrics.R:180`,
+called at line `394`) over the FULL p-length causal label vector (no top-8 mask).
+This per-fit column is NOT the paper-figure AUPRC: the paper figures are built
+from pooled confusion bins (Section 11) using the top-8 mask. Critically, the
+per-fit `AUPRC` is identical on the unfiltered and purity-filtered model rows,
+because both score the same full combined PIP vector -- see the inline comment
+at `R/evaluation_metrics.R:447` (`# classification metrics don't change with
+filtering`). The only place credible-set filtering feeds back into the PIP
+ranking, and hence into AUPRC, is the purity-filter minibatch
+(`purity_filter_confusion_sweep()`, Section 12.7).
+
 `evaluate_model()` also emits local-genetic-variance (PVE/heritability) columns
 on each model-metric row. Two estimands are emitted:
 
@@ -346,7 +358,7 @@ filtered view keeps credible sets with `purity >= 0.50`.
 ## 10. Confusion bins and top-8 convention
 
 The confusion-bin implementation is `compute_confusion_bins()` in
-`R/run_model.R`.
+`R/run_model.R:219`.
 
 The baseline study uses a top-8 causal mask for PIP-threshold classification:
 
@@ -436,16 +448,32 @@ It computes:
 - pooled-by-annotation AUPRC;
 - corresponding TPR@FPR=0.05 tables using pooled confusion bins.
 
-Current AUPRC convention, as of the June 2026 rerun:
+Current AUPRC convention, as of the June 2026 rerun. The baseline and
+purity-filter collect workbooks call the same exported entry point:
 
-- `test_susine::compute_auprc_from_confusion()` first pools bucket counts with
-  `pool_confusion_bins()`;
+- `test_susine::compute_auprc_from_confusion()` (`R/visualize_results.R:69`)
+  first pools bucket counts with `pool_confusion_bins()`
+  (`R/visualize_results.R:87`), then dispatches to
+  `compute_auprc_from_pooled_confusion()` (`R/visualize_results.R:131`, with a
+  `data.table` fast path);
 - within each group, bins are sorted by descending `pip_threshold`, cumulative
   TP/FP counts define precision and recall;
-- `compute_auprc_single()` then uses step-function average precision,
-  `sum(precision_k * delta_recall_k)`, matching sklearn-style AP;
+- `compute_auprc_single()` (`R/visualize_results.R:496`) then uses step-function
+  average precision, `sum(precision_k * delta_recall_k)`, matching sklearn-style
+  AP;
 - there is no artificial `(recall = 0, precision = 1)` anchor and no
   trapezoidal interpolation.
+
+Note on a parallel implementation: `R/collect_results.R` carries a second,
+self-contained step-AP path -- `auprc_from_pooled_bins()`
+(`R/collect_results.R:809`) fed by `.accumulate_bins()`
+(`R/collect_results.R:931`). This is the *ensemble-scaling* path (it lives under
+the "Ensemble scaling analysis helpers" section header and is used by the
+in-`run_model` aggregation and the ensemble collect workbook), NOT the baseline
+or purity-filter path. Both paths implement the identical step-function AP
+(descending `pip_threshold`, cumulative TP/FP, `sum(precision * delta_recall)`),
+so they agree numerically; the baseline figures specifically go through
+`compute_auprc_from_confusion()`.
 
 Older exploratory helpers in `R/dataset_metrics.R` and `R/x_matrix_metrics.R`
 still contain trapezoidal AUPRC routines, but they are not the production path
@@ -610,44 +638,96 @@ Current job:
 - `job_name <- "purity_filter_minibatch"`
 - `parent_job_id <- "53617896"`
 
-Design:
+Design (from `run_control_workbook_purity_filter_minibatch.Rmd`):
 
 - same M1-stratified 150 genotype matrices and `seeds <- 1:4` substrate as the
-  baseline and ensemble simulations;
-- exactly 600 runs;
-- one annotation-agnostic `susie_vanilla` fit per dataset;
+  baseline and ensemble simulations (matrix selection and bundle assignment are
+  intentionally identical so the 600 datasets coincide);
+- exactly 600 runs (one fit per dataset; asserted in the smoke-check chunk:
+  `stopifnot(nrow(runs) == 600L)`);
+- one annotation-agnostic `susie_vanilla` fit per dataset, configured with a
+  single `prior_quality` row `tibble(annotation_r2 = 0, inflate_match = 1)`;
 - `L = 10`, `max_iter = 100`, `rho = 0.95`;
 - fit prior variance setting `sigma_0_2_default <- 0.2`;
 - ordinary per-run `purity_threshold <- 0.50` still gates the standard
   filtered credible-set view, but the minibatch's AUPRC diagnostic uses its own
-  effect-dropping filters.
+  effect-dropping filters;
+- the sweep is turned on by two job-config flags from the run-control workbook:
+  `purity_filter_sweep <- TRUE` and
+  `purity_filter_specs <- list(purity_thresholds = c(0.95, 0.90, 0.50), keff_core95_max = 100)`;
+- `write_confusion_bins <- FALSE` (the sweep replaces the single confusion-bin
+  set) and `write_tier_cs_metrics <- FALSE`; the `pip_breaks` grid is the same
+  variable-width grid as the baseline screen.
+
+Dispatch path: `run_task()` -> `execute_single_run()` checks
+`isTRUE(job_config$job$compute$purity_filter_sweep)` at `R/run_model.R:2428`;
+when set it calls `purity_filter_confusion_sweep()` at `R/run_model.R:2447`,
+passing the fit's `alpha` matrix, `evaluation$effects_unfiltered`, the full
+length-p `causal_vec`, and the same top-8 `causal_mask` (largest-`abs(beta)`
+causals) used by the standard confusion-bin path.
 
 The key implementation is `purity_filter_confusion_sweep()` in
-`R/evaluation_metrics.R`. For each fitted alpha matrix it recomputes the
-combined PIP vector after retaining only effects that pass each filter:
+`R/evaluation_metrics.R:586`. For each fitted `L x p` alpha matrix it recomputes
+the combined PIP vector (`combined_pip_from_alpha()` on the surviving rows) after
+retaining only effects whose credible set passes each filter, then re-bins via
+`compute_confusion_bins()` with the top-8 mask. The filter set (note the keys
+are generated by `sprintf("purity_%02d", round(thr*100))` and
+`sprintf("keff_core95_le_%d", keff_core95_max)`):
 
-- `no_filter`: keep all effects;
+- `no_filter`: keep all `L` effects;
 - `purity_95`: keep effects with credible-set purity at least 0.95;
 - `purity_90`: keep effects with credible-set purity at least 0.90;
 - `purity_50`: keep effects with credible-set purity at least 0.50;
-- `keff_core95_le_100`: keep effects with core-95% effective support at most
-  100.
+- `keff_core95_le_100`: keep effects with core-95% effective support
+  (`effect_k_eff_signal_core95`) at most 100.
 
-The minibatch then writes confusion bins tagged by `filter_type`. This is
-intentionally different from the standard model-metric path: ordinary
-`evaluate_model()` reports the same per-variant AUPRC for filtered and
-unfiltered model rows because it scores the full combined PIP vector, whereas
-this minibatch feeds credible-set filtering back into the PIP ranking itself.
+It returns a long tibble with columns `filter_type`, `n_effects_kept`,
+`pip_threshold`, `n_causal_at_bucket`, `n_noncausal_at_bucket`, and the minibatch
+writes those confusion bins tagged by `filter_type`. This is intentionally
+different from the standard model-metric path: ordinary `evaluate_model()`
+reports the same per-variant AUPRC for filtered and unfiltered model rows because
+it scores the full combined PIP vector
+(`R/evaluation_metrics.R:447` comment, Section 9), whereas this minibatch feeds
+credible-set filtering back into the PIP ranking itself.
 
-The collect workbook computes:
+The collect workbook (`collect_results_workbook_purity_filter_minibatch.Rmd`)
+pools the per-`filter_type` confusion bins with
+`compute_auprc_from_confusion(confusion_bins, group_vars = "filter_type")` and
+computes:
 
-- `auprc_by_filter_type.csv`: pooled step-AP AUPRC by `filter_type`;
-- `auprc_per_dataset_by_filter.csv`: per-dataset step-AP AUPRC by filter;
-- `auprc_per_dataset_delta_summary.csv`: paired change versus `no_filter`;
-- `effect_diagnostic_summary.csv`: correlation / fraction summaries linking
-  purity, core-95% `k_eff`, and accuracy ratio;
-- `plots/paper_purity_filter_composite.png`, copied to
-  `../Writings/plots/baseline_sims/paper_purity_filter_composite.png`.
+- `auprc_by_filter_type.csv`: pooled step-AP AUPRC by `filter_type` (plus a
+  `delta_vs_unfiltered` column relative to `no_filter`) -- the headline
+  "AUPRC with vs without purity filtering" table;
+- `auprc_per_dataset_by_filter.csv`: per-dataset step-AP AUPRC by filter
+  (grouped by `filter_type` + `dataset_bundle_id`);
+- `auprc_per_dataset_delta_summary.csv`: per-filter paired change versus
+  `no_filter` (`mean_delta`, `median_delta`, `frac_hurt`, `frac_help`);
+- `effect_diagnostic_summary.csv`: Spearman correlations and fraction summaries
+  linking purity, core-95% `k_eff`, and accuracy ratio (e.g.
+  `cor_purity_keff`, `cor_purity_accuracy`, `frac_accurate_dropped_at_095`,
+  `frac_pure_but_inaccurate`);
+- `effect_metrics_unfiltered_full.csv`: the per-effect diagnostic record used by
+  the scatter panels.
+
+The paper composite `paper_purity_filter_composite.png` is written to the job's
+`consolidated/plots/` directory (via `save_paper_grid()`, using `ragg::agg_png`
+when available) and copied to
+`../Writings/plots/baseline_sims/paper_purity_filter_composite.png`. It is a
+2x2 panel grid with a shared bottom legend (panels labelled A-D):
+
+- A: pooled AUPRC by credible-set filter (bar chart, dashed line at the
+  `no_filter` AUPRC -- shorter bars mean the filter discarded useful signal);
+- B: purity versus accuracy ratio, coloured by whether the credible set covers a
+  true causal variant (dashed line at the 0.50 purity cutoff);
+- C: credible-set size versus core-95% `k_eff` on log-log axes (dotted `y = x`
+  reference; points below it have a peaked core despite a large set);
+- D: purity versus core-95% `k_eff` (weak association -- low-purity sets are not
+  reliably more diffuse).
+
+The collect workbook also writes standalone versions of these panels under the
+same `consolidated/plots/` directory (`auprc_by_filter_type.png`,
+`diag_purity_vs_accuracy.png`, `diag_size_vs_keff.png`,
+`diag_purity_vs_keff.png`).
 
 ## 13. Final copied baseline artifacts
 

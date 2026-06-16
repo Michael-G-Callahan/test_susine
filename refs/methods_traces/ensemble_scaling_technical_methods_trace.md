@@ -1,7 +1,7 @@
 # Ensemble Simulation Study Technical Trace
 
 Date written: 2026-05-08
-Last updated: 2026-06-15
+Last updated: 2026-06-16
 
 This document traces the ensemble-scaling simulation study as implemented in the
 `test_susine` codebase. It is intentionally technical and implementation-facing:
@@ -83,7 +83,31 @@ Important provenance notes:
   compatibility in lower-level helpers, but it is not the current paper
   ensemble-simulation aggregator and is not the current real-data aggregator.
   The paper-prep workbook highlights `cluster_weight_credible` as the primary
-  method.
+  method (its figure display label is "cluster softmax"; `cluster_weight_max`
+  is labelled "cluster (max)" -- see `agg_labels` in the paper-prep workbook).
+- The scheduled aggregation method list is set in the run-control workbook
+  (`aggregation_methods <- c("max_elbo", "uniform", "elbo_softmax",
+  "cluster_weight_credible", "cluster_weight_max")`), NOT in
+  `aggregation_catalog()`. The exported `aggregation_catalog()`
+  (`use_cases.R:82`) is stale: it still lists only the legacy
+  `cluster_weight` (JSD 0.15) and `cluster_weight_jsd_050` (JSD 0.50) IDs and
+  is not consulted by this job. The authoritative method registry for the
+  scheduled cluster-weight methods is `.cluster_weight_specs`
+  (`run_model.R:2143`) plus `cluster_weight_method_ids()`.
+- The heritability panel (composite Panel E) is spliced from a SEPARATE hotfix
+  job. The paper-prep workbook reads `hg2_by_agg.csv`, the baseline
+  `model_metrics_full.csv` hg2 columns, and `dataset_metrics.csv`
+  (`true_hg2_realized`) from
+  `ensemble_scaling_hg2_hotfix/53588814/consolidated`
+  (`hg2_source_job_name` / `hg2_source_job_id` in the prep workbook config);
+  every other panel reads the main job `ensemble_scaling_full/53547760`. The
+  hotfix reran only C-CS (`c_grid_8 x sigma_grid_8`) and
+  `baseline-single / susine_vanilla` at `annotation_r2 = 0.3`, with scaling
+  bins off and aggregation trimmed to `max_elbo` + `cluster_weight_credible`,
+  to regenerate the corrected `hg2_expected_pve` estimand and per-dataset
+  realized truth. See
+  `run_control_workbook_ensemble_scaling_hg2_hotfix.Rmd` and
+  `refs/decisions/heritability_estimand_decision_2026-06-09.md`.
 
 ## 2. Manuscript context
 
@@ -349,7 +373,7 @@ The phenotype noise seed is `phenotype_seed + 1`.
 
 During actual model execution, dataset generation is handled by:
 
-- `test_susine/R/run_model.R:525` (`generate_data_for_bundle`)
+- `test_susine/R/run_model.R:533` (`generate_data_for_bundle`)
 
 That function loads the selected matrix, regenerates effects and phenotype using
 the transformed seed, and returns a data bundle containing `X`, `y`, `beta`,
@@ -518,11 +542,18 @@ Relevant ensemble-study exploration modes:
 - `cs_grid_refit`: fit a `(c, sigma_0_2)` grid under functional-mu, then refit
   with default priors from the converged effect fits.
 
-Aggregation IDs are defined in:
+The exported aggregation-ID catalog is in:
 
 - `test_susine/R/use_cases.R:82` (`aggregation_catalog`)
 
-The core aggregation methods are:
+but it is stale and is NOT what schedules the methods for this job. It still
+lists only `max_elbo`, `uniform`, `elbo_softmax`, the legacy `cluster_weight`
+(labelled "Cluster-then-ELBO-softmax (JSD 0.15)"), and `cluster_weight_jsd_050`
+(JSD 0.50). The methods actually scheduled come from the run-control workbook's
+`aggregation_methods` vector and the locked-in registry
+`.cluster_weight_specs` / `cluster_weight_method_ids()` in `run_model.R`.
+
+The core aggregation methods scheduled for this job are:
 
 - `max_elbo`;
 - `uniform`;
@@ -887,7 +918,7 @@ Task execution enters through:
 
 The per-dataset work is in:
 
-- `test_susine/R/run_model.R:622` (`execute_dataset_bundle`)
+- `test_susine/R/run_model.R:630` (`execute_dataset_bundle`)
 
 For each dataset bundle:
 
@@ -918,7 +949,7 @@ override is not encoded in the cache key.
 
 The model-fitting function is:
 
-- `test_susine/R/run_model.R:1623` (`run_use_case`)
+- `test_susine/R/run_model.R:1701` (`run_use_case`)
 
 For each run row, it extracts:
 
@@ -1010,8 +1041,9 @@ c_nonneg = TRUE
 
 ## 17. Refine algorithm
 
-Refine execution is implemented inside `execute_dataset_bundle()`, starting
-around `test_susine/R/run_model.R:956`.
+Refine execution is implemented inside `execute_dataset_bundle()`, in the
+per-parent BFS block starting around `test_susine/R/run_model.R:937`
+(the `# Two-step refinement BFS per parent` comment sits at ~`run_model.R:997`).
 
 The algorithm is a breadth-first search over blocked credible-set combinations.
 
@@ -1076,7 +1108,7 @@ For `C-CSR`, the grid is 8 c values x 8 sigma values = 64 source settings.
 During model execution, the source fit is a normal functional-mu fit at that
 `c` and `sigma_0_2`. Then `run_default_prior_refit()` is called:
 
-- file: `test_susine/R/run_model.R:1587`
+- file: `test_susine/R/run_model.R:1665`
 
 The refit:
 
@@ -1138,7 +1170,7 @@ per-fit `model_metrics$AUPRC` column.
 
 Confusion bins are built by:
 
-- `test_susine/R/run_model.R:218` (`compute_confusion_bins`)
+- `test_susine/R/run_model.R:219` (`compute_confusion_bins`)
 
 The function takes:
 
@@ -1189,9 +1221,10 @@ pooled AUPRC and TPR.
 Primary aggregation happens in `execute_dataset_bundle()` after all individual
 fits in a group are stored:
 
-- `test_susine/R/run_model.R:1101`
+- `test_susine/R/run_model.R:1170` (per-group `aggregate_use_case_pips()`
+  call site) and `~1357` (the optional overall-pool aggregation)
 - aggregation helper:
-  `test_susine/R/run_model.R:1931` (`aggregate_use_case_pips`)
+  `test_susine/R/run_model.R:2047` (`aggregate_use_case_pips`)
 
 For each ensemble group, the code has:
 
@@ -1280,12 +1313,26 @@ ensemble-simulation paper workflow or the current real-data paper workflow.
 
 Scaling-bin subsets are computed at runtime by:
 
-- `test_susine/R/run_model.R:2454`
+- `test_susine/R/run_model.R:2654`
   (`compute_scaling_confusion_bins_for_group`)
 
-That function uses:
+That function builds its per-subset aggregation method list as
+`agg_methods <- c("uniform", "max_elbo", "elbo_softmax",
+cluster_weight_method_ids())` (`run_model.R:2679`) -- i.e. the SAME
+metric-specific Method-B cluster-weight methods as the primary path -- and
+aggregates each subset through:
 
 - `test_susine/R/collect_results.R:830` (`aggregate_pip_matrix`)
+
+`aggregate_pip_matrix()` dispatches any method in `cluster_weight_method_ids()`
+to `.aggregate_cluster_method()` (Method B, each method's own metric +
+threshold); the legacy `cluster_weight` / `cluster_weight_jsd_050` branches in
+that switch are retained for the real-data pipeline but are not exercised by
+this job's scaling bins. (Note: the SNP-parquet-based post-hoc helpers
+`compute_scaling_curves()` and `compute_interaction_scaling()` in
+`collect_results.R` still hardcode the legacy JSD method IDs, but they require
+`write_snps_parquet = TRUE`, which is FALSE here, so they do not feed the paper
+figures.)
 
 For `uniform`, `max_elbo`, and `elbo_softmax`, this is equivalent to the primary
 aggregation logic.
@@ -1393,15 +1440,30 @@ and any other three-or-more-axis spec.
 
 The runtime computes multimodality metrics in:
 
-- `test_susine/R/run_model.R:2029`
+- `test_susine/R/run_model.R:2182` (`compute_multimodal_metrics`)
 
-For groups with multiple fits, it computes:
+For groups with multiple fits, it emits a tibble with these columns:
 
-- pairwise PIP-vector JSD mean/median/max;
-- top-`k` Jaccard similarity across fits, with `k = z_top_k = 10`;
-- mean PIP variance;
-- number of clusters at JSD 0.15;
-- number of clusters at JSD 0.50.
+- `mean_jsd`, `median_jsd`, `max_jsd`: pairwise PIP-vector JSD summary
+  (unnormalized JSD, the `jsd` metric in `pip_cluster_distance`);
+- `jaccard_top10`: mean top-`k` Jaccard similarity across fit pairs, with
+  `k = top_k = z_top_k = 10`;
+- `mean_pip_var`: mean per-variant PIP variance across fits;
+- `n_clusters`: number of clusters cutting the JSD dendrogram at 0.15;
+- `n_clusters_jsd_050`: number of clusters cutting the JSD dendrogram at 0.50;
+- `n_clusters_credible`: number of clusters under the `credible_shift` metric
+  cut at 0.05 (the primary cluster-weight method's clustering);
+- `n_clusters_max`: number of clusters under the `max_shift` (L-infinity)
+  metric cut at 0.10;
+- `max_credible_dist`: largest pairwise `credible_shift` distance between any
+  two fits in the ensemble;
+- `max_maxshift_dist`: largest pairwise `max_shift` distance between any two
+  fits.
+
+The last four columns (`n_clusters_credible`, `n_clusters_max`,
+`max_credible_dist`, `max_maxshift_dist`) were added alongside the locked-in
+cluster-weight methods; they are the columns the paper multimodality figure
+prefers (see Section 46.9). For a single-fit group all columns are `NA`.
 
 These diagnostics are written to `multimodal_metrics`.
 
@@ -1409,7 +1471,7 @@ These diagnostics are written to `multimodal_metrics`.
 
 Aggregated fitted-value heritability is computed in:
 
-- `test_susine/R/run_model.R:2850` (`compute_hg2_by_agg`)
+- `test_susine/R/run_model.R:2851` (`compute_hg2_by_agg`)
 
 The code now emits a corrected "fair" local-genetic-variance decomposition rather
 than only the old posterior-mean point estimate. For each aggregation method it
@@ -2066,17 +2128,42 @@ This feeds:
 
 ## 42. Paper-prep `hg2` data
 
+The hg2 panel inputs are read from a SEPARATE hotfix job, not the main
+`53547760` consolidated dir. The prep workbook defines:
+
+```r
+hg2_source_job_name <- "ensemble_scaling_hg2_hotfix"
+hg2_source_job_id   <- "53588814"
+```
+
+and uses a dedicated `read_hg2_source_csv()` reader for `hg2_by_agg.csv`, the
+baseline `model_metrics_full.csv` hg2 columns, and `dataset_metrics.csv`
+(`true_hg2_realized`). Every other panel reads the main job. The hotfix reran
+only C-CS (`c_grid_8 x sigma_grid_8`) and `baseline-single / susine_vanilla` at
+`annotation_r2 = 0.3`, scaling off, aggregation trimmed to
+`max_elbo` + `cluster_weight_credible`, with the corrected
+local-genetic-variance estimand.
+
 If `hg2_by_agg.csv` is available, the prep workbook:
 
 - normalizes aggregation-method IDs;
+- detects the corrected columns (`hg2_postmean`, `hg2_between_fit`,
+  `hg2_uncertainty`, `hg2_expected_pve`) and warns + falls back to the legacy
+  `hg2` column if they are absent (`hg2_has_corrected`);
 - enriches metadata from `model_metrics`;
 - keeps focus annotation rows;
-- keeps `agg_method == "cluster_weight_credible"`;
+- keeps `agg_method == "cluster_weight_credible"` for the SuSiNE-ensemble
+  series (`pull_agg_hg2(..., "cluster_weight_credible", "susine_ensemble")`);
 - labels `C-CS` specially;
 - adds baseline `hg2` rows from `model_metrics` for
-  `baseline-single / susine_vanilla`.
+  `baseline-single / susine_vanilla`;
+- when `true_hg2_realized` is present, joins it per `dataset_bundle_id` for the
+  truth-centered error supplement;
+- builds `hg2_decomp_data` (postmean / within-fit / between-fit slices) for the
+  stacked decomposition panel.
 
-The plotted reference heritability is:
+The plotted estimand is `hg2_expected_pve` = E[var(Xb)|y]/var(y); the plotted
+reference heritability is:
 
 ```r
 true_h2 <- 0.25
@@ -2084,7 +2171,9 @@ true_h2 <- 0.25
 
 This feeds:
 
-- `paper_hg2_cluster_weight_r2_0p2.png`
+- `paper_hg2_cluster_weight_r2_0p2.png` (boxplot, composite Panel E);
+- `paper_hg2_decomposition_r2_0p2.png` (stacked decomposition);
+- `paper_hg2_truth_error_r2_0p2.png` (when `true_hg2_realized` is available).
 
 ## 43. Paper-prep PIP calibration data
 
@@ -2206,24 +2295,42 @@ and reads:
 figures/paper_ensemble_scaling/plot_data/paper_ensemble_plot_data.rds
 ```
 
-It saves figures with `save_paper_png()`, using `ragg` if available and Cairo
-PNG otherwise.
+It saves figures with `save_paper_png()` (individual panels) and
+`save_composite_png()` (multi-panel composites), using `ragg` if available and
+Cairo PNG otherwise.
 
-The rendering workbook's expected output figures are:
+Critical: the rendering workbook sets `write_component_pngs <- FALSE`. With that
+flag off, `save_paper_png()` is a no-op (it returns the path without opening a
+device), so the individual component PNGs are NOT written. Only the three
+composite figures are actually saved to disk:
 
-- `paper_delta_auprc_heatmap_r2_0p2.png`
-- `paper_ccs_aggregation_by_annotation_r2.png`
-- `paper_bootstrap_auprc_r2_0p2.png`
-- `paper_pr_curves_ccs_cluster_weight_by_r2.png`
-- `paper_hg2_cluster_weight_r2_0p2.png`
-- `paper_hg2_decomposition_r2_0p2.png`
-- `paper_hg2_truth_error_r2_0p2.png` when truth-error data are available
-- `paper_pip_calibration_ccs_cluster_weight_r2_0p2.png`
-- `paper_ccs_4x4_8x8_r2_0p2.png`
-- `paper_compute_vs_auprc_cluster_weight_r2_0p2.png`
-- `paper_ensemble_scaling_composite_heatmap.png`
-- `paper_ensemble_scaling_composite_performance.png`
-- `paper_ensemble_multimodality.png`
+- `paper_ensemble_scaling_composite_heatmap.png` (composite Panel A only);
+- `paper_ensemble_scaling_composite_performance.png` (composite Panels B-F);
+- `paper_ensemble_multimodality.png` (the standalone Panel G, saved directly
+  via `ggplot2::ggsave()`, not through the `write_component_pngs` gate).
+
+Naming caveat: component filenames are tagged with
+`format_r2_tag(annotation_r2_focus)`, and `annotation_r2_focus = 0.3`, so the
+correct tag is `0p3`, NOT the `0p2` literal that appears in older copies of this
+trace (a leftover from when the focus level was 0.2). The composite figures
+themselves carry no r2 tag in their filenames. Treat any `_r2_0p2` below as
+`_r2_0p3`.
+
+The component-PNG names below are the figure objects the composites are built
+from; they correspond to the manuscript figure components but are not emitted
+as separate files in the current run:
+
+- `paper_delta_auprc_heatmap_r2_0p2.png` -> composite Panel A;
+- `paper_ccs_aggregation_by_annotation_r2_credible.png` /
+  `..._max.png` -> Panel B (the `_credible` variant is reused);
+- `paper_pip_calibration_ccs_cluster_weight_r2_0p2.png` -> Panel C;
+- `paper_pr_curves_ccs_cluster_weight_by_r2.png` -> Panel D;
+- `paper_hg2_cluster_weight_r2_0p2.png` -> Panel E;
+- `paper_compute_vs_auprc_cluster_weight_r2_0p2.png` -> Panel F;
+- `paper_bootstrap_auprc_r2_0p2.png` (gated behind `write_component_pngs`;
+  intentionally NOT placed in any composite -- summarized in text instead);
+- `paper_hg2_decomposition_r2_0p2.png`, `paper_hg2_truth_error_r2_0p2.png`,
+  `paper_ccs_4x4_8x8_r2_0p2.png` (all gated; supplementary / printed inline).
 
 Those are the workflow-level figure names expected under the job output tree.
 The current local manuscript/writing folder contains copied composite and
@@ -2246,27 +2353,34 @@ Observed local figure metadata:
 | `paper_ensemble_scaling_composite_heatmap.png` | 5400 x 3060 | 812,809 | 2026-06-15 11:17:05 |
 | `paper_ensemble_scaling_composite_performance.png` | 5940 x 6210 | 1,100,957 | 2026-06-15 11:17:07 |
 
-The local `paper_ensemble_scaling_composite_heatmap.png` contains the heatmap
-version of the main ensemble result, centered on:
+The local `paper_ensemble_scaling_composite_heatmap.png` is the single-panel
+heatmap composite (one-row layout, just Panel A): the delta-AUPRC heatmap over
+ensemble spec (rows) and aggregation method (columns). Note the heatmap drops
+`cluster_weight_max` (`heatmap_agg_order <- setdiff(agg_order,
+"cluster_weight_max")`), so its columns are max ELBO, uniform, ELBO softmax,
+cluster softmax (= `cluster_weight_credible`), and oracle; the
+`C-CS / cluster_weight_credible` tile carries a red highlight border, and a
+vertical rule separates the oracle column. A bottom method-key note is added.
 
-- A: delta-AUPRC heatmap over ensemble spec and aggregation method;
-- selected supporting performance panels from the same prepared RDS, depending
-  on which components were available during rendering.
+The local `paper_ensemble_scaling_composite_performance.png` is the five-panel
+performance composite, laid out (per `performance_layout`) as:
 
-The local `paper_ensemble_scaling_composite_performance.png` contains the
-performance subset:
-
-- B: C-CS AUPRC by annotation accuracy;
+- B: C-CS AUPRC by annotation accuracy (the `cluster_weight_credible` variant,
+  rendered last in the loop so the reused `p_ccs_r2` object is the credible one);
 - C: PIP calibration;
-- D: precision-recall curves by annotation accuracy;
-- F: estimated heritability;
-- G: AUPRC by compute cost.
+- D: precision-recall curves by annotation accuracy (full-width row);
+- E: estimated heritability (boxplot, spliced from the hg2 hotfix job);
+- F: AUPRC by compute cost.
 
-The local `paper_ensemble_multimodality.png` is a supplementary multimodality
-summary rendered from the same paper workflow. There is still no local
-individual-panel PNG folder under `../Writings/plots/ensemble_sims`; the
-code-level individual panels are left under the HPC/job-output figure tree or
-not copied into the writing directory.
+The local `paper_ensemble_multimodality.png` is the standalone Panel G
+(faceted boxplots, see Section 46.9), saved separately via `ggsave()` at
+18 x 7 in. There is no local individual-panel PNG folder under
+`../Writings/plots/ensemble_sims` because `write_component_pngs = FALSE`
+suppresses individual-panel output; only the three composites are produced.
+
+Earlier drafts of this trace labelled the performance panels B/C/D/F/G; the
+current code labels them B/C/D/E/F, with the multimodality boxplots carried as
+a separate Panel G figure.
 
 The local composite labels the annotation axis as `phi_a`, while the code field
 feeding these plots is `annotation_r2`. In methods text, these should be tied
@@ -2305,17 +2419,20 @@ Rows:
 - specs in `spec_order`;
 - Group A at `annotation_r2 = NA`;
 - Groups B/C at `annotation_r2 = 0.3`;
-- aggregation methods:
+- aggregation columns (note: the heatmap renderer drops `cluster_weight_max`
+  via `heatmap_agg_order <- setdiff(agg_order, "cluster_weight_max")`):
   - max ELBO;
   - uniform;
   - ELBO softmax;
-  - cluster_weight_credible (primary);
-  - cluster_weight_max;
-  - oracle.
+  - cluster_weight_credible (primary; labelled "cluster softmax", red-bordered
+    at the C-CS row);
+  - oracle (separated by a vertical rule).
 
 Displayed value:
 
-- AUPRC delta relative to `baseline-single / susine_vanilla`.
+- AUPRC delta relative to `baseline-single / susine_vanilla`
+  (`delta_auprc`, with `delta_pct = 100 * delta_auprc / baseline_auprc` in the
+  tile label).
 
 ### 46.2 C-CS aggregation by annotation r2
 
@@ -2375,13 +2492,13 @@ Methods:
 - SuSiE baseline;
 - SuSiNE C-CS cluster-weight.
 
-Annotation r2 facets/series:
+Annotation r2 facets/series (faceted by `phi[a]` label):
 
 - 0;
-- 0.2;
+- 0.3;
 - 0.5.
 
-### 46.5 `hg2` plot
+### 46.5 `hg2` plot (composite Panel E)
 
 File:
 
@@ -2389,17 +2506,25 @@ File:
 
 Data:
 
-- `hg2_plot_data`.
+- `hg2_plot_data` (spliced from the `ensemble_scaling_hg2_hotfix/53588814`
+  consolidated dir, not the main job -- see Section 42).
 
-Methods:
+Y-axis estimand:
 
-- baseline;
-- cluster-weight ensemble series;
-- C-CS highlighted.
+- `hg2_expected_pve` = E[var(Xb)|y]/var(y) = postmean + within-fit + between-fit.
+
+Series:
+
+- `susie` (baseline `baseline-single / susine_vanilla`);
+- `susine_ensemble` (C-CS, `agg_method == "cluster_weight_credible"`).
 
 Reference:
 
 - true `h2 = 0.25`.
+
+Companion panels rendered from the same data: `paper_hg2_decomposition...png`
+(stacked postmean / within-fit / between-fit) and
+`paper_hg2_truth_error...png` (estimate minus `true_hg2_realized`).
 
 ### 46.6 PIP calibration
 
@@ -2468,6 +2593,42 @@ Y-axis:
 Reference:
 
 - baseline compute/AUPRC point or line.
+
+X-axis note: the rendered panel actually plots `compute_sec = 60 * compute_min`
+(mean wall-time seconds per dataset) on a pseudo-log axis, with a black star at
+the baseline compute/AUPRC point; per-point subscale fractions
+(1/16 ... 1) are mapped from the subscale labels (4x1, 8x1, ..., 8x8).
+
+### 46.9 Ensemble multimodality (composite Panel G)
+
+File:
+
+- `paper_ensemble_multimodality.png`
+
+Data:
+
+- read directly from `consolidated/multimodal_metrics.csv` (main job
+  `53547760`), with `spec_name` re-attached via `group_key` from
+  `model_metrics_full.csv` (the workbook strips the `model_grid|` prefix off
+  `group_label` to recover `group_key`).
+
+Metric selection (rendering workbook, chunk `fig-multimodality`):
+
+- if the run produced the extended columns, it uses
+  `n_clusters_credible` (relabelled "Number of clusters") and
+  `max_credible_dist` (relabelled "Max pairwise distance");
+- otherwise it falls back to the JSD-era columns `n_clusters` (JSD 0.15),
+  `n_clusters_jsd_050` (JSD 0.50), `max_jsd`, and `mean_pip_var`.
+
+Layout:
+
+- faceted boxplots, metric rows x model-family columns
+  (A: SuSiE, B: EB SuSiNE, C: grid SuSiNE), x-axis = ensemble variant
+  (R, F, S, R+F, ..., C+F), white points mark per-group medians.
+
+This is the per-ensemble (per-locus) characterization of how multimodal each
+ensemble's fit population is -- the empirical motivation for clustering before
+weighting.
 
 ## 47. What is scientifically varied?
 
@@ -2687,28 +2848,32 @@ Simulation:
 - `test_susine/R/simulate_data.R:178` - `simulate_effect_sizes_susie2_oligogenic`
 - `test_susine/R/simulate_data.R:257` - `simulate_phenotype_h2`
 - `test_susine/R/simulate_data.R:356` - `simulate_priors`
-- `test_susine/R/run_model.R:525` - `generate_data_for_bundle`
+- `test_susine/R/run_model.R:533` - `generate_data_for_bundle`
 
 Execution:
 
 - `test_susine/R/run_model.R:13` - `run_task`
-- `test_susine/R/run_model.R:622` - `execute_dataset_bundle`
-- `test_susine/R/run_model.R:333` - `execution_cache_key`
-- `test_susine/R/run_model.R:1587` - `run_default_prior_refit`
-- `test_susine/R/run_model.R:1623` - `run_use_case`
-- `test_susine/R/run_model.R:1931` - `aggregate_use_case_pips`
-- `test_susine/R/run_model.R:2029` - `compute_multimodal_metrics`
-- `test_susine/R/run_model.R:2165` - `write_run_outputs`
-- `test_susine/R/run_model.R:2454` - `compute_scaling_confusion_bins_for_group`
+- `test_susine/R/run_model.R:630` - `execute_dataset_bundle`
+- `test_susine/R/run_model.R:341` - `execution_cache_key`
+- `test_susine/R/run_model.R:1665` - `run_default_prior_refit`
+- `test_susine/R/run_model.R:1701` - `run_use_case`
+- `test_susine/R/run_model.R:2047` - `aggregate_use_case_pips`
+- `test_susine/R/run_model.R:2182` - `compute_multimodal_metrics`
+- `test_susine/R/run_model.R:2014` - `prepare_pip_similarity_cache` (PIP-shift dendrogram cache)
+- `test_susine/R/run_model.R:1984` - `pip_cluster_distance` (`credible_shift` ~2005, `max_shift` ~2009)
 - `test_susine/R/run_model.R:2086` - `.cluster_weights_from_hc` (Method B)
 - `test_susine/R/run_model.R:2143` - `.cluster_weight_specs` (locked-in cluster-weight metrics/thresholds)
-- `test_susine/R/run_model.R:2850` - `compute_hg2_by_agg`
-- `test_susine/R/heritability.R` - fair-PVE decomposition engine (`hg2_uncertainty_scalar`, etc.)
+- `test_susine/R/run_model.R:2150` - `cluster_weight_method_ids`
+- `test_susine/R/run_model.R:2158` - `.aggregate_cluster_method`
+- `test_susine/R/run_model.R:2654` - `compute_scaling_confusion_bins_for_group`
+- `test_susine/R/run_model.R:2851` - `compute_hg2_by_agg`
+- `test_susine/R/heritability.R:155` - `hg2_uncertainty_scalar` (per-fit within-fit correction)
+- `test_susine/R/heritability.R:99` - `hg2_components` (fair-PVE decomposition engine)
 
 Metrics:
 
 - `test_susine/R/evaluation_metrics.R:315` - `evaluate_model`
-- `test_susine/R/run_model.R:218` - `compute_confusion_bins`
+- `test_susine/R/run_model.R:219` - `compute_confusion_bins`
 - `test_susine/R/collect_results.R:809` - `auprc_from_pooled_bins`
 - `test_susine/R/collect_results.R:830` - `aggregate_pip_matrix`
 - `test_susine/R/visualize_results.R:131` - `compute_auprc_from_pooled_confusion`

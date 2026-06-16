@@ -4,9 +4,9 @@
 
 | Prefix | Model family | Description |
 |--------|-------------|-------------|
-| **A** | SuSiE (vanilla) | Fixed σ₀² = 0.2, no EB prior variance estimation |
-| **B** | SuSiE (EB) | EB prior variance estimation, clamped & non-negative |
-| **C** | SuSiNE | Directional prior μ₀ = c·a; c is the exploration knob |
+| **A** | SuSiE (vanilla) | Use case `susine_vanilla`: zero prior mean, fixed σ₀² = 0.2, no EB. Runs through the local `susine` backend (not `susieR`), so "SuSiE" here means a SuSiE-equivalent zero-prior-mean fit. |
+| **B** | SuSiNE (EB) | Use case `susine_eb_clamped_scale_var_nonneg`: EB scale + variance, clamped & non-negative annotation scale |
+| **C** | SuSiNE (grid) | Use case `susine_functional_mu`: directional prior μ₀ = c·a; c is the exploration knob, fixed σ₀² |
 
 ## Exploration axis codes
 
@@ -73,14 +73,21 @@ The gap between **oracle** and **truth-warm** reflects whether the best discover
 
 Applied post-hoc to each spec's pool of fits.
 
-| Method | Description |
-|--------|-------------|
-| **max_elbo** | Select single best fit by ELBO |
-| **uniform** | Average PIPs equally across all fits |
-| **elbo_softmax** | ELBO-softmax weighted average of PIPs |
-| **cluster_weight_credible** | Cluster fits by `credible_shift` = max_j[ max(p_j,q_j)·\|p_j−q_j\| ], complete-linkage cut at 0.05; aggregate with Method B (frequency-free). Primary scheduled cluster-weight method. |
-| **cluster_weight_max** | Cluster fits by `max_shift` = max_j \|p_j−q_j\| (L-infinity), complete-linkage cut at 0.10; aggregate with Method B (frequency-free). |
-| **oracle** | Best individual fit by AUPRC (truth-aware; reference only) |
+| Method (`agg_method` ID) | Figure label | Description |
+|--------|--------------|-------------|
+| **max_elbo** | max ELBO | Select single best fit by ELBO |
+| **uniform** | uniform | Average PIPs equally across all fits |
+| **elbo_softmax** | ELBO softmax | ELBO-softmax weighted average of PIPs |
+| **cluster_weight_credible** | cluster softmax | Cluster fits by `credible_shift` = max_j[ max(p_j,q_j)·\|p_j−q_j\| ], complete-linkage cut at 0.05; aggregate with Method B (frequency-free). Primary scheduled cluster-weight method. |
+| **cluster_weight_max** | cluster (max) | Cluster fits by `max_shift` = max_j \|p_j−q_j\| (L-infinity), complete-linkage cut at 0.10; aggregate with Method B (frequency-free). Dropped from the delta-AUPRC heatmap panel. |
+| **oracle** | oracle | Best individual fit by AUPRC (truth-aware; reference only) |
+
+The scheduled method list comes from the run-control workbook
+(`aggregation_methods`) and the `.cluster_weight_specs` registry in
+`run_model.R`, NOT from `aggregation_catalog()` in `use_cases.R` (which is stale
+and still lists only the legacy `cluster_weight` / `cluster_weight_jsd_050`
+JSD methods). Figure display labels are from `agg_labels` in the paper-prep
+workbook.
 
 **Method B (frequency-free):** each cluster gets weight proportional to
 `exp(max-ELBO-in-cluster)`; that weight is split within the cluster across member
@@ -89,3 +96,22 @@ correction is applied. The legacy JSD-0.15 + frequency `cluster_weight` method
 (Method C, max-ELBO nominee + inverse-frequency) still exists in code for
 backward compatibility, but it is not used by the current ensemble-simulation or
 real-data paper workflows.
+
+## Manuscript figure mapping
+
+The three manuscript-facing PNGs (in `../Writings/plots/ensemble_sims/`) are
+the only files the rendering workbook writes; `write_component_pngs = FALSE`
+suppresses individual panels. They are produced by
+`visualize_results_workbook_ensemble_scaling_paper.Rmd` from the prepared RDS.
+
+| Manuscript PNG | Composite panels | Content |
+|----------------|------------------|---------|
+| `paper_ensemble_scaling_composite_heatmap.png` | A | Delta-AUPRC heatmap (spec × aggregation; `cluster_weight_max` dropped) |
+| `paper_ensemble_scaling_composite_performance.png` | B, C, D, E, F | B: C-CS AUPRC vs annotation; C: PIP calibration; D: PR curves; E: heritability; F: AUPRC vs compute |
+| `paper_ensemble_multimodality.png` | G | Faceted multimodality boxplots (metric × model family), per-locus |
+
+Panel E (heritability) inputs are spliced from the separate hotfix job
+`ensemble_scaling_hg2_hotfix/53588814`; all other panels read the main job
+`ensemble_scaling_full/53547760`. Panel G prefers the `n_clusters_credible` /
+`max_credible_dist` multimodal columns, falling back to the JSD-era columns when
+absent.

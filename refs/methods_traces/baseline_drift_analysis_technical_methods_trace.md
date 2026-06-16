@@ -7,10 +7,22 @@ rerun job `baseline_sims_screen/53522724`, but this drift-analysis trace still
 documents the 5-arm effect-matching artifacts generated from the historical
 baseline source `baseline_sims_screen/51509956`. The drift PNGs currently in
 `../Writings/plots/drift_analysis/` have May 2026 write times and do not appear
-to have been regenerated with the June 15 baseline rerun. If the drift figures
-are rerun, their pooled PR AUPRCs should follow the current production
-step-average-precision convention (`sum(precision_k * delta_recall_k)`, no
-trapezoidal interpolation).
+to have been regenerated with the June 15 baseline rerun.
+
+June 16, 2026 audit note (this revision): a code re-audit of the two figure
+workbooks and supporting R uncovered an important divergence. The drift study's
+pooled top-8 PR curves and AUPRCs are NOT computed with the production
+pooled-confusion-bins machinery (`compute_confusion_bins()` /
+`auprc_from_pooled_bins()` / step-AP `compute_auprc_single()`). Instead the heavy
+notebook computes them directly from pooled `(variant, PIP, top-8 label)` rows
+via `PRROC::pr.curve(..., curve = TRUE)` and reports `pr$auc.integral` (a
+continuous-threshold PR integral). Therefore the drift figure AUPRC engine still
+differs from the main baseline trace's step-average-precision convention, so the
+numbers are not directly cross-comparable. The same audit also found that the
+drift PR pooling had been keeping weak (non-top-8) causals as negatives; source
+was corrected on 2026-06-16 so future reruns drop those weak causals, matching
+the production `compute_confusion_bins()` causal-mask convention. Cached May
+2026 drift CSVs/PNGs may predate that source correction.
 
 This document traces the high-quality-regime 5-arm effect-matching and drift
 analysis built on top of the baseline simulation study. It is source-first and
@@ -32,15 +44,35 @@ Main files traced:
 - Final cached plotting workbooks:
   - `vignettes/one_off_validations/effect_matching_pr_pve_quality_figure_5arm.Rmd`
   - `vignettes/one_off_validations/effect_matching_drift_paper_figure_5arm.Rmd`
+- Sibling decomposition workbook (not a manuscript figure, but a cross-check of
+  the basis-divergence story):
+  - `vignettes/one_off_validations/causal_basis_alignment_auprc_decomposition_5arm.Rmd`
+    — replaces one-to-one Hungarian truth-basis drift with a truth-audited
+    "causal basis alignment" score (for each top-8 causal explanatory signal,
+    find the fitted effect that best covers it, average coverage over signals),
+    then decomposes AUPRC delta into an alignment-predicted part plus a residual.
+    It reads `effect_refit_records.rds`, `auprc_per_dataset_5arm.csv`,
+    `dataset_bundles.csv` and writes its own `causal_basis_alignment_*` caches;
+    its `truth_top_k <- 8L` (NOT the figure's 23). Useful context for any
+    reviewer question about how robust the basis-divergence narrative is.
 - Final copied paper plots:
   - `../Writings/plots/drift_analysis/paper_figure_pr_pve_effect_quality.png`
   - `../Writings/plots/drift_analysis/paper_figure_truth_drift_basis_divergence.png`
 - Local study directory:
   - `output/effect_matching_study/baseline_sims_5arm_effect_matching/`
 - Relevant helpers:
-  - `R/run_model.R`
-  - `R/evaluation_metrics.R`
-  - `R/heritability.R`
+  - `R/run_model.R` — `compute_confusion_bins()` (~219), per-fit metrics, the
+    multi-fit `hg2_*` aggregation (~2844-2944), `js_distance`.
+  - `R/evaluation_metrics.R` — `evaluate_model()` (~315), `auprc_average_precision()`
+    (~180, per-fit AP on combined PIP), `estimate_hg2()` (~280, legacy `hg2`).
+  - `R/collect_results.R` — `auprc_from_pooled_bins()` (~809), `.accumulate_bins()`
+    (~931), `.metrics_from_bins_list()` (~949). NOTE: these are the production
+    pooled-confusion-bins AUPRC path; the drift figures do NOT use them (they use
+    `PRROC::pr.curve()` — see sections 11, 14).
+  - `R/visualize_results.R` — `compute_auprc_single()` (~496), the production
+    step-AP integrator (`sum(precision * delta_recall)`, no trapezoid).
+  - `R/heritability.R` — `hg2_components()` (~99), `hg2_components_from_moments()`
+    (~45), `hg2_uncertainty_scalar()` (~155). The corrected PVE estimand.
   - `R/simulate_data.R`
   - `R/run_controls.R`
 
@@ -49,7 +81,11 @@ Important caveats:
 - The local study directory contains the main 5-arm refit records and several
   drift-derived CSVs, but it does not contain all cached inputs expected by the
   final lightweight plotting workbooks.
-- Missing locally at trace time:
+- Local cache state re-verified 2026-06-16. Now present (some were missing at the
+  original trace time): `drift_summary_5arm.csv`, `drift_assignments_5arm.csv`,
+  `pip_drift_summary_5arm.csv`, `auprc_per_dataset_5arm.csv`,
+  `effect_quality_pair_rows_5arm.csv` (all written 2026-04-27 15:28).
+- Still missing locally as of 2026-06-16:
   - `selected_5arm_settings.csv`
   - `pip_records_5arm.rds`
   - `pr_curves_pooled_top8_5arm.csv`
@@ -59,10 +95,10 @@ Important caveats:
   - `truth_fitted_y_5arm_top23.rds`
   - `truth_drift_summary_5arm_top23.csv`
   - `truth_drift_assignments_5arm_top23.csv`
-- The local `drift_summary_5arm.csv` has `weighted_chord_drift`, but not the
-  newer `weighted_r2_drift` column used by the final paper-figure workbook.
-  Therefore the local drift cache appears older than the May 20 final paper
-  PNGs.
+- The local `drift_summary_5arm.csv` (re-checked 2026-06-16) still has only
+  `weighted_drift` and `weighted_chord_drift`, NOT the newer `weighted_r2_drift`
+  column that the final paper-figure workbook reads as `basin_drift`. Therefore
+  the local drift cache is still older than the May 20 final paper PNGs.
 - The final paper PNGs in `../Writings/plots/drift_analysis` are newer than the
   local 5-arm derived CSVs and appear to have been rendered from HPC or synced
   caches not present locally.
@@ -303,6 +339,27 @@ Each effect row records:
   - `var_y_explained_frac`;
 - model-level AUPRC and TPR@FPR=0.05 copied onto the row.
 
+The model-level AUPRC copied onto each effect row comes from `evaluate_model()`
+(`R/evaluation_metrics.R`, ~line 394), which scores the combined PIP
+(`fit$model_fit$PIPs`) against the FULL causal set (all causals = positives,
+all non-causals = negatives) using `auprc_average_precision()` (~line 180): mean
+precision at each positive's rank, i.e. classical average precision. This is a
+PER-FIT, full-causal-set AUPRC. It is NOT the pooled top-8 PR-curve AUPRC that
+the paper figure's Panel A reports, and it is NOT the production
+pooled-confusion-bins AUPRC. Three distinct AUPRC notions appear in this study
+and must not be conflated:
+
+- `evaluate_model()` per-fit AUPRC (`auprc_average_precision`, full causal set) --
+  stored on effect records;
+- the heavy drift notebook's pooled top-8 PR-curve AUPRC
+  (`PRROC::pr.curve()$auc.integral`, top-8 positives, weak non-top causals
+  dropped in current source) -- Panel A of both paper figures, and (after the
+  notebook's overwrite) the `auprc_per_dataset_5arm.csv` per-dataset values;
+- the production baseline-sims pooled-confusion-bins AUPRC
+  (`compute_confusion_bins()` -> `.accumulate_bins()` -> `auprc_from_pooled_bins()`
+  -> step-AP `compute_auprc_single()`, top-8 positives with weak causals DROPPED)
+  -- used by the main baseline trace, NOT by this drift study.
+
 The model-level metrics copied onto each row come from `evaluate_model()`, which
 also emits two local-genetic-variance (PVE/heritability) estimands: the legacy
 `hg2` (still emitted) = `var(fitted_y) / var(y)`, clipped to `[0, 1]`, via
@@ -399,8 +456,16 @@ final May 20 paper figure because it lacks `weighted_r2_drift`.
 
 ## 11. AUPRC trajectory
 
-The heavy drift notebook builds `auprc_per_dataset_5arm.csv` from the model
-AUPRC values stored in the effect records.
+The heavy drift notebook builds `auprc_per_dataset_5arm.csv`. IMPORTANT: as of
+the current source, the notebook deliberately OVERWRITES this CSV. An earlier
+version held the per-fit `evaluate_model()` AUPRC (full 23-causal set); the
+current version recomputes per-`(dataset, method)` AUPRC from `pooled_df` via
+`PRROC::pr.curve(..., curve = FALSE)$auc.integral` with the same top-8 `is_causal`
+labels Panel A uses, then keeps the legacy column names so downstream plotting is
+unchanged (heavy notebook ~lines 2154-2208). The explicit in-source rationale is
+that the old full-causal AUPRC did not match Panel A's pooled top-8 PR or the
+baseline-sims convention. So the trajectory/deltas below are now top-8 PRROC
+AUPRCs, not full-causal `evaluate_model()` AUPRCs.
 
 It computes:
 
@@ -422,9 +487,14 @@ from the local file are:
 | cold `susie_functional_pi` | 0.156264 |
 | warm `susie_vanilla_warm_from_pi` | 0.145353 |
 
-These local per-dataset means should not be confused with pooled PR-curve
-AUPRCs in the final paper figure. The final figure legend uses pooled PR AUPRC
-from `pr_auc_pooled_top8_5arm.csv`, which is not local.
+These local per-dataset means (re-verified 2026-06-16; they match this table
+exactly, confirming the local CSV is the top-8 PRROC version) should not be
+confused with the single pooled PR-curve AUPRC in the final paper figure legend.
+Per-dataset AUPRC averages 600 locus-specific top-8 PRROC curves; the figure
+legend instead reports ONE pooled top-8 PR curve integrated over all variants,
+from `pr_auc_pooled_top8_5arm.csv` (not local). The two share the top-8 PRROC
+engine and rank methods identically but are numerically different. Both differ
+from the production step-AP confusion-bins AUPRC.
 
 ## 12. PIP JSD
 
@@ -487,22 +557,33 @@ workbooks can rebuild the density-shift grid from pair rows if needed.
 
 ## 14. Top-8 PR scoring
 
-The heavy notebook regenerates causal truth from `dataset_bundles.csv` by
-calling `generate_data_for_bundle()` for each dataset.
+The heavy notebook regenerates causal truth by calling
+`test_susine:::generate_data_for_bundle()` for each dataset that has cached PIP
+records. The bundle rows come from `cfg_for_pr$tables$dataset_bundles` (the
+reconstructed job config), not directly from the on-disk `dataset_bundles.csv`.
+For each dataset it stores `causal_idx` (full causal set), `top_idx` (top
+`pr_top_k = 8` causals by `abs(beta)`), and `beta_at_causal`
+(heavy notebook ~lines 2007-2060).
 
-For pooled PR curves:
+For pooled PR curves (heavy notebook ~lines 2071-2151):
 
 - `pr_top_k <- 8L`;
 - causals are ranked by `abs(beta)` within each dataset;
-- the top 8 are positives;
-- true non-causal variants are negatives; non-top causal variants (true causals
-  outside the top 8) are DROPPED entirely -- neither positive nor negative.
+- the top 8 are positives (`is_causal = 1`);
+- true causals outside the top 8 are dropped from the scored table, neither
+  positive nor negative;
+- all retained non-top variants are negatives.
+- the PR curve is built by `PRROC::pr.curve(scores.class0 = pip,
+  weights.class0 = is_causal, curve = TRUE)` and the AUPRC reported is
+  `pr$auc.integral` (plus `pr$auc.davis.goadrich` as a secondary column).
 
-This matches the baseline-sims confusion-bin AUPRC convention in
-`compute_confusion_bins()` (`R/run_model.R`), which does
-`scored <- as.integer(seq_len(n) %in% causal_mask)` then
-`keep <- !(causal == 1L & scored == 0L)` so weak causals are removed and AUPRC
-is not penalized for them.
+CORRECTION (2026-06-16): the audit version of this trace found that the drift
+source had been keeping weak non-top causals as negatives despite comments saying
+it matched the baseline-sims convention. The source has now been corrected: it
+computes `weak_causal_idx = setdiff(causal_idx, top_idx)` and drops those rows
+before calling `PRROC::pr.curve()`. The remaining difference from the production
+baseline metric is the integration engine (`PRROC::pr.curve()$auc.integral`
+versus pooled-bin step AP), not the top-8 negative set.
 
 Outputs intended by the heavy notebook:
 
@@ -589,10 +670,36 @@ The workbook expects:
 - `effect_quality_density_shift_5arm.csv`, or it rebuilds that cache from
   pair rows.
 
-It builds:
+It builds exactly two panels:
 
-- panel A: pooled top-8 PR curves for the five arms;
-- panel B: per-effect quality density shifts.
+- panel A: pooled top-8 PR curves for the five arms (legend annotated with each
+  arm's pooled AUPRC, drawn with `geom_step(direction = "vh")` plus a dashed
+  prevalence reference line; prevalence defaults to 0.008 if the PR-AUC cache is
+  missing);
+- panel B: per-effect quality density shifts (`scale_fill_gradient2`,
+  destination - source PVE-weighted 2D KDE; same `weighted_kde2d_df()` machinery
+  as section 13).
+
+CAVEAT on the figure name (2026-06-16): despite the workbook title and intro
+("model-level heritability estimates by method", "mu-chain vs pi-chain AUPRC
+gains") and the `pr_pve` filename, the rendered figure does NOT contain a
+heritability/PVE panel or a standalone AUPRC-gain panel. The only role PVE plays
+is as `pve_weight` (per-effect `max(var_y_explained_frac, 0)`) weighting the
+Panel B KDE. The `hg2_*` model-level estimands described in section 8 are NOT
+plotted in either final drift figure. So the corrected heritability estimand
+(commit 4e0721b) does not change these two PNGs; it only matters for any future
+revision that actually adds a heritability panel. Flag for Michael: the workbook
+title/intro promises panels that the code does not produce.
+
+AUPRC label provenance: when `pr_auc_pooled_top8_5arm.csv` is present, the legend
+AUPRC values come straight from its `auprc_integral` column (the PRROC
+`auc.integral` written by the heavy notebook). When that cache is ABSENT, this
+plotting workbook FALLS BACK to estimating AUPRC by TRAPEZOIDAL integration of
+the cached PR curve (`sum(diff(recall) * 0.5 * (lag(precision) + precision))`,
+~lines 250-265). That trapezoidal fallback matches neither the PRROC
+`auc.integral` engine nor the production step-AP `compute_auprc_single()`. Flag
+for Michael: if the May 20 PNG was rendered with the PR-AUC cache missing, its
+legend AUPRCs are trapezoidal estimates, not the canonical PRROC values.
 
 The local final copied PNG exists and was written:
 
@@ -610,27 +717,66 @@ Final local copied paper file:
 
 - `../Writings/plots/drift_analysis/paper_figure_truth_drift_basis_divergence.png`
 
-The workbook expects:
+The workbook expects (hard-required at the top of the chunk, plus optional):
 
-- `drift_summary_5arm.csv`;
-- `auprc_per_dataset_5arm.csv`;
-- `pip_drift_summary_5arm.csv`;
-- `pr_curves_pooled_top8_5arm.csv`;
+- `drift_summary_5arm.csv` (required; read for `weighted_r2_drift`);
+- `auprc_per_dataset_5arm.csv` (required);
+- `pip_drift_summary_5arm.csv` (required);
+- `pr_curves_pooled_top8_5arm.csv` (required);
 - `pr_auc_pooled_top8_5arm.csv` if available;
-- `effect_quality_pair_rows_5arm.csv`;
-- `effect_quality_density_shift_5arm.csv`;
-- `pip_records_5arm.rds`;
-- `causal_truth_5arm.rds`;
-- truth-drift caches when building truth-basis panels.
+- `effect_quality_pair_rows_5arm.csv` / `effect_quality_density_shift_5arm.csv`;
+- `pip_records_5arm.rds`, `causal_truth_5arm.rds` (only for ad-hoc Panel C
+  representative-PIP diagnostics);
+- the truth-drift cache `truth_drift_summary_5arm_top23.csv` (read as
+  `truth_drift_csv`), which carries `truth_r2_drift` and `truth_chord_drift`.
 
-The source uses `weighted_r2_drift` for the paper-facing basin-drift panels,
-not the older local `weighted_chord_drift` column.
+IMPORTANT (2026-06-16): this workbook `ggsave()`s TWO distinct combined figures,
+and the file copied to the manuscript is the SECOND one, not the first. The
+earlier `combined_fig` (chunk `paper-figure`, ~line 785) is saved to
+`paper_figure_effect_drift.png` and has four panels: A pooled top-8 PR; B AUPRC
+change by basin-drift bucket (`weighted_r2_drift` bucketed at 0.05); C
+effect-level drift diagnostics (mu vs pi scatter of basin drift = `weighted_r2_drift`
+and PIP JSD); D per-effect quality shifts. That file is NOT the one in the
+manuscript plots dir.
+
+The manuscript file `paper_figure_truth_drift_basis_divergence.png` is built by a
+LATER chunk (`explanatory-basis-divergence-paper-figure`, ~line 2546) into
+`paper_basis_divergence_png`. Its content is the truth-basin / explanatory-basis
+divergence story:
+
+- "Explanatory basis divergence" axis = `truth_r2_drift`, the truth-basin
+  `weighted_r2_drift` (`1 - corr^2` of the one-to-one Hungarian match between a
+  fit's per-effect fitted-y basis and the top-23 true-causal fitted-y basis).
+  Toggle `truth_drift_column <- "truth_r2_drift"` at ~line 1419; the chord
+  variant `truth_chord_drift` is the documented alternative.
+- divergence is bucketed by `basis_divergence_bin()` into `[0, 0.05]`,
+  `(0.05, 0.10]`, `(0.10, inf)` (breaks `c(-Inf, 0.05, 0.10, Inf)`).
+- `p_baseline_truth`: baseline cold-SuSiE explanatory-basis divergence vs AUPRC,
+  with a natural-spline smoother (`truth_drift_spline_df = 5`).
+- `p_col1` / `p_col2` / `p_col3`: per-transition columns over the same plane.
+- `p_basis_explain_scatter`: the AUPRC-gain DECOMPOSITION. For each transition,
+  `basis_pred_delta` is the predicted ΔAUPRC read off the baseline divergence->AUPRC
+  smoother for the realized reduction in basis divergence, `observed_delta` is the
+  actual ΔAUPRC (`end_auprc - start_auprc`), and `residual_delta = observed -
+  predicted`. Panels report `R^2` (observed vs predicted+transition-intercept),
+  observed mean, predicted-curve mean, and the residual/transition-intercept mean,
+  per mu and pi channel. Intuition: it splits each arm's AUPRC gain into the part
+  attributable to moving the explanatory basis toward truth versus a residual
+  (within-basis SNP-ranking / confusion) component.
+
+So this figure is driven by the TRUTH-basin `truth_r2_drift` cache, not by the
+six-pair `weighted_r2_drift` drift summary used in the other figure. The earlier
+trace note "the source uses `weighted_r2_drift` for the paper-facing basin-drift
+panels" is true of the (non-manuscript) `paper_figure_effect_drift.png`; the
+MANUSCRIPT figure uses `truth_r2_drift` from `truth_drift_summary_5arm_top23.csv`.
 
 The local final copied PNG exists and was written:
 
 - 2026-05-20 15:09:51
 
-The exact truth-drift and PIP-JSD caches used for that figure are not local.
+The exact truth-drift and PIP-JSD caches used for that figure are not local
+(`truth_drift_summary_5arm_top23.csv`, `pip_records_5arm.rds`,
+`causal_truth_5arm.rds` are all absent locally).
 
 ## 18. Final copied drift artifacts
 
@@ -665,28 +811,55 @@ For the actual drift analysis, use the generated selected-run rows and the
 manuscript caption as the operational source: all five arms are treated as
 `sigma_0_2 = 0.01`.
 
-### 19.2 Top-8 positives versus polygenic causals
+### 19.2 Top-8 positives versus polygenic causals (CORRECTED)
 
-Both baseline confusion bins and the 5-arm PR regeneration code use top-8
-causal variants by `abs(beta)` as positives. In source code, true non-causal
-variants are the negatives, and variants that are truly causal but outside the
-top-8 set (including members of the 15-variant polygenic causal tier) are
-DROPPED from the table entirely -- neither positive nor negative -- so AUPRC is
-not penalized for them.
+Both the baseline confusion bins and the 5-arm PR regeneration code now use top-8
+causal variants by `abs(beta)` as positives and drop weak (non-top-8) causals:
 
-Manuscript prose that says polygenic-tier causals are excluded from negatives is
-therefore correct: those weak causals are dropped, not scored as negatives.
+- Production baseline confusion bins (`compute_confusion_bins()`,
+  `R/run_model.R` ~219): weak causals are DROPPED entirely -- neither positive
+  nor negative -- via `keep <- !(causal == 1L & scored == 0L)`. AUPRC is not
+  penalized for them.
+- 5-arm drift PR regeneration (`effect_matching_drift_analysis_5arm.Rmd`
+  ~2071-2151): weak causals are also DROPPED before `PRROC::pr.curve()` is
+  called. This was corrected on 2026-06-16 after the audit found that the prior
+  source kept weak causals as negatives despite comments saying otherwise.
 
-### 19.3 Chord drift versus `1 - r^2` drift
+Consequence: manuscript prose claiming polygenic-tier causals are excluded from
+the negatives is correct for the main baseline figure and for future drift
+reruns. The cached May 2026 drift outputs may still reflect the pre-fix behavior
+unless they are regenerated.
 
-The heavy drift source now defines both:
+### 19.3 Chord drift versus `1 - r^2` drift, and the three drift surfaces
 
-- chord drift: `sqrt(2 * (1 - corr))`;
-- basis drift: `1 - corr^2`.
+The heavy drift source defines three weighted distances on the assignment
+correlations (helpers `chord_distance()` ~line 249, `r2_distance()` ~line 257;
+weights `pmin(var_y_explained_a, var_y_explained_b)`):
 
-The local `drift_summary_5arm.csv` only contains chord drift. The final
-paper-figure source expects `weighted_r2_drift`, so the final paper figure was
-not rendered from this exact local `drift_summary_5arm.csv`.
+- `weighted_drift`: `1 - corr` (legacy);
+- `weighted_chord_drift`: `sqrt(2 * (1 - corr))` (the chord distance; manuscript
+  Eq. 9);
+- `weighted_r2_drift`: `1 - corr^2` (the "basis drift" / "basis divergence" used
+  by both final figures).
+
+These three are applied to TWO different correlation matrices, producing two
+distinct drift surfaces that the manuscript uses for different panels:
+
+- six-pair effect drift (section 10): correlations between two FITS' per-effect
+  fitted-y bases, summarized per `(dataset, pair)`. `weighted_r2_drift` here is
+  the `basin_drift` axis of the non-manuscript `paper_figure_effect_drift.png`
+  Panels B/C.
+- truth-basin drift (section 15): correlations between ONE fit's basis and the
+  top-23 true-causal fitted-y basis, summarized per `(dataset, method)` and
+  written as `truth_r2_drift` / `truth_chord_drift` in
+  `truth_drift_summary_5arm_top23.csv`. `truth_r2_drift` is the "explanatory
+  basis divergence" axis of the MANUSCRIPT `paper_figure_truth_drift_basis_divergence.png`.
+
+The local `drift_summary_5arm.csv` (re-checked 2026-06-16) only contains
+`weighted_drift` and `weighted_chord_drift`, NOT `weighted_r2_drift`. The
+manuscript figures expect `weighted_r2_drift` (six-pair) and `truth_r2_drift`
+(truth-basin), so the final figures were not rendered from this exact local
+cache.
 
 ### 19.4 PIP JSD local cache
 
