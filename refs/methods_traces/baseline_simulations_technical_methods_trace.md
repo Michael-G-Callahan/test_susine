@@ -1,16 +1,19 @@
 # Baseline Simulation Study Technical Trace
 
 Date written: 2026-05-20
+Last updated: 2026-06-15
 
 This document traces the baseline single-fit simulation study as implemented in
 the `test_susine` codebase and as represented in the current manuscript draft.
 It is implementation-facing: the goal is to preserve enough detail to audit how
 the paper-facing baseline figures and quoted numbers were produced.
 
-The baseline HPC output directory for job `baseline_sims_screen/51509956` was
-not present in this local checkout when this trace was written. The trace is
-therefore based on source workbooks, helper code, the manuscript draft, final
-copied plot files, and the copied paper-side `top_settings_by_family.csv`.
+The current paper-facing baseline rerun is anchored on job
+`baseline_sims_screen/53522724`. The June 15, 2026 paper plot directory contains
+the refreshed combined baseline figure and top-settings CSVs. A separate
+diagnostic minibatch, `purity_filter_minibatch/53617896`, quantifies how
+credible-set filtering changes per-variant AUPRC and supplies the paper
+purity-filter composite now copied into the baseline plot folder.
 
 ## 1. Scope, provenance, and caveats
 
@@ -26,11 +29,9 @@ Main files traced:
   - `vignettes/simulation pipeline/visualize_results_workbook_baseline_sims.Rmd`
 - Final copied paper artifacts:
   - `../Writings/plots/baseline_sims/fig_baseline_combined.png`
-  - `../Writings/plots/baseline_sims/pip_calibration_top_settings.png`
-  - `../Writings/plots/baseline_sims/auprc_by_annotation.png`
-  - `../Writings/plots/baseline_sims/auprc_non_annotation_methods.png`
-  - `../Writings/plots/baseline_sims/tau_sweep.png`
+  - `../Writings/plots/baseline_sims/paper_purity_filter_composite.png`
   - `../Writings/plots/baseline_sims/top_settings_by_family.csv`
+  - `../Writings/plots/baseline_sims/top_settings_global_top5.csv`
 - Core helper code:
   - `R/run_controls.R`
   - `R/run_model.R`
@@ -45,19 +46,19 @@ Main files traced:
 
 Important caveats:
 
-- The expected local generated directories do not exist:
-  - `output/slurm_output/baseline_sims_screen/51509956`
-  - `output/run_history/baseline_sims_screen/51509956/job_config.json`
+- The current baseline workbooks point to:
+  - `output/slurm_output/baseline_sims_screen/53522724`
+  - `output/run_history/baseline_sims_screen/53522724/job_config.json`
+- The purity-filter minibatch workbooks point to:
+  - `output/slurm_output/purity_filter_minibatch/53617896`
+  - `output/run_history/purity_filter_minibatch/53617896/job_config.json`
 - The exact HPC consolidated inputs used by the visualization workbook were
   therefore not locally re-read. If exact regenerated tables are needed, the
   narrow artifact request should be only:
-  `output/slurm_output/baseline_sims_screen/51509956/consolidated/`.
+  `output/slurm_output/baseline_sims_screen/53522724/consolidated/`.
 - The final paper plot directory does contain copied outputs, including
   `top_settings_by_family.csv`, which preserves the paper-facing selected
-  settings and numeric AUPRC/TPR summaries.
-- Git status could not be checked because this checkout triggered Git's
-  safe-directory ownership guard. I did not mutate global Git config to bypass
-  that guard.
+  settings and numeric AUPRC/TPR summaries from the current rerun.
 
 ## 2. Manuscript context
 
@@ -92,12 +93,17 @@ decisions:
   `susine_eb_clamped_scale_var_nonneg`, while dropping SuSiE-ash, SuSiE-inf,
   and functional-pi from the main ensemble screen.
 
-The manuscript baseline figures are:
+The manuscript baseline figures currently copied under
+`../Writings/plots/baseline_sims/` are:
 
 - Fig. baseline AUPRC:
   `../Writings/plots/baseline_sims/fig_baseline_combined.png`
-- Fig. baseline calibration:
-  `../Writings/plots/baseline_sims/pip_calibration_top_settings.png`
+- Fig. purity-filter diagnostics:
+  `../Writings/plots/baseline_sims/paper_purity_filter_composite.png`
+
+The standalone calibration, annotation-response, non-annotation, and tau-sweep
+PNGs are still generated in the job figure tree, but they are not present in the
+current paper plot directory.
 
 ## 3. End-to-end workflow
 
@@ -125,7 +131,7 @@ The baseline simulation study has four stages.
    - Key helper:
      `R/collect_results.R` (`aggregate_staging_outputs`)
    - Writes consolidated CSVs expected under:
-     `output/slurm_output/baseline_sims_screen/51509956/consolidated/`.
+     `output/slurm_output/baseline_sims_screen/53522724/consolidated/`.
 
 4. Render analysis and paper-facing plots.
    - Workbook:
@@ -372,15 +378,15 @@ therefore correct: those weak causals are neither positives nor negatives.
 The collection workbook uses:
 
 - `job_name <- "baseline_sims_screen"`
-- `parent_job_id <- "51509956"`
+- `parent_job_id <- "53522724"`
 - `output_root <- here("output")`
 
 It expects:
 
 - job directory:
-  `output/slurm_output/baseline_sims_screen/51509956`
+  `output/slurm_output/baseline_sims_screen/53522724`
 - job config:
-  `output/run_history/baseline_sims_screen/51509956/job_config.json`
+  `output/run_history/baseline_sims_screen/53522724/job_config.json`
 
 It calls:
 
@@ -430,6 +436,21 @@ It computes:
 - pooled-by-annotation AUPRC;
 - corresponding TPR@FPR=0.05 tables using pooled confusion bins.
 
+Current AUPRC convention, as of the June 2026 rerun:
+
+- `test_susine::compute_auprc_from_confusion()` first pools bucket counts with
+  `pool_confusion_bins()`;
+- within each group, bins are sorted by descending `pip_threshold`, cumulative
+  TP/FP counts define precision and recall;
+- `compute_auprc_single()` then uses step-function average precision,
+  `sum(precision_k * delta_recall_k)`, matching sklearn-style AP;
+- there is no artificial `(recall = 0, precision = 1)` anchor and no
+  trapezoidal interpolation.
+
+Older exploratory helpers in `R/dataset_metrics.R` and `R/x_matrix_metrics.R`
+still contain trapezoidal AUPRC routines, but they are not the production path
+for the baseline, ensemble, or purity-filter paper figures.
+
 The expected consolidated exports are:
 
 - `model_metrics_full.csv`
@@ -453,7 +474,7 @@ These consolidated files were not present locally at trace time.
 
 The visualization workbook reads the consolidated CSVs and writes figures under:
 
-- `output/slurm_output/baseline_sims_screen/51509956/figures/`
+- `output/slurm_output/baseline_sims_screen/53522724/figures/`
 
 It creates these figure subdirectories:
 
@@ -471,7 +492,7 @@ Output in job figure directory:
 
 - `susie2_plots/pip_calibration_top_settings.png`
 
-Final copied paper file:
+Earlier paper copy, not present in the current June 15 paper plot directory:
 
 - `../Writings/plots/baseline_sims/pip_calibration_top_settings.png`
 
@@ -494,7 +515,7 @@ Output in job figure directory:
 - `baseline_performance/auprc_non_annotation_methods.png`
 - `baseline_performance/tpr05_non_annotation_methods.png`
 
-Final copied paper file:
+Earlier paper copy, not present in the current June 15 paper plot directory:
 
 - `../Writings/plots/baseline_sims/auprc_non_annotation_methods.png`
 
@@ -512,7 +533,7 @@ Output in job figure directory:
 - `baseline_performance/auprc_by_annotation.png`
 - `baseline_performance/tpr05_annotation_consuming.png`
 
-Final copied paper file:
+Earlier paper copy, not present in the current June 15 paper plot directory:
 
 - `../Writings/plots/baseline_sims/auprc_by_annotation.png`
 
@@ -529,7 +550,7 @@ Output in job figure directory:
 
 - `baseline_performance/tau_sweep.png`
 
-Final copied paper file:
+Earlier paper copy, not present in the current June 15 paper plot directory:
 
 - `../Writings/plots/baseline_sims/tau_sweep.png`
 
@@ -563,6 +584,7 @@ Output in job figure directory:
 Final copied paper file:
 
 - `../Writings/plots/baseline_sims/top_settings_by_family.csv`
+- `../Writings/plots/baseline_sims/top_settings_global_top5.csv`
 
 The table chooses:
 
@@ -570,71 +592,131 @@ The table chooses:
 - one best row per `(method_family, annotation_label)` for annotation-consuming
   methods.
 
+### 12.7 Purity-filter minibatch diagnostic
+
+The paper-side purity-filter figure is generated by a separate diagnostic
+minibatch, not by the main baseline screen.
+
+Run-control workbook:
+
+- `vignettes/simulation pipeline/run_control_workbook_purity_filter_minibatch.Rmd`
+
+Collection / plotting workbook:
+
+- `vignettes/simulation pipeline/collect_results_workbook_purity_filter_minibatch.Rmd`
+
+Current job:
+
+- `job_name <- "purity_filter_minibatch"`
+- `parent_job_id <- "53617896"`
+
+Design:
+
+- same M1-stratified 150 genotype matrices and `seeds <- 1:4` substrate as the
+  baseline and ensemble simulations;
+- exactly 600 runs;
+- one annotation-agnostic `susie_vanilla` fit per dataset;
+- `L = 10`, `max_iter = 100`, `rho = 0.95`;
+- fit prior variance setting `sigma_0_2_default <- 0.2`;
+- ordinary per-run `purity_threshold <- 0.50` still gates the standard
+  filtered credible-set view, but the minibatch's AUPRC diagnostic uses its own
+  effect-dropping filters.
+
+The key implementation is `purity_filter_confusion_sweep()` in
+`R/evaluation_metrics.R`. For each fitted alpha matrix it recomputes the
+combined PIP vector after retaining only effects that pass each filter:
+
+- `no_filter`: keep all effects;
+- `purity_95`: keep effects with credible-set purity at least 0.95;
+- `purity_90`: keep effects with credible-set purity at least 0.90;
+- `purity_50`: keep effects with credible-set purity at least 0.50;
+- `keff_core95_le_100`: keep effects with core-95% effective support at most
+  100.
+
+The minibatch then writes confusion bins tagged by `filter_type`. This is
+intentionally different from the standard model-metric path: ordinary
+`evaluate_model()` reports the same per-variant AUPRC for filtered and
+unfiltered model rows because it scores the full combined PIP vector, whereas
+this minibatch feeds credible-set filtering back into the PIP ranking itself.
+
+The collect workbook computes:
+
+- `auprc_by_filter_type.csv`: pooled step-AP AUPRC by `filter_type`;
+- `auprc_per_dataset_by_filter.csv`: per-dataset step-AP AUPRC by filter;
+- `auprc_per_dataset_delta_summary.csv`: paired change versus `no_filter`;
+- `effect_diagnostic_summary.csv`: correlation / fraction summaries linking
+  purity, core-95% `k_eff`, and accuracy ratio;
+- `plots/paper_purity_filter_composite.png`, copied to
+  `../Writings/plots/baseline_sims/paper_purity_filter_composite.png`.
+
 ## 13. Final copied baseline artifacts
 
 Local final copied paper files under `../Writings/plots/baseline_sims`:
 
-| File | Size | Last write time |
-|---|---:|---|
-| `auprc_by_annotation.png` | 329,923 | 2026-04-26 18:37:58 |
-| `auprc_non_annotation_methods.png` | 45,423 | 2026-04-26 18:38:00 |
-| `fig_baseline_combined.png` | 580,093 | 2026-04-27 11:12:04 |
-| `pip_calibration_top_settings.png` | 196,084 | 2026-04-26 18:38:53 |
-| `tau_sweep.png` | 134,877 | 2026-04-26 18:38:03 |
-| `top_settings_by_family.csv` | 3,675 | 2026-04-26 18:38:05 |
+| File | Dimensions / rows | Size | Last write time |
+|---|---:|---:|---|
+| `fig_baseline_combined.png` | 3080 x 2640 | 587,790 | 2026-06-15 11:15:35 |
+| `paper_purity_filter_composite.png` | 4050 x 2790 | 1,300,442 | 2026-06-15 16:05:43 |
+| `top_settings_by_family.csv` | 33 data rows | 3,764 | 2026-06-15 11:15:44 |
+| `top_settings_global_top5.csv` | 25 data rows | 2,661 | 2026-06-15 11:15:48 |
+
+Files such as `pip_calibration_top_settings.png`, `auprc_by_annotation.png`,
+`auprc_non_annotation_methods.png`, and `tau_sweep.png` are still produced under
+the job's `figures/baseline_performance` or `figures/susie2_plots` directories,
+but they are not present in the current paper plot directory.
 
 ## 14. Paper-facing selected settings and numbers
 
-The final copied `top_settings_by_family.csv` contains the following
+The final copied `top_settings_by_family.csv` contains the following current
 paper-facing rows:
 
 ```csv
 method_family,annotation_label,setting_label,AUPRC,tpr_fpr05
-susie_ash_fixed,no_annotation,susie_ash_fixed | sigma=0.2,0.234942,0.515417
-susie_eb,no_annotation,susie_eb,0.228315,0.485208
-susie_functional_pi,r2=0.0 | inflate=0.8,susie_functional_pi | tau=4.6400,0.245036,0.531458
-susie_functional_pi,r2=0.0 | inflate=0.9,susie_functional_pi | tau=4.6400,0.243008,0.530625
-susie_functional_pi,r2=0.0 | inflate=1.0,susie_functional_pi | tau=10.0000,0.243364,0.531042
-susie_functional_pi,r2=0.3 | inflate=0.8,susie_functional_pi | tau=0.4640,0.271397,0.545208
-susie_functional_pi,r2=0.3 | inflate=0.9,susie_functional_pi | tau=0.4640,0.265318,0.538958
-susie_functional_pi,r2=0.3 | inflate=1.0,susie_functional_pi | tau=1.0000,0.256406,0.536250
-susie_functional_pi,r2=0.5 | inflate=0.8,susie_functional_pi | tau=0.4640,0.293128,0.558750
-susie_functional_pi,r2=0.5 | inflate=0.9,susie_functional_pi | tau=0.4640,0.283158,0.542708
-susie_functional_pi,r2=0.5 | inflate=1.0,susie_functional_pi | tau=0.4640,0.273789,0.536250
-susie_inf,no_annotation,susie_inf | sigma=0.2,0.247328,0.550208
-susie_vanilla,no_annotation,susie_vanilla | sigma=0.1,0.243601,0.533750
-susine_eb_clamped_scale_var_nonneg,r2=0.0 | inflate=0.8,susine_eb_clamped_scale_var_nonneg,0.219573,0.490417
-susine_eb_clamped_scale_var_nonneg,r2=0.0 | inflate=0.9,susine_eb_clamped_scale_var_nonneg,0.213792,0.486667
-susine_eb_clamped_scale_var_nonneg,r2=0.0 | inflate=1.0,susine_eb_clamped_scale_var_nonneg,0.220685,0.488542
-susine_eb_clamped_scale_var_nonneg,r2=0.3 | inflate=0.8,susine_eb_clamped_scale_var_nonneg,0.258100,0.506667
-susine_eb_clamped_scale_var_nonneg,r2=0.3 | inflate=0.9,susine_eb_clamped_scale_var_nonneg,0.261627,0.507917
-susine_eb_clamped_scale_var_nonneg,r2=0.3 | inflate=1.0,susine_eb_clamped_scale_var_nonneg,0.257765,0.505625
-susine_eb_clamped_scale_var_nonneg,r2=0.5 | inflate=0.8,susine_eb_clamped_scale_var_nonneg,0.267929,0.508125
-susine_eb_clamped_scale_var_nonneg,r2=0.5 | inflate=0.9,susine_eb_clamped_scale_var_nonneg,0.266709,0.508542
-susine_eb_clamped_scale_var_nonneg,r2=0.5 | inflate=1.0,susine_eb_clamped_scale_var_nonneg,0.264265,0.510208
-susine_functional_mu,r2=0.0 | inflate=0.8,susine_functional_mu | c=0.000 | sigma=0.01,0.246172,0.546250
-susine_functional_mu,r2=0.0 | inflate=0.9,susine_functional_mu | c=0.000 | sigma=0.01,0.246172,0.546250
-susine_functional_mu,r2=0.0 | inflate=1.0,susine_functional_mu | c=0.000 | sigma=0.01,0.246172,0.546250
-susine_functional_mu,r2=0.3 | inflate=0.8,susine_functional_mu | c=0.643 | sigma=0.01,0.312642,0.562708
-susine_functional_mu,r2=0.3 | inflate=0.9,susine_functional_mu | c=0.643 | sigma=0.01,0.313759,0.568542
-susine_functional_mu,r2=0.3 | inflate=1.0,susine_functional_mu | c=0.857 | sigma=0.01,0.308138,0.558333
-susine_functional_mu,r2=0.5 | inflate=0.8,susine_functional_mu | c=0.643 | sigma=0.01,0.339148,0.572500
-susine_functional_mu,r2=0.5 | inflate=0.9,susine_functional_mu | c=0.643 | sigma=0.01,0.336866,0.570625
-susine_functional_mu,r2=0.5 | inflate=1.0,susine_functional_mu | c=0.857 | sigma=0.01,0.334232,0.564167
-susine_vanilla,no_annotation,susine_vanilla | sigma=0.1,0.243665,0.535000
+susie_ash_fixed,no_annotation,susie_ash_fixed | sigma=0.2,0.23847558468084196,0.5154166666666666
+susie_eb,no_annotation,susie_eb,0.2319341123575946,0.48520833333333335
+susie_functional_pi,r2=0.0 | inflate=0.8,susie_functional_pi | tau=2.1500 | sigma=0.2,0.24943470766027728,0.5325
+susie_functional_pi,r2=0.0 | inflate=0.9,susie_functional_pi | tau=4.6400 | sigma=0.2,0.24731444365891184,0.530625
+susie_functional_pi,r2=0.0 | inflate=1.0,susie_functional_pi | tau=10.0000 | sigma=0.2,0.24764587672321056,0.5310416666666666
+susie_functional_pi,r2=0.3 | inflate=0.8,susie_functional_pi | tau=0.4640 | sigma=0.2,0.2755443582209447,0.5452083333333333
+susie_functional_pi,r2=0.3 | inflate=0.9,susie_functional_pi | tau=0.4640 | sigma=0.2,0.2696401708979602,0.5389583333333333
+susie_functional_pi,r2=0.3 | inflate=1.0,susie_functional_pi | tau=1.0000 | sigma=0.2,0.26067486849126376,0.53625
+susie_functional_pi,r2=0.5 | inflate=0.8,susie_functional_pi | tau=0.4640 | sigma=0.2,0.29739606573822797,0.55875
+susie_functional_pi,r2=0.5 | inflate=0.9,susie_functional_pi | tau=0.4640 | sigma=0.2,0.287010392046365,0.5427083333333333
+susie_functional_pi,r2=0.5 | inflate=1.0,susie_functional_pi | tau=0.4640 | sigma=0.2,0.2771755689135032,0.53625
+susie_inf,no_annotation,susie_inf | sigma=0.2,0.2507126872167263,0.5502083333333333
+susie_vanilla,no_annotation,susie_vanilla | sigma=0.1,0.24789501609460132,0.53375
+susine_eb_clamped_scale_var_nonneg,r2=0.0 | inflate=0.8,susine_eb_clamped_scale_var_nonneg,0.223277892110518,0.49041666666666667
+susine_eb_clamped_scale_var_nonneg,r2=0.0 | inflate=0.9,susine_eb_clamped_scale_var_nonneg,0.2173635499739772,0.4866666666666667
+susine_eb_clamped_scale_var_nonneg,r2=0.0 | inflate=1.0,susine_eb_clamped_scale_var_nonneg,0.22467487352812865,0.48854166666666665
+susine_eb_clamped_scale_var_nonneg,r2=0.3 | inflate=0.8,susine_eb_clamped_scale_var_nonneg,0.2622238964991876,0.5066666666666667
+susine_eb_clamped_scale_var_nonneg,r2=0.3 | inflate=0.9,susine_eb_clamped_scale_var_nonneg,0.26599437261390885,0.5079166666666667
+susine_eb_clamped_scale_var_nonneg,r2=0.3 | inflate=1.0,susine_eb_clamped_scale_var_nonneg,0.2618589567622323,0.505625
+susine_eb_clamped_scale_var_nonneg,r2=0.5 | inflate=0.8,susine_eb_clamped_scale_var_nonneg,0.2718569352441113,0.508125
+susine_eb_clamped_scale_var_nonneg,r2=0.5 | inflate=0.9,susine_eb_clamped_scale_var_nonneg,0.2708967689546458,0.5085416666666667
+susine_eb_clamped_scale_var_nonneg,r2=0.5 | inflate=1.0,susine_eb_clamped_scale_var_nonneg,0.2689577071098522,0.5102083333333334
+susine_functional_mu,r2=0.0 | inflate=0.8,susine_functional_mu | c=0.000 | sigma=0.01,0.24997132357030105,0.54625
+susine_functional_mu,r2=0.0 | inflate=0.9,susine_functional_mu | c=0.000 | sigma=0.01,0.24997132357030105,0.54625
+susine_functional_mu,r2=0.0 | inflate=1.0,susine_functional_mu | c=0.000 | sigma=0.01,0.24997132357030105,0.54625
+susine_functional_mu,r2=0.3 | inflate=0.8,susine_functional_mu | c=0.643 | sigma=0.01,0.3177288960754971,0.5627083333333334
+susine_functional_mu,r2=0.3 | inflate=0.9,susine_functional_mu | c=0.643 | sigma=0.01,0.3190634076649782,0.5685416666666666
+susine_functional_mu,r2=0.3 | inflate=1.0,susine_functional_mu | c=0.857 | sigma=0.01,0.31332488185414537,0.5583333333333333
+susine_functional_mu,r2=0.5 | inflate=0.8,susine_functional_mu | c=0.643 | sigma=0.01,0.3441932321539766,0.5725
+susine_functional_mu,r2=0.5 | inflate=0.9,susine_functional_mu | c=0.643 | sigma=0.01,0.34230849065599317,0.5760416666666667
+susine_functional_mu,r2=0.5 | inflate=1.0,susine_functional_mu | c=0.857 | sigma=0.01,0.3396715540326592,0.5739583333333333
+susine_vanilla,no_annotation,susine_vanilla | sigma=0.1,0.2479653521413696,0.53375
 ```
 
 These rows support the manuscript statements that:
 
 - SuSiE-inf is the strongest annotation-agnostic baseline by AUPRC
-  (`0.247328`);
-- SuSiE vanilla is essentially tied with SuSiNE vanilla around `0.244`;
+  (`0.250713`);
+- SuSiE vanilla is essentially tied with SuSiNE vanilla around `0.248`;
 - at the AlphaGenome-calibration point `r2=0.3 | inflate=0.9`,
-  `susine_functional_mu` reaches `0.313759`;
-- at that same annotation point, functional-pi reaches `0.265318`;
+  `susine_functional_mu` reaches `0.319063`;
+- at that same annotation point, functional-pi reaches `0.269640`;
 - at the high-quality drift-analysis point `r2=0.5 | inflate=0.9`,
-  `susine_functional_mu` reaches `0.336866`, functional-pi reaches
-  `0.283158`, and SuSiNE-EB reaches `0.266709`.
+  `susine_functional_mu` reaches `0.342308`, functional-pi reaches
+  `0.287010`, and SuSiNE-EB reaches `0.270897`.
 
 ## 15. Diagnostics and non-paper plots
 
@@ -657,12 +739,12 @@ To fully reproduce the baseline paper figures from raw outputs, the required
 artifacts are:
 
 1. HPC run history:
-   - `output/run_history/baseline_sims_screen/51509956/job_config.json`
+   - `output/run_history/baseline_sims_screen/53522724/job_config.json`
    - associated run tables if not embedded in the JSON.
 2. HPC staged outputs:
-   - `output/slurm_output/baseline_sims_screen/51509956/task-*`
+   - `output/slurm_output/baseline_sims_screen/53522724/task-*`
 3. Consolidated outputs:
-   - `output/slurm_output/baseline_sims_screen/51509956/consolidated/*.csv`
+   - `output/slurm_output/baseline_sims_screen/53522724/consolidated/*.csv`
 4. Source code at the same revision used to generate the final plots.
 5. Rendering dependencies:
    - `ggplot2`

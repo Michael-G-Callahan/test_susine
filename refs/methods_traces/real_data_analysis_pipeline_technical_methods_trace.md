@@ -1,13 +1,16 @@
 # Real Data Analysis Pipeline Technical Trace
 
 Date written: 2026-05-22
-Last updated: 2026-05-26
+Last updated: 2026-06-15
 
 This document traces the real-data eQTL case-study pipeline that produced the
 paper figures:
 
 - `../Writings/plots/real_data_case_study/paper_overall_annotation_drift_pve.png`
 - `../Writings/plots/real_data_case_study/paper_selected_locus_zoom_lollipop_l2_drift.png`
+- `../Writings/plots/real_data_case_study/paper_supplement_real_vs_sim_multimodality.png`
+- `../Writings/plots/real_data_case_study/paper_real_data_locus_summary_table.csv`
+- `../Writings/plots/real_data_case_study/paper_real_data_pip_gt05_totals.csv`
 
 The trace is intentionally implementation-facing. Its goal is to make the full
 data provenance and analysis path recoverable from source files, even though the
@@ -58,10 +61,10 @@ Important local-state caveats at trace time:
   `test_susine/output/slurm_output/real_data_ensemble_geometric_n20/52906940/figures/real_data_ensemble/overall/`.
 - The paper copies currently live under:
   `../Writings/plots/real_data_case_study/`.
-- The final paper directory currently contains the two paper PNGs plus
-  `paper_real_data_ensemble_summary.csv`; that summary has 20 locus rows.
-- The final PNGs in the paper directory have local write times on
-  2026-05-26.
+- The final paper directory currently contains the two main paper PNGs, one
+  supplement PNG, paper-facing CSV summaries, and older paper-note artifacts.
+  The main PNGs and generated paper summary CSVs have local write times on
+  2026-06-15.
 - The production upstream annotation/data-prep source root used for this run is:
   `/storage/home/mgc5166/work/Annotations/eQTL_annotations_for_susine`.
   Some source code and older notebooks still show
@@ -87,8 +90,9 @@ The final figures focus on four linked diagnostics:
 1. how much weight the ensemble assigns to annotation-influenced fits;
 2. how much the highest-weight annotation-informed model and its warm baseline
    refit drift from a SuSiE baseline in PIP space and effect-basis space;
-3. whether the annotation-informed ensemble or warm refit changes the
-   standardized posterior-mean PVE proxy;
+3. whether the annotation-informed ensemble or warm refit changes local genetic
+   variance, using corrected expected PVE when available and otherwise falling
+   back to the posterior-mean PVE proxy;
 4. whether annotation-informed fits sharpen per-effect posterior support.
 
 The selected-locus zoom figure (the paper L2-drift figure) then drills into six
@@ -806,7 +810,7 @@ Per-run metrics include:
 - annotation correlation diagnostics;
 - fit path and wall time.
 
-The posterior-mean PVE proxy is computed as:
+The run-time posterior-mean PVE proxy is computed as:
 
 ```text
 b = posterior mean effect vector
@@ -814,6 +818,20 @@ PVE_proxy = b' R b
 ```
 
 clipped to `[0, 1]`.
+
+For the current paper PVE exhibit, the visualization workbook first tries to
+load a corrected local-genetic-variance estimand from the sibling
+`hg2_corrected/` directory, produced by `inst/scripts/recompute_real_data_hg2.R`.
+When those files are present, the plotted quantity is:
+
+```text
+hg2_expected_pve = E[var(Xb)|y] / var(y)
+```
+
+This adds the within-fit posterior-variance term to the posterior-mean
+predictor variance and is used consistently for the SuSiE anchor, SuSiNE
+ensemble, and warm refit. If `hg2_corrected/` is absent, the workbook falls back
+to the posterior-mean proxy above and emits a warning.
 
 For SuSiNE RSS fits:
 
@@ -1086,6 +1104,22 @@ appear to be copied from:
 test_susine/output/slurm_output/real_data_ensemble_geometric_n20/52906940/figures/real_data_ensemble/overall/
 ```
 
+Current local paper-facing artifacts in that directory:
+
+| File | Dimensions / rows | Size | Last write time |
+|---|---:|---:|---|
+| `paper_overall_annotation_drift_pve.png` | 2256 x 2340 | 301,701 | 2026-06-15 16:00:09 |
+| `paper_selected_locus_zoom_lollipop_l2_drift.png` | 2256 x 2520 | 708,743 | 2026-06-15 15:59:53 |
+| `paper_supplement_real_vs_sim_multimodality.png` | 2100 x 1500 | 230,792 | 2026-06-15 16:00:23 |
+| `paper_real_data_locus_summary_table.csv` | 20 data rows | 2,937 | 2026-06-15 16:02:34 |
+| `paper_real_data_pip_gt05_totals.csv` | 1 data row | 87 | 2026-06-15 16:02:36 |
+| `paper_real_data_ensemble_summary.csv` | 20 data rows | 11,952 | 2026-05-26 13:10:33 |
+
+The visualization workbook writes the two CSV summaries directly into
+`../Writings/plots/real_data_case_study/` when that directory exists. The PNG
+paper copies appear to be copied from the job output `overall/` directory rather
+than copied by a `file.copy()` call in the workbook.
+
 ### 11.1 Overall annotation-drift-PVE figure
 
 Final paper file:
@@ -1143,7 +1177,7 @@ Loci are labeled when:
 weighted_c_value > 0.1 OR weighted_sigma_0_2_scalar > 0.1
 ```
 
-Panel B: PIP drift vs effect-basis drift.
+Panel B: PIP L2 drift vs effect-basis drift.
 
 Source tables:
 
@@ -1153,32 +1187,37 @@ paper_real_data_ensemble_summary.csv
 variant_posteriors_dataset/
 ```
 
-The x-axis is effect-basis `r^2` drift from the SuSiE baseline. The y-axis is
-PIP JSD from the SuSiE baseline. Each locus contributes up to two points:
+The x-axis is effect-basis drift from the SuSiE baseline, measured as the
+variance-weighted basis-drift term in standardized phenotype units. The y-axis
+is PIP L2 distance from the SuSiE baseline. Each locus contributes up to two
+points:
 
 - highest-weight model;
 - warm refit.
 
-For the highest-weight model, PIP JSD is recomputed directly between:
+For the highest-weight model, PIP L2 distance is recomputed directly between:
 
 ```text
 susie_anchor_run_id
 highest_weight_source_run_id
 ```
 
-For the warm refit, PIP JSD comes from:
+For the warm refit, PIP L2 distance is recomputed from the anchor and warm-refit
+variant-posterior tables. JSD values are still collected in
+`paper_real_data_ensemble_summary.csv` and auxiliary diagnostics, but the
+paper-facing overall panel is the L2 version.
 
 ```text
-paper_real_data_ensemble_summary.csv: jsd_susie_anchor_vs_refit
+paper_real_data_ensemble_summary.csv: pip_l2_susie_anchor_vs_refit
 ```
 
 Loci are labeled for the highest-weight-model point when:
 
 ```text
-basin_r2_drift > 0.1 OR pip_jsd > 0.3
+basis_drift_var_y > 0.05 OR pip_l2 > 1.0
 ```
 
-Panel C: posterior-mean PVE.
+Panel C: local genetic variance / PVE.
 
 Source tables:
 
@@ -1193,14 +1232,15 @@ The panel compares:
 - SuSiNE ensemble PVE,
 - warm-refit PVE.
 
-The PVE proxy is:
+The preferred plotted estimand is:
 
 ```text
-b' R b
+hg2_expected_pve = E[var(Xb)|y] / var(y)
 ```
 
-where `b` is the posterior mean effect vector on standardized genotype and
-standardized phenotype scale.
+When corrected-PVE files are unavailable, the workbook falls back to
+`b' R b`, where `b` is the posterior mean effect vector on standardized
+genotype and standardized phenotype scale.
 
 Loci are labeled for the SuSiNE ensemble point when:
 
@@ -1262,6 +1302,8 @@ overall/paper_selected_locus_zoom_lollipop_drift.png
 overall/paper_selected_locus_zoom_lollipop_drift.pdf
 overall/paper_selected_locus_zoom_lollipop_l2_drift.png
 overall/paper_selected_locus_zoom_lollipop_l2_drift.pdf
+overall/paper_selected_locus_zoom_lollipop_credible_drift.png
+overall/paper_selected_locus_zoom_lollipop_credible_drift.pdf
 ```
 
 The selected-locus figure is rendered with `patchwork` at:
@@ -1311,11 +1353,9 @@ the same selection rule as the warm-refit stage:
 desc(agg_weight_run), desc(elbo_final), run_id
 ```
 
-The figure also renders a deprecated JSD version (`selected_locus_zoom_figure`),
-which instead uses the 3 tokens `selected_locus_tokens <- c("rrp7a", "arsa",
-"prpf38b")` and 15 variants per locus. That 3-token/15-variant set applies only
-to the deprecated JSD figure; the final paper PNG named in this trace is the
-six-locus L2-drift version above.
+The figure also renders a deprecated JSD version (`selected_locus_zoom_figure`)
+and a six-locus credible-shift drift version. The final paper PNG named in this
+trace is the six-locus L2-drift version above.
 
 ## 12. Reproduction recipe
 
@@ -1498,15 +1538,19 @@ The workbook writes:
 ```text
 output/slurm_output/real_data_ensemble_geometric_n20/52906940/figures/real_data_ensemble/overall/paper_overall_annotation_drift_pve.png
 output/slurm_output/real_data_ensemble_geometric_n20/52906940/figures/real_data_ensemble/overall/paper_selected_locus_zoom_lollipop_l2_drift.png
+output/slurm_output/real_data_ensemble_geometric_n20/52906940/figures/real_data_ensemble/overall/paper_supplement_real_vs_sim_multimodality.png
+output/slurm_output/real_data_ensemble_geometric_n20/52906940/figures/real_data_ensemble/overall/paper_real_data_locus_summary_table.csv
+output/slurm_output/real_data_ensemble_geometric_n20/52906940/figures/real_data_ensemble/overall/paper_real_data_pip_gt05_totals.csv
 ```
 
-Copy those two files into:
+Copy the paper PNGs into:
 
 ```text
 ../Writings/plots/real_data_case_study/
 ```
 
-to match the current paper figure paths.
+to match the current paper figure paths. The two paper CSV summaries are written
+there directly by the visualization workbook when the writing directory exists.
 
 ## 13. Artifact inventory expected for final provenance
 
@@ -1553,8 +1597,10 @@ Resolved for this trace:
 4. No selected loci failed. The paper-side summary has 20 locus rows with
    populated anchor, highest-weight-source, and warm-refit run ids.
 5. The cluster-weight ambiguity is resolved in the current source: both
-   `agg_weight_run` and `aggregated_pip` use the nominee-based
-   `.cluster_weights_from_hc()` rule described in Section 10.2.
+   `agg_weight_run` and `aggregated_pip` use the credible-shift, Method-B,
+   frequency-free `.cluster_weights_from_hc(..., aggregation = "method_b")`
+   rule described in Section 10.2. Every fit can receive nonzero weight; the
+   representative run ids remain cluster descriptors, not the only contributors.
 
 Remaining or intentionally deferred:
 

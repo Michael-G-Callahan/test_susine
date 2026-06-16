@@ -86,5 +86,6 @@ Applied post-hoc to each spec's pool of fits.
 `exp(max-ELBO-in-cluster)`; that weight is split within the cluster across member
 fits by ELBO-softmax. All fits contribute (no single nominee), so no 1/frequency
 correction is applied. The legacy JSD-0.15 + frequency `cluster_weight` method
-(Method C, max-ELBO nominee + inverse-frequency) still exists in code but is now
-used only by the real-data pipeline, not the ensemble-sim run.
+(Method C, max-ELBO nominee + inverse-frequency) still exists in code for
+backward compatibility, but it is not used by the current ensemble-simulation or
+real-data paper workflows.

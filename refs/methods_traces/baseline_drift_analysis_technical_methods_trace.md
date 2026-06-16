@@ -2,6 +2,16 @@
 
 Date written: 2026-05-20
 
+June 15, 2026 audit note: the main baseline simulation trace now points to the
+rerun job `baseline_sims_screen/53522724`, but this drift-analysis trace still
+documents the 5-arm effect-matching artifacts generated from the historical
+baseline source `baseline_sims_screen/51509956`. The drift PNGs currently in
+`../Writings/plots/drift_analysis/` have May 2026 write times and do not appear
+to have been regenerated with the June 15 baseline rerun. If the drift figures
+are rerun, their pooled PR AUPRCs should follow the current production
+step-average-precision convention (`sum(precision_k * delta_recall_k)`, no
+trapezoidal interpolation).
+
 This document traces the high-quality-regime 5-arm effect-matching and drift
 analysis built on top of the baseline simulation study. It is source-first and
 implementation-facing. The goal is to make clear how the final drift-analysis

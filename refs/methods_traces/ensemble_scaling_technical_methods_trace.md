@@ -1,6 +1,7 @@
 # Ensemble Simulation Study Technical Trace
 
 Date written: 2026-05-08
+Last updated: 2026-06-15
 
 This document traces the ensemble-scaling simulation study as implemented in the
 `test_susine` codebase. It is intentionally technical and implementation-facing:
@@ -78,9 +79,11 @@ Important provenance notes:
   (`.cluster_weight_specs`). For these scheduled methods both the full-ensemble
   path and the scaling-bin path now route through Method B identically, so the
   older full-vs-scaling discrepancy is obsolete for them. The legacy JSD-0.15 +
-  frequency `cluster_weight` method (Method C) still exists in code but is now
-  used only by the real-data pipeline, not the ensemble-sim run. The paper-prep
-  workbook highlights `cluster_weight_credible` as the primary method.
+  frequency `cluster_weight` method (Method C) still exists for backward
+  compatibility in lower-level helpers, but it is not the current paper
+  ensemble-simulation aggregator and is not the current real-data aggregator.
+  The paper-prep workbook highlights `cluster_weight_credible` as the primary
+  method.
 
 ## 2. Manuscript context
 
@@ -1270,7 +1273,8 @@ The final aggregated PIP vector gets an `ess` attribute:
 
 The legacy JSD-0.15 + frequency-corrected `cluster_weight` (Method C: max-ELBO
 nominee per JSD cluster, weight divided by cluster frequency) still exists in
-code but is now used only by the real-data pipeline, not the ensemble-sim run.
+code for backward compatibility, but it is not used by the current
+ensemble-simulation paper workflow or the current real-data paper workflow.
 
 ## 22. Scaling-bin aggregation and the cluster-weight discrepancy
 
@@ -1294,9 +1298,8 @@ cluster-weight discrepancy -- where the scaling helper weighted clusters
 uniformly (`1/K`) without representatives or frequency adjustment -- is therefore
 obsolete for the scheduled methods; both paths agree at full resolution.
 
-(The legacy JSD-0.15 + frequency `cluster_weight` method, used only by the
-real-data pipeline now, is the one for which the historical discrepancy was
-defined.)
+(The legacy JSD-0.15 + frequency `cluster_weight` method is the one for which
+the historical discrepancy was defined; current paper workflows avoid it.)
 
 ## 23. Scaling-subset construction
 
@@ -1662,7 +1665,9 @@ precision = cum_tp / (cum_tp + cum_fp)
 recall = cum_tp / total_positives
 ```
 
-4. Apply the package's average-precision / step-function AUPRC helper.
+4. Apply the package's average-precision / step-function AUPRC helper:
+   `sum(precision_k * delta_recall_k)`, with no `(0, 1)` anchor and no
+   trapezoidal interpolation.
 
 TPR@FPR=0.05 is computed by:
 
@@ -2211,39 +2216,42 @@ The rendering workbook's expected output figures are:
 - `paper_bootstrap_auprc_r2_0p2.png`
 - `paper_pr_curves_ccs_cluster_weight_by_r2.png`
 - `paper_hg2_cluster_weight_r2_0p2.png`
+- `paper_hg2_decomposition_r2_0p2.png`
+- `paper_hg2_truth_error_r2_0p2.png` when truth-error data are available
 - `paper_pip_calibration_ccs_cluster_weight_r2_0p2.png`
 - `paper_ccs_4x4_8x8_r2_0p2.png`
 - `paper_compute_vs_auprc_cluster_weight_r2_0p2.png`
 - `paper_ensemble_scaling_composite_heatmap.png`
 - `paper_ensemble_scaling_composite_performance.png`
+- `paper_ensemble_multimodality.png`
 
 Those are the workflow-level figure names expected under the job output tree.
-The local manuscript/writing folder instead contains copied composite PNGs:
+The current local manuscript/writing folder contains copied composite and
+supplement PNGs:
 
 ```text
-../Writings/plots/ensemble_sims/paper_ensemble_scaling_composite_main.png
+../Writings/plots/ensemble_sims/paper_ensemble_scaling_composite_heatmap.png
 ../Writings/plots/ensemble_sims/paper_ensemble_scaling_composite_performance.png
+../Writings/plots/ensemble_sims/paper_ensemble_multimodality.png
 ```
 
-These two files were present locally even though the HPC result CSVs were not.
-They appear to be the final manuscript-facing figure artifacts for the ensemble
-simulation section.
+These three files are the current manuscript-facing ensemble simulation
+artifacts copied under `../Writings/plots`.
 
 Observed local figure metadata:
 
-| file | dimensions | modified time |
-|---|---:|---|
-| `paper_ensemble_scaling_composite_main.png` | 5400 x 7800 | 2026-05-08 17:26:33 |
-| `paper_ensemble_scaling_composite_performance.png` | 5940 x 6210 | 2026-05-08 17:26:35 |
+| file | dimensions | size | modified time |
+|---|---:|---:|---|
+| `paper_ensemble_multimodality.png` | 5400 x 2100 | 257,785 | 2026-06-15 11:17:03 |
+| `paper_ensemble_scaling_composite_heatmap.png` | 5400 x 3060 | 812,809 | 2026-06-15 11:17:05 |
+| `paper_ensemble_scaling_composite_performance.png` | 5940 x 6210 | 1,100,957 | 2026-06-15 11:17:07 |
 
-The local `paper_ensemble_scaling_composite_main.png` contains panels:
+The local `paper_ensemble_scaling_composite_heatmap.png` contains the heatmap
+version of the main ensemble result, centered on:
 
 - A: delta-AUPRC heatmap over ensemble spec and aggregation method;
-- B: C-CS AUPRC by annotation accuracy;
-- C: PIP calibration;
-- D: precision-recall curves by annotation accuracy;
-- F: estimated heritability;
-- G: AUPRC by compute cost.
+- selected supporting performance panels from the same prepared RDS, depending
+  on which components were available during rendering.
 
 The local `paper_ensemble_scaling_composite_performance.png` contains the
 performance subset:
@@ -2254,10 +2262,11 @@ performance subset:
 - F: estimated heritability;
 - G: AUPRC by compute cost.
 
-There is no local individual-panel PNG folder under `../Writings/plots/ensemble_sims`;
-only the two composite files are present. The code-level individual panels were
-therefore either left on the HPC/job-output filesystem or not copied into the
-writing directory.
+The local `paper_ensemble_multimodality.png` is a supplementary multimodality
+summary rendered from the same paper workflow. There is still no local
+individual-panel PNG folder under `../Writings/plots/ensemble_sims`; the
+code-level individual panels are left under the HPC/job-output figure tree or
+not copied into the writing directory.
 
 The local composite labels the annotation axis as `phi_a`, while the code field
 feeding these plots is `annotation_r2`. In methods text, these should be tied
@@ -2587,8 +2596,9 @@ uniformly with no representative -- is obsolete for the scheduled methods; both
 paths agree at full resolution.
 
 That historical discrepancy was defined only for the legacy JSD-0.15 +
-frequency `cluster_weight` method (Method C), which is now used solely by the
-real-data pipeline.
+frequency `cluster_weight` method (Method C). Current paper workflows use
+metric-specific `cluster_weight_credible` / `cluster_weight_max` Method-B
+weights instead.
 
 ### 48.9 Truth-warm is an upper-bound diagnostic, not a method
 
