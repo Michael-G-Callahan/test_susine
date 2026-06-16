@@ -13,7 +13,7 @@ editor_options:
 This workbook reads consolidated real-data ensemble outputs and renders the
 main locus-level visual diagnostics.
 
-```{r setup, message=FALSE}
+```{r setup, message=FALSE, fig.keep='none'}
 here::i_am("vignettes/real data pipeline/visualize_results_workbook_real_data_ensemble.Rmd")
 library(here)
 library(devtools)
