@@ -5,6 +5,7 @@ output:
     toc: true
     toc_depth: 2
     number_sections: true
+    dev: ragg_png
 editor_options:
   markdown:
     wrap: 72
