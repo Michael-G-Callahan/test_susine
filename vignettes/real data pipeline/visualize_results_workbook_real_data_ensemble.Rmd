@@ -33,14 +33,25 @@ if (file.exists(file.path(susine_path, "DESCRIPTION"))) {
 devtools::load_all(".")
 theme_set(theme_bw(base_size = 12))
 
-# Headless HPC has no X11/Cairo, so base png()/svg() fail. During the preview
-# sweep (env var set), route every .png save through ragg (pure-C, headless).
-# .pdf saves use grDevices::pdf, which is headless-safe. Production (no env
-# var) is untouched.
-if (nzchar(Sys.getenv("RD_PREVIEW_FIG_DIR")) && requireNamespace("ragg", quietly = TRUE)) {
+# Headless HPC has no X11/Cairo, so base png()/svg() fail. During preview/paper
+# renders (env var set), route knitted figures and every .png save through ragg
+# (pure-C, headless). Skip .pdf saves in that mode; the paper refresh only needs
+# PNG/CSV artifacts. Production (no env var) is untouched.
+.headless_preview <- nzchar(Sys.getenv("RD_PREVIEW_FIG_DIR")) ||
+  nzchar(Sys.getenv("RD_PREVIEW_PAPER_DIR"))
+if (.headless_preview && !requireNamespace("ragg", quietly = TRUE)) {
+  stop("Headless preview render requires the ragg package for PNG output.")
+}
+if (.headless_preview) {
   knitr::opts_chunk$set(dev = "ragg_png")
   ggsave <- function(filename, plot = ggplot2::last_plot(), ..., device = NULL) {
-    if (is.null(device) && grepl("\\.png$", filename)) device <- ragg::agg_png
+    if (grepl("\\.pdf$", filename, ignore.case = TRUE)) {
+      message("Skipping PDF during headless preview render: ", filename)
+      return(invisible(filename))
+    }
+    if (is.null(device) && grepl("\\.png$", filename, ignore.case = TRUE)) {
+      device <- ragg::agg_png
+    }
     ggplot2::ggsave(filename, plot = plot, ..., device = device)
   }
 }
