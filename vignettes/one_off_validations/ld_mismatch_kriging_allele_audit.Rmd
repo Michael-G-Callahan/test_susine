@@ -109,6 +109,11 @@ fmt_duration <- function(seconds) {
   sprintf("%dh %02dm", floor(seconds / 3600), floor((seconds %% 3600) / 60))
 }
 
+progress_line <- function(...) {
+  cat(sprintf(...), "\n", file = stderr())
+  flush.console()
+}
+
 progress_msg <- function(prefix, i, n, label, start_time, item_start = NULL) {
   elapsed <- as.numeric(difftime(Sys.time(), start_time, units = "secs"))
   mean_per_item <- elapsed / max(i, 1L)
@@ -118,13 +123,19 @@ progress_msg <- function(prefix, i, n, label, start_time, item_start = NULL) {
     item_elapsed <- as.numeric(difftime(Sys.time(), item_start, units = "secs"))
     item_txt <- paste0(" | locus=", fmt_duration(item_elapsed))
   }
-  message(
-    sprintf(
-      "%s [%d/%d] %s | elapsed=%s | ETA=%s%s",
-      prefix, i, n, label, fmt_duration(elapsed), fmt_duration(eta), item_txt
-    )
+  progress_line(
+    "%s [%d/%d] %s | elapsed=%s | ETA=%s%s",
+    prefix, i, n, label, fmt_duration(elapsed), fmt_duration(eta), item_txt
   )
 }
+
+get_env_int <- function(name, default) {
+  val <- suppressWarnings(as.integer(Sys.getenv(name, unset = NA_character_)))
+  if (length(val) != 1L || is.na(val)) default else val
+}
+
+estimate_s_max_variants <- get_env_int("ESTIMATE_S_MAX_VARIANTS", 3000L)
+ld_z_diag_max_variants <- get_env_int("LD_Z_DIAG_MAX_VARIANTS", estimate_s_max_variants)
 ```
 
 # 1. estimate_s_rss across all 20 loci
@@ -137,22 +148,63 @@ inconsistent than the inert ones.
 ```{r estimate-s, include=FALSE}
 estimate_s_start <- Sys.time()
 n_loci <- length(all_loci)
-message(sprintf("estimate_s_rss: starting %d loci", n_loci))
+progress_line(
+  paste0(
+    "estimate_s_rss: starting %d loci ",
+    "(ESTIMATE_S_MAX_VARIANTS=%d, LD_Z_DIAG_MAX_VARIANTS=%d)"
+  ),
+  n_loci, estimate_s_max_variants, ld_z_diag_max_variants
+)
 
 s_tbl <- map2_dfr(all_loci, seq_along(all_loci), function(lid, i) {
   locus_start <- Sys.time()
   progress_msg("estimate_s_rss start", i, n_loci, lid, estimate_s_start)
+
+  progress_line("  [%d/%d] loading bundle: %s", i, n_loci, lid)
   bundle <- load_bundle(lid)
-  ld_z_diag <- safe_ld_z_diag(bundle)
-  s_val <- tryCatch(
-    susieR::estimate_s_rss(
-      z = bundle$z, R = bundle$R, n = bundle$n_sample, method = "null-mle"
-    ),
-    error = function(e) NA_real_
-  )
-  tibble(
+  p_locus <- length(bundle$z)
+  progress_line("  [%d/%d] loaded bundle: %s p=%d", i, n_loci, lid, p_locus)
+
+  if (p_locus <= ld_z_diag_max_variants) {
+    progress_line("  [%d/%d] computing MoM LD-z diagnostic: %s", i, n_loci, lid)
+    ld_z_diag <- safe_ld_z_diag(bundle)
+  } else {
+    progress_line(
+      "  [%d/%d] skipping MoM LD-z diagnostic: %s p=%d > cap=%d",
+      i, n_loci, lid, p_locus, ld_z_diag_max_variants
+    )
+    ld_z_diag <- list(
+      mom_sigma2_hat = NA_real_,
+      ld_chol_ok = NA,
+      ld_z_inconsistency_flag = NA
+    )
+  }
+
+  if (p_locus <= estimate_s_max_variants) {
+    progress_line("  [%d/%d] computing estimate_s_rss: %s", i, n_loci, lid)
+    s_val <- tryCatch(
+      susieR::estimate_s_rss(
+        z = bundle$z, R = bundle$R, n = bundle$n_sample, method = "null-mle"
+      ),
+      error = function(e) {
+        progress_line("  [%d/%d] estimate_s_rss ERROR: %s | %s", i, n_loci, lid,
+                      conditionMessage(e))
+        NA_real_
+      }
+    )
+    estimate_s_status <- ifelse(is.na(s_val), "error_or_na", "ok")
+  } else {
+    progress_line(
+      "  [%d/%d] skipping estimate_s_rss: %s p=%d > cap=%d",
+      i, n_loci, lid, p_locus, estimate_s_max_variants
+    )
+    s_val <- NA_real_
+    estimate_s_status <- "skipped_p_gt_cap"
+  }
+
+  row <- tibble(
     locus_id = lid,
-    n_variants = length(bundle$z),
+    n_variants = p_locus,
     n_sample = bundle$n_sample,
     n_sample_min = bundle$n_sample_min,
     n_sample_max = bundle$n_sample_max,
@@ -161,20 +213,22 @@ s_tbl <- map2_dfr(all_loci, seq_along(all_loci), function(lid, i) {
     ld_chol_ok = ld_z_diag$ld_chol_ok,
     ld_z_inconsistency_flag = ld_z_diag$ld_z_inconsistency_flag,
     s = s_val,
+    estimate_s_status = estimate_s_status,
     is_responder = lid %in% responder_loci
   )
   progress_msg(
-    sprintf("estimate_s_rss done  p=%d s=%s", length(bundle$z),
-            ifelse(is.na(s_val), "NA", sprintf("%.4f", s_val))),
+    sprintf("estimate_s_rss done  p=%d s=%s status=%s", p_locus,
+            ifelse(is.na(s_val), "NA", sprintf("%.4f", s_val)),
+            estimate_s_status),
     i, n_loci, lid, estimate_s_start, locus_start
   )
   row
 }) %>% arrange(desc(s))
 
-message(sprintf(
+progress_line(
   "estimate_s_rss: finished %d loci in %s",
   n_loci, fmt_duration(as.numeric(difftime(Sys.time(), estimate_s_start, units = "secs")))
-))
+)
 
 readr::write_csv(s_tbl, file.path(out_dir, "estimate_s_rss_by_locus.csv"))
 
