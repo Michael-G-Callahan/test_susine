@@ -98,6 +98,33 @@ safe_summary <- function(x, fn) {
   if (!length(x)) return(NA_real_)
   fn(x)
 }
+
+fmt_duration <- function(seconds) {
+  if (!is.finite(seconds)) return("NA")
+  seconds <- max(0, as.numeric(seconds))
+  if (seconds < 60) return(sprintf("%.1fs", seconds))
+  if (seconds < 3600) {
+    return(sprintf("%dm %.0fs", floor(seconds / 60), seconds %% 60))
+  }
+  sprintf("%dh %02dm", floor(seconds / 3600), floor((seconds %% 3600) / 60))
+}
+
+progress_msg <- function(prefix, i, n, label, start_time, item_start = NULL) {
+  elapsed <- as.numeric(difftime(Sys.time(), start_time, units = "secs"))
+  mean_per_item <- elapsed / max(i, 1L)
+  eta <- mean_per_item * max(n - i, 0L)
+  item_txt <- ""
+  if (!is.null(item_start)) {
+    item_elapsed <- as.numeric(difftime(Sys.time(), item_start, units = "secs"))
+    item_txt <- paste0(" | locus=", fmt_duration(item_elapsed))
+  }
+  message(
+    sprintf(
+      "%s [%d/%d] %s | elapsed=%s | ETA=%s%s",
+      prefix, i, n, label, fmt_duration(elapsed), fmt_duration(eta), item_txt
+    )
+  )
+}
 ```
 
 # 1. estimate_s_rss across all 20 loci
@@ -108,7 +135,13 @@ reader can see whether the loci carrying the annotation signal are *more*
 inconsistent than the inert ones.
 
 ```{r estimate-s, include=FALSE}
-s_tbl <- map_dfr(all_loci, function(lid) {
+estimate_s_start <- Sys.time()
+n_loci <- length(all_loci)
+message(sprintf("estimate_s_rss: starting %d loci", n_loci))
+
+s_tbl <- map2_dfr(all_loci, seq_along(all_loci), function(lid, i) {
+  locus_start <- Sys.time()
+  progress_msg("estimate_s_rss start", i, n_loci, lid, estimate_s_start)
   bundle <- load_bundle(lid)
   ld_z_diag <- safe_ld_z_diag(bundle)
   s_val <- tryCatch(
@@ -130,7 +163,18 @@ s_tbl <- map_dfr(all_loci, function(lid) {
     s = s_val,
     is_responder = lid %in% responder_loci
   )
+  progress_msg(
+    sprintf("estimate_s_rss done  p=%d s=%s", length(bundle$z),
+            ifelse(is.na(s_val), "NA", sprintf("%.4f", s_val))),
+    i, n_loci, lid, estimate_s_start, locus_start
+  )
+  row
 }) %>% arrange(desc(s))
+
+message(sprintf(
+  "estimate_s_rss: finished %d loci in %s",
+  n_loci, fmt_duration(as.numeric(difftime(Sys.time(), estimate_s_start, units = "secs")))
+))
 
 readr::write_csv(s_tbl, file.path(out_dir, "estimate_s_rss_by_locus.csv"))
 
