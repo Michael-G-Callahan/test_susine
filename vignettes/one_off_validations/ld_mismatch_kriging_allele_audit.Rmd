@@ -52,6 +52,8 @@ out_dir <- here::here(
   "output", "one_off_validations", "ld_mismatch_kriging_allele_audit"
 )
 dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+progress_log_path <- file.path(out_dir, "run_progress.log")
+unlink(progress_log_path)
 
 manifest <- readr::read_csv(manifest_path, show_col_types = FALSE)
 all_loci <- manifest$locus_id
@@ -110,7 +112,9 @@ fmt_duration <- function(seconds) {
 }
 
 progress_line <- function(...) {
-  cat(sprintf(...), "\n", file = stderr())
+  line <- sprintf(...)
+  cat(line, "\n", file = stderr())
+  cat(line, "\n", file = progress_log_path, append = TRUE)
   flush.console()
 }
 
@@ -136,6 +140,35 @@ get_env_int <- function(name, default) {
 
 estimate_s_max_variants <- get_env_int("ESTIMATE_S_MAX_VARIANTS", 3000L)
 ld_z_diag_max_variants <- get_env_int("LD_Z_DIAG_MAX_VARIANTS", estimate_s_max_variants)
+estimate_s_subset_variants <- get_env_int("ESTIMATE_S_SUBSET_VARIANTS", 1500L)
+
+subset_bundle_for_diagnostics <- function(bundle, locus_id, max_variants) {
+  p <- length(bundle$z)
+  required_ids <- character()
+  if (grepl("^ydjc_", locus_id, ignore.case = TRUE)) {
+    required_ids <- ydjc_pair_ids
+  }
+  required_idx <- which(bundle$variant_map$variant_id %in% required_ids)
+
+  if (!is.finite(max_variants) || max_variants <= 0 || p <= max_variants) {
+    keep <- seq_len(p)
+    scope <- "full"
+  } else {
+    n_top <- max(0L, as.integer(max_variants) - length(required_idx))
+    top_idx <- order(abs(bundle$z), decreasing = TRUE)[seq_len(min(n_top, p))]
+    keep <- sort(unique(c(required_idx, top_idx)))
+    scope <- sprintf("top_abs_z_subset_%d", length(keep))
+  }
+
+  list(
+    z = bundle$z[keep],
+    R = bundle$R[keep, keep, drop = FALSE],
+    n_sample = bundle$n_sample,
+    keep = keep,
+    scope = scope,
+    n_diagnostic_variants = length(keep)
+  )
+}
 ```
 
 # 1. estimate_s_rss across all 20 loci
@@ -151,9 +184,11 @@ n_loci <- length(all_loci)
 progress_line(
   paste0(
     "estimate_s_rss: starting %d loci ",
-    "(ESTIMATE_S_MAX_VARIANTS=%d, LD_Z_DIAG_MAX_VARIANTS=%d)"
+    "(ESTIMATE_S_MAX_VARIANTS=%d, LD_Z_DIAG_MAX_VARIANTS=%d, ",
+    "ESTIMATE_S_SUBSET_VARIANTS=%d)"
   ),
-  n_loci, estimate_s_max_variants, ld_z_diag_max_variants
+  n_loci, estimate_s_max_variants, ld_z_diag_max_variants,
+  estimate_s_subset_variants
 )
 
 s_tbl <- map2_dfr(all_loci, seq_along(all_loci), function(lid, i) {
@@ -165,13 +200,28 @@ s_tbl <- map2_dfr(all_loci, seq_along(all_loci), function(lid, i) {
   p_locus <- length(bundle$z)
   progress_line("  [%d/%d] loaded bundle: %s p=%d", i, n_loci, lid, p_locus)
 
-  if (p_locus <= ld_z_diag_max_variants) {
+  diag_bundle <- subset_bundle_for_diagnostics(
+    bundle = bundle,
+    locus_id = lid,
+    max_variants = if (p_locus <= estimate_s_max_variants) {
+      p_locus
+    } else {
+      estimate_s_subset_variants
+    }
+  )
+  progress_line(
+    "  [%d/%d] diagnostic scope: %s n_diag=%d full_p=%d",
+    i, n_loci, diag_bundle$scope, diag_bundle$n_diagnostic_variants, p_locus
+  )
+
+  if (diag_bundle$n_diagnostic_variants <= ld_z_diag_max_variants ||
+      diag_bundle$scope != "full") {
     progress_line("  [%d/%d] computing MoM LD-z diagnostic: %s", i, n_loci, lid)
-    ld_z_diag <- safe_ld_z_diag(bundle)
+    ld_z_diag <- safe_ld_z_diag(diag_bundle)
   } else {
     progress_line(
       "  [%d/%d] skipping MoM LD-z diagnostic: %s p=%d > cap=%d",
-      i, n_loci, lid, p_locus, ld_z_diag_max_variants
+      i, n_loci, lid, diag_bundle$n_diagnostic_variants, ld_z_diag_max_variants
     )
     ld_z_diag <- list(
       mom_sigma2_hat = NA_real_,
@@ -180,11 +230,13 @@ s_tbl <- map2_dfr(all_loci, seq_along(all_loci), function(lid, i) {
     )
   }
 
-  if (p_locus <= estimate_s_max_variants) {
+  if (diag_bundle$n_diagnostic_variants <= estimate_s_max_variants ||
+      diag_bundle$scope != "full") {
     progress_line("  [%d/%d] computing estimate_s_rss: %s", i, n_loci, lid)
     s_val <- tryCatch(
       susieR::estimate_s_rss(
-        z = bundle$z, R = bundle$R, n = bundle$n_sample, method = "null-mle"
+        z = diag_bundle$z, R = diag_bundle$R, n = diag_bundle$n_sample,
+        method = "null-mle"
       ),
       error = function(e) {
         progress_line("  [%d/%d] estimate_s_rss ERROR: %s | %s", i, n_loci, lid,
@@ -192,11 +244,11 @@ s_tbl <- map2_dfr(all_loci, seq_along(all_loci), function(lid, i) {
         NA_real_
       }
     )
-    estimate_s_status <- ifelse(is.na(s_val), "error_or_na", "ok")
+    estimate_s_status <- ifelse(is.na(s_val), "error_or_na", diag_bundle$scope)
   } else {
     progress_line(
       "  [%d/%d] skipping estimate_s_rss: %s p=%d > cap=%d",
-      i, n_loci, lid, p_locus, estimate_s_max_variants
+      i, n_loci, lid, diag_bundle$n_diagnostic_variants, estimate_s_max_variants
     )
     s_val <- NA_real_
     estimate_s_status <- "skipped_p_gt_cap"
@@ -205,6 +257,8 @@ s_tbl <- map2_dfr(all_loci, seq_along(all_loci), function(lid, i) {
   row <- tibble(
     locus_id = lid,
     n_variants = p_locus,
+    n_diagnostic_variants = diag_bundle$n_diagnostic_variants,
+    diagnostic_scope = diag_bundle$scope,
     n_sample = bundle$n_sample,
     n_sample_min = bundle$n_sample_min,
     n_sample_max = bundle$n_sample_max,
@@ -466,6 +520,115 @@ readr::write_csv(
 )
 ```
 
+# 5. Durable report exports
+
+All final tables are written here before rendering. This makes the workbook
+safe to run from a transient interactive session: the report artifacts persist
+under `out_dir` even if the console disconnects.
+
+```{r durable-report-exports, include=FALSE}
+final_table_specs <- list(
+  estimate_s_rss_by_locus = list(
+    data = s_tbl,
+    caption = paste(
+      "All loci: estimate_s_rss, sample-size spread, and existing MoM",
+      "LD-z consistency diagnostics"
+    ),
+    digits = 4
+  ),
+  estimate_s_rss_responder_summary = list(
+    data = s_summary_tbl,
+    caption = "Responder versus non-responder consistency summary",
+    digits = 4
+  ),
+  kriging_flagged_variants = list(
+    data = kriging_flagged_tbl,
+    caption = "Responder variants flagged by kriging_rss (logLR > 2, |z| > 2)",
+    digits = 3
+  ),
+  ydjc_headline_pair_kriging = list(
+    data = ydjc_pair_tbl,
+    caption = "YDJC headline pair: pairwise LD, kriging, annotation, and strand audit",
+    digits = 3
+  ),
+  strand_ambiguity_summary = list(
+    data = strand_summary_tbl,
+    caption = "Strand-ambiguous SNP counts per responder locus",
+    digits = NULL
+  ),
+  ydjc_headline_pair_strand = list(
+    data = ydjc_strand_tbl,
+    caption = "YDJC headline pair: strand-ambiguity check",
+    digits = NULL
+  ),
+  kriging_flagged_x_strand = list(
+    data = strand_flagged_tbl,
+    caption = "kriging-flagged variants x strand ambiguity",
+    digits = 3
+  ),
+  high_pip_result_drivers = list(
+    data = high_pip_driver_tbl,
+    caption = "High-PIP responder variants joined to kriging diagnostics",
+    digits = 3
+  )
+)
+
+write_report_csv <- function(name, spec) {
+  readr::write_csv(spec$data, file.path(out_dir, paste0(name, ".csv")))
+}
+
+render_report_table <- function(spec) {
+  tbl <- spec$data
+  digits <- spec$digits
+  table_txt <- if (is.null(digits)) {
+    knitr::kable(tbl, format = "pipe")
+  } else {
+    knitr::kable(tbl, format = "pipe", digits = digits)
+  }
+  c("", paste0("## ", spec$caption), "", table_txt, "")
+}
+
+walk2(names(final_table_specs), final_table_specs, write_report_csv)
+
+plot_files <- file.path(
+  out_dir, paste0("kriging_obs_vs_exp_", responder_loci, ".png")
+)
+
+report_path <- file.path(out_dir, "ld_mismatch_copy_paste_report.md")
+report_lines <- c(
+  "# Real-data LD-mismatch diligence report",
+  "",
+  paste0("Generated: ", format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z")),
+  paste0("Output directory: `", out_dir, "`"),
+  paste0("Progress log: `", progress_log_path, "`"),
+  "",
+  "## Runtime settings",
+  "",
+  paste0("- `ESTIMATE_S_MAX_VARIANTS`: ", estimate_s_max_variants),
+  paste0("- `LD_Z_DIAG_MAX_VARIANTS`: ", ld_z_diag_max_variants),
+  paste0("- `ESTIMATE_S_SUBSET_VARIANTS`: ", estimate_s_subset_variants),
+  "",
+  "## Written files",
+  "",
+  paste0("- `", names(final_table_specs), ".csv`"),
+  paste0("- `", basename(plot_files), "`"),
+  "- `run_progress.log`",
+  "- `ld_mismatch_copy_paste_report.md`",
+  "",
+  unlist(map(final_table_specs, render_report_table), use.names = FALSE),
+  "",
+  "## Decision tree",
+  "",
+  "- 1-3 pass: low/ordinary `s`, no kriging flag at the YDJC pair, and the YDJC pair is not strand-ambiguous. Keep YDJC as headline with a short supplement; caveat that in-sample LD remains the gold standard.",
+  "- YDJC pair kriging-flagged: demote YDJC from the headline and lead with a responder that passes.",
+  "- YDJC pair strand-ambiguous: fix harmonization and rerun before finalizing.",
+  "- In all cases: warm-refit durability controls for prior dependence, not LD mismatch."
+)
+
+writeLines(report_lines, report_path)
+progress_line("durable report written: %s", report_path)
+```
+
 # Decision tree (from ld_mismatch_diligence.md)
 
 - **1-3 pass** (low `s`, no kriging flag at the YDJC pair, YDJC pair not
@@ -497,6 +660,9 @@ emit_table <- function(x, ..., digits = NULL, caption = NULL) {
 }
 
 cat("**Output directory:** `", out_dir, "`\n\n", sep = "")
+cat("**Copy-paste Markdown report:** `", report_path, "`\n\n", sep = "")
+cat("**Progress log:** `", progress_log_path, "`\n\n", sep = "")
+cat("**Per-table CSV files:** `", out_dir, "/*.csv`\n\n", sep = "")
 
 emit_table(
   s_tbl,
