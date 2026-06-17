@@ -1,0 +1,464 @@
+---
+title: "Real-data LD-mismatch diligence: estimate_s_rss, kriging_rss, allele/strand audit"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# Purpose
+
+Reviewer-proofing the GTEx Lung real-data case study. The headline `YDJC`
+finding is an `r = 0.98` variant pair that snaps to PIP near 1 with large
+*opposite-sign* conditional effects. That is simultaneously the canonical
+"signed annotation resolved a bidirectional cis-regulatory pair" success story
+*and* the canonical reference-LD-mismatch / allele-flip artifact. The
+warm-refit durability test varies the **prior** while holding `(z, R, n)`
+fixed, so it cannot distinguish the two: both the annotated source fit and its
+warm refit inhale the *same* reference `R`, and a shared `(z, R)`
+misspecification is in the null space of any prior-only perturbation.
+
+This workbook runs the three cheap, decisive `(z, R)`-consistency diagnostics
+(no refitting, pure downstream functions of the synced bundle):
+
+1. `susieR::estimate_s_rss` on all 20 loci -- a continuous, more sensitive
+   version of the method-of-moments `sigma_hat^2` screen already in Methods.
+2. `susieR::kriging_rss` on the responder loci -- per-variant expected `z`
+   given LD neighbors. Its `logLR` is literally the log-LR for "this variant's
+   `z` is sign-flipped relative to its LD" vs consistent, so it directly tests
+   the YDJC opposite-sign story.
+3. Allele orientation / strand-ambiguity audit. Upstream matching
+   (`pipeline_ld.py`) keys on the exact `(chrom, pos, ref, alt)` tuple, which
+   closes the orientation-swap flip pathway by construction; the only residual
+   flip pathway is strand-ambiguous SNPs (A/T, C/G).
+
+Run on HPC interactive, where the geometric_n20 bundles already exist.
+
+```{r libs, include=FALSE}
+devtools::load_all(here::here())
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(ggplot2)
+library(susieR)
+
+manifest_path <- here::here(
+  "data", "real_case_studies", "geometric_n20_loci", "locus_manifest.csv"
+)
+stopifnot(file.exists(manifest_path))
+
+out_dir <- here::here(
+  "output", "one_off_validations", "ld_mismatch_kriging_allele_audit"
+)
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+manifest <- readr::read_csv(manifest_path, show_col_types = FALSE)
+all_loci <- manifest$locus_id
+
+# Strongest + intermediate responders (off-zero weight) per the locus summary.
+responder_loci <- all_loci[grepl(
+  "^(ydjc|arsa|rrp7a|lgals9)_", all_loci, ignore.case = TRUE
+)]
+
+# The named YDJC headline pair, for a hard check.
+ydjc_pair_ids <- c(
+  "chr22_21715468_T_C_b38",
+  "chr22_21715668_G_A_b38"
+)
+
+load_bundle <- function(locus_id) {
+  test_susine:::load_real_data_locus_bundle(
+    locus_id = locus_id,
+    manifest_path = manifest_path,
+    repo_root = here::here()
+  )
+}
+
+safe_ld_z_diag <- function(bundle) {
+  tryCatch(
+    test_susine:::real_data_ld_z_consistency(
+      R = bundle$R, z = bundle$z, n = bundle$n_sample
+    ),
+    error = function(e) list(
+      mom_sigma2_hat = NA_real_,
+      ld_chol_ok = NA,
+      ld_z_inconsistency_flag = NA
+    )
+  )
+}
+
+is_strand_ambiguous <- function(ref, alt) {
+  pair <- toupper(paste0(ref, alt))
+  pair %in% c("AT", "TA", "CG", "GC")
+}
+
+safe_summary <- function(x, fn) {
+  x <- x[is.finite(x)]
+  if (!length(x)) return(NA_real_)
+  fn(x)
+}
+```
+
+# 1. estimate_s_rss across all 20 loci
+
+`s` in `[0, 1)` is the panel-LD inconsistency parameter: larger `s` => more
+`z`-`R` disagreement. We report responders alongside non-responders so the
+reader can see whether the loci carrying the annotation signal are *more*
+inconsistent than the inert ones.
+
+```{r estimate-s, include=FALSE}
+s_tbl <- map_dfr(all_loci, function(lid) {
+  bundle <- load_bundle(lid)
+  ld_z_diag <- safe_ld_z_diag(bundle)
+  s_val <- tryCatch(
+    susieR::estimate_s_rss(
+      z = bundle$z, R = bundle$R, n = bundle$n_sample, method = "null-mle"
+    ),
+    error = function(e) NA_real_
+  )
+  tibble(
+    locus_id = lid,
+    n_variants = length(bundle$z),
+    n_sample = bundle$n_sample,
+    n_sample_min = bundle$n_sample_min,
+    n_sample_max = bundle$n_sample_max,
+    n_sample_ratio = bundle$n_sample_max / bundle$n_sample_min,
+    mom_sigma2_hat = ld_z_diag$mom_sigma2_hat,
+    ld_chol_ok = ld_z_diag$ld_chol_ok,
+    ld_z_inconsistency_flag = ld_z_diag$ld_z_inconsistency_flag,
+    s = s_val,
+    is_responder = lid %in% responder_loci
+  )
+}) %>% arrange(desc(s))
+
+readr::write_csv(s_tbl, file.path(out_dir, "estimate_s_rss_by_locus.csv"))
+
+s_summary_tbl <- s_tbl %>%
+  group_by(is_responder) %>%
+  summarise(
+    n = n(),
+    median_s = safe_summary(s, median),
+    max_s = safe_summary(s, max),
+    median_n_ratio = safe_summary(n_sample_ratio, median),
+    min_mom_sigma2_hat = safe_summary(mom_sigma2_hat, min),
+    n_ld_z_flags = sum(ld_z_inconsistency_flag %in% TRUE, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+# 2. kriging_rss on the responder loci
+
+For each responder we extract the per-variant conditional distribution. The
+`logLR` column is the log-LR for an allele flip; `z_std_diff` is the
+standardized observed-minus-expected `z`. The susieR convention flags a variant
+when `logLR > 2 & abs(z) > 2` (it fits *better* sign-flipped and is a real
+marginal signal) -- i.e. a candidate LD-inconsistency / flip.
+
+```{r kriging, include=FALSE}
+kriging_res <- map(responder_loci, function(lid) {
+  bundle <- load_bundle(lid)
+  kr <- susieR::kriging_rss(
+    z = bundle$z, R = bundle$R, n = bundle$n_sample
+  )
+  cond <- kr$conditional_dist %>%
+    mutate(
+      locus_id = lid,
+      ld_matrix_index = bundle$variant_map$ld_matrix_index,
+      variant_id = bundle$variant_map$variant_id,
+      chrom = bundle$variant_map$chrom,
+      pos = bundle$variant_map$pos,
+      ref = bundle$variant_map$ref,
+      alt = bundle$variant_map$alt,
+      annotation_a = bundle$a,
+      strand_ambiguous = is_strand_ambiguous(ref, alt),
+      flagged = logLR > 2 & abs(z) > 2
+    )
+  list(locus_id = lid, plot = kr$plot, cond = cond)
+})
+names(kriging_res) <- responder_loci
+
+kriging_cond <- map_dfr(kriging_res, "cond")
+readr::write_csv(
+  kriging_cond, file.path(out_dir, "kriging_rss_conditional_by_variant.csv")
+)
+
+kriging_flagged_tbl <- kriging_cond %>%
+  filter(flagged) %>%
+  select(locus_id, variant_id, chrom, pos, ref, alt, z, condmean, z_std_diff,
+         logLR, annotation_a, strand_ambiguous) %>%
+  arrange(desc(logLR))
+
+ydjc_lid <- responder_loci[grepl("^ydjc_", responder_loci, ignore.case = TRUE)]
+if (length(ydjc_lid) == 1) {
+  ydjc_bundle <- load_bundle(ydjc_lid)
+  ydjc_pair_tbl <- kriging_res[[ydjc_lid]]$cond %>%
+    filter(variant_id %in% ydjc_pair_ids) %>%
+    arrange(match(variant_id, ydjc_pair_ids))
+  if (nrow(ydjc_pair_tbl) != length(ydjc_pair_ids)) {
+    stop(
+      "Expected both YDJC headline variants in the loaded bundle; found ",
+      nrow(ydjc_pair_tbl), "."
+    )
+  }
+  ydjc_pair_r <- ydjc_bundle$R[
+    ydjc_pair_tbl$ld_matrix_index[1],
+    ydjc_pair_tbl$ld_matrix_index[2]
+  ]
+  ydjc_pair_tbl <- ydjc_pair_tbl %>%
+    mutate(pairwise_r = ydjc_pair_r) %>%
+    select(locus_id, variant_id, chrom, pos, ref, alt, pairwise_r, z,
+           condmean, condvar, z_std_diff, logLR, annotation_a,
+           strand_ambiguous, flagged)
+} else {
+  ydjc_pair_tbl <- tibble(
+    locus_id = character(), variant_id = character(), chrom = character(),
+    pos = integer(), ref = character(), alt = character(), pairwise_r = numeric(),
+    z = numeric(), condmean = numeric(), condvar = numeric(),
+    z_std_diff = numeric(), logLR = numeric(), annotation_a = numeric(),
+    strand_ambiguous = logical(), flagged = logical()
+  )
+}
+
+walk(responder_loci, function(lid) {
+  ggsave(
+    file.path(out_dir, paste0("kriging_obs_vs_exp_", lid, ".png")),
+    kriging_res[[lid]]$plot, width = 6, height = 5, dpi = 200, bg = "white"
+  )
+})
+```
+
+# 3. Allele orientation / strand-ambiguity audit
+
+Upstream `pipeline_ld.py` matches GTEx -> 1000G on the exact `(chrom, pos, ref,
+alt)` tuple, so a ref/alt orientation swap cannot survive matching: orientation
+is concordant by construction. The only residual silent-flip pathway is a
+strand-ambiguous SNP (ref/alt in {A/T, C/G}), where the complementary-strand
+allele set is identical and an opposite-strand record can match the tuple while
+being the complement.
+
+```{r strand-audit, include=FALSE}
+strand_tbl <- map_dfr(responder_loci, function(lid) {
+  bundle <- load_bundle(lid)
+  bundle$variant_map %>%
+    transmute(
+      locus_id = lid, variant_id, ref, alt,
+      strand_ambiguous = is_strand_ambiguous(ref, alt)
+    )
+})
+
+readr::write_csv(
+  strand_tbl, file.path(out_dir, "strand_ambiguity_responders.csv")
+)
+
+strand_summary_tbl <- strand_tbl %>%
+  group_by(locus_id) %>%
+  summarise(n_variants = n(),
+            n_strand_ambiguous = sum(strand_ambiguous), .groups = "drop")
+
+ydjc_strand_tbl <- strand_tbl %>%
+  filter(variant_id %in% ydjc_pair_ids)
+
+strand_flagged_tbl <- kriging_cond %>%
+  filter(flagged) %>%
+  select(locus_id, variant_id, ref, alt, logLR, strand_ambiguous) %>%
+  arrange(desc(logLR))
+```
+
+# 4. Optional cross-check against high-PIP real-data result drivers
+
+If the collected real-data ensemble outputs are present, this joins kriging
+diagnostics to high-PIP variants. This is optional and downstream-only; if the
+collection artifacts are not mounted, the table is empty and the core audit
+above still runs.
+
+```{r high-pip-crosscheck, include=FALSE}
+candidate_aggregated_dirs <- file.path(
+  here::here("output", "slurm_output", "real_data_ensemble_geometric_n20"),
+  c("52906940", Sys.getenv("REAL_DATA_PARENT_JOB_ID", unset = NA_character_)),
+  "aggregated"
+)
+candidate_aggregated_dirs <- unique(candidate_aggregated_dirs[!is.na(candidate_aggregated_dirs)])
+aggregated_dir <- candidate_aggregated_dirs[
+  file.exists(file.path(candidate_aggregated_dirs, "paper_real_data_ensemble_summary.csv"))
+][1]
+
+read_parquet_if_exists <- function(path) {
+  if (length(path) != 1L || is.na(path) || !file.exists(path)) {
+    return(tibble())
+  }
+  arrow::read_parquet(path) %>% tibble::as_tibble()
+}
+
+ensure_cols <- function(tbl, cols) {
+  for (nm in setdiff(cols, names(tbl))) {
+    tbl[[nm]] <- NA
+  }
+  tbl
+}
+
+if (!is.na(aggregated_dir)) {
+  paper_summary <- readr::read_csv(
+    file.path(aggregated_dir, "paper_real_data_ensemble_summary.csv"),
+    show_col_types = FALSE
+  )
+  agg_pip_tbl <- read_parquet_if_exists(
+    file.path(aggregated_dir, "aggregated_variant_pips_cluster_weight.parquet")
+  ) %>%
+    ensure_cols(c("locus_id", "variant_id", "aggregated_pip",
+                  "aggregated_posterior_mean"))
+  refit_pip_tbl <- read_parquet_if_exists(
+    file.path(aggregated_dir, "highest_weight_refit_variant_posteriors.parquet")
+  ) %>%
+    ensure_cols(c("locus_id", "variant_id", "pip"))
+  variant_posteriors <- tryCatch(
+    arrow::open_dataset(file.path(aggregated_dir, "variant_posteriors_dataset")),
+    error = function(e) NULL
+  )
+
+  anchor_tbl <- tibble()
+  if (!is.null(variant_posteriors) &&
+      all(c("locus_id", "run_id", "variant_id", "pip") %in%
+          names(variant_posteriors)) &&
+      "susie_anchor_run_id" %in% names(paper_summary)) {
+    anchor_tbl <- variant_posteriors %>%
+      filter(locus_id %in% responder_loci) %>%
+      select(locus_id, run_id, variant_id, anchor_pip = pip) %>%
+      collect() %>%
+      inner_join(
+        paper_summary %>% select(locus_id, susie_anchor_run_id),
+        by = "locus_id"
+      ) %>%
+      filter(run_id == susie_anchor_run_id) %>%
+      select(-run_id, -susie_anchor_run_id)
+  }
+
+  anchor_tbl <- ensure_cols(anchor_tbl, c("locus_id", "variant_id", "anchor_pip"))
+
+  high_pip_driver_tbl <- kriging_cond %>%
+    select(locus_id, variant_id, z, condmean, z_std_diff, logLR, flagged,
+           strand_ambiguous, annotation_a) %>%
+    left_join(
+      agg_pip_tbl %>%
+        filter(locus_id %in% responder_loci) %>%
+        select(locus_id, variant_id, aggregated_pip,
+               aggregated_posterior_mean),
+      by = c("locus_id", "variant_id")
+    ) %>%
+    left_join(anchor_tbl, by = c("locus_id", "variant_id")) %>%
+    left_join(
+      refit_pip_tbl %>%
+        filter(locus_id %in% responder_loci) %>%
+        select(locus_id, variant_id, warm_refit_pip = pip),
+      by = c("locus_id", "variant_id")
+    ) %>%
+    mutate(
+      max_reported_pip = pmax(aggregated_pip, anchor_pip, warm_refit_pip,
+                              na.rm = TRUE)
+    ) %>%
+    filter(is.finite(max_reported_pip), max_reported_pip >= 0.5) %>%
+    arrange(desc(flagged), desc(max_reported_pip), desc(logLR))
+} else {
+  high_pip_driver_tbl <- tibble()
+}
+
+readr::write_csv(
+  high_pip_driver_tbl,
+  file.path(out_dir, "kriging_high_pip_result_drivers.csv")
+)
+```
+
+# Decision tree (from ld_mismatch_diligence.md)
+
+- **1-3 pass** (low `s`, no kriging flag at the YDJC pair, YDJC pair not
+  strand-ambiguous): add a short supplementary subsection, keep YDJC as the
+  headline, soften the Discussion caveat to "standard `z`-`R` consistency
+  diagnostics flagged no problem at the responder loci; in-sample LD remains the
+  gold standard and is the natural next step."
+- **kriging flags the YDJC pair**: demote YDJC from the headline, lead with a
+  responder that passes, state the mismatch honestly.
+- **YDJC pair strand-ambiguous**: a real allele-harmonization bug -- fix and
+  re-run upstream before finalizing anything (this may change the result).
+- **In all cases**: state explicitly that the warm-refit durability test
+  controls for prior dependence, not LD mismatch.
+
+# Copy-paste report
+
+All printed output is collected here.
+
+```{r final-report-tables, echo=FALSE, results='asis', fig.width=6, fig.height=5}
+emit_table <- function(x, ..., digits = NULL, caption = NULL) {
+  cat("\n\n")
+  if (is.null(digits)) {
+    tbl <- knitr::kable(x, ..., caption = caption)
+  } else {
+    tbl <- knitr::kable(x, ..., digits = digits, caption = caption)
+  }
+  cat(tbl, sep = "\n")
+  cat("\n\n")
+}
+
+cat("**Output directory:** `", out_dir, "`\n\n", sep = "")
+
+emit_table(
+  s_tbl,
+  digits = 4,
+  caption = paste(
+    "All loci: estimate_s_rss, sample-size spread, and existing MoM",
+    "LD-z consistency diagnostics"
+  )
+)
+
+emit_table(
+  s_summary_tbl,
+  digits = 4,
+  caption = "Responder versus non-responder consistency summary"
+)
+
+emit_table(
+  kriging_flagged_tbl,
+  digits = 3,
+  caption = "Responder variants flagged by kriging_rss (logLR > 2, |z| > 2)"
+)
+
+emit_table(
+  ydjc_pair_tbl,
+  digits = 3,
+  caption = "YDJC headline pair: pairwise LD, kriging, annotation, and strand audit"
+)
+
+emit_table(
+  strand_summary_tbl,
+  caption = "Strand-ambiguous SNP counts per responder locus"
+)
+
+emit_table(
+  ydjc_strand_tbl,
+  caption = "YDJC headline pair: strand-ambiguity check"
+)
+
+emit_table(
+  strand_flagged_tbl,
+  digits = 3,
+  caption = "kriging-flagged variants x strand ambiguity"
+)
+
+if (nrow(high_pip_driver_tbl)) {
+  emit_table(
+    high_pip_driver_tbl,
+    digits = 3,
+    caption = "High-PIP responder variants joined to kriging diagnostics"
+  )
+} else {
+  cat(
+    "\nHigh-PIP responder cross-check was empty or skipped because collected ",
+    "real-data ensemble outputs were not found at parent job 52906940 or ",
+    "REAL_DATA_PARENT_JOB_ID.\n\n",
+    sep = ""
+  )
+}
+
+walk(responder_loci, function(lid) {
+  print(kriging_res[[lid]]$plot + ggtitle(lid))
+})
+```
