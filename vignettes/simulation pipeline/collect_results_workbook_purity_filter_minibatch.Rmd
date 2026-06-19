@@ -295,6 +295,9 @@ p_auprc <- ggplot2::ggplot(
   ggplot2::geom_hline(yintercept = auprc_no_filter, linetype = "dashed", color = "grey30") +
   ggplot2::geom_text(ggplot2::aes(label = sprintf("%.3f", .data$AUPRC)),
                      vjust = -0.35, size = 6.4) +
+  ggplot2::coord_cartesian(
+    ylim = c(NA_real_, max(auprc_pooled$AUPRC, na.rm = TRUE) + 0.02)
+  ) +
   ggplot2::labs(
     x = NULL, y = "Pooled AUPRC",
     title = "Credible-set filtering changes per-variant AUPRC",
