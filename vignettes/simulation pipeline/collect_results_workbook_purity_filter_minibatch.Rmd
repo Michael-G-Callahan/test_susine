@@ -786,11 +786,11 @@ paper_panels <- list(
     paper_panel_theme +
     ggplot2::theme(legend.position = "none"),
   p_purity_acc +
-    ggplot2::labs(title = "Purity versus causal coverage") +
+    ggplot2::labs(title = "Purity versus causal coverage", y = "Accuracy ratio") +
     paper_panel_theme +
     ggplot2::theme(legend.position = "none"),
   p_keff_acc +
-    ggplot2::labs(title = "Effective support versus accuracy") +
+    ggplot2::labs(title = "Effective support versus accuracy", y = "Accuracy ratio") +
     paper_panel_theme +
     ggplot2::theme(legend.position = "none"),
   p_purity_keff +
