@@ -245,11 +245,45 @@ auprc_pooled <- auprc_pooled %>%
   )
 
 
+compute_pip_mass_ratio_from_bins <- function(confusion_df, group_vars = "filter_type") {
+  required_cols <- c(group_vars, "pip_threshold", "n_causal_at_bucket", "n_noncausal_at_bucket")
+  if (is.null(confusion_df) || !all(required_cols %in% names(confusion_df))) {
+    return(tibble::tibble())
+  }
+
+  confusion_df %>%
+    dplyr::group_by(dplyr::across(dplyr::all_of(group_vars))) %>%
+    dplyr::summarise(
+      causal_pip_mass = sum(.data$pip_threshold * .data$n_causal_at_bucket, na.rm = TRUE),
+      noncausal_pip_mass = sum(.data$pip_threshold * .data$n_noncausal_at_bucket, na.rm = TRUE),
+      pip_mass_ratio = dplyr::if_else(
+        .data$noncausal_pip_mass > 0,
+        .data$causal_pip_mass / .data$noncausal_pip_mass,
+        NA_real_
+      ),
+      .groups = "drop"
+    )
+}
+
+pip_mass_summary <- compute_pip_mass_ratio_from_bins(confusion_bins, group_vars = "filter_type")
+if (nrow(pip_mass_summary)) {
+  auprc_pooled <- auprc_pooled %>%
+    dplyr::select(-dplyr::any_of(c("causal_pip_mass", "noncausal_pip_mass", "pip_mass_ratio"))) %>%
+    dplyr::left_join(pip_mass_summary, by = "filter_type")
+} else {
+  auprc_pooled <- auprc_pooled %>%
+    dplyr::mutate(
+      causal_pip_mass = NA_real_,
+      noncausal_pip_mass = NA_real_,
+      pip_mass_ratio = NA_real_
+    )
+}
+
 kable(
   auprc_pooled %>%
-    dplyr::select(.data$filter_label, .data$AUPRC, .data$delta_vs_unfiltered),
+    dplyr::select(.data$filter_label, .data$AUPRC, .data$delta_vs_unfiltered, .data$pip_mass_ratio),
   digits = 4,
-  col.names = c("Filter", "Pooled AUPRC", "Δ vs unfiltered"),
+  col.names = c("Filter", "Pooled AUPRC", "Δ vs unfiltered", "Causal/noncausal PIP mass"),
   caption = "Pooled causal-recovery AUPRC (top-8 positives) by credible-set filter, 600 datasets"
 )
 
@@ -294,10 +328,14 @@ p_auprc <- ggplot2::ggplot(
 ) +
   ggplot2::geom_col(fill = "#1F77B4", width = 0.7) +
   ggplot2::geom_hline(yintercept = auprc_no_filter, linetype = "dashed", color = "grey30") +
-  ggplot2::geom_text(ggplot2::aes(label = sprintf("%.3f", .data$AUPRC)),
-                     vjust = -0.35, size = 6.4) +
+  ggplot2::geom_text(
+    ggplot2::aes(label = sprintf("%.3f\nmass r=%.2f", .data$AUPRC, .data$pip_mass_ratio)),
+    vjust = -0.25,
+    size = 5.6,
+    lineheight = 0.9
+  ) +
   ggplot2::coord_cartesian(
-    ylim = c(NA_real_, max(auprc_pooled$AUPRC, na.rm = TRUE) + 0.02)
+    ylim = c(NA_real_, max(auprc_pooled$AUPRC, na.rm = TRUE) + 0.04)
   ) +
   ggplot2::labs(
     x = NULL, y = "Pooled AUPRC",
@@ -833,6 +871,7 @@ if (exists("diag_summary")) write_if_present(diag_summary, "effect_diagnostic_su
 if (exists("keff_filter_effect_summary")) write_if_present(keff_filter_effect_summary, "keff_filter_effect_summary.csv")
 if (exists("purity_failure_mode_summary")) write_if_present(purity_failure_mode_summary, "purity_failure_mode_summary.csv")
 if (exists("filter_retention_summary")) write_if_present(filter_retention_summary, "filter_retention_summary.csv")
+if (exists("pip_mass_summary")) write_if_present(pip_mass_summary, "pip_mass_ratio_by_filter.csv")
 if (exists("effect_unfiltered")) write_if_present(effect_unfiltered, "effect_metrics_unfiltered_full.csv")
 
 cat("Plots written to:", plot_dir, "\n")
@@ -848,6 +887,7 @@ diagnostic_csvs <- c(
   "keff_filter_effect_summary.csv",
   "purity_failure_mode_summary.csv",
   "filter_retention_summary.csv",
+  "pip_mass_ratio_by_filter.csv",
   "effect_metrics_unfiltered_full.csv",
   "confusion_bins.csv"
 )
