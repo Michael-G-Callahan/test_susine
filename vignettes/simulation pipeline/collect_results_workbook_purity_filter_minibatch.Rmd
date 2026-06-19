@@ -244,84 +244,6 @@ auprc_pooled <- auprc_pooled %>%
     )
   )
 
-precision_operating_cutoff <- 0.50
-
-compute_precision_operating_area <- function(confusion_df,
-                                             group_vars = "filter_type",
-                                             precision_cutoff = 0.50) {
-  required_cols <- c(group_vars, "pip_threshold", "n_causal_at_bucket", "n_noncausal_at_bucket")
-  if (is.null(confusion_df) || !all(required_cols %in% names(confusion_df))) {
-    return(tibble::tibble())
-  }
-
-  precision_col <- sprintf("recall_at_precision_%02d", as.integer(precision_cutoff * 100))
-  area_col <- sprintf("partial_auprc_precision_%02d", as.integer(precision_cutoff * 100))
-  threshold_col <- sprintf("pip_threshold_at_precision_%02d", as.integer(precision_cutoff * 100))
-
-  out <- confusion_df %>%
-    dplyr::group_by(dplyr::across(dplyr::all_of(group_vars)), .data$pip_threshold) %>%
-    dplyr::summarise(
-      n_causal_at_bucket = sum(.data$n_causal_at_bucket, na.rm = TRUE),
-      n_noncausal_at_bucket = sum(.data$n_noncausal_at_bucket, na.rm = TRUE),
-      .groups = "drop"
-    ) %>%
-    dplyr::group_by(dplyr::across(dplyr::all_of(group_vars))) %>%
-    dplyr::arrange(dplyr::desc(.data$pip_threshold), .by_group = TRUE) %>%
-    dplyr::mutate(
-      TP = cumsum(.data$n_causal_at_bucket),
-      FP = cumsum(.data$n_noncausal_at_bucket),
-      total_causal = sum(.data$n_causal_at_bucket, na.rm = TRUE),
-      precision = dplyr::if_else(.data$TP + .data$FP > 0,
-                                 .data$TP / (.data$TP + .data$FP), NA_real_),
-      recall = dplyr::if_else(.data$total_causal > 0,
-                              .data$TP / .data$total_causal, NA_real_)
-    ) %>%
-    dplyr::filter(is.finite(.data$precision), is.finite(.data$recall)) %>%
-    dplyr::summarise(
-      recall_at_cutoff = if (any(.data$precision >= precision_cutoff)) {
-        max(.data$recall[.data$precision >= precision_cutoff], na.rm = TRUE)
-      } else {
-        0
-      },
-      pip_threshold_at_cutoff = if (any(.data$precision >= precision_cutoff)) {
-        min(.data$pip_threshold[.data$precision >= precision_cutoff], na.rm = TRUE)
-      } else {
-        NA_real_
-      },
-      .groups = "drop"
-    ) %>%
-    dplyr::mutate(partial_area_at_cutoff = precision_cutoff * .data$recall_at_cutoff)
-
-  names(out)[names(out) == "recall_at_cutoff"] <- precision_col
-  names(out)[names(out) == "partial_area_at_cutoff"] <- area_col
-  names(out)[names(out) == "pip_threshold_at_cutoff"] <- threshold_col
-  out
-}
-
-pr_precision50_summary <- compute_precision_operating_area(
-  confusion_bins,
-  group_vars = "filter_type",
-  precision_cutoff = precision_operating_cutoff
-)
-
-if (nrow(pr_precision50_summary)) {
-  auprc_pooled <- auprc_pooled %>%
-    dplyr::left_join(pr_precision50_summary, by = "filter_type")
-} else {
-  auprc_pooled <- auprc_pooled %>%
-    dplyr::mutate(
-      recall_at_precision_50 = NA_real_,
-      partial_auprc_precision_50 = NA_real_,
-      pip_threshold_at_precision_50 = NA_real_
-    )
-}
-
-auprc_pooled <- auprc_pooled %>%
-  dplyr::mutate(
-    partial_auprc_precision_50 = dplyr::coalesce(.data$partial_auprc_precision_50, 0),
-    partial_auprc_precision_50 = pmin(.data$partial_auprc_precision_50, .data$AUPRC),
-    auprc_remainder = pmax(.data$AUPRC - .data$partial_auprc_precision_50, 0)
-  )
 
 kable(
   auprc_pooled %>%
@@ -329,19 +251,6 @@ kable(
   digits = 4,
   col.names = c("Filter", "Pooled AUPRC", "Δ vs unfiltered"),
   caption = "Pooled causal-recovery AUPRC (top-8 positives) by credible-set filter, 600 datasets"
-)
-
-kable(
-  auprc_pooled %>%
-    dplyr::select(
-      .data$filter_label,
-      .data$recall_at_precision_50,
-      .data$partial_auprc_precision_50,
-      .data$pip_threshold_at_precision_50
-    ),
-  digits = 4,
-  col.names = c("Filter", "Recall at precision >= 0.50", "0.5 x recall", "Lowest PIP threshold"),
-  caption = "Pooled precision-50 operating component shown as the dark sub-bar in panel A"
 )
 
 # Per-dataset AUPRC -> paired delta vs no_filter (sign test on the filtering cost).
@@ -379,89 +288,24 @@ kable(per_dataset_summary, digits = 4,
 ```
 
 ```{r auprc-plot}
-auprc_plot_data <- auprc_pooled %>%
-  dplyr::select(
-    .data$filter_type,
-    .data$filter_label_plot,
-    .data$AUPRC,
-    .data$partial_auprc_precision_50,
-    .data$auprc_remainder
-  ) %>%
-  tidyr::pivot_longer(
-    cols = c("partial_auprc_precision_50", "auprc_remainder"),
-    names_to = "auprc_component",
-    values_to = "component_value"
-  ) %>%
-  dplyr::mutate(
-    auprc_component = factor(
-      .data$auprc_component,
-      levels = c("partial_auprc_precision_50", "auprc_remainder"),
-      labels = c("Precision-50 partial AUPRC", "Remaining AUPRC")
-    )
-  )
-
 p_auprc <- ggplot2::ggplot(
-  auprc_plot_data,
-  ggplot2::aes(
-    x = stats::reorder(.data$filter_label_plot, -.data$AUPRC),
-    y = .data$component_value,
-    fill = .data$auprc_component
-  )
+  auprc_pooled,
+  ggplot2::aes(x = stats::reorder(.data$filter_label_plot, -.data$AUPRC), y = .data$AUPRC)
 ) +
-  ggplot2::geom_col(width = 0.7) +
+  ggplot2::geom_col(fill = "#1F77B4", width = 0.7) +
   ggplot2::geom_hline(yintercept = auprc_no_filter, linetype = "dashed", color = "grey30") +
-  ggplot2::geom_text(
-    data = auprc_pooled,
-    ggplot2::aes(
-      x = stats::reorder(.data$filter_label_plot, -.data$AUPRC),
-      y = .data$AUPRC,
-      label = sprintf("%.3f", .data$AUPRC)
-    ),
-    inherit.aes = FALSE,
-    vjust = -0.35,
-    size = 6.4
-  ) +
-  ggplot2::geom_text(
-    data = auprc_pooled,
-    ggplot2::aes(
-      x = stats::reorder(.data$filter_label_plot, -.data$AUPRC),
-      y = pmax(.data$partial_auprc_precision_50 / 2, 0.006),
-      label = sprintf("%.3f", .data$partial_auprc_precision_50)
-    ),
-    inherit.aes = FALSE,
-    color = "white",
-    size = 5.4
-  ) +
-  ggplot2::annotate(
-    "label",
-    x = Inf,
-    y = Inf,
-    label = "dark: precision-50 partial AUPRC",
-    hjust = 1.05,
-    vjust = 1.25,
-    size = 4.8,
-    label.size = 0,
-    fill = "white",
-    alpha = 0.9
-  ) +
-  ggplot2::scale_fill_manual(
-    values = c("Precision-50 partial AUPRC" = "#08519C",
-               "Remaining AUPRC" = "#9ECAE1"),
-    name = "AUPRC component"
-  ) +
+  ggplot2::geom_text(ggplot2::aes(label = sprintf("%.3f", .data$AUPRC)),
+                     vjust = -0.35, size = 6.4) +
   ggplot2::coord_cartesian(
     ylim = c(NA_real_, max(auprc_pooled$AUPRC, na.rm = TRUE) + 0.02)
   ) +
   ggplot2::labs(
     x = NULL, y = "Pooled AUPRC",
     title = "Credible-set filtering changes per-variant AUPRC",
-    subtitle = "Dark segment: precision-50 partial AUPRC = 0.5 x recall at precision >= 0.5. Dashed line: unfiltered PIP."
+    subtitle = "Dashed line: unfiltered PIP. Lower bars = the filter discarded useful signal."
   ) +
   ggplot2::theme_bw(base_size = 12) +
-  ggplot2::theme(
-    axis.text.x = ggplot2::element_text(angle = 20, hjust = 1),
-    legend.position = "bottom"
-  )
+  ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 20, hjust = 1))
 
 ggplot2::ggsave(file.path(plot_dir, "auprc_by_filter_type.png"),
                 p_auprc, width = 8, height = 5, dpi = 300)
@@ -989,7 +833,6 @@ if (exists("diag_summary")) write_if_present(diag_summary, "effect_diagnostic_su
 if (exists("keff_filter_effect_summary")) write_if_present(keff_filter_effect_summary, "keff_filter_effect_summary.csv")
 if (exists("purity_failure_mode_summary")) write_if_present(purity_failure_mode_summary, "purity_failure_mode_summary.csv")
 if (exists("filter_retention_summary")) write_if_present(filter_retention_summary, "filter_retention_summary.csv")
-if (exists("pr_precision50_summary")) write_if_present(pr_precision50_summary, "pr_precision50_summary.csv")
 if (exists("effect_unfiltered")) write_if_present(effect_unfiltered, "effect_metrics_unfiltered_full.csv")
 
 cat("Plots written to:", plot_dir, "\n")
@@ -1005,7 +848,6 @@ diagnostic_csvs <- c(
   "keff_filter_effect_summary.csv",
   "purity_failure_mode_summary.csv",
   "filter_retention_summary.csv",
-  "pr_precision50_summary.csv",
   "effect_metrics_unfiltered_full.csv",
   "confusion_bins.csv"
 )
