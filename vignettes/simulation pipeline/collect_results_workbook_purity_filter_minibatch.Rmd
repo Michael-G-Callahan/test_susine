@@ -717,6 +717,119 @@ kable(filter_retention_summary, digits = 4,
 # 6. Paper Figure Composite
 
 ```{r paper-figure-composite}
+if ((!exists("p_purity_acc") || !exists("p_keff_acc") || !exists("p_purity_keff")) &&
+    exists("effect_unfiltered") && !is.null(effect_unfiltered)) {
+  eff <- effect_unfiltered %>%
+    dplyr::filter(.data$size > 0) %>%
+    dplyr::mutate(
+      coverage_lab = factor(
+        ifelse(.data$coverage > 0, "Contains causal variant", "No causal variant"),
+        levels = c("Contains causal variant", "No causal variant")
+      ),
+      purity = as.numeric(.data$purity),
+      accuracy_ratio = as.numeric(.data$accuracy_ratio),
+      k_eff_core95 = as.numeric(.data$effect_k_eff_signal_core95),
+      size = as.numeric(.data$size)
+    )
+
+  cov_palette <- c("Contains causal variant" = "#0072B2", "No causal variant" = "#D55E00")
+  purity_cutoff <- 0.50
+  keff_filter_cutoff <- 100
+  scatter_point_size <- 3.2
+
+  p_purity_acc <- ggplot2::ggplot(
+    eff %>% dplyr::filter(is.finite(.data$purity), is.finite(.data$accuracy_ratio)),
+    ggplot2::aes(x = .data$purity, y = .data$accuracy_ratio, color = .data$coverage_lab)
+  ) +
+    ggplot2::geom_point(alpha = 0.45, size = scatter_point_size) +
+    ggplot2::geom_vline(xintercept = purity_cutoff, linetype = "dashed", color = "grey25") +
+    ggplot2::scale_color_manual(values = cov_palette, name = "Credible set") +
+    ggplot2::labs(
+      x = "Credible-set purity (minimum pairwise |r|)",
+      y = "Accuracy ratio, A (top causal PIP / top PIP)",
+      title = "Purity vs accuracy",
+      subtitle = "Dashed line: 0.50 purity threshold."
+    ) +
+    ggplot2::theme_bw(base_size = 11) +
+    ggplot2::theme(legend.position = "bottom")
+
+  p_keff_acc <- ggplot2::ggplot(
+    eff %>% dplyr::filter(is.finite(.data$k_eff_core95), is.finite(.data$accuracy_ratio)),
+    ggplot2::aes(x = .data$k_eff_core95, y = .data$accuracy_ratio, color = .data$coverage_lab)
+  ) +
+    ggplot2::geom_point(alpha = 0.45, size = scatter_point_size) +
+    ggplot2::geom_vline(xintercept = keff_filter_cutoff, linetype = "longdash", color = "grey35") +
+    ggplot2::geom_hline(yintercept = 0.9, linetype = "dotted", color = "grey45") +
+    ggplot2::scale_x_log10() +
+    ggplot2::scale_color_manual(values = cov_palette, name = "Credible set") +
+    ggplot2::labs(
+      x = expression("Core-95% effective support (" * k[eff] * ")"),
+      y = "Accuracy ratio, A (top causal PIP / top PIP)",
+      title = "Effective support vs accuracy",
+      subtitle = "Long dash: k_eff = 100 filter. Dotted line: A = 0.9."
+    ) +
+    ggplot2::theme_bw(base_size = 11) +
+    ggplot2::theme(legend.position = "bottom")
+
+  purity_keff_plot_data <- eff %>%
+    dplyr::filter(is.finite(.data$purity), is.finite(.data$k_eff_core95))
+
+  purity_side_summary <- purity_keff_plot_data %>%
+    dplyr::mutate(
+      purity_side = dplyr::if_else(.data$purity < purity_cutoff, "left", "right")
+    ) %>%
+    dplyr::group_by(.data$purity_side) %>%
+    dplyr::summarise(
+      n_effects = dplyr::n(),
+      pct_no_causal = 100 * mean(.data$coverage <= 0),
+      .groups = "drop"
+    ) %>%
+    dplyr::right_join(
+      data.frame(purity_side = c("left", "right")),
+      by = "purity_side"
+    ) %>%
+    dplyr::mutate(
+      n_effects = dplyr::coalesce(.data$n_effects, 0L),
+      pct_no_causal = dplyr::coalesce(.data$pct_no_causal, 0),
+      x = dplyr::if_else(.data$purity_side == "left", purity_cutoff - 0.02, purity_cutoff + 0.02),
+      hjust = dplyr::if_else(.data$purity_side == "left", 1, 0),
+      label = sprintf(
+        "%s\nn = %s\nNo causal: %.1f%%",
+        dplyr::if_else(.data$purity_side == "left", "Purity < 0.50", "Purity >= 0.50"),
+        format(.data$n_effects, big.mark = ",", scientific = FALSE),
+        .data$pct_no_causal
+      )
+    )
+
+  p_purity_keff <- ggplot2::ggplot(
+    purity_keff_plot_data,
+    ggplot2::aes(x = .data$purity, y = .data$k_eff_core95, color = .data$coverage_lab)
+  ) +
+    ggplot2::geom_point(alpha = 0.45, size = scatter_point_size) +
+    ggplot2::geom_vline(xintercept = purity_cutoff, linetype = "dashed", color = "grey25") +
+    ggplot2::geom_hline(yintercept = keff_filter_cutoff, linetype = "longdash", color = "grey35") +
+    ggplot2::geom_label(
+      data = purity_side_summary,
+      ggplot2::aes(x = .data$x, y = Inf, label = .data$label, hjust = .data$hjust),
+      inherit.aes = FALSE,
+      vjust = 1.15,
+      size = 5.4,
+      label.size = 0,
+      fill = "white",
+      alpha = 0.85
+    ) +
+    ggplot2::scale_y_log10() +
+    ggplot2::scale_color_manual(values = cov_palette, name = "Credible set") +
+    ggplot2::labs(
+      x = "Credible-set purity (minimum pairwise |r|)",
+      y = expression("Core-95% effective support (" * k[eff] * ")"),
+      title = "Purity vs diffuseness",
+      subtitle = "Weak association: low-purity sets are not reliably more diffuse."
+    ) +
+    ggplot2::theme_bw(base_size = 11) +
+    ggplot2::theme(legend.position = "bottom")
+}
+
 required_paper_plot_objects <- c("p_auprc", "p_purity_acc", "p_keff_acc", "p_purity_keff")
 missing_paper_plot_objects <- required_paper_plot_objects[
   !vapply(required_paper_plot_objects, exists, logical(1), inherits = TRUE)
