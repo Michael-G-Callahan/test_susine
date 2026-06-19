@@ -523,16 +523,41 @@ p_purity_keff <- ggplot2::ggplot(
   ggplot2::theme_bw(base_size = 11) +
   ggplot2::theme(legend.position = "bottom")
 
+p_purity_keff_accuracy <- ggplot2::ggplot(
+  purity_keff_plot_data %>%
+    dplyr::filter(is.finite(.data$accuracy_ratio)) %>%
+    dplyr::arrange(.data$accuracy_ratio),
+  ggplot2::aes(x = .data$purity, y = .data$k_eff_core95, color = .data$accuracy_ratio)
+) +
+  ggplot2::geom_point(alpha = 0.65, size = scatter_point_size) +
+  ggplot2::geom_vline(xintercept = purity_cutoff, linetype = "dashed", color = "grey25") +
+  ggplot2::geom_hline(yintercept = keff_filter_cutoff, linetype = "longdash", color = "grey35") +
+  ggplot2::scale_y_log10() +
+  ggplot2::scale_color_gradientn(
+    colors = c("#D55E00", "#F0E442", "#0072B2"),
+    name = "Accuracy ratio"
+  ) +
+  ggplot2::labs(
+    x = "Credible-set purity (minimum pairwise |r|)",
+    y = expression("Core-95% effective support (" * k[eff] * ")"),
+    title = "Purity vs diffuseness, colored by accuracy",
+    subtitle = "Dashed line: purity = 0.50. Long dash: k_eff = 100."
+  ) +
+  ggplot2::theme_bw(base_size = 11) +
+  ggplot2::theme(legend.position = "bottom")
 ggplot2::ggsave(file.path(plot_dir, "diag_purity_vs_accuracy.png"),
                 p_purity_acc, width = 7, height = 5.5, dpi = 300)
 ggplot2::ggsave(file.path(plot_dir, "diag_keff_vs_accuracy.png"),
                 p_keff_acc, width = 7, height = 5.5, dpi = 300)
 ggplot2::ggsave(file.path(plot_dir, "diag_purity_vs_keff.png"),
                 p_purity_keff, width = 7, height = 5.5, dpi = 300)
+ggplot2::ggsave(file.path(plot_dir, "diag_purity_vs_keff_accuracy_ratio.png"),
+                p_purity_keff_accuracy, width = 7, height = 5.5, dpi = 300)
 
 p_purity_acc
 p_keff_acc
 p_purity_keff
+p_purity_keff_accuracy
 ```
 
 ```{r effect-diagnostics-summary, eval = exists("effect_unfiltered") && !is.null(effect_unfiltered)}
@@ -831,6 +856,35 @@ if ((!exists("p_purity_acc") || !exists("p_keff_acc") || !exists("p_purity_keff"
     ggplot2::theme(legend.position = "bottom")
 }
 
+if (exists("purity_keff_plot_data") && !is.null(purity_keff_plot_data)) {
+  p_purity_keff_accuracy <- ggplot2::ggplot(
+    purity_keff_plot_data %>%
+      dplyr::filter(is.finite(.data$accuracy_ratio)) %>%
+      dplyr::arrange(.data$accuracy_ratio),
+    ggplot2::aes(x = .data$purity, y = .data$k_eff_core95, color = .data$accuracy_ratio)
+  ) +
+    ggplot2::geom_point(alpha = 0.65, size = scatter_point_size) +
+    ggplot2::geom_vline(xintercept = purity_cutoff, linetype = "dashed", color = "grey25") +
+    ggplot2::geom_hline(yintercept = keff_filter_cutoff, linetype = "longdash", color = "grey35") +
+    ggplot2::scale_y_log10() +
+    ggplot2::scale_color_gradientn(
+      colors = c("#D55E00", "#F0E442", "#0072B2"),
+      name = "Accuracy ratio"
+    ) +
+    ggplot2::labs(
+      x = "Credible-set purity (minimum pairwise |r|)",
+      y = expression("Core-95% effective support (" * k[eff] * ")"),
+      title = "Purity vs diffuseness, colored by accuracy",
+      subtitle = "Dashed line: purity = 0.50. Long dash: k_eff = 100."
+    ) +
+    ggplot2::theme_bw(base_size = 11) +
+    ggplot2::theme(legend.position = "bottom")
+
+  purity_keff_accuracy_path <- file.path(plot_dir, "diag_purity_vs_keff_accuracy_ratio.png")
+  ggplot2::ggsave(purity_keff_accuracy_path,
+                  p_purity_keff_accuracy, width = 7, height = 5.5, dpi = 300)
+  cat("Purity/effective-support accuracy plot written to:", purity_keff_accuracy_path, "\n")
+}
 required_paper_plot_objects <- c("p_auprc", "p_purity_acc", "p_keff_acc", "p_purity_keff")
 missing_paper_plot_objects <- required_paper_plot_objects[
   !vapply(required_paper_plot_objects, exists, logical(1), inherits = TRUE)
