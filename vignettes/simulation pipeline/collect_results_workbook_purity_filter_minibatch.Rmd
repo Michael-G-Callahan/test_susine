@@ -380,6 +380,21 @@ pr_curves_by_filter <- confusion_bins %>%
     filter_label = factor(.data$filter_label, levels = unname(filter_labels[filter_levels]))
   )
 
+pr_plot_filter_levels <- setdiff(filter_levels, "purity_90")
+pr_curves_by_filter <- pr_curves_by_filter %>%
+  dplyr::filter(
+    as.character(.data$filter_type) %in% pr_plot_filter_levels,
+    .data$pip_threshold > 0,
+    .data$recall > 0
+  ) %>%
+  dplyr::mutate(
+    filter_type = factor(as.character(.data$filter_type), levels = pr_plot_filter_levels),
+    filter_label = factor(
+      as.character(.data$filter_label),
+      levels = unname(filter_labels[pr_plot_filter_levels])
+    )
+  )
+
 p_pr_curves <- ggplot2::ggplot(
   pr_curves_by_filter,
   ggplot2::aes(x = .data$recall, y = .data$precision, color = .data$filter_label)
@@ -427,6 +442,24 @@ cov_palette <- c("Contains causal variant" = "#0072B2", "No causal variant" = "#
 purity_cutoff <- 0.50
 keff_filter_cutoff <- 100
 scatter_point_size <- 3.2
+
+# Classical CS diagnostics: purity, size, and binary 95% coverage.
+p_old_cs <- ggplot2::ggplot(
+  eff %>% dplyr::filter(is.finite(.data$purity), is.finite(.data$size), .data$size > 0),
+  ggplot2::aes(x = .data$purity, y = .data$size, color = .data$coverage_lab)
+) +
+  ggplot2::geom_point(alpha = 0.45, size = scatter_point_size) +
+  ggplot2::geom_vline(xintercept = purity_cutoff, linetype = "dashed", color = "grey25") +
+  ggplot2::scale_y_log10() +
+  ggplot2::scale_color_manual(values = cov_palette, name = "95% CS") +
+  ggplot2::labs(
+    x = "Credible-set purity (minimum pairwise |r|)",
+    y = "95% credible-set size",
+    title = "Classical credible-set summaries",
+    subtitle = "Dashed line: 0.50 purity threshold."
+  ) +
+  ggplot2::theme_bw(base_size = 11) +
+  ggplot2::theme(legend.position = "bottom")
 
 # (A) Purity vs accuracy: are low-purity sets actually inaccurate?
 p_purity_acc <- ggplot2::ggplot(
@@ -545,6 +578,8 @@ p_purity_keff_accuracy <- ggplot2::ggplot(
   ) +
   ggplot2::theme_bw(base_size = 11) +
   ggplot2::theme(legend.position = "bottom")
+ggplot2::ggsave(file.path(plot_dir, "diag_old_cs_purity_size_coverage.png"),
+                p_old_cs, width = 7, height = 5.5, dpi = 300)
 ggplot2::ggsave(file.path(plot_dir, "diag_purity_vs_accuracy.png"),
                 p_purity_acc, width = 7, height = 5.5, dpi = 300)
 ggplot2::ggsave(file.path(plot_dir, "diag_keff_vs_accuracy.png"),
@@ -554,6 +589,7 @@ ggplot2::ggsave(file.path(plot_dir, "diag_purity_vs_keff.png"),
 ggplot2::ggsave(file.path(plot_dir, "diag_purity_vs_keff_accuracy_ratio.png"),
                 p_purity_keff_accuracy, width = 7, height = 5.5, dpi = 300)
 
+p_old_cs
 p_purity_acc
 p_keff_acc
 p_purity_keff
@@ -716,6 +752,21 @@ if (exists("confusion_bins") && !is.null(confusion_bins)) {
         filter_label = factor(.data$filter_label, levels = unname(filter_labels[filter_levels]))
       )
 
+    pr_plot_filter_levels <- setdiff(filter_levels, "purity_90")
+    pr_curves_by_filter <- pr_curves_by_filter %>%
+      dplyr::filter(
+        as.character(.data$filter_type) %in% pr_plot_filter_levels,
+        .data$pip_threshold > 0,
+        .data$recall > 0
+      ) %>%
+      dplyr::mutate(
+        filter_type = factor(as.character(.data$filter_type), levels = pr_plot_filter_levels),
+        filter_label = factor(
+          as.character(.data$filter_label),
+          levels = unname(filter_labels[pr_plot_filter_levels])
+        )
+      )
+
     p_pr_curves <- ggplot2::ggplot(
       pr_curves_by_filter,
       ggplot2::aes(x = .data$recall, y = .data$precision, color = .data$filter_label)
@@ -856,6 +907,31 @@ if ((!exists("p_purity_acc") || !exists("p_keff_acc") || !exists("p_purity_keff"
     ggplot2::theme(legend.position = "bottom")
 }
 
+if (!exists("p_old_cs") && exists("eff") && !is.null(eff)) {
+  p_old_cs <- ggplot2::ggplot(
+    eff %>% dplyr::filter(is.finite(.data$purity), is.finite(.data$size), .data$size > 0),
+    ggplot2::aes(x = .data$purity, y = .data$size, color = .data$coverage_lab)
+  ) +
+    ggplot2::geom_point(alpha = 0.45, size = scatter_point_size) +
+    ggplot2::geom_vline(xintercept = purity_cutoff, linetype = "dashed", color = "grey25") +
+    ggplot2::scale_y_log10() +
+    ggplot2::scale_color_manual(values = cov_palette, name = "95% CS") +
+    ggplot2::labs(
+      x = "Credible-set purity (minimum pairwise |r|)",
+      y = "95% credible-set size",
+      title = "Classical credible-set summaries",
+      subtitle = "Dashed line: 0.50 purity threshold."
+    ) +
+    ggplot2::theme_bw(base_size = 11) +
+    ggplot2::theme(legend.position = "bottom")
+}
+
+if (exists("p_old_cs")) {
+  old_cs_path <- file.path(plot_dir, "diag_old_cs_purity_size_coverage.png")
+  ggplot2::ggsave(old_cs_path, p_old_cs, width = 7, height = 5.5, dpi = 300)
+  cat("Old-CS diagnostic plot written to:", old_cs_path, "\n")
+}
+
 if (exists("purity_keff_plot_data") && !is.null(purity_keff_plot_data)) {
   p_purity_keff_accuracy <- ggplot2::ggplot(
     purity_keff_plot_data %>%
@@ -885,13 +961,13 @@ if (exists("purity_keff_plot_data") && !is.null(purity_keff_plot_data)) {
                   p_purity_keff_accuracy, width = 7, height = 5.5, dpi = 300)
   cat("Purity/effective-support accuracy plot written to:", purity_keff_accuracy_path, "\n")
 }
-required_paper_plot_objects <- c("p_auprc", "p_purity_acc", "p_keff_acc", "p_purity_keff")
+required_paper_plot_objects <- c("p_pr_curves", "p_old_cs", "p_keff_acc", "p_purity_keff_accuracy")
 missing_paper_plot_objects <- required_paper_plot_objects[
   !vapply(required_paper_plot_objects, exists, logical(1), inherits = TRUE)
 ]
 if (length(missing_paper_plot_objects)) {
   stop(
-    "Paper composite requires these plot objects; rerun the plot chunks first and ensure effect_metrics_unfiltered_full.csv is available: ",
+    "Paper composite requires these plot objects; rerun the plot chunks first and ensure confusion_bins.csv plus effect_metrics_unfiltered_full.csv are available: ",
     paste(missing_paper_plot_objects, collapse = ", ")
   )
 }
@@ -980,34 +1056,21 @@ save_paper_grid <- function(filename, panels, labels, legend_grob = NULL,
   invisible(filename)
 }
 
-paper_shared_legend <- extract_plot_legend(
-  p_purity_acc +
-    paper_panel_theme +
-    ggplot2::guides(
-      color = ggplot2::guide_legend(
-        nrow = 1,
-        override.aes = list(alpha = 0.75, size = 4)
-      )
-    )
-)
+paper_shared_legend <- NULL
 
 paper_panels <- list(
-  p_auprc +
-    ggplot2::labs(title = "Pooled AUPRC by credible-set filter") +
-    paper_panel_theme +
-    ggplot2::theme(legend.position = "none"),
-  p_purity_acc +
-    ggplot2::labs(title = "Purity versus causal coverage", y = "Accuracy ratio") +
-    paper_panel_theme +
-    ggplot2::theme(legend.position = "none"),
+  p_pr_curves +
+    ggplot2::labs(title = "Pooled precision-recall curves") +
+    paper_panel_theme,
+  p_old_cs +
+    ggplot2::labs(title = "Classical CS summaries") +
+    paper_panel_theme,
   p_keff_acc +
     ggplot2::labs(title = "Effective support versus accuracy", y = "Accuracy ratio") +
-    paper_panel_theme +
-    ggplot2::theme(legend.position = "none"),
-  p_purity_keff +
+    paper_panel_theme,
+  p_purity_keff_accuracy +
     ggplot2::labs(title = "Purity versus effective support") +
-    paper_panel_theme +
-    ggplot2::theme(legend.position = "none")
+    paper_panel_theme
 )
 
 paper_purity_filter_path <- file.path(plot_dir, "paper_purity_filter_composite.png")
