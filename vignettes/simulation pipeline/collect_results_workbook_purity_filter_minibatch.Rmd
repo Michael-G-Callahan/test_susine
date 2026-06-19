@@ -410,6 +410,7 @@ p_pr_curves <- ggplot2::ggplot(
     subtitle = "Dotted line: 50% precision. Curves are pooled across all simulation datasets."
   ) +
   ggplot2::theme_bw(base_size = 12) +
+  ggplot2::guides(color = ggplot2::guide_legend(nrow = 2, byrow = TRUE)) +
   ggplot2::theme(legend.position = "bottom")
 
 ggplot2::ggsave(file.path(plot_dir, "pr_curves_by_filter_type.png"),
@@ -480,14 +481,24 @@ p_purity_acc <- ggplot2::ggplot(
 
 # (B) Core-95 k_eff vs accuracy: diffuse effects can still point to causals.
 p_keff_acc <- ggplot2::ggplot(
-  eff %>% dplyr::filter(is.finite(.data$k_eff_core95), is.finite(.data$accuracy_ratio)),
-  ggplot2::aes(x = .data$k_eff_core95, y = .data$accuracy_ratio, color = .data$coverage_lab)
+  eff %>%
+    dplyr::filter(is.finite(.data$k_eff_core95), is.finite(.data$accuracy_ratio)) %>%
+    dplyr::arrange(.data$accuracy_ratio),
+  ggplot2::aes(x = .data$k_eff_core95, y = .data$accuracy_ratio, color = .data$accuracy_ratio)
 ) +
-  ggplot2::geom_point(alpha = 0.45, size = scatter_point_size) +
+  ggplot2::geom_point(alpha = 0.65, size = scatter_point_size) +
   ggplot2::geom_vline(xintercept = keff_filter_cutoff, linetype = "longdash", color = "grey35") +
   ggplot2::geom_hline(yintercept = 0.9, linetype = "dotted", color = "grey45") +
   ggplot2::scale_x_log10() +
-  ggplot2::scale_color_manual(values = cov_palette, name = "Credible set") +
+  ggplot2::scale_color_gradientn(
+    colors = c("#D55E00", "#F0E442", "#0072B2"),
+    name = "Accuracy ratio",
+    guide = ggplot2::guide_colorbar(
+      title.position = "top",
+      barwidth = grid::unit(4.0, "in"),
+      barheight = grid::unit(0.18, "in")
+    )
+  ) +
   ggplot2::labs(
     x = expression("Core-95% effective support (" * k[eff] * ")"),
     y = "Accuracy ratio",
@@ -568,7 +579,12 @@ p_purity_keff_accuracy <- ggplot2::ggplot(
   ggplot2::scale_y_log10() +
   ggplot2::scale_color_gradientn(
     colors = c("#D55E00", "#F0E442", "#0072B2"),
-    name = "Accuracy ratio"
+    name = "Accuracy ratio",
+    guide = ggplot2::guide_colorbar(
+      title.position = "top",
+      barwidth = grid::unit(4.0, "in"),
+      barheight = grid::unit(0.18, "in")
+    )
   ) +
   ggplot2::labs(
     x = "Credible-set purity (minimum pairwise |r|)",
@@ -782,6 +798,7 @@ if (exists("confusion_bins") && !is.null(confusion_bins)) {
         subtitle = "Dotted line: 50% precision. Curves are pooled across all simulation datasets."
       ) +
       ggplot2::theme_bw(base_size = 12) +
+      ggplot2::guides(color = ggplot2::guide_legend(nrow = 2, byrow = TRUE)) +
       ggplot2::theme(legend.position = "bottom")
 
     pr_curve_path <- file.path(plot_dir, "pr_curves_by_filter_type.png")
@@ -831,14 +848,24 @@ if ((!exists("p_purity_acc") || !exists("p_keff_acc") || !exists("p_purity_keff"
     ggplot2::theme(legend.position = "bottom")
 
   p_keff_acc <- ggplot2::ggplot(
-    eff %>% dplyr::filter(is.finite(.data$k_eff_core95), is.finite(.data$accuracy_ratio)),
-    ggplot2::aes(x = .data$k_eff_core95, y = .data$accuracy_ratio, color = .data$coverage_lab)
+    eff %>%
+      dplyr::filter(is.finite(.data$k_eff_core95), is.finite(.data$accuracy_ratio)) %>%
+      dplyr::arrange(.data$accuracy_ratio),
+    ggplot2::aes(x = .data$k_eff_core95, y = .data$accuracy_ratio, color = .data$accuracy_ratio)
   ) +
-    ggplot2::geom_point(alpha = 0.45, size = scatter_point_size) +
+    ggplot2::geom_point(alpha = 0.65, size = scatter_point_size) +
     ggplot2::geom_vline(xintercept = keff_filter_cutoff, linetype = "longdash", color = "grey35") +
     ggplot2::geom_hline(yintercept = 0.9, linetype = "dotted", color = "grey45") +
     ggplot2::scale_x_log10() +
-    ggplot2::scale_color_manual(values = cov_palette, name = "Credible set") +
+    ggplot2::scale_color_gradientn(
+      colors = c("#D55E00", "#F0E442", "#0072B2"),
+      name = "Accuracy ratio",
+      guide = ggplot2::guide_colorbar(
+        title.position = "top",
+        barwidth = grid::unit(4.0, "in"),
+        barheight = grid::unit(0.18, "in")
+      )
+    ) +
     ggplot2::labs(
       x = expression("Core-95% effective support (" * k[eff] * ")"),
       y = "Accuracy ratio",
@@ -945,7 +972,12 @@ if (exists("purity_keff_plot_data") && !is.null(purity_keff_plot_data)) {
     ggplot2::scale_y_log10() +
     ggplot2::scale_color_gradientn(
       colors = c("#D55E00", "#F0E442", "#0072B2"),
-      name = "Accuracy ratio"
+      name = "Accuracy ratio",
+      guide = ggplot2::guide_colorbar(
+        title.position = "top",
+        barwidth = grid::unit(4.0, "in"),
+        barheight = grid::unit(0.18, "in")
+      )
     ) +
     ggplot2::labs(
       x = "Credible-set purity (minimum pairwise |r|)",
