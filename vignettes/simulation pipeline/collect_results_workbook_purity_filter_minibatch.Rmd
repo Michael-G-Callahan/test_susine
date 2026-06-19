@@ -651,6 +651,73 @@ kable(filter_retention_summary, digits = 4,
 # 6. Paper Figure Composite
 
 ```{r paper-figure-composite}
+if (exists("confusion_bins") && !is.null(confusion_bins)) {
+  pr_required_cols <- c(
+    "filter_type", "pip_threshold", "n_causal_at_bucket", "n_noncausal_at_bucket"
+  )
+  if (all(pr_required_cols %in% names(confusion_bins))) {
+    pr_curves_by_filter <- confusion_bins %>%
+      dplyr::group_by(.data$filter_type, .data$pip_threshold) %>%
+      dplyr::summarise(
+        n_causal_at_bucket = sum(.data$n_causal_at_bucket, na.rm = TRUE),
+        n_noncausal_at_bucket = sum(.data$n_noncausal_at_bucket, na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      dplyr::group_by(.data$filter_type) %>%
+      dplyr::arrange(dplyr::desc(.data$pip_threshold), .by_group = TRUE) %>%
+      dplyr::mutate(
+        TP = cumsum(.data$n_causal_at_bucket),
+        FP = cumsum(.data$n_noncausal_at_bucket),
+        total_causal = sum(.data$n_causal_at_bucket, na.rm = TRUE),
+        precision = dplyr::if_else(
+          .data$TP + .data$FP > 0,
+          .data$TP / (.data$TP + .data$FP),
+          NA_real_
+        ),
+        recall = dplyr::if_else(
+          .data$total_causal > 0,
+          .data$TP / .data$total_causal,
+          NA_real_
+        ),
+        filter_label = dplyr::coalesce(
+          unname(filter_labels[as.character(.data$filter_type)]),
+          as.character(.data$filter_type)
+        )
+      ) %>%
+      dplyr::ungroup() %>%
+      dplyr::filter(is.finite(.data$precision), is.finite(.data$recall)) %>%
+      dplyr::mutate(
+        filter_type = factor(as.character(.data$filter_type), levels = filter_levels),
+        filter_label = factor(.data$filter_label, levels = unname(filter_labels[filter_levels]))
+      )
+
+    p_pr_curves <- ggplot2::ggplot(
+      pr_curves_by_filter,
+      ggplot2::aes(x = .data$recall, y = .data$precision, color = .data$filter_label)
+    ) +
+      ggplot2::geom_line(linewidth = 1.1, alpha = 0.9) +
+      ggplot2::geom_hline(yintercept = 0.5, linetype = "dotted", color = "grey45") +
+      ggplot2::coord_cartesian(xlim = c(0, 1), ylim = c(0, 1)) +
+      ggplot2::labs(
+        x = "Recall",
+        y = "Precision",
+        color = "Filter",
+        title = "Pooled precision-recall curves by credible-set filter",
+        subtitle = "Dotted line: 50% precision. Curves are pooled across all simulation datasets."
+      ) +
+      ggplot2::theme_bw(base_size = 12) +
+      ggplot2::theme(legend.position = "bottom")
+
+    pr_curve_path <- file.path(plot_dir, "pr_curves_by_filter_type.png")
+    ggplot2::ggsave(pr_curve_path, p_pr_curves, width = 8, height = 5.5, dpi = 300)
+    cat("PR curves written to:", pr_curve_path, "\n")
+  } else {
+    message(
+      "Skipping PR curve plot; confusion_bins is missing required columns: ",
+      paste(setdiff(pr_required_cols, names(confusion_bins)), collapse = ", ")
+    )
+  }
+}
 if ((!exists("p_purity_acc") || !exists("p_keff_acc") || !exists("p_purity_keff")) &&
     exists("effect_unfiltered") && !is.null(effect_unfiltered)) {
   eff <- effect_unfiltered %>%
