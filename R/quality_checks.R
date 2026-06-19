@@ -29,7 +29,7 @@ validate_metrics_coverage <- function(aggregated_dir, require_multimodal = TRUE)
       "run_id", "use_case_id", "effect", "size", "purity", "coverage",
       "effect_pip_entropy", "effect_pip_entropy_core95",
       "effect_k_eff_signal", "effect_k_eff_signal_core95",
-      "tail_inflation_ratio", "tail_inflation_log", "accuracy_ratio"
+      "tail_inflation_ratio", "tail_inflation_log", "causal_pip_mass", "accuracy_ratio"
     ),
     dataset_metrics = c("dataset_bundle_id", "M1", "z_topk_ratio", "z_max_abs", "z_count_abs_gt_3", "z_eff_signals", "high_ld_count_095", "high_ld_count_095_per_snp", "high_ld_frac_095"),
     confusion_bins = c("run_id", "pip_threshold", "n_causal_at_bucket", "n_noncausal_at_bucket"),

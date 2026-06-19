@@ -45,6 +45,7 @@ test_that("evaluate_model reports effect diffuseness and accuracy metrics", {
     "effect_k_eff_signal_core95",
     "tail_inflation_ratio",
     "tail_inflation_log",
+    "causal_pip_mass",
     "accuracy_ratio"
   ) %in% names(eff)))
   expect_equal(nrow(res$effects_filtered), 2L)
@@ -52,6 +53,7 @@ test_that("evaluate_model reports effect diffuseness and accuracy metrics", {
   expect_equal(eff$size, c(3, 4))
   expect_equal(eff$coverage, c(1L, 1L))
   expect_equal(eff$accuracy_ratio, c(0.1 / 0.8, 0.3 / 0.4), tolerance = 1e-12)
+  expect_equal(eff$causal_pip_mass, c(0.1, 0.3), tolerance = 1e-12)
 
   entropy_1 <- -sum(alpha_1 * log(alpha_1))
   core_1 <- alpha_1[c(1, 2, 3)] / sum(alpha_1[c(1, 2, 3)])

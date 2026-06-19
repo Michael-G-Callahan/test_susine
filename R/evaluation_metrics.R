@@ -132,6 +132,19 @@ effect_accuracy_ratio <- function(alpha_vec, causal_idx) {
   max_causal / max_any
 }
 
+effect_causal_pip_mass <- function(alpha_vec, causal_idx) {
+  p <- normalize_prob_vec(alpha_vec)
+  if (!length(causal_idx)) return(NA_real_)
+
+  valid_causal <- unique(as.integer(causal_idx[is.finite(causal_idx)]))
+  valid_causal <- valid_causal[valid_causal >= 1L & valid_causal <= length(p)]
+  if (!length(valid_causal)) return(NA_real_)
+
+  causal_mass <- sum(p[valid_causal], na.rm = TRUE)
+  if (!is.finite(causal_mass)) return(NA_real_)
+  causal_mass
+}
+
 # Per-effect metrics given one alpha vector
 cs_metrics_one_effect <- function(alpha_vec, X, causal_idx, rho = 0.95,
                                   purity_cache = NULL, cor_mat = NULL) {
@@ -158,6 +171,7 @@ cs_metrics_one_effect <- function(alpha_vec, X, causal_idx, rho = 0.95,
     NA_real_
   }
   accuracy_ratio <- effect_accuracy_ratio(alpha_prob, causal_idx)
+  causal_pip_mass <- effect_causal_pip_mass(alpha_prob, causal_idx)
   list(
     indices = cs,
     size = size,
@@ -169,6 +183,7 @@ cs_metrics_one_effect <- function(alpha_vec, X, causal_idx, rho = 0.95,
     effect_k_eff_signal_core95 = effect_k_eff_signal_core95,
     tail_inflation_ratio = tail_inflation_ratio,
     tail_inflation_log = tail_inflation_log,
+    causal_pip_mass = causal_pip_mass,
     accuracy_ratio = accuracy_ratio
   )
 }
@@ -356,6 +371,7 @@ evaluate_model <- function(fit, X, y = NULL, causal_idx = integer(0),
     effect_k_eff_signal_core95  = sapply(eff, `[[`, "effect_k_eff_signal_core95"),
     tail_inflation_ratio        = sapply(eff, `[[`, "tail_inflation_ratio"),
     tail_inflation_log          = sapply(eff, `[[`, "tail_inflation_log"),
+    causal_pip_mass             = sapply(eff, `[[`, "causal_pip_mass"),
     accuracy_ratio              = sapply(eff, `[[`, "accuracy_ratio"),
     stringsAsFactors = FALSE
   )
