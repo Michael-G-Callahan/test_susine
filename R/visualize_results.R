@@ -184,9 +184,6 @@ compute_auprc_from_pooled_confusion <- function(pooled_bins,
       if (!any(valid)) {
         val <- NA_real_
         keep_group[[i]] <- FALSE
-      } else if (sum(valid) < 2L) {
-        val <- NA_real_
-        keep_group[[i]] <- TRUE
       } else {
         val <- compute_auprc_single(precision[valid], recall[valid])
         keep_group[[i]] <- TRUE
@@ -275,8 +272,6 @@ compute_auprc_from_pooled_confusion_dt <- function(pooled_bins,
           n_valid <- sum(valid)
           if (!n_valid) {
             list(keep = FALSE, AUPRC = NA_real_)
-          } else if (n_valid < 2L) {
-            list(keep = TRUE, AUPRC = NA_real_)
           } else {
             precision <- precision[valid]
             recall <- recall[valid]
@@ -498,7 +493,7 @@ compute_auprc_single <- function(precision, recall) {
     dplyr::filter(!is.na(precision), !is.na(recall)) %>%
     dplyr::arrange(recall)
 
-  if (nrow(df) < 2) return(NA_real_)
+  if (!nrow(df)) return(NA_real_)
 
   # Step-function AP: sum of precision * delta_recall at each threshold
   delta_recall <- c(df$recall[1], diff(df$recall))

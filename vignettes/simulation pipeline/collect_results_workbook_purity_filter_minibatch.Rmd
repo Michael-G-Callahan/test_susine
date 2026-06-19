@@ -294,7 +294,7 @@ p_auprc <- ggplot2::ggplot(
   ggplot2::geom_col(fill = "#1F77B4", width = 0.7) +
   ggplot2::geom_hline(yintercept = auprc_no_filter, linetype = "dashed", color = "grey30") +
   ggplot2::geom_text(ggplot2::aes(label = sprintf("%.3f", .data$AUPRC)),
-                     vjust = -0.4, size = 3.5) +
+                     vjust = -0.35, size = 6.4) +
   ggplot2::labs(
     x = NULL, y = "Pooled AUPRC",
     title = "Credible-set filtering changes per-variant AUPRC",
@@ -331,14 +331,15 @@ eff <- effect_unfiltered %>%
 
 cov_palette <- c("Contains causal variant" = "#0072B2", "No causal variant" = "#D55E00")
 purity_cutoff <- 0.50
-scatter_point_size <- 1.35
+keff_filter_cutoff <- 100
+scatter_point_size <- 3.2
 
 # (A) Purity vs accuracy: are low-purity sets actually inaccurate?
 p_purity_acc <- ggplot2::ggplot(
   eff %>% dplyr::filter(is.finite(.data$purity), is.finite(.data$accuracy_ratio)),
   ggplot2::aes(x = .data$purity, y = .data$accuracy_ratio, color = .data$coverage_lab)
 ) +
-  ggplot2::geom_point(alpha = 0.3, size = scatter_point_size) +
+  ggplot2::geom_point(alpha = 0.45, size = scatter_point_size) +
   ggplot2::geom_vline(xintercept = purity_cutoff, linetype = "dashed", color = "grey25") +
   ggplot2::scale_color_manual(values = cov_palette, name = "Credible set") +
   ggplot2::labs(
@@ -356,7 +357,8 @@ p_size_keff <- ggplot2::ggplot(
   ggplot2::aes(x = .data$size, y = .data$k_eff_core95, color = .data$coverage_lab)
 ) +
   ggplot2::geom_abline(slope = 1, intercept = 0, linetype = "dotted", color = "grey50") +
-  ggplot2::geom_point(alpha = 0.3, size = scatter_point_size) +
+  ggplot2::geom_hline(yintercept = keff_filter_cutoff, linetype = "longdash", color = "grey35") +
+  ggplot2::geom_point(alpha = 0.45, size = scatter_point_size) +
   ggplot2::scale_x_log10() +
   ggplot2::scale_y_log10() +
   ggplot2::scale_color_manual(values = cov_palette, name = "Credible set") +
@@ -404,14 +406,15 @@ p_purity_keff <- ggplot2::ggplot(
   purity_keff_plot_data,
   ggplot2::aes(x = .data$purity, y = .data$k_eff_core95, color = .data$coverage_lab)
 ) +
-  ggplot2::geom_point(alpha = 0.3, size = scatter_point_size) +
+  ggplot2::geom_point(alpha = 0.45, size = scatter_point_size) +
   ggplot2::geom_vline(xintercept = purity_cutoff, linetype = "dashed", color = "grey25") +
+  ggplot2::geom_hline(yintercept = keff_filter_cutoff, linetype = "longdash", color = "grey35") +
   ggplot2::geom_label(
     data = purity_side_summary,
     ggplot2::aes(x = .data$x, y = Inf, label = .data$label, hjust = .data$hjust),
     inherit.aes = FALSE,
     vjust = 1.15,
-    size = 3.1,
+    size = 5.4,
     label.size = 0,
     fill = "white",
     alpha = 0.85
@@ -440,7 +443,7 @@ p_purity_keff
 ```
 
 ```{r effect-diagnostics-summary, eval = !is.null(effect_unfiltered)}
-# Quantify "high-quality but low-purity" and "high-purity but inaccurate" effects.
+# Quantify the two purity failure modes and the direct k_eff filter target.
 diag_summary <- eff %>%
   dplyr::filter(is.finite(.data$purity), is.finite(.data$accuracy_ratio)) %>%
   dplyr::summarise(
@@ -449,15 +452,77 @@ diag_summary <- eff %>%
                                                   use = "complete.obs", method = "spearman")),
     cor_purity_accuracy = suppressWarnings(stats::cor(.data$purity, .data$accuracy_ratio,
                                                       use = "complete.obs", method = "spearman")),
-    # Accurate (A >= 0.9) AND covers a causal, yet would be dropped at purity 0.95:
     frac_accurate_dropped_at_095 = mean(.data$purity < 0.95 & .data$accuracy_ratio >= 0.9 &
                                           .data$coverage > 0),
-    # High purity (>= 0.95) but inaccurate (A < 0.5):
-    frac_pure_but_inaccurate = mean(.data$purity >= 0.95 & .data$accuracy_ratio < 0.5)
+    frac_pure_but_inaccurate = mean(.data$purity >= 0.95 & .data$accuracy_ratio < 0.5),
+    n_keff_dropped = sum(.data$k_eff_core95 > keff_filter_cutoff, na.rm = TRUE),
+    frac_keff_dropped = mean(.data$k_eff_core95 > keff_filter_cutoff, na.rm = TRUE),
+    frac_keff_dropped_covering_causal = mean(.data$coverage > 0 &
+                                               .data$k_eff_core95 > keff_filter_cutoff,
+                                             na.rm = TRUE),
+    frac_keff_dropped_accurate = mean(.data$coverage > 0 & .data$accuracy_ratio >= 0.9 &
+                                        .data$k_eff_core95 > keff_filter_cutoff,
+                                      na.rm = TRUE),
+    n_low_purity_concentrated_true = sum(.data$purity < purity_cutoff & .data$coverage > 0 &
+                                           .data$accuracy_ratio >= 0.9 & .data$k_eff_core95 <= 5,
+                                         na.rm = TRUE),
+    n_zero_purity_concentrated_true = sum(.data$purity <= 1e-8 & .data$coverage > 0 &
+                                            .data$accuracy_ratio >= 0.9 & .data$k_eff_core95 <= 5,
+                                          na.rm = TRUE),
+    n_high_purity_concentrated_noncausal = sum(.data$purity >= purity_cutoff & .data$coverage <= 0 &
+                                                 .data$k_eff_core95 <= 5,
+                                               na.rm = TRUE)
   )
+
+keff_filter_effect_summary <- eff %>%
+  dplyr::filter(is.finite(.data$k_eff_core95)) %>%
+  dplyr::mutate(
+    filter_group = dplyr::if_else(
+      .data$k_eff_core95 <= keff_filter_cutoff,
+      "kept_by_keff_filter",
+      "dropped_by_keff_filter"
+    )
+  ) %>%
+  dplyr::group_by(.data$filter_group) %>%
+  dplyr::summarise(
+    n_effects = dplyr::n(),
+    frac_covering_causal = mean(.data$coverage > 0, na.rm = TRUE),
+    frac_accuracy_ge_0_9 = mean(.data$accuracy_ratio >= 0.9, na.rm = TRUE),
+    median_accuracy_ratio = stats::median(.data$accuracy_ratio, na.rm = TRUE),
+    median_purity = stats::median(.data$purity, na.rm = TRUE),
+    median_k_eff_core95 = stats::median(.data$k_eff_core95, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+purity_failure_mode_summary <- eff %>%
+  dplyr::filter(is.finite(.data$purity), is.finite(.data$k_eff_core95)) %>%
+  dplyr::mutate(
+    failure_mode = dplyr::case_when(
+      .data$purity < purity_cutoff & .data$coverage > 0 &
+        .data$accuracy_ratio >= 0.9 & .data$k_eff_core95 <= 5 ~
+        "low_purity_concentrated_true",
+      .data$purity <= 1e-8 & .data$coverage > 0 &
+        .data$accuracy_ratio >= 0.9 & .data$k_eff_core95 <= 5 ~
+        "zero_purity_concentrated_true",
+      .data$purity >= purity_cutoff & .data$coverage <= 0 & .data$k_eff_core95 <= 5 ~
+        "high_purity_concentrated_noncausal",
+      .data$k_eff_core95 > keff_filter_cutoff & .data$coverage > 0 ~
+        "diffuse_causal_containing",
+      .data$k_eff_core95 > keff_filter_cutoff & .data$coverage <= 0 ~
+        "diffuse_noncausal",
+      TRUE ~ "other"
+    )
+  ) %>%
+  dplyr::count(.data$failure_mode, name = "n_effects") %>%
+  dplyr::mutate(frac_effects = .data$n_effects / sum(.data$n_effects)) %>%
+  dplyr::arrange(dplyr::desc(.data$n_effects))
 
 kable(diag_summary, digits = 4,
       caption = "Decoupling of classical (purity) and effect-level (accuracy / k_eff) diagnostics")
+kable(keff_filter_effect_summary, digits = 4,
+      caption = "Effect-level composition of the direct k_eff filter")
+kable(purity_failure_mode_summary, digits = 4,
+      caption = "Effect counts for purity and diffuseness failure modes")
 ```
 
 # 6. Paper Figure Composite
@@ -475,16 +540,16 @@ if (length(missing_paper_plot_objects)) {
 }
 
 paper_panel_theme <- ggplot2::theme(
-  plot.title = ggplot2::element_text(size = 11, face = "bold", hjust = 0.5),
+  plot.title = ggplot2::element_text(size = 24, face = "bold", hjust = 0.5),
   plot.subtitle = ggplot2::element_blank(),
   plot.caption = ggplot2::element_blank(),
-  axis.title = ggplot2::element_text(size = 10),
-  axis.text = ggplot2::element_text(size = 9),
-  legend.title = ggplot2::element_text(size = 9),
-  legend.text = ggplot2::element_text(size = 8),
+  axis.title = ggplot2::element_text(size = 22),
+  axis.text = ggplot2::element_text(size = 20),
+  legend.title = ggplot2::element_text(size = 22),
+  legend.text = ggplot2::element_text(size = 20),
   legend.position = "bottom",
   legend.direction = "horizontal",
-  plot.margin = ggplot2::margin(7, 7, 7, 7)
+  plot.margin = ggplot2::margin(10, 10, 10, 10)
 )
 
 extract_plot_legend <- function(plot) {
@@ -505,7 +570,7 @@ open_png_device <- function(filename, width, height, dpi = 300) {
 }
 
 save_paper_grid <- function(filename, panels, labels, legend_grob = NULL,
-                            width = 13.5, height = 9.3, dpi = 300) {
+                            width = 19.8, height = 20.7, dpi = 300) {
   stopifnot(length(panels) == 4L, length(labels) == 4L)
 
   open_png_device(filename, width = width, height = height, dpi = dpi)
@@ -526,7 +591,7 @@ save_paper_grid <- function(filename, panels, labels, legend_grob = NULL,
     layout <- grid::grid.layout(
       nrow = 3, ncol = 2,
       widths = grid::unit(c(1, 1), "null"),
-      heights = grid::unit.c(grid::unit(c(1, 1), "null"), grid::unit(0.42, "in"))
+      heights = grid::unit.c(grid::unit(c(1, 1), "null"), grid::unit(0.85, "in"))
     )
   }
   grid::pushViewport(grid::viewport(layout = layout))
@@ -544,7 +609,7 @@ save_paper_grid <- function(filename, panels, labels, legend_grob = NULL,
       x = grid::unit(0.01, "npc"),
       y = grid::unit(0.99, "npc"),
       just = c("left", "top"),
-      gp = grid::gpar(fontsize = 17, fontface = "bold")
+      gp = grid::gpar(fontsize = 30, fontface = "bold")
     )
     grid::popViewport()
   }
@@ -564,7 +629,7 @@ paper_shared_legend <- extract_plot_legend(
     ggplot2::guides(
       color = ggplot2::guide_legend(
         nrow = 1,
-        override.aes = list(alpha = 0.75, size = 1.8)
+        override.aes = list(alpha = 0.75, size = 4)
       )
     )
 )

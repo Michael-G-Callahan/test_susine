@@ -28,6 +28,23 @@ test_that("pooled AUPRC uses step-function average precision", {
   expect_equal(pooled$AUPRC[[1]], 0.70, tolerance = 1e-12)
 })
 
+test_that("pooled AUPRC handles one-threshold all-zero filtered groups", {
+  bins <- tibble::tibble(
+    metric_group = "all_zero",
+    pip_threshold = 0,
+    n_causal_at_bucket = 2,
+    n_noncausal_at_bucket = 8
+  )
+
+  expect_equal(test_susine:::auprc_from_pooled_bins(bins), 0.2, tolerance = 1e-12)
+
+  pooled <- test_susine:::compute_auprc_from_pooled_confusion(
+    pooled_bins = bins,
+    group_vars = "metric_group"
+  )
+  expect_equal(pooled$AUPRC[[1]], 0.2, tolerance = 1e-12)
+})
+
 test_that("TPR@FPR helper matches pooled-confusion implementation", {
   bins <- tibble::tibble(
     metric_group = "g1",

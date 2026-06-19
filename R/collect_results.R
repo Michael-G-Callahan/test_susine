@@ -817,7 +817,7 @@ auprc_from_pooled_bins <- function(bins) {
   precision <- ifelse(denom > 0, cum_tp / denom, NA_real_)
   recall <- cum_tp / total_p
   valid <- !is.na(precision) & !is.na(recall)
-  if (sum(valid) < 2L) return(NA_real_)
+  if (!any(valid)) return(NA_real_)
   compute_auprc_single(precision[valid], recall[valid])
 }
 

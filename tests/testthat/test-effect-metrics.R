@@ -85,3 +85,45 @@ test_that("evaluate_model reports effect diffuseness and accuracy metrics", {
   expect_equal(eff$tail_inflation_ratio[[2]], 1, tolerance = 1e-12)
   expect_equal(eff$tail_inflation_log[[2]], 0, tolerance = 1e-12)
 })
+test_that("purity_filter_confusion_sweep recomputes PIPs after dropping diffuse effects", {
+  alpha <- rbind(
+    c(0.90, 0.02, 0.02, 0.03, 0.03),
+    c(0.01, 0.55, 0.14, 0.15, 0.15),
+    c(0.01, 0.01, 0.01, 0.85, 0.12)
+  )
+
+  effects <- tibble::tibble(
+    purity = c(0.8, 0.8, 0.8),
+    effect_k_eff_signal_core95 = c(1.4, 5.0, 1.5)
+  )
+  causal_vec <- c(1L, 1L, 0L, 0L, 0L)
+
+  bins <- test_susine:::purity_filter_confusion_sweep(
+    alpha = alpha,
+    effects_unfiltered = effects,
+    causal_vec = causal_vec,
+    causal_mask = c(1L, 2L),
+    pip_breaks = seq(0, 1, by = 0.001),
+    purity_thresholds = 0.5,
+    keff_core95_max = 3,
+    pip_bucket_width = 0.001
+  )
+
+  expect_equal(
+    unique(bins$n_effects_kept[bins$filter_type == "keff_core95_le_3"]),
+    2
+  )
+
+  auprc <- test_susine::compute_auprc_from_confusion(
+    bins,
+    group_vars = "filter_type"
+  )
+  no_filter <- auprc$AUPRC[auprc$filter_type == "no_filter"]
+  keff_filter <- auprc$AUPRC[auprc$filter_type == "keff_core95_le_3"]
+
+  expect_lt(keff_filter, no_filter)
+
+  pip_unfiltered <- test_susine:::combined_pip_from_alpha(alpha)
+  pip_filtered <- test_susine:::combined_pip_from_alpha(alpha[c(1, 3), , drop = FALSE])
+  expect_lt(pip_filtered[[2]], pip_unfiltered[[2]])
+})
