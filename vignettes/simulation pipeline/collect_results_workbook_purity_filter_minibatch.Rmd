@@ -318,7 +318,7 @@ effect-level metrics introduced in the paper (core-95% $k_{\mathrm{eff}}$,
 accuracy ratio). `coverage = 1` marks effects whose credible set actually
 contains a true causal variant.
 
-```{r effect-diagnostics, eval = !is.null(effect_unfiltered)}
+```{r effect-diagnostics, eval = exists("effect_unfiltered") && !is.null(effect_unfiltered)}
 eff <- effect_unfiltered %>%
   dplyr::filter(.data$size > 0) %>%                 # active effects only
   dplyr::mutate(
@@ -445,7 +445,7 @@ p_size_keff
 p_purity_keff
 ```
 
-```{r effect-diagnostics-summary, eval = !is.null(effect_unfiltered)}
+```{r effect-diagnostics-summary, eval = exists("effect_unfiltered") && !is.null(effect_unfiltered)}
 # Quantify the two purity failure modes and the direct k_eff filter target.
 diag_summary <- eff %>%
   dplyr::filter(is.finite(.data$purity), is.finite(.data$accuracy_ratio)) %>%
@@ -528,6 +528,25 @@ kable(purity_failure_mode_summary, digits = 4,
       caption = "Effect counts for purity and diffuseness failure modes")
 ```
 
+```{r filter-retention-summary, eval = exists("confusion_bins") && !is.null(confusion_bins) && all(c("filter_type", "dataset_bundle_id", "n_effects_kept") %in% names(confusion_bins))}
+filter_retention_summary <- confusion_bins %>%
+  dplyr::distinct(.data$filter_type, .data$dataset_bundle_id, .data$n_effects_kept) %>%
+  dplyr::group_by(.data$filter_type) %>%
+  dplyr::summarise(
+    n_datasets = dplyr::n(),
+    n_all_effects_dropped = sum(.data$n_effects_kept == 0, na.rm = TRUE),
+    frac_all_effects_dropped = mean(.data$n_effects_kept == 0, na.rm = TRUE),
+    mean_effects_kept = mean(.data$n_effects_kept, na.rm = TRUE),
+    median_effects_kept = stats::median(.data$n_effects_kept, na.rm = TRUE),
+    min_effects_kept = min(.data$n_effects_kept, na.rm = TRUE),
+    max_effects_kept = max(.data$n_effects_kept, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+kable(filter_retention_summary, digits = 4,
+      caption = "Effect retention by filter; all-zero filtered fits have n_effects_kept = 0")
+```
+
 # 6. Paper Figure Composite
 
 ```{r paper-figure-composite}
@@ -537,7 +556,7 @@ missing_paper_plot_objects <- required_paper_plot_objects[
 ]
 if (length(missing_paper_plot_objects)) {
   stop(
-    "Paper composite requires these plot objects; rerun the plot chunks first: ",
+    "Paper composite requires these plot objects; rerun the plot chunks first and ensure effect_metrics_unfiltered_full.csv is available: ",
     paste(missing_paper_plot_objects, collapse = ", ")
   )
 }
@@ -680,15 +699,39 @@ if (isTRUE(run_collection) || !consolidated_summary_cache_available) {
   write_if_present(auprc_pooled, "auprc_by_filter_type.csv")
   write_if_present(auprc_per_dataset, "auprc_per_dataset_by_filter.csv")
   write_if_present(per_dataset_summary, "auprc_per_dataset_delta_summary.csv")
-  if (exists("diag_summary")) write_if_present(diag_summary, "effect_diagnostic_summary.csv")
-  write_if_present(effect_unfiltered, "effect_metrics_unfiltered_full.csv")
+  if (exists("effect_unfiltered")) write_if_present(effect_unfiltered, "effect_metrics_unfiltered_full.csv")
 
   cat("Consolidated files written to:", consolidated_dir, "\n")
 } else {
   cat("Skipped consolidated data export; consolidated summary cache already exists.\n")
 }
+if (exists("diag_summary")) write_if_present(diag_summary, "effect_diagnostic_summary.csv")
+if (exists("keff_filter_effect_summary")) write_if_present(keff_filter_effect_summary, "keff_filter_effect_summary.csv")
+if (exists("purity_failure_mode_summary")) write_if_present(purity_failure_mode_summary, "purity_failure_mode_summary.csv")
+if (exists("filter_retention_summary")) write_if_present(filter_retention_summary, "filter_retention_summary.csv")
+if (exists("effect_unfiltered")) write_if_present(effect_unfiltered, "effect_metrics_unfiltered_full.csv")
+
 cat("Plots written to:", plot_dir, "\n")
 if (exists("paper_purity_filter_path")) {
   cat("Paper composite:", paper_purity_filter_path, "\n")
 }
+
+diagnostic_csvs <- c(
+  "auprc_by_filter_type.csv",
+  "auprc_per_dataset_by_filter.csv",
+  "auprc_per_dataset_delta_summary.csv",
+  "effect_diagnostic_summary.csv",
+  "keff_filter_effect_summary.csv",
+  "purity_failure_mode_summary.csv",
+  "filter_retention_summary.csv",
+  "effect_metrics_unfiltered_full.csv",
+  "confusion_bins.csv"
+)
+diagnostic_paths <- tibble::tibble(
+  diagnostic = diagnostic_csvs,
+  path = file.path(consolidated_dir, diagnostic_csvs)
+) %>%
+  dplyr::mutate(exists = file.exists(.data$path))
+cat("\nDiagnostic CSVs to download/send back if validating Figure 4:\n")
+print(diagnostic_paths, n = Inf)
 ```
