@@ -570,7 +570,7 @@ open_png_device <- function(filename, width, height, dpi = 300) {
 }
 
 save_paper_grid <- function(filename, panels, labels, legend_grob = NULL,
-                            width = 19.8, height = 20.7, dpi = 300) {
+                            width = 19.8, height = 14.5, dpi = 300) {
   stopifnot(length(panels) == 4L, length(labels) == 4L)
 
   open_png_device(filename, width = width, height = height, dpi = dpi)
