@@ -348,7 +348,7 @@ p_purity_acc <- ggplot2::ggplot(
   ggplot2::scale_color_manual(values = cov_palette, name = "Credible set") +
   ggplot2::labs(
     x = "Credible-set purity (minimum pairwise |r|)",
-    y = "Accuracy ratio, A (top causal PIP / top PIP)",
+    y = "Accuracy ratio",
     title = "Purity vs accuracy",
     subtitle = "Dashed line: 0.50 purity threshold."
   ) +
@@ -367,7 +367,7 @@ p_keff_acc <- ggplot2::ggplot(
   ggplot2::scale_color_manual(values = cov_palette, name = "Credible set") +
   ggplot2::labs(
     x = expression("Core-95% effective support (" * k[eff] * ")"),
-    y = "Accuracy ratio, A (top causal PIP / top PIP)",
+    y = "Accuracy ratio",
     title = "Effective support vs accuracy",
     subtitle = "Long dash: k_eff = 100 filter. Dotted line: A = 0.9."
   ) +
@@ -590,7 +590,7 @@ if ((!exists("p_purity_acc") || !exists("p_keff_acc") || !exists("p_purity_keff"
     ggplot2::scale_color_manual(values = cov_palette, name = "Credible set") +
     ggplot2::labs(
       x = "Credible-set purity (minimum pairwise |r|)",
-      y = "Accuracy ratio, A (top causal PIP / top PIP)",
+      y = "Accuracy ratio",
       title = "Purity vs accuracy",
       subtitle = "Dashed line: 0.50 purity threshold."
     ) +
@@ -608,7 +608,7 @@ if ((!exists("p_purity_acc") || !exists("p_keff_acc") || !exists("p_purity_keff"
     ggplot2::scale_color_manual(values = cov_palette, name = "Credible set") +
     ggplot2::labs(
       x = expression("Core-95% effective support (" * k[eff] * ")"),
-      y = "Accuracy ratio, A (top causal PIP / top PIP)",
+      y = "Accuracy ratio",
       title = "Effective support vs accuracy",
       subtitle = "Long dash: k_eff = 100 filter. Dotted line: A = 0.9."
     ) +
