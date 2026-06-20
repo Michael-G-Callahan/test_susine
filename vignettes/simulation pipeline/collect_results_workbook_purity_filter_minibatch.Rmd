@@ -1373,10 +1373,16 @@ collinearity) between the paired axes, and (iii) refit every model under
 ```{r metric-diagnostics-robustness, eval = exists("diag_df") && !is.null(diag_df)}
 # ---- Response distribution: causal PIP mass is spiky at the boundaries --------
 cm <- diag_df$causal_pip_mass
+resp_dist <- tibble::tibble(
+  n           = length(cm),
+  pct_exact_0 = 100 * mean(cm == 0),
+  pct_exact_1 = 100 * mean(cm == 1),
+  median      = stats::median(cm),
+  mean        = mean(cm)
+)
 cat("Causal PIP mass distribution (n =", length(cm), "active effects):\n")
 cat(sprintf("  exactly 0 : %.1f%%   exactly 1 : %.1f%%   median : %.3f   mean : %.3f\n\n",
-            100 * mean(cm == 0), 100 * mean(cm == 1),
-            stats::median(cm), mean(cm)))
+            resp_dist$pct_exact_0, resp_dist$pct_exact_1, resp_dist$median, resp_dist$mean))
 
 # ---- Full Spearman correlation matrix among metrics + response ---------------
 cor_vars <- diag_df %>%
@@ -1388,8 +1394,9 @@ cor_vars <- diag_df %>%
     cs_size         = .data$size,
     purity          = .data$purity
   )
+spearman_mat <- stats::cor(cor_vars, method = "spearman")
 cat("Spearman correlation matrix:\n")
-print(round(stats::cor(cor_vars, method = "spearman"), 2))
+print(round(spearman_mat, 2))
 
 # ---- Concurvity: are the OLD axes redundant where the NEW ones are not? -------
 # ~1 means one axis is well-approximated by the other (a redundant dimension).
@@ -1402,11 +1409,11 @@ conc_worst <- function(formula_str) {
   w <- mgcv::concurvity(fit, full = TRUE)["worst", ]
   max(w[names(w) != "para"], na.rm = TRUE)
 }
+conc_old <- conc_worst("causal_pip_mass ~ s(purity, k = 5) + s(log_size, k = 5)")
+conc_new <- conc_worst("causal_pip_mass ~ s(log_keff, k = 5) + s(accuracy_ratio, k = 5)")
 cat("\nWorst-case concurvity between the two axes (1 = redundant):\n")
-cat(sprintf("  old plane  s(purity) + s(log_size)   : %.3f\n",
-            conc_worst("causal_pip_mass ~ s(purity, k = 5) + s(log_size, k = 5)")))
-cat(sprintf("  new plane  s(log_keff) + s(accuracy) : %.3f\n",
-            conc_worst("causal_pip_mass ~ s(log_keff, k = 5) + s(accuracy_ratio, k = 5)")))
+cat(sprintf("  old plane  s(purity) + s(log_size)   : %.3f\n", conc_old))
+cat(sprintf("  new plane  s(log_keff) + s(accuracy) : %.3f\n", conc_new))
 
 # ---- Dataset-grouped CV: honest out-of-sample PVE (rows clustered by locus) ---
 if (all(is.na(diag_df$dataset_id))) {
@@ -1449,6 +1456,76 @@ print(as.data.frame(cv_table), row.names = FALSE, digits = 3)
 if (exists("consolidated_dir")) {
   readr::write_csv(cv_table, file.path(consolidated_dir, "metric_pve_cv_causal_pip_mass.csv"))
 }
+```
+
+# 8b. Receipts: consolidated results package
+
+Bundles every diagnostic number above into one human-readable Markdown report
+plus matching CSVs, all in the consolidated directory — download these for the
+writeup.
+
+```{r metric-diagnostics-receipts, eval = exists("pve_table") && exists("cv_table") && exists("spearman_mat")}
+kbl <- function(x, digits = 3) as.character(knitr::kable(x, format = "pipe", digits = digits))
+
+spearman_tbl <- tibble::as_tibble(round(spearman_mat, 3), rownames = "metric")
+conc_tbl <- tibble::tibble(
+  plane            = c("Old: purity + size", "New: k_eff + accuracy"),
+  worst_concurvity = c(conc_old, conc_new)
+)
+n_groups <- dplyr::n_distinct(diag_df$.cv_group)
+
+md <- character(0)
+add <- function(...) md <<- c(md, ..., "")
+
+add("# Metric diagnostics — purity-filter minibatch receipts")
+add(
+  sprintf("- **Job:** `%s`", parent_job_id),
+  sprintf("- **Units:** %d active single-effects across %d CV groups (loci)",
+          nrow(diag_df), n_groups),
+  "- **Response:** causal PIP mass per effect (truth-aware quality measure)",
+  sprintf("- **Generated:** %s", format(Sys.time(), "%Y-%m-%d %H:%M %Z"))
+)
+add("## 1. Response distribution", kbl(resp_dist))
+add("## 2. Spearman correlation matrix",
+    "Truth-aware: causal_pip_mass, accuracy, coverage. Truth-agnostic: k_eff, cs_size, purity.",
+    kbl(spearman_tbl))
+add("## 3. Concurvity between paired axes (1 = redundant)", kbl(conc_tbl))
+add("## 4. Deviance explained in causal PIP mass — in-sample (quasibinomial GAM)",
+    kbl(pve_table))
+add(sprintf("## 5. Deviance explained — dataset-grouped %d-fold CV (out-of-sample)", K_cv),
+    kbl(cv_table))
+if (exists("auprc_pooled") && !is.null(auprc_pooled) && nrow(auprc_pooled)) {
+  add("## 6. Filtering receipt — pooled AUPRC by filter type",
+      "Panel A evidence: hard credible-set filtering never beats no-filter.",
+      kbl(as.data.frame(auprc_pooled)))
+}
+add("## Notes",
+    "- The effects are clustered ~L per locus; all out-of-sample numbers use dataset-grouped folds.",
+    "- `accuracy` and `coverage` are truth-aware (functions of the causal index); `purity`, `cs_size`, `k_eff` are truth-agnostic.",
+    "- PVE = deviance explained from a quasibinomial-logit GAM; `te()` = 2-D tensor surface, `s()` = 1-D smooth, k = 5.")
+
+receipts_md <- file.path(consolidated_dir, "metric_diagnostics_receipts.md")
+writeLines(md, receipts_md)
+
+# Machine-readable companions alongside the report.
+readr::write_csv(resp_dist, file.path(consolidated_dir, "metric_response_distribution.csv"))
+readr::write_csv(spearman_tbl, file.path(consolidated_dir, "metric_spearman_matrix.csv"))
+readr::write_csv(conc_tbl, file.path(consolidated_dir, "metric_concurvity.csv"))
+
+receipt_files <- c(
+  "metric_diagnostics_receipts.md",
+  "metric_pve_causal_pip_mass.csv",
+  "metric_pve_cv_causal_pip_mass.csv",
+  "metric_response_distribution.csv",
+  "metric_spearman_matrix.csv",
+  "metric_concurvity.csv"
+)
+cat("Consolidated receipts written to:\n  ", receipts_md, "\n\n", sep = "")
+cat("Download these from", consolidated_dir, ":\n")
+print(as.data.frame(tibble::tibble(
+  file   = receipt_files,
+  exists = file.exists(file.path(consolidated_dir, receipt_files))
+)), row.names = FALSE)
 ```
 
 <!-- Draft paper prose (move to manuscript) -------------------------------------
