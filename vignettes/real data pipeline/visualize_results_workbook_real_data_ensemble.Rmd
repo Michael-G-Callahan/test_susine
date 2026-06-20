@@ -124,13 +124,23 @@ highest_weight_refit_basin <- if (file.exists(file.path(aggregated_dir, "highest
     basin_r2_drift_highest_weight_vs_susie_anchor = numeric(),
     basin_r2_drift_refit_vs_susie_anchor = numeric(),
     basis_drift_var_y_highest_weight_vs_susie_anchor = numeric(),
-    basis_drift_var_y_refit_vs_susie_anchor = numeric()
+    basis_drift_var_y_refit_vs_susie_anchor = numeric(),
+    matched_basis_drift_var_y_highest_weight_vs_susie_anchor = numeric(),
+    matched_basis_drift_var_y_refit_vs_susie_anchor = numeric(),
+    matched_basis_var_y_highest_weight_vs_susie_anchor = numeric(),
+    matched_basis_var_y_refit_vs_susie_anchor = numeric()
   )
 }
 for (nm in c(
   "basis_drift_var_y_highest_weight_vs_susie_anchor",
   "basis_drift_var_y_refit_vs_susie_anchor",
-  "basis_drift_var_y_refit_vs_highest_weight"
+  "basis_drift_var_y_refit_vs_highest_weight",
+  "matched_basis_drift_var_y_highest_weight_vs_susie_anchor",
+  "matched_basis_drift_var_y_refit_vs_susie_anchor",
+  "matched_basis_drift_var_y_refit_vs_highest_weight",
+  "matched_basis_var_y_highest_weight_vs_susie_anchor",
+  "matched_basis_var_y_refit_vs_susie_anchor",
+  "matched_basis_var_y_refit_vs_highest_weight"
 )) {
   if (!nm %in% names(highest_weight_refit_basin)) highest_weight_refit_basin[[nm]] <- NA_real_
 }
@@ -1757,12 +1767,33 @@ weighted_annotation_tbl <- functional_grid_summary %>%
   ) %>%
   dplyr::mutate(
     locus_label = dplyr::if_else(
-      .data$weighted_c_value > 0.1 | .data$weighted_sigma_0_2_scalar > 0.1,
+      .data$off_c0_weight > 0.1,
       sub("_lung$", "", .data$locus_id),
       ""
     )
   )
 
+
+paper_annotation_weight_labels_tbl <- weighted_annotation_tbl %>%
+  dplyr::transmute(
+    locus_id,
+    gene_name,
+    weighted_c_value,
+    weighted_sigma_0_2_scalar,
+    off_c0_weight,
+    max_model_weight,
+    locus_label
+  )
+readr::write_csv(
+  paper_annotation_weight_labels_tbl,
+  file.path(overall_figure_dir, "paper_real_data_annotation_weight_labels.csv")
+)
+if (dir.exists(paper_real_data_case_study_dir)) {
+  readr::write_csv(
+    paper_annotation_weight_labels_tbl,
+    file.path(paper_real_data_case_study_dir, "paper_real_data_annotation_weight_labels.csv")
+  )
+}
 paper_annotation_weight_plot <- ggplot(
   weighted_annotation_tbl,
   aes(x = weighted_c_value, y = weighted_sigma_0_2_scalar)
@@ -1842,7 +1873,9 @@ drift_pip_l2_long_tbl <- dplyr::bind_rows(
     dplyr::transmute(
       locus_id,
       fit_type = "Highest-weight SuSiNE fit",
-      basis_drift_var_y = .data$basis_drift_var_y_highest_weight_vs_susie_anchor,
+      matched_basis_drift_var_y = .data$matched_basis_drift_var_y_highest_weight_vs_susie_anchor,
+      matched_basis_var_y = .data$matched_basis_var_y_highest_weight_vs_susie_anchor,
+      total_yhat_drift_var_y = .data$basis_drift_var_y_highest_weight_vs_susie_anchor,
       pip_l2 = .data$pip_l2_susie_anchor_vs_highest_weight_source,
       source_weight = .data$highest_weight_source_agg_weight_run
     ),
@@ -1850,7 +1883,9 @@ drift_pip_l2_long_tbl <- dplyr::bind_rows(
     dplyr::transmute(
       locus_id,
       fit_type = "SuSiE warm refit",
-      basis_drift_var_y = .data$basis_drift_var_y_refit_vs_susie_anchor,
+      matched_basis_drift_var_y = .data$matched_basis_drift_var_y_refit_vs_susie_anchor,
+      matched_basis_var_y = .data$matched_basis_var_y_refit_vs_susie_anchor,
+      total_yhat_drift_var_y = .data$basis_drift_var_y_refit_vs_susie_anchor,
       pip_l2 = .data$pip_l2_susie_anchor_vs_refit,
       source_weight = .data$highest_weight_source_agg_weight_run
     )
@@ -1859,16 +1894,29 @@ drift_pip_l2_long_tbl <- dplyr::bind_rows(
     fit_type = factor(.data$fit_type, levels = c("Highest-weight SuSiNE fit", "SuSiE warm refit")),
     locus_label = dplyr::if_else(
       .data$fit_type == "Highest-weight SuSiNE fit" &
-        (.data$basis_drift_var_y > 0.05 | .data$pip_l2 > 1.0),
+        (.data$matched_basis_drift_var_y > 0.02 | .data$pip_l2 > 1.0),
       sub("_lung$", "", .data$locus_id),
       ""
     )
   ) %>%
-  dplyr::filter(is.finite(.data$basis_drift_var_y), is.finite(.data$pip_l2))
+  dplyr::filter(is.finite(.data$matched_basis_drift_var_y), is.finite(.data$pip_l2))
+
+paper_matched_basis_drift_summary_tbl <- drift_pip_l2_long_tbl %>%
+  dplyr::arrange(desc(.data$matched_basis_drift_var_y), desc(.data$pip_l2))
+readr::write_csv(
+  paper_matched_basis_drift_summary_tbl,
+  file.path(overall_figure_dir, "paper_real_data_matched_basis_drift_summary.csv")
+)
+if (dir.exists(paper_real_data_case_study_dir)) {
+  readr::write_csv(
+    paper_matched_basis_drift_summary_tbl,
+    file.path(paper_real_data_case_study_dir, "paper_real_data_matched_basis_drift_summary.csv")
+  )
+}
 
 paper_drift_pip_l2_plot <- ggplot(
   drift_pip_l2_long_tbl,
-  aes(x = basis_drift_var_y, y = pip_l2)
+  aes(x = matched_basis_drift_var_y, y = pip_l2)
 ) +
   geom_path(
     aes(group = locus_id),
@@ -1893,8 +1941,7 @@ paper_drift_pip_l2_plot <- ggplot(
   ) +
   labs(
     title = "Annotations change inference and prediction",
-    x = expression(Delta[widehat(y)] * " = mean squared " * widehat(y) *
-                   " drift from SuSiE baseline"),
+    x = "Matched basis drift from SuSiE baseline (fraction var(y))",
     y = expression("PIP shift from SuSiE baseline  " * "||" * Delta * "PIP" * "||"[2])
   ) +
   paper_panel_theme
@@ -2157,6 +2204,14 @@ ggsave(
   bg = "white"
 )
 ggsave(
+  file.path(overall_figure_dir, "paper_overall_annotation_matched_basis_drift_pve_panel_b.png"),
+  paper_drift_pip_l2_plot,
+  width = 3.76,
+  height = 3.9,
+  dpi = 300,
+  bg = "white"
+)
+ggsave(
   file.path(overall_figure_dir, "paper_overall_annotation_drift_pve_panel_c.png"),
   paper_pve_plot,
   width = 3.76,
@@ -2207,6 +2262,42 @@ if (requireNamespace("patchwork", quietly = TRUE)) {
     bg = "white",
     limitsize = FALSE
   )
+  ggsave(
+    file.path(overall_figure_dir, "paper_overall_annotation_matched_basis_drift_pve.png"),
+    paper_overall_figure,
+    width = 7.52,
+    height = 7.8,
+    dpi = 300,
+    bg = "white",
+    limitsize = FALSE
+  )
+  ggsave(
+    file.path(overall_figure_dir, "paper_overall_annotation_matched_basis_drift_pve.pdf"),
+    paper_overall_figure,
+    width = 7.52,
+    height = 7.8,
+    bg = "white",
+    limitsize = FALSE
+  )
+  if (dir.exists(paper_real_data_case_study_dir)) {
+    ggsave(
+      file.path(paper_real_data_case_study_dir, "paper_overall_annotation_matched_basis_drift_pve.png"),
+      paper_overall_figure,
+      width = 7.52,
+      height = 7.8,
+      dpi = 300,
+      bg = "white",
+      limitsize = FALSE
+    )
+    ggsave(
+      file.path(paper_real_data_case_study_dir, "paper_overall_annotation_matched_basis_drift_pve.pdf"),
+      paper_overall_figure,
+      width = 7.52,
+      height = 7.8,
+      bg = "white",
+      limitsize = FALSE
+    )
+  }
 
   paper_overall_figure
 } else {
@@ -2549,7 +2640,10 @@ ensure_basin_r2_drift_tbl <- function() {
       run_id = integer(),
       c_value = numeric(),
       sigma_0_2_scalar = numeric(),
-      basin_r2_drift = numeric()
+      basin_r2_drift = numeric(),
+      matched_basis_drift_var_y = numeric(),
+      matched_basis_var_y = numeric(),
+      matched_basis_drift_per_var_y = numeric()
     )
   }
   readr::write_csv(basin_r2_drift_tbl, basin_r2_drift_path)

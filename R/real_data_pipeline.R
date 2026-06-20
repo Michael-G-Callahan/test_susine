@@ -1353,6 +1353,64 @@ real_data_basis_drift_var_y_pair_cached <- function(cache_a, cache_b) {
   max(val, 0)
 }
 
+real_data_matched_basis_drift_var_y_pair_cached <- function(cache_a, cache_b) {
+  if (is.null(cache_a) || is.null(cache_b)) {
+    return(list(
+      drift = NA_real_,
+      matched_var_y = NA_real_,
+      drift_per_matched_var = NA_real_,
+      n_matched = 0L
+    ))
+  }
+
+  L_a <- nrow(cache_a$b)
+  L_b <- nrow(cache_b$b)
+  if (L_a == 0L || L_b == 0L) {
+    return(list(
+      drift = NA_real_,
+      matched_var_y = NA_real_,
+      drift_per_matched_var = NA_real_,
+      n_matched = 0L
+    ))
+  }
+
+  if (!requireNamespace("clue", quietly = TRUE)) {
+    stop("Package 'clue' is required for Hungarian matched basis drift.", call. = FALSE)
+  }
+
+  num <- cache_a$b %*% t(cache_b$Rb)
+  denom <- sqrt(outer(cache_a$var, cache_b$var))
+  cor_mat <- ifelse(denom > 0, num / denom, 0)
+  cor_mat <- pmin(pmax(cor_mat, -1), 1)
+
+  L <- max(L_a, L_b)
+  score <- matrix(0, nrow = L, ncol = L)
+  score[seq_len(L_a), seq_len(L_b)] <- 1 + cor_mat^2
+  assignment <- as.integer(clue::solve_LSAP(score, maximum = TRUE))
+
+  drift_num <- 0
+  matched_var <- 0
+  n_matched <- 0L
+  for (i in seq_len(L_a)) {
+    j <- assignment[i]
+    if (j > L_b) next
+
+    pair_var <- min(cache_a$var[i], cache_b$var[j])
+    if (!is.finite(pair_var) || pair_var <= 0) next
+
+    drift_num <- drift_num + pair_var * (1 - cor_mat[i, j]^2)
+    matched_var <- matched_var + pair_var
+    n_matched <- n_matched + 1L
+  }
+
+  list(
+    drift = if (matched_var > 0) max(drift_num, 0) else NA_real_,
+    matched_var_y = if (matched_var > 0) matched_var else NA_real_,
+    drift_per_matched_var = if (matched_var > 0) drift_num / matched_var else NA_real_,
+    n_matched = n_matched
+  )
+}
+
 real_data_basin_r2_drift_pair_cached <- function(cache_a, cache_b) {
   if (is.null(cache_a) || is.null(cache_b)) return(list(drift = NA_real_, n_matched = 0L))
   L_a <- nrow(cache_a$b); L_b <- nrow(cache_b$b)
@@ -1420,19 +1478,31 @@ real_data_basin_r2_drift_locus <- function(R, runs_tbl, progress = NULL) {
       if (is.na(row$fit_rds_path[[1]])) {
         rows[[length(rows) + 1L]] <- tibble::tibble(
           sigma_0_2_scalar = sig, c_value = row$c_value[[1]],
-          basin_r2_drift = NA_real_, n_matched_effects = NA_integer_,
+          basin_r2_drift = NA_real_,
+          matched_basis_drift_var_y = NA_real_,
+          matched_basis_var_y = NA_real_,
+          matched_basis_drift_per_var_y = NA_real_,
+          n_matched_effects = NA_integer_,
           run_id = row$run_id[[1]]
         )
         next
       }
+      source_cache <- fit_cache[[row$.drift_cache_idx[[1]]]]
       drift_res <- real_data_basin_r2_drift_pair_cached(
-        fit_cache[[row$.drift_cache_idx[[1]]]],
+        source_cache,
+        base_cache
+      )
+      matched_vy_res <- real_data_matched_basis_drift_var_y_pair_cached(
+        source_cache,
         base_cache
       )
       rows[[length(rows) + 1L]] <- tibble::tibble(
         sigma_0_2_scalar = sig,
         c_value = row$c_value[[1]],
         basin_r2_drift = drift_res$drift,
+        matched_basis_drift_var_y = matched_vy_res$drift,
+        matched_basis_var_y = matched_vy_res$matched_var_y,
+        matched_basis_drift_per_var_y = matched_vy_res$drift_per_matched_var,
         n_matched_effects = drift_res$n_matched,
         run_id = row$run_id[[1]]
       )
@@ -2662,6 +2732,9 @@ collect_real_data_results <- function(
           source_vs_anchor_vy <- real_data_basis_drift_var_y_pair_cached(source_cache, anchor_cache)
           refit_vs_anchor_vy  <- real_data_basis_drift_var_y_pair_cached(refit_cache, anchor_cache)
           refit_vs_source_vy  <- real_data_basis_drift_var_y_pair_cached(refit_cache, source_cache)
+          source_vs_anchor_matched_vy <- real_data_matched_basis_drift_var_y_pair_cached(source_cache, anchor_cache)
+          refit_vs_anchor_matched_vy <- real_data_matched_basis_drift_var_y_pair_cached(refit_cache, anchor_cache)
+          refit_vs_source_matched_vy <- real_data_matched_basis_drift_var_y_pair_cached(refit_cache, source_cache)
           highest_weight_refit_basin_rows[[length(highest_weight_refit_basin_rows) + 1L]] <- tibble::tibble(
             locus_id = locus_id,
             gene_name = locus_row$gene_name[[1]],
@@ -2674,6 +2747,15 @@ collect_real_data_results <- function(
             basis_drift_var_y_highest_weight_vs_susie_anchor = source_vs_anchor_vy,
             basis_drift_var_y_refit_vs_susie_anchor = refit_vs_anchor_vy,
             basis_drift_var_y_refit_vs_highest_weight = refit_vs_source_vy,
+            matched_basis_drift_var_y_highest_weight_vs_susie_anchor = source_vs_anchor_matched_vy$drift,
+            matched_basis_drift_var_y_refit_vs_susie_anchor = refit_vs_anchor_matched_vy$drift,
+            matched_basis_drift_var_y_refit_vs_highest_weight = refit_vs_source_matched_vy$drift,
+            matched_basis_var_y_highest_weight_vs_susie_anchor = source_vs_anchor_matched_vy$matched_var_y,
+            matched_basis_var_y_refit_vs_susie_anchor = refit_vs_anchor_matched_vy$matched_var_y,
+            matched_basis_var_y_refit_vs_highest_weight = refit_vs_source_matched_vy$matched_var_y,
+            matched_basis_drift_per_var_y_highest_weight_vs_susie_anchor = source_vs_anchor_matched_vy$drift_per_matched_var,
+            matched_basis_drift_per_var_y_refit_vs_susie_anchor = refit_vs_anchor_matched_vy$drift_per_matched_var,
+            matched_basis_drift_per_var_y_refit_vs_highest_weight = refit_vs_source_matched_vy$drift_per_matched_var,
             n_matched_highest_weight_vs_susie_anchor = source_vs_anchor$n_matched,
             n_matched_refit_vs_susie_anchor = refit_vs_anchor$n_matched,
             n_matched_refit_vs_highest_weight = refit_vs_source$n_matched
@@ -2730,7 +2812,7 @@ collect_real_data_results <- function(
     "functional_grid_summary", file.path(output_dir, "functional_grid_summary.csv"), "csv", "run", "Functional grid summary joined to cluster and drift metrics",
     "susie_anchor_summary", file.path(output_dir, "susie_anchor_summary.csv"), "csv", "locus", "susieR anchor vs functional baseline summary",
     "highest_weight_refit_summary", file.path(output_dir, "highest_weight_refit_summary.csv"), "csv", "locus", "Warm baseline refit initialized from the highest-weight SuSiNE ensemble member",
-    "highest_weight_refit_basin_r2_drift", file.path(output_dir, "highest_weight_refit_basin_r2_drift.csv"), "csv", "locus", "Basin r2 drift among susie anchor, highest-weight source, and warm refit",
+    "highest_weight_refit_basin_r2_drift", file.path(output_dir, "highest_weight_refit_basin_r2_drift.csv"), "csv", "locus", "Basin r2 drift, total fitted-y drift, and Hungarian matched basis drift among susie anchor, highest-weight source, and warm refit",
     "paper_real_data_ensemble_summary", file.path(output_dir, "paper_real_data_ensemble_summary.csv"), "csv", "locus", "Paper-facing summary of PIP counts, overlaps, PVE, and JSD",
     "top_variants_cluster_weight", file.path(output_dir, "top_variants_cluster_weight.csv"), "csv", "locus-variant", "Top aggregated variants per locus",
     "run_comparisons", file.path(output_dir, "run_comparisons.csv"), "csv", "run-target", "Per-run comparison metrics against baselines",

@@ -1302,3 +1302,265 @@ knitr::kable(
   caption = "PR operating points: non-baseline rows at baseline 50%-precision recall"
 )
 ```
+
+# 6. Headline Ensemble Numbers (manuscript / abstract)
+
+Purely additive extraction of the detailed numbers requested in the 2026-06-20
+results triage (see `Writings/second draft/MC_comments_results_06_20_26.md`).
+Nothing above is modified; this section only reads the already-computed
+in-memory objects (`auprc_plot_table`, `heatmap_data`, `ccs_by_r2`,
+`pr_curve_counts`, `ccs_compute_coordinates`, the `baseline_auprc` /
+`truth_warm_vanilla` / `baseline_compute_sec` references) and writes a small set
+of clearly-delineated CSVs into `plot_data_dir`. Run after the chunks above.
+
+```{r headline-numbers}
+r2_focus_tag <- format_r2_tag(annotation_r2_focus)
+
+# --- (a) AUPRC gap attribution at the central annotation regime ----------------
+# Anchors are the C-CS AUPRC at the focus annotation (r2 = 0.3) under each
+# aggregation, taken from heatmap_data (which already carries delta-vs-baseline).
+ccs_focus_anchor <- function(method_id) {
+  v <- heatmap_data %>%
+    dplyr::filter(.data$spec_name == "C-CS", .data$agg_method == method_id) %>%
+    dplyr::pull("AUPRC")
+  if (length(v)) v[[1]] else NA_real_
+}
+
+a_baseline   <- baseline_auprc
+a_max_elbo   <- ccs_focus_anchor("max_elbo")
+a_cluster    <- ccs_focus_anchor("cluster_weight_credible")
+a_oracle     <- ccs_focus_anchor("oracle")
+a_ceiling    <- 1.0
+
+pct_of_base <- function(delta) {
+  if (is.finite(a_baseline) && a_baseline != 0) 100 * delta / a_baseline else NA_real_
+}
+
+auprc_gap_attribution <- tibble::tribble(
+  ~gap_id,                 ~from_label,            ~to_label,               ~from_auprc, ~to_auprc,  ~interpretation,
+  "exploration_maxelbo",   "baseline SuSiE",       "C-CS max-ELBO",         a_baseline,  a_max_elbo, "Exploration benefit you keep when committing to the single best-ELBO fit.",
+  "exploration_oracle",    "baseline SuSiE",       "C-CS oracle",           a_baseline,  a_oracle,   "Total exploration value if the best fit per locus could be selected (oracle).",
+  "aggregation_modelspec", "C-CS max-ELBO",        "C-CS cluster softmax",  a_max_elbo,  a_cluster,  "Deployable aggregation gain; how far ELBO-softmax cluster mixing pushes past the single best-ELBO fit (model-specification barrier closed).",
+  "elbo_suboptimality",    "C-CS max-ELBO",        "C-CS oracle",           a_max_elbo,  a_oracle,   "How far max-ELBO selection falls short of the best-quality fit, i.e. ELBO does not always rank fit quality.",
+  "aggregation_shortfall", "C-CS cluster softmax", "C-CS oracle",           a_cluster,   a_oracle,   "Remaining headroom of deployable cluster softmax relative to the oracle.",
+  "residual_to_ceiling",   "C-CS oracle",          "perfect (AUPRC = 1)",   a_oracle,    a_ceiling,  "Residual ceiling: LD-induced ambiguity inherent to the data plus basins never explored."
+) %>%
+  dplyr::mutate(
+    annotation_r2          = annotation_r2_focus,
+    spec_name              = "C-CS",
+    delta_auprc            = .data$to_auprc - .data$from_auprc,
+    delta_pct_of_baseline  = pct_of_base(.data$delta_auprc)
+  ) %>%
+  dplyr::select(spec_name, annotation_r2, gap_id, from_label, to_label,
+                from_auprc, to_auprc, delta_auprc, delta_pct_of_baseline,
+                interpretation)
+
+# --- (b) C-CS AUPRC vs baseline across annotation quality ----------------------
+# Panel 8B numbers: uninformative (r2 = 0) loss, central (0.3) gain, high (0.5)
+# gain, plus the truth-warm-vanilla comparison the abstract asks for.
+truth_warm_gain <- truth_warm_vanilla - a_baseline
+
+ccs_auprc_by_annotation_vs_baseline <- ccs_by_r2 %>%
+  dplyr::filter(.data$agg_method %in% c("max_elbo", "cluster_weight_credible", "oracle")) %>%
+  dplyr::transmute(
+    spec_name                 = .data$spec_name,
+    annotation_r2             = as.numeric(.data$annotation_r2),
+    agg_method                = .data$agg_method,
+    AUPRC                     = .data$AUPRC,
+    baseline_auprc            = a_baseline,
+    delta_auprc               = .data$AUPRC - a_baseline,
+    delta_pct                 = pct_of_base(.data$AUPRC - a_baseline),
+    truth_warm_vanilla_auprc  = truth_warm_vanilla,
+    truth_warm_gain           = truth_warm_gain,
+    ensemble_minus_truthwarm  = (.data$AUPRC - a_baseline) - truth_warm_gain
+  ) %>%
+  dplyr::arrange(.data$agg_method, .data$annotation_r2)
+
+# --- (c) Recall at fixed 75% precision, ensemble vs baseline -------------------
+# Reuses the existing operating-point picker at target precision 0.75. The
+# operating_rule column flags whether precision 0.75 was actually attainable on
+# the pooled curve or whether the closest observed precision was used instead.
+pr_precision75_points <- pick_precision_operating_points(
+  pr_curve_counts,
+  target_precision = 0.75
+)
+
+pr75_baseline <- pr_precision75_points %>%
+  dplyr::filter(.data$method == "SuSiE baseline") %>%
+  dplyr::select(
+    annotation_r2,
+    baseline_pip_threshold = .data$pip_threshold,
+    baseline_precision     = .data$precision,
+    baseline_recall        = .data$recall,
+    baseline_tp            = .data$cum_tp,
+    baseline_called        = .data$called_variants,
+    baseline_total_p       = .data$total_p,
+    baseline_rule          = .data$operating_rule
+  )
+
+pr_precision75_ensemble_vs_baseline <- pr_precision75_points %>%
+  dplyr::filter(.data$method != "SuSiE baseline") %>%
+  dplyr::select(
+    method, annotation_r2,
+    ensemble_pip_threshold = .data$pip_threshold,
+    ensemble_precision     = .data$precision,
+    ensemble_recall        = .data$recall,
+    ensemble_tp            = .data$cum_tp,
+    ensemble_called        = .data$called_variants,
+    ensemble_total_p       = .data$total_p,
+    ensemble_rule          = .data$operating_rule
+  ) %>%
+  dplyr::inner_join(pr75_baseline, by = "annotation_r2") %>%
+  dplyr::mutate(
+    target_precision      = 0.75,
+    recall_diff           = .data$ensemble_recall - .data$baseline_recall,
+    recall_pct_change     = dplyr::if_else(
+      .data$baseline_recall > 0,
+      100 * (.data$ensemble_recall - .data$baseline_recall) / .data$baseline_recall,
+      NA_real_
+    ),
+    causal_tp_pct_change  = dplyr::if_else(
+      .data$baseline_tp > 0,
+      100 * (.data$ensemble_tp - .data$baseline_tp) / .data$baseline_tp,
+      NA_real_
+    )
+  ) %>%
+  dplyr::arrange(.data$method, .data$annotation_r2)
+
+# --- (d) Compute multiplier: 16-run (4x4) and full (8x8) C-CS vs baseline ------
+ccs_compute_multiplier_summary <- if (nrow(ccs_compute_coordinates) > 0L &&
+                                      is.finite(baseline_compute_sec)) {
+  ccs_compute_coordinates %>%
+    dplyr::filter(.data$subscale_label %in% c("4x4", "8x8")) %>%
+    dplyr::transmute(
+      spec_name,
+      annotation_r2,
+      subscale_label,
+      n_members              = dplyr::recode(.data$subscale_label, "4x4" = 16L, "8x8" = 64L),
+      ensemble_wall_sec      = .data$x_model_fit_wall_sec,
+      ensemble_compute_min   = .data$x_compute_min,
+      AUPRC                  = .data$y_AUPRC,
+      AUPRC_se,
+      baseline_wall_sec      = baseline_compute_sec,
+      compute_multiplier     = .data$x_model_fit_wall_sec / baseline_compute_sec,
+      baseline_auprc         = a_baseline,
+      delta_auprc            = .data$y_AUPRC - a_baseline,
+      delta_pct              = pct_of_base(.data$y_AUPRC - a_baseline),
+      n_datasets_compute
+    ) %>%
+    dplyr::arrange(.data$n_members)
+} else {
+  message("Compute multiplier summary skipped: no scaling-derived C-CS compute ",
+          "coordinates (or baseline wall time) available in this job.")
+  tibble::tibble()
+}
+
+# --- (e) C-CSR durability at the central annotation regime ---------------------
+# The cs_grid_refit arm: gain that survives a default-prior warm refit. The
+# manuscript headline uses the primary cluster-softmax aggregation; all scheduled
+# aggregations are exported so the primary value can be confirmed in context.
+ccsr_durability <- heatmap_data %>%
+  dplyr::filter(.data$spec_name == "C-CSR") %>%
+  dplyr::transmute(
+    spec_name,
+    annotation_r2,
+    agg_method,
+    AUPRC,
+    baseline_auprc = a_baseline,
+    delta_auprc,
+    delta_pct,
+    is_primary_aggregation = .data$agg_method == "cluster_weight_credible"
+  ) %>%
+  dplyr::arrange(dplyr::desc(.data$is_primary_aggregation), .data$agg_method)
+
+# --- (f) Compact abstract roll-up ----------------------------------------------
+ccs_cluster_at <- function(r2_val, col) {
+  v <- ccs_auprc_by_annotation_vs_baseline %>%
+    dplyr::filter(.data$agg_method == "cluster_weight_credible",
+                  near_focus(.data$annotation_r2, r2_val)) %>%
+    dplyr::pull(col)
+  if (length(v)) v[[1]] else NA_real_
+}
+get_mult <- function(members, col) {
+  if (!nrow(ccs_compute_multiplier_summary)) return(NA_real_)
+  v <- ccs_compute_multiplier_summary %>%
+    dplyr::filter(.data$n_members == members) %>%
+    dplyr::pull(col)
+  if (length(v)) v[[1]] else NA_real_
+}
+pr75_change <- function(r2_val) {
+  v <- pr_precision75_ensemble_vs_baseline %>%
+    dplyr::filter(near_focus(.data$annotation_r2, r2_val)) %>%
+    dplyr::pull("recall_pct_change")
+  if (length(v)) v[[1]] else NA_real_
+}
+ccsr_primary <- ccsr_durability %>%
+  dplyr::filter(.data$is_primary_aggregation)
+
+paper_ensemble_headline_numbers <- tibble::tribble(
+  ~metric,                                   ~value,                                        ~unit,
+  "baseline_susie_auprc",                    a_baseline,                                    "AUPRC",
+  "truth_warm_vanilla_auprc",                truth_warm_vanilla,                            "AUPRC",
+  "truth_warm_gain_over_baseline",           truth_warm_gain,                               "AUPRC delta",
+  "ccs_cluster_auprc_r2_0",                  ccs_cluster_at(0,   "AUPRC"),                  "AUPRC",
+  "ccs_cluster_delta_r2_0",                  ccs_cluster_at(0,   "delta_auprc"),            "AUPRC delta",
+  "ccs_cluster_delta_pct_r2_0",              ccs_cluster_at(0,   "delta_pct"),              "percent",
+  "ccs_cluster_auprc_r2_0p3",                ccs_cluster_at(0.3, "AUPRC"),                  "AUPRC",
+  "ccs_cluster_delta_r2_0p3",                ccs_cluster_at(0.3, "delta_auprc"),            "AUPRC delta",
+  "ccs_cluster_delta_pct_r2_0p3",            ccs_cluster_at(0.3, "delta_pct"),              "percent",
+  "ccs_cluster_gain_minus_truthwarm_r2_0p3", ccs_cluster_at(0.3, "ensemble_minus_truthwarm"), "AUPRC delta",
+  "ccs_cluster_auprc_r2_0p5",                ccs_cluster_at(0.5, "AUPRC"),                  "AUPRC",
+  "ccs_cluster_delta_r2_0p5",                ccs_cluster_at(0.5, "delta_auprc"),            "AUPRC delta",
+  "ccs_cluster_delta_pct_r2_0p5",            ccs_cluster_at(0.5, "delta_pct"),              "percent",
+  "pr75_recall_pct_change_r2_0",             pr75_change(0),                                "percent",
+  "pr75_recall_pct_change_r2_0p3",           pr75_change(0.3),                              "percent",
+  "pr75_recall_pct_change_r2_0p5",           pr75_change(0.5),                              "percent",
+  "baseline_wall_sec",                       baseline_compute_sec,                          "seconds",
+  "ccs_16run_wall_sec",                      get_mult(16L, "ensemble_wall_sec"),            "seconds",
+  "ccs_16run_compute_multiplier",            get_mult(16L, "compute_multiplier"),           "x baseline",
+  "ccs_16run_auprc",                         get_mult(16L, "AUPRC"),                        "AUPRC",
+  "ccs_64run_wall_sec",                      get_mult(64L, "ensemble_wall_sec"),            "seconds",
+  "ccs_64run_compute_multiplier",            get_mult(64L, "compute_multiplier"),           "x baseline",
+  "ccs_64run_auprc",                         get_mult(64L, "AUPRC"),                        "AUPRC",
+  "ccsr_durable_auprc_r2_0p3",               ccsr_primary$AUPRC[1] %||% NA_real_,           "AUPRC",
+  "ccsr_durable_delta_r2_0p3",               ccsr_primary$delta_auprc[1] %||% NA_real_,     "AUPRC delta",
+  "ccsr_durable_delta_pct_r2_0p3",           ccsr_primary$delta_pct[1] %||% NA_real_,       "percent"
+)
+
+# --- Write the delineated CSVs -------------------------------------------------
+headline_csv <- function(df, name) {
+  path <- file.path(plot_data_dir, name)
+  readr::write_csv(df, path)
+  cat("Saved:", path, "(", nrow(df), "rows )\n")
+}
+
+headline_csv(auprc_gap_attribution,
+             paste0("paper_auprc_gap_attribution_r2_", r2_focus_tag, ".csv"))
+headline_csv(ccs_auprc_by_annotation_vs_baseline,
+             "paper_ccs_auprc_by_annotation_vs_baseline.csv")
+headline_csv(pr_precision75_points,
+             "paper_pr_precision75_operating_points.csv")
+headline_csv(pr_precision75_ensemble_vs_baseline,
+             "paper_pr_precision75_ensemble_vs_baseline.csv")
+headline_csv(ccs_compute_multiplier_summary,
+             "paper_ccs_compute_multiplier_summary.csv")
+headline_csv(ccsr_durability,
+             paste0("paper_ccsr_durability_r2_", r2_focus_tag, ".csv"))
+headline_csv(paper_ensemble_headline_numbers,
+             "paper_ensemble_headline_numbers.csv")
+```
+
+```{r headline-numbers-kable}
+knitr::kable(auprc_gap_attribution, digits = 4,
+             caption = "AUPRC gap attribution at the central annotation regime (r2 = 0.3)")
+knitr::kable(ccs_auprc_by_annotation_vs_baseline, digits = 4,
+             caption = "C-CS AUPRC vs baseline across annotation quality, with truth-warm comparison")
+knitr::kable(pr_precision75_ensemble_vs_baseline, digits = 4,
+             caption = "Recall at fixed 75% precision: C-CS ensemble vs SuSiE baseline")
+knitr::kable(ccs_compute_multiplier_summary, digits = 4,
+             caption = "C-CS compute multiplier: 16-run (4x4) and full (8x8) ensembles vs baseline")
+knitr::kable(ccsr_durability, digits = 4,
+             caption = "C-CSR durability (default-prior warm refit) at r2 = 0.3")
+knitr::kable(paper_ensemble_headline_numbers, digits = 4,
+             caption = "Compact abstract roll-up of ensemble headline numbers")
+```
