@@ -49,13 +49,21 @@ library(knitr)
 
 ```{r locate}
 job_name <- "purity_filter_minibatch"
-parent_job_id <- "53617896"
+parent_job_id <- "53747151"
 output_root <- here("output")
-run_collection <- if (exists("params") && "run_collection" %in% names(params)) {
-  isTRUE(params$run_collection)
-} else {
-  FALSE
-}
+# --- Consolidation control -------------------------------------------------
+# The workbook AUTO-DETECTS whether it needs to aggregate staging flush files:
+# if the consolidated/aggregated CSVs already exist, aggregation is skipped and
+# those cached tables are read directly. Flip the switch below to TRUE to force
+# a fresh re-consolidation from staging even when cached CSVs exist (a forced
+# refresh still requires the staging flush files -- it errors if they are gone).
+# A knit parameter (params$force_reconsolidation, or legacy params$run_collection)
+# overrides this default.
+force_reconsolidation <- FALSE
+
+force_reconsolidation <- isTRUE(force_reconsolidation) ||
+  (exists("params") && isTRUE(params[["force_reconsolidation"]])) ||
+  (exists("params") && isTRUE(params[["run_collection"]]))
 
 job_dir <- file.path(output_root, "slurm_output", job_name, parent_job_id)
 cfg_path <- file.path(output_root, "run_history", job_name, parent_job_id, "job_config.json")
@@ -93,20 +101,35 @@ cache_dir <- if (consolidated_summary_cache_available || consolidated_raw_cache_
 } else {
   consolidated_dir
 }
+cache_available <- summary_cache_available || raw_cache_available
+
+# Aggregate when explicitly forced, or when there is no cache to read yet
+# (first pass on a fresh job). Otherwise skip straight to the cached tables.
+run_collection <- isTRUE(force_reconsolidation) || !cache_available
 use_consolidated_cache <- !run_collection
 
-if (use_consolidated_cache && !summary_cache_available && !raw_cache_available) {
+# Consolidation -- whether forced or an auto-bootstrap -- needs the staging
+# flush files. If they are absent and we have no cache to fall back on, stop.
+if (run_collection && !length(staging_flush_files)) {
   stop(
-    "Visualization-only mode requires either summary CSVs or raw aggregate CSVs in ",
-    consolidated_dir,
-    " or ",
-    aggregated_dir,
-    ". Re-knit with params$run_collection = TRUE to rebuild them from staging files."
+    if (isTRUE(force_reconsolidation)) {
+      "force_reconsolidation = TRUE but no staging flush files were found to rebuild from: "
+    } else {
+      "No consolidated/aggregated CSVs found, and no staging flush files to build them from: "
+    },
+    job_dir,
+    if (isTRUE(force_reconsolidation) && cache_available) {
+      " (existing cached CSVs were left untouched)."
+    } else {
+      "."
+    }
   )
 }
 
 cat("Job dir:", job_dir, "\n")
-cat("Run collection:", run_collection, "\n")
+cat("Force reconsolidation:", force_reconsolidation, "\n")
+cat("Cache available:", cache_available, "\n")
+cat("Aggregating staging files:", run_collection, "\n")
 cat("Using consolidated cache only:", use_consolidated_cache, "\n")
 cat("Reading cached tables from:", cache_dir, "\n")
 ```
