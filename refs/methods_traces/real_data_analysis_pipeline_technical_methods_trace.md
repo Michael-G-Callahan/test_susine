@@ -7,12 +7,12 @@ This document traces the real-data eQTL case-study pipeline that produced the
 paper figures:
 
 - `../Writings/plots/real_data_case_study/paper_overall_annotation_drift_pve.png`
-- `../Writings/plots/real_data_case_study/paper_overall_annotation_matched_basis_drift_pve.png`
+- `../Writings/plots/real_data_case_study/paper_overall_annotation_matched_component_drift_pve.png`
 - `../Writings/plots/real_data_case_study/paper_selected_locus_zoom_lollipop_l2_drift.png`
 - `../Writings/plots/real_data_case_study/paper_supplement_real_vs_sim_multimodality.png`
 - `../Writings/plots/real_data_case_study/paper_real_data_locus_summary_table.csv`
 - `../Writings/plots/real_data_case_study/paper_real_data_pip_gt05_totals.csv`
-- `../Writings/plots/real_data_case_study/paper_real_data_matched_basis_drift_summary.csv`
+- `../Writings/plots/real_data_case_study/paper_real_data_matched_component_drift_summary.csv`
 - `../Writings/plots/real_data_case_study/paper_real_data_annotation_weight_labels.csv`
 
 The trace is intentionally implementation-facing. Its goal is to make the full
@@ -1077,11 +1077,11 @@ aggregated/highest_weight_refit_summary.csv
 aggregated/highest_weight_refit_variant_posteriors.parquet
 ```
 
-### 10.4 Effect-basis drift (three distinct metrics)
+### 10.4 Effect-basis drift (four distinct metrics)
 
-The collector computes three related per-pair drift scalars and writes them to
+The collector computes four related per-pair drift scalars and writes them to
 `highest_weight_refit_basin_r2_drift.csv`. They are easy to conflate. The current
-paper overall figure Panel B uses the third metric.
+paper overall figure Panel B uses the fourth metric.
 
 (1) Hungarian effect-basis `r^2` drift
 (`real_data_basin_r2_drift_pair_cached`, `R/real_data_pipeline.R`). For each
@@ -1132,10 +1132,28 @@ Because the RSS fits use standardized phenotypes, `matched_basis_drift_var_y` is
 interpretable as the fraction of `var(y)` carried by matched effect bases that
 changed orientation. The assignment score uses `1 + cor^2` for real effect pairs
 and 0 for dummy padding, so real pairs are preferred over unmatched dummy slots
-even when the matched correlation is near zero. This is the current x-axis of
-paper overall Panel B.
+even when the matched correlation is near zero. This is retained for audit and backward comparison. Panel B now uses the normalized matched-component metric instead.
 
-All three metrics are written for the same three comparisons:
+
+(4) Normalized Hungarian matched-component drift
+(`real_data_matched_component_relative_drift_pair_cached`,
+`R/real_data_pipeline.R`). This keeps truth-agnostic effect matching, but it
+matches by absolute fitted-effect correlation and then computes a signed
+component L2 distance:
+
+```text
+signed_l2_sum = sum_matched ||b_a - b_match||_R^2
+pair_var_sum  = sum_matched (||b_a||_R^2 + ||b_match||_R^2)
+matched_component_signed_rel_l2 = signed_l2_sum / pair_var_sum
+```
+
+The signed numerator captures sign and amplitude changes that `1 - r^2` misses.
+The denominator makes the metric relative to the matched component mass, which is
+important because real RSS components can have large opposing fitted effects that
+cancel in the whole model. This metric is not a fraction of `var(y)`. It is a
+scale-free matched-component rearrangement diagnostic. The current paper overall
+Panel B uses `matched_component_signed_rel_l2_*` as its x-axis.
+All four metric families are written for the same three comparisons:
 
 - highest-weight source vs SuSiE anchor
   (`*_highest_weight_vs_susie_anchor`);
@@ -1180,7 +1198,7 @@ appear to be copied from:
 test_susine/output/slurm_output/real_data_ensemble_geometric_n20/52906940/figures/real_data_ensemble/overall/
 ```
 
-Previously observed local paper-facing artifacts in that directory. After the 2026-06-20 matched-basis update, rerender the workbook and use the `matched_basis_drift` outputs listed below for the paper figure:
+Previously observed local paper-facing artifacts in that directory. After the 2026-06-20 matched-component update, rerender the workbook and use the `matched_component` outputs listed below for the paper figure:
 
 | File | Dimensions / rows | Size | Last write time |
 |---|---:|---:|---|
@@ -1190,23 +1208,23 @@ Previously observed local paper-facing artifacts in that directory. After the 20
 | `paper_real_data_locus_summary_table.csv` | 20 data rows | 2,937 | 2026-06-15 16:02:34 |
 | `paper_real_data_pip_gt05_totals.csv` | 1 data row | 87 | 2026-06-15 16:02:36 |
 | `paper_real_data_ensemble_summary.csv` | 20 data rows | 11,952 | 2026-05-26 13:10:33 |
-| `paper_overall_annotation_matched_basis_drift_pve.png` | produced after rerender | not yet recorded | 2026-06-20 code update |
-| `paper_real_data_matched_basis_drift_summary.csv` | produced after rerender | not yet recorded | 2026-06-20 code update |
+| `paper_overall_annotation_matched_component_drift_pve.png` | produced after rerender | not yet recorded | 2026-06-20 code update |
+| `paper_real_data_matched_component_drift_summary.csv` | produced after rerender | not yet recorded | 2026-06-20 code update |
 | `paper_real_data_annotation_weight_labels.csv` | produced after rerender | not yet recorded | 2026-06-20 code update |
 
 The visualization workbook writes the table CSV summaries directly into
 `../Writings/plots/real_data_case_study/` when that directory exists. The
-matched-basis combined figure is also written directly there when that directory
+matched-component combined figure is also written directly there when that directory
 exists. Older PNG paper copies may have been copied manually from the job output
 `overall/` directory.
 
 ### 11.1 Overall annotation-drift-PVE figure
 
-Final paper files after the 2026-06-20 matched-basis update:
+Final paper files after the 2026-06-20 matched-component update:
 
 ```text
-paper_overall_annotation_matched_basis_drift_pve.png
-paper_overall_annotation_matched_basis_drift_pve.pdf
+paper_overall_annotation_matched_component_drift_pve.png
+paper_overall_annotation_matched_component_drift_pve.pdf
 ```
 
 Workbook output paths:
@@ -1214,15 +1232,15 @@ Workbook output paths:
 ```text
 overall/paper_overall_annotation_drift_pve_panel_a.png
 overall/paper_overall_annotation_drift_pve_panel_b.png
-overall/paper_overall_annotation_matched_basis_drift_pve_panel_b.png
+overall/paper_overall_annotation_matched_component_drift_pve_panel_b.png
 overall/paper_overall_annotation_drift_pve_panel_c.png
 overall/paper_overall_annotation_drift_pve_panel_d.png
 overall/paper_overall_annotation_drift_pve.png
 overall/paper_overall_annotation_drift_pve.pdf
-overall/paper_overall_annotation_matched_basis_drift_pve.png
-overall/paper_overall_annotation_matched_basis_drift_pve.pdf
+overall/paper_overall_annotation_matched_component_drift_pve.png
+overall/paper_overall_annotation_matched_component_drift_pve.pdf
 overall/paper_real_data_annotation_weight_labels.csv
-overall/paper_real_data_matched_basis_drift_summary.csv
+overall/paper_real_data_matched_component_drift_summary.csv
 ```
 
 The combined figure is rendered with `patchwork` at:
@@ -1274,22 +1292,12 @@ paper_real_data_ensemble_summary.csv
 variant_posteriors_dataset/
 ```
 
-The x-axis is the Hungarian matched basis drift in standardized-phenotype units
-from the SuSiE baseline: the `matched_basis_drift_var_y_*` scalar of Section
-10.4(3). The workbook axis title is `Matched basis drift from SuSiE baseline
-(fraction var(y))`. The y-axis is PIP L2 distance from the SuSiE baseline. Each
-locus contributes up to two points, joined by a grey path:
+The x-axis is normalized Hungarian matched-component drift from the SuSiE baseline: the `matched_component_signed_rel_l2_*` scalar of Section 10.4(4). The workbook axis title is `Matched component drift from SuSiE baseline (relative L2)`. The y-axis is PIP L2 distance from the SuSiE baseline. Each locus contributes up to two points, joined by a grey path:
 
 - highest-weight SuSiNE fit (point color `#0B6E4F`);
 - SuSiE warm refit (point color `#C65D00`).
 
-The x-coordinates come straight from `highest_weight_refit_basin` columns
-`matched_basis_drift_var_y_highest_weight_vs_susie_anchor` and
-`matched_basis_drift_var_y_refit_vs_susie_anchor`. The old total fitted-y drift
-columns are retained in `paper_real_data_matched_basis_drift_summary.csv` as
-`total_yhat_drift_var_y` for audit. The y-coordinates (PIP L2) are recomputed
-live in the workbook from the variant-posterior parquet, not read from a stored
-column:
+The x-coordinates come straight from `highest_weight_refit_basin` columns `matched_component_signed_rel_l2_highest_weight_vs_susie_anchor` and `matched_component_signed_rel_l2_refit_vs_susie_anchor`. The old total fitted-y drift and matched-basis drift columns are retained in `paper_real_data_matched_component_drift_summary.csv` for audit. The y-coordinates (PIP L2) are recomputed live in the workbook from the variant-posterior parquet, not read from a stored column:
 
 - highest-weight fit: `run_pip_l2(locus_id, susie_anchor_run_id,
   highest_weight_source_run_id)`;
@@ -1303,7 +1311,7 @@ auxiliary diagnostics, but the paper-facing overall panel is the L2 version.
 Loci are labeled (only on the highest-weight-fit point) when:
 
 ```text
-matched_basis_drift_var_y > 0.02 OR pip_l2 > 1.0
+matched_component_signed_rel_l2 > 0.25 OR pip_l2 > 1.0
 ```
 
 Panel C: local genetic variance / PVE.
@@ -1741,7 +1749,7 @@ Expected validation:
 - `paper_real_data_ensemble_summary.csv` exists.
 - `aggregated_variant_pips_cluster_weight.parquet` exists.
 - `highest_weight_refit_variant_posteriors.parquet` exists.
-- `highest_weight_refit_basin_r2_drift.csv` exists and includes `matched_basis_drift_var_y_*` columns.
+- `highest_weight_refit_basin_r2_drift.csv` exists and includes `matched_basis_drift_var_y_*` and `matched_component_signed_rel_l2_*` columns.
 - No selected loci failed. The final paper-side
   `paper_real_data_ensemble_summary.csv` has 20 rows and non-missing anchor,
   highest-weight-source, and warm-refit run ids for all 20 loci.
@@ -1784,11 +1792,11 @@ force_recompute_basin_r2_drift <- FALSE
 The workbook writes:
 
 ```text
-output/slurm_output/real_data_ensemble_geometric_n20/52906940/figures/real_data_ensemble/overall/paper_overall_annotation_matched_basis_drift_pve.png
-output/slurm_output/real_data_ensemble_geometric_n20/52906940/figures/real_data_ensemble/overall/paper_overall_annotation_matched_basis_drift_pve.pdf
-output/slurm_output/real_data_ensemble_geometric_n20/52906940/figures/real_data_ensemble/overall/paper_overall_annotation_matched_basis_drift_pve_panel_b.png
+output/slurm_output/real_data_ensemble_geometric_n20/52906940/figures/real_data_ensemble/overall/paper_overall_annotation_matched_component_drift_pve.png
+output/slurm_output/real_data_ensemble_geometric_n20/52906940/figures/real_data_ensemble/overall/paper_overall_annotation_matched_component_drift_pve.pdf
+output/slurm_output/real_data_ensemble_geometric_n20/52906940/figures/real_data_ensemble/overall/paper_overall_annotation_matched_component_drift_pve_panel_b.png
 output/slurm_output/real_data_ensemble_geometric_n20/52906940/figures/real_data_ensemble/overall/paper_real_data_annotation_weight_labels.csv
-output/slurm_output/real_data_ensemble_geometric_n20/52906940/figures/real_data_ensemble/overall/paper_real_data_matched_basis_drift_summary.csv
+output/slurm_output/real_data_ensemble_geometric_n20/52906940/figures/real_data_ensemble/overall/paper_real_data_matched_component_drift_summary.csv
 output/slurm_output/real_data_ensemble_geometric_n20/52906940/figures/real_data_ensemble/overall/paper_selected_locus_zoom_lollipop_l2_drift.png
 output/slurm_output/real_data_ensemble_geometric_n20/52906940/figures/real_data_ensemble/overall/paper_supplement_real_vs_sim_multimodality.png
 output/slurm_output/real_data_ensemble_geometric_n20/52906940/figures/real_data_ensemble/overall/paper_real_data_locus_summary_table.csv

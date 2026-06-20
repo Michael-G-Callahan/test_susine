@@ -1,5 +1,5 @@
 ---
-title: "Real-Data Ensemble — Visualize Results"
+title: "Real-Data Ensemble â€” Visualize Results"
 output:
   html_document:
     toc: true
@@ -128,7 +128,13 @@ highest_weight_refit_basin <- if (file.exists(file.path(aggregated_dir, "highest
     matched_basis_drift_var_y_highest_weight_vs_susie_anchor = numeric(),
     matched_basis_drift_var_y_refit_vs_susie_anchor = numeric(),
     matched_basis_var_y_highest_weight_vs_susie_anchor = numeric(),
-    matched_basis_var_y_refit_vs_susie_anchor = numeric()
+    matched_basis_var_y_refit_vs_susie_anchor = numeric(),
+    matched_component_signed_rel_l2_highest_weight_vs_susie_anchor = numeric(),
+    matched_component_signed_rel_l2_refit_vs_susie_anchor = numeric(),
+    matched_component_unsigned_rel_l2_highest_weight_vs_susie_anchor = numeric(),
+    matched_component_unsigned_rel_l2_refit_vs_susie_anchor = numeric(),
+    matched_component_mass_ratio_highest_weight_vs_susie_anchor = numeric(),
+    matched_component_mass_ratio_refit_vs_susie_anchor = numeric()
   )
 }
 for (nm in c(
@@ -140,7 +146,22 @@ for (nm in c(
   "matched_basis_drift_var_y_refit_vs_highest_weight",
   "matched_basis_var_y_highest_weight_vs_susie_anchor",
   "matched_basis_var_y_refit_vs_susie_anchor",
-  "matched_basis_var_y_refit_vs_highest_weight"
+  "matched_basis_var_y_refit_vs_highest_weight",
+  "matched_component_signed_rel_l2_highest_weight_vs_susie_anchor",
+  "matched_component_signed_rel_l2_refit_vs_susie_anchor",
+  "matched_component_signed_rel_l2_refit_vs_highest_weight",
+  "matched_component_unsigned_rel_l2_highest_weight_vs_susie_anchor",
+  "matched_component_unsigned_rel_l2_refit_vs_susie_anchor",
+  "matched_component_unsigned_rel_l2_refit_vs_highest_weight",
+  "matched_component_signed_l2_sum_highest_weight_vs_susie_anchor",
+  "matched_component_signed_l2_sum_refit_vs_susie_anchor",
+  "matched_component_signed_l2_sum_refit_vs_highest_weight",
+  "matched_component_pair_var_sum_highest_weight_vs_susie_anchor",
+  "matched_component_pair_var_sum_refit_vs_susie_anchor",
+  "matched_component_pair_var_sum_refit_vs_highest_weight",
+  "matched_component_mass_ratio_highest_weight_vs_susie_anchor",
+  "matched_component_mass_ratio_refit_vs_susie_anchor",
+  "matched_component_mass_ratio_refit_vs_highest_weight"
 )) {
   if (!nm %in% names(highest_weight_refit_basin)) highest_weight_refit_basin[[nm]] <- NA_real_
 }
@@ -1005,7 +1026,7 @@ plot_aggregated_lollipop <- function(locus_id) {
 
   if (identical(status, "failed")) {
     base_plot <- base_plot + labs(
-      subtitle = paste0("susieR anchor fit FAILED — no susieR overlay",
+      subtitle = paste0("susieR anchor fit FAILED â€” no susieR overlay",
                         if (!is.na(err_msg)) paste0(" (", err_msg, ")") else "")
     )
   }
@@ -1873,6 +1894,9 @@ drift_pip_l2_long_tbl <- dplyr::bind_rows(
     dplyr::transmute(
       locus_id,
       fit_type = "Highest-weight SuSiNE fit",
+      matched_component_signed_rel_l2 = .data$matched_component_signed_rel_l2_highest_weight_vs_susie_anchor,
+      matched_component_unsigned_rel_l2 = .data$matched_component_unsigned_rel_l2_highest_weight_vs_susie_anchor,
+      matched_component_mass_ratio = .data$matched_component_mass_ratio_highest_weight_vs_susie_anchor,
       matched_basis_drift_var_y = .data$matched_basis_drift_var_y_highest_weight_vs_susie_anchor,
       matched_basis_var_y = .data$matched_basis_var_y_highest_weight_vs_susie_anchor,
       total_yhat_drift_var_y = .data$basis_drift_var_y_highest_weight_vs_susie_anchor,
@@ -1883,6 +1907,9 @@ drift_pip_l2_long_tbl <- dplyr::bind_rows(
     dplyr::transmute(
       locus_id,
       fit_type = "SuSiE warm refit",
+      matched_component_signed_rel_l2 = .data$matched_component_signed_rel_l2_refit_vs_susie_anchor,
+      matched_component_unsigned_rel_l2 = .data$matched_component_unsigned_rel_l2_refit_vs_susie_anchor,
+      matched_component_mass_ratio = .data$matched_component_mass_ratio_refit_vs_susie_anchor,
       matched_basis_drift_var_y = .data$matched_basis_drift_var_y_refit_vs_susie_anchor,
       matched_basis_var_y = .data$matched_basis_var_y_refit_vs_susie_anchor,
       total_yhat_drift_var_y = .data$basis_drift_var_y_refit_vs_susie_anchor,
@@ -1894,29 +1921,29 @@ drift_pip_l2_long_tbl <- dplyr::bind_rows(
     fit_type = factor(.data$fit_type, levels = c("Highest-weight SuSiNE fit", "SuSiE warm refit")),
     locus_label = dplyr::if_else(
       .data$fit_type == "Highest-weight SuSiNE fit" &
-        (.data$matched_basis_drift_var_y > 0.02 | .data$pip_l2 > 1.0),
+        (.data$matched_component_signed_rel_l2 > 0.25 | .data$pip_l2 > 1.0),
       sub("_lung$", "", .data$locus_id),
       ""
     )
   ) %>%
-  dplyr::filter(is.finite(.data$matched_basis_drift_var_y), is.finite(.data$pip_l2))
+  dplyr::filter(is.finite(.data$matched_component_signed_rel_l2), is.finite(.data$pip_l2))
 
-paper_matched_basis_drift_summary_tbl <- drift_pip_l2_long_tbl %>%
-  dplyr::arrange(desc(.data$matched_basis_drift_var_y), desc(.data$pip_l2))
+paper_matched_component_drift_summary_tbl <- drift_pip_l2_long_tbl %>%
+  dplyr::arrange(desc(.data$matched_component_signed_rel_l2), desc(.data$pip_l2))
 readr::write_csv(
-  paper_matched_basis_drift_summary_tbl,
-  file.path(overall_figure_dir, "paper_real_data_matched_basis_drift_summary.csv")
+  paper_matched_component_drift_summary_tbl,
+  file.path(overall_figure_dir, "paper_real_data_matched_component_drift_summary.csv")
 )
 if (dir.exists(paper_real_data_case_study_dir)) {
   readr::write_csv(
-    paper_matched_basis_drift_summary_tbl,
-    file.path(paper_real_data_case_study_dir, "paper_real_data_matched_basis_drift_summary.csv")
+    paper_matched_component_drift_summary_tbl,
+    file.path(paper_real_data_case_study_dir, "paper_real_data_matched_component_drift_summary.csv")
   )
 }
 
 paper_drift_pip_l2_plot <- ggplot(
   drift_pip_l2_long_tbl,
-  aes(x = matched_basis_drift_var_y, y = pip_l2)
+  aes(x = matched_component_signed_rel_l2, y = pip_l2)
 ) +
   geom_path(
     aes(group = locus_id),
@@ -1941,7 +1968,7 @@ paper_drift_pip_l2_plot <- ggplot(
   ) +
   labs(
     title = "Annotations change inference and prediction",
-    x = "Matched basis drift from SuSiE baseline (fraction var(y))",
+    x = "Matched component drift from SuSiE baseline (relative L2)",
     y = expression("PIP shift from SuSiE baseline  " * "||" * Delta * "PIP" * "||"[2])
   ) +
   paper_panel_theme
@@ -2212,6 +2239,14 @@ ggsave(
   bg = "white"
 )
 ggsave(
+  file.path(overall_figure_dir, "paper_overall_annotation_matched_component_drift_pve_panel_b.png"),
+  paper_drift_pip_l2_plot,
+  width = 3.76,
+  height = 3.9,
+  dpi = 300,
+  bg = "white"
+)
+ggsave(
   file.path(overall_figure_dir, "paper_overall_annotation_drift_pve_panel_c.png"),
   paper_pve_plot,
   width = 3.76,
@@ -2279,6 +2314,23 @@ if (requireNamespace("patchwork", quietly = TRUE)) {
     bg = "white",
     limitsize = FALSE
   )
+  ggsave(
+    file.path(overall_figure_dir, "paper_overall_annotation_matched_component_drift_pve.png"),
+    paper_overall_figure,
+    width = 7.52,
+    height = 7.8,
+    dpi = 300,
+    bg = "white",
+    limitsize = FALSE
+  )
+  ggsave(
+    file.path(overall_figure_dir, "paper_overall_annotation_matched_component_drift_pve.pdf"),
+    paper_overall_figure,
+    width = 7.52,
+    height = 7.8,
+    bg = "white",
+    limitsize = FALSE
+  )
   if (dir.exists(paper_real_data_case_study_dir)) {
     ggsave(
       file.path(paper_real_data_case_study_dir, "paper_overall_annotation_matched_basis_drift_pve.png"),
@@ -2291,6 +2343,23 @@ if (requireNamespace("patchwork", quietly = TRUE)) {
     )
     ggsave(
       file.path(paper_real_data_case_study_dir, "paper_overall_annotation_matched_basis_drift_pve.pdf"),
+      paper_overall_figure,
+      width = 7.52,
+      height = 7.8,
+      bg = "white",
+      limitsize = FALSE
+    )
+    ggsave(
+      file.path(paper_real_data_case_study_dir, "paper_overall_annotation_matched_component_drift_pve.png"),
+      paper_overall_figure,
+      width = 7.52,
+      height = 7.8,
+      dpi = 300,
+      bg = "white",
+      limitsize = FALSE
+    )
+    ggsave(
+      file.path(paper_real_data_case_study_dir, "paper_overall_annotation_matched_component_drift_pve.pdf"),
       paper_overall_figure,
       width = 7.52,
       height = 7.8,
@@ -2643,7 +2712,12 @@ ensure_basin_r2_drift_tbl <- function() {
       basin_r2_drift = numeric(),
       matched_basis_drift_var_y = numeric(),
       matched_basis_var_y = numeric(),
-      matched_basis_drift_per_var_y = numeric()
+      matched_basis_drift_per_var_y = numeric(),
+      matched_component_signed_rel_l2 = numeric(),
+      matched_component_unsigned_rel_l2 = numeric(),
+      matched_component_signed_l2_sum = numeric(),
+      matched_component_pair_var_sum = numeric(),
+      matched_component_mass_ratio = numeric()
     )
   }
   readr::write_csv(basin_r2_drift_tbl, basin_r2_drift_path)
@@ -3304,9 +3378,9 @@ rm(list = ls(envir = selected_locus_R_cache), envir = selected_locus_R_cache)
 invisible(gc(full = TRUE))
 ```
 
-# 9. Basin r² Drift From c = 0 (one panel per locus)
+# 9. Basin rÂ² Drift From c = 0 (one panel per locus)
 
-Drift metric: weighted (1 - r²) on max-weight 1-1 matched per-effect coefficient
+Drift metric: weighted (1 - rÂ²) on max-weight 1-1 matched per-effect coefficient
 vectors, weighted by `min(var_y_explained_a, var_y_explained_b)`. RSS analog of
 `weighted_r2_drift` from `effect_matching_drift_analysis_5arm.Rmd`. Uses the
 R-weighted cosine `(b_i' R b_j) / sqrt((b_i' R b_i)(b_j' R b_j))` since X is
@@ -3328,11 +3402,11 @@ plot_basin_r2_drift <- function(loc) {
     geom_line() +
     geom_point(size = 2) +
     labs(
-      title = paste0("Basin r² Drift From c = 0: ", loc,
+      title = paste0("Basin rÂ² Drift From c = 0: ", loc,
                      if (flagged) "  [LD/z inconsistent]" else ""),
-      subtitle = "Weighted (1 - r²) on matched per-effect b_l, R-weighted cosine",
+      subtitle = "Weighted (1 - rÂ²) on matched per-effect b_l, R-weighted cosine",
       x = "Annotation scale c",
-      y = "Weighted (1 - r²) drift",
+      y = "Weighted (1 - rÂ²) drift",
       color = expression(sigma[0]^2)
     )
 }
