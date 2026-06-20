@@ -606,9 +606,9 @@ p_purity_keff <- ggplot2::ggplot(
 
 p_purity_keff_accuracy <- ggplot2::ggplot(
   purity_keff_plot_data %>%
-    dplyr::filter(is.finite(.data$accuracy_ratio)) %>%
-    dplyr::arrange(.data$accuracy_ratio),
-  ggplot2::aes(x = .data$purity, y = .data$k_eff_core95, color = .data$accuracy_ratio)
+    dplyr::filter(is.finite(.data$causal_pip_mass_pct)) %>%
+    dplyr::arrange(.data$causal_pip_mass_pct),
+  ggplot2::aes(x = .data$purity, y = .data$k_eff_core95, color = .data$causal_pip_mass_pct)
 ) +
   ggplot2::geom_point(alpha = 0.65, size = scatter_point_size) +
   ggplot2::geom_vline(xintercept = purity_cutoff, linetype = "dashed", color = "grey25") +
@@ -616,7 +616,7 @@ p_purity_keff_accuracy <- ggplot2::ggplot(
   ggplot2::scale_y_log10() +
   ggplot2::scale_color_gradientn(
     colors = c("#D55E00", "#F0E442", "#0072B2"),
-    name = "Accuracy ratio",
+    name = "Causal PIP mass (%)",
     guide = ggplot2::guide_colorbar(
       title.position = "top",
       barwidth = grid::unit(4.0, "in"),
@@ -626,7 +626,7 @@ p_purity_keff_accuracy <- ggplot2::ggplot(
   ggplot2::labs(
     x = "Credible-set purity (minimum pairwise |r|)",
     y = expression("Core-95% effective support (" * k[eff] * ")"),
-    title = "Purity vs diffuseness, colored by accuracy",
+    title = "Purity vs diffuseness, colored by causal PIP mass",
     subtitle = "Dashed line: purity = 0.50. Long dash: k_eff = 100."
   ) +
   ggplot2::theme_bw(base_size = 11) +
@@ -1013,9 +1013,9 @@ if (exists("p_old_cs")) {
 if (exists("purity_keff_plot_data") && !is.null(purity_keff_plot_data)) {
   p_purity_keff_accuracy <- ggplot2::ggplot(
     purity_keff_plot_data %>%
-      dplyr::filter(is.finite(.data$accuracy_ratio)) %>%
-      dplyr::arrange(.data$accuracy_ratio),
-    ggplot2::aes(x = .data$purity, y = .data$k_eff_core95, color = .data$accuracy_ratio)
+      dplyr::filter(is.finite(.data$causal_pip_mass_pct)) %>%
+      dplyr::arrange(.data$causal_pip_mass_pct),
+    ggplot2::aes(x = .data$purity, y = .data$k_eff_core95, color = .data$causal_pip_mass_pct)
   ) +
     ggplot2::geom_point(alpha = 0.65, size = scatter_point_size) +
     ggplot2::geom_vline(xintercept = purity_cutoff, linetype = "dashed", color = "grey25") +
@@ -1023,7 +1023,7 @@ if (exists("purity_keff_plot_data") && !is.null(purity_keff_plot_data)) {
     ggplot2::scale_y_log10() +
     ggplot2::scale_color_gradientn(
       colors = c("#D55E00", "#F0E442", "#0072B2"),
-      name = "Accuracy ratio",
+      name = "Causal PIP mass (%)",
       guide = ggplot2::guide_colorbar(
         title.position = "top",
         barwidth = grid::unit(4.0, "in"),
@@ -1033,7 +1033,7 @@ if (exists("purity_keff_plot_data") && !is.null(purity_keff_plot_data)) {
     ggplot2::labs(
       x = "Credible-set purity (minimum pairwise |r|)",
       y = expression("Core-95% effective support (" * k[eff] * ")"),
-      title = "Purity vs diffuseness, colored by accuracy",
+      title = "Purity vs diffuseness, colored by causal PIP mass",
       subtitle = "Dashed line: purity = 0.50. Long dash: k_eff = 100."
     ) +
     ggplot2::theme_bw(base_size = 11) +
