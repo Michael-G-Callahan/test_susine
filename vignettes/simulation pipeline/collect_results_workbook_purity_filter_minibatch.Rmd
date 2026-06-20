@@ -1272,6 +1272,12 @@ if (!"causal_pip_mass" %in% names(effect_unfiltered)) {
   message("Skipping metric diagnostics: causal_pip_mass not present in ",
           "effect_unfiltered (rerun with the updated evaluator).")
 } else {
+  # Locus grouping for cluster-aware CV: each dataset contributes L effects, so
+  # the rows are NOT iid. Pick the best available dataset identifier.
+  group_col <- intersect(c("dataset_bundle_id", "run_id", "matrix_id"),
+                         names(effect_unfiltered))
+  group_col <- if (length(group_col)) group_col[[1]] else NA_character_
+
   diag_df <- effect_unfiltered %>%
     dplyr::filter(.data$size > 0) %>%
     dplyr::transmute(
@@ -1280,7 +1286,8 @@ if (!"causal_pip_mass" %in% names(effect_unfiltered)) {
       purity          = as.numeric(.data$purity),
       size            = as.numeric(.data$size),
       k_eff           = as.numeric(.data$effect_k_eff_signal_core95),
-      coverage        = as.numeric(.data$coverage)
+      coverage        = as.numeric(.data$coverage),
+      dataset_id      = if (!is.na(group_col)) as.character(.data[[group_col]]) else NA_character_
     ) %>%
     dplyr::mutate(
       log_size = log10(.data$size),
@@ -1308,17 +1315,26 @@ if (!"causal_pip_mass" %in% names(effect_unfiltered)) {
     )
   }
 
+  # Shared model list: reused by the in-sample table and the grouped-CV chunk so
+  # the two never drift apart.
+  pve_specs <- list(
+    list(label = "Purity only (truth-agnostic)",
+         formula = "causal_pip_mass ~ s(purity, k = 5)"),
+    list(label = "CS size only (truth-agnostic)",
+         formula = "causal_pip_mass ~ s(log_size, k = 5)"),
+    list(label = "Effective support k_eff only (truth-agnostic)",
+         formula = "causal_pip_mass ~ s(log_keff, k = 5)"),
+    list(label = "Accuracy only (truth-aware)",
+         formula = "causal_pip_mass ~ s(accuracy_ratio, k = 5)"),
+    list(label = "Old joint: purity x size (truth-agnostic)",
+         formula = "causal_pip_mass ~ te(purity, log_size, k = 5)"),
+    list(label = "New joint: k_eff x accuracy (truth-aware)",
+         formula = "causal_pip_mass ~ te(log_keff, accuracy_ratio, k = 5)"),
+    list(label = "Old triple: purity x size + coverage (truth-aware)",
+         formula = "causal_pip_mass ~ te(purity, log_size, k = 5) + coverage")
+  )
   pve_table <- dplyr::bind_rows(
-    gam_dev_expl("causal_pip_mass ~ s(purity, k = 5)",
-                 diag_df, "Purity only (truth-agnostic)"),
-    gam_dev_expl("causal_pip_mass ~ s(log_keff, k = 5)",
-                 diag_df, "Effective support k_eff only (truth-agnostic)"),
-    gam_dev_expl("causal_pip_mass ~ te(purity, log_size, k = 5)",
-                 diag_df, "Old joint: purity x size (truth-agnostic)"),
-    gam_dev_expl("causal_pip_mass ~ te(log_keff, accuracy_ratio, k = 5)",
-                 diag_df, "New joint: k_eff x accuracy (truth-aware)"),
-    gam_dev_expl("causal_pip_mass ~ te(purity, log_size, k = 5) + coverage",
-                 diag_df, "Old triple: purity x size + coverage (truth-aware)")
+    lapply(pve_specs, function(s) gam_dev_expl(s$formula, diag_df, s$label))
   )
 
   # Metric independence: old metrics are already entangled; new ones are not.
@@ -1342,6 +1358,96 @@ if (!"causal_pip_mass" %in% names(effect_unfiltered)) {
     readr::write_csv(pve_table, pve_path)
     cat("\nWrote:", pve_path, "\n")
   }
+}
+```
+
+# 8a. Robustness: cluster-aware CV, concurvity, and full correlations
+
+`k_eff` matching the old joint *in-sample* (and the new-joint's edf ~23) both
+invite the same question: does it survive *out of sample*, and are the rows even
+independent? They are not — each locus contributes L effects. So we (i) report the
+full Spearman matrix, (ii) measure concurvity (the nonlinear generalization of
+collinearity) between the paired axes, and (iii) refit every model under
+**dataset-grouped** k-fold CV, holding out whole loci.
+
+```{r metric-diagnostics-robustness, eval = exists("diag_df") && !is.null(diag_df)}
+# ---- Response distribution: causal PIP mass is spiky at the boundaries --------
+cm <- diag_df$causal_pip_mass
+cat("Causal PIP mass distribution (n =", length(cm), "active effects):\n")
+cat(sprintf("  exactly 0 : %.1f%%   exactly 1 : %.1f%%   median : %.3f   mean : %.3f\n\n",
+            100 * mean(cm == 0), 100 * mean(cm == 1),
+            stats::median(cm), mean(cm)))
+
+# ---- Full Spearman correlation matrix among metrics + response ---------------
+cor_vars <- diag_df %>%
+  dplyr::transmute(
+    causal_pip_mass = .data$causal_pip_mass,
+    accuracy        = .data$accuracy_ratio,
+    coverage        = .data$coverage,
+    k_eff           = .data$k_eff,
+    cs_size         = .data$size,
+    purity          = .data$purity
+  )
+cat("Spearman correlation matrix:\n")
+print(round(stats::cor(cor_vars, method = "spearman"), 2))
+
+# ---- Concurvity: are the OLD axes redundant where the NEW ones are not? -------
+# ~1 means one axis is well-approximated by the other (a redundant dimension).
+conc_worst <- function(formula_str) {
+  fit <- tryCatch(
+    mgcv::gam(stats::as.formula(formula_str), data = diag_df,
+              family = stats::quasibinomial("logit"), method = "REML"),
+    error = function(e) NULL)
+  if (is.null(fit)) return(NA_real_)
+  w <- mgcv::concurvity(fit, full = TRUE)["worst", ]
+  max(w[names(w) != "para"], na.rm = TRUE)
+}
+cat("\nWorst-case concurvity between the two axes (1 = redundant):\n")
+cat(sprintf("  old plane  s(purity) + s(log_size)   : %.3f\n",
+            conc_worst("causal_pip_mass ~ s(purity, k = 5) + s(log_size, k = 5)")))
+cat(sprintf("  new plane  s(log_keff) + s(accuracy) : %.3f\n",
+            conc_worst("causal_pip_mass ~ s(log_keff, k = 5) + s(accuracy_ratio, k = 5)")))
+
+# ---- Dataset-grouped CV: honest out-of-sample PVE (rows clustered by locus) ---
+if (all(is.na(diag_df$dataset_id))) {
+  diag_df$.cv_group <- as.character(seq_len(nrow(diag_df)))
+  cat("\n[CV] No dataset identifier found; falling back to ungrouped CV.\n")
+} else {
+  diag_df$.cv_group <- diag_df$dataset_id
+}
+ug <- unique(diag_df$.cv_group)
+K_cv <- min(5L, length(ug))
+fold_lookup <- stats::setNames(((seq_along(ug) - 1L) %% K_cv) + 1L, ug)
+fold_id <- fold_lookup[diag_df$.cv_group]
+
+grouped_cv <- function(formula_str) {
+  y <- diag_df$causal_pip_mass
+  pred <- rep(NA_real_, length(y))
+  for (k in seq_len(K_cv)) {
+    tr <- fold_id != k
+    fit <- tryCatch(
+      mgcv::gam(stats::as.formula(formula_str), data = diag_df[tr, , drop = FALSE],
+                family = stats::quasibinomial("logit"), method = "REML"),
+      error = function(e) NULL)
+    if (is.null(fit)) next
+    pred[!tr] <- as.numeric(predict(fit, newdata = diag_df[!tr, , drop = FALSE],
+                                    type = "response"))
+  }
+  ok <- is.finite(pred) & is.finite(y)
+  r2 <- 1 - sum((y[ok] - pred[ok])^2) / sum((y[ok] - mean(y[ok]))^2)
+  sp <- suppressWarnings(stats::cor(pred[ok], y[ok], method = "spearman"))
+  tibble::tibble(r2_oos_pct = 100 * r2, spearman_oos = sp)
+}
+
+cv_table <- dplyr::bind_rows(lapply(pve_specs, function(s) {
+  dplyr::bind_cols(tibble::tibble(model = s$label), grouped_cv(s$formula))
+}))
+cat(sprintf("\nDataset-grouped %d-fold CV across %d loci (out-of-sample):\n",
+            K_cv, length(ug)))
+print(as.data.frame(cv_table), row.names = FALSE, digits = 3)
+
+if (exists("consolidated_dir")) {
+  readr::write_csv(cv_table, file.path(consolidated_dir, "metric_pve_cv_causal_pip_mass.csv"))
 }
 ```
 
