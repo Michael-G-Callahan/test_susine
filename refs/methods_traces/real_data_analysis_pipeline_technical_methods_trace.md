@@ -963,6 +963,7 @@ functional_grid_summary.csv
 susie_anchor_summary.csv
 highest_weight_refit_summary.csv
 highest_weight_refit_basin_r2_drift.csv
+highest_weight_refit_matched_component_pairs.csv
 paper_real_data_ensemble_summary.csv
 top_variants_cluster_weight.csv
 run_comparisons.csv
@@ -1145,20 +1146,18 @@ component L2 distance:
 signed_l2_sum = sum_matched ||b_a - b_match||_R^2
 pair_var_sum  = sum_matched (||b_a||_R^2 + ||b_match||_R^2)
 matched_component_signed_rel_l2 = signed_l2_sum / pair_var_sum
-component_mass_weight = max(sum_l ||b_l^a||_R^2, sum_m ||b_m^b||_R^2)
-matched_component_signed_mass_weighted = matched_component_signed_rel_l2 * component_mass_weight
+fitted_var_weight = max(||X sum_l b_l^a||_2^2, ||X sum_m b_m^b||_2^2)
+matched_component_signed_pve_weighted = matched_component_signed_rel_l2 * fitted_var_weight
 ```
 
 The relative diagnostic captures sign and amplitude changes that `1 - r^2`
-misses while staying scale-free within the matched components. The mass-weighted
+misses while staying scale-free within the matched components. The PVE-weighted
 diagnostic keeps that matched-component rearrangement signal, but downweights
-small fitted-signal loci by multiplying by the larger summed component mass from
-the two compared fits. Because real RSS components can have opposing fitted
-effects that cancel in the whole model, the component mass can exceed ordinary
-whole-model PVE. The current paper overall Panel B uses
-`matched_component_signed_mass_weighted_*` as its x-axis. The unweighted
-`matched_component_signed_rel_l2_*` columns are retained in the summary CSV for
-audit.
+small fitted-signal loci by multiplying by the larger whole-model fitted variance
+explained by either compared fit. The current paper overall Panel B uses
+`matched_component_signed_pve_weighted_*` as its x-axis. The unweighted
+`matched_component_signed_rel_l2_*` and component-mass-weighted columns are
+retained in the summary CSV for audit.
 All four metric families are written for the same three comparisons:
 
 - highest-weight source vs SuSiE anchor
@@ -1166,11 +1165,19 @@ All four metric families are written for the same three comparisons:
 - warm refit vs SuSiE anchor (`*_refit_vs_susie_anchor`);
 - warm refit vs highest-weight source (`*_refit_vs_highest_weight`).
 
-These are stored in:
+These scalar summaries are stored in:
 
 ```text
 highest_weight_refit_basin_r2_drift.csv
 ```
+
+The collector also writes the matched-component sufficient statistics used to rebuild these diagnostics without another collector run:
+
+```text
+highest_weight_refit_matched_component_pairs.csv
+```
+
+This long table has one row per locus, comparison, and matched or unmatched component. It includes component-level fitted variances, cross-covariances, correlations, signed and unsigned L2 distances, component-mass totals, and whole-model fitted-variance totals for both compared fits.
 ## 11. Paper figure rendering
 
 The visualization workbook is:
@@ -1294,16 +1301,17 @@ Source tables:
 
 ```text
 highest_weight_refit_basin_r2_drift.csv
+highest_weight_refit_matched_component_pairs.csv
 paper_real_data_ensemble_summary.csv
 variant_posteriors_dataset/
 ```
 
-The x-axis is component-mass-weighted Hungarian matched-component drift from the SuSiE baseline: the `matched_component_signed_mass_weighted_*` scalar of Section 10.4(4). The workbook axis title is `Matched component drift from SuSiE baseline (component-mass weighted)`. The y-axis is PIP L2 distance from the SuSiE baseline. Each locus contributes up to two points, joined by a grey path:
+The x-axis is PVE-weighted Hungarian matched-component drift from the SuSiE baseline: the `matched_component_signed_pve_weighted_*` scalar of Section 10.4(4). The workbook axis title is `Matched component drift from SuSiE baseline (PVE weighted)`. The y-axis is PIP L2 distance from the SuSiE baseline. Each locus contributes up to two points, joined by a grey path:
 
 - highest-weight SuSiNE fit (point color `#0B6E4F`);
 - SuSiE warm refit (point color `#C65D00`).
 
-The x-coordinates come straight from `highest_weight_refit_basin` columns `matched_component_signed_mass_weighted_highest_weight_vs_susie_anchor` and `matched_component_signed_mass_weighted_refit_vs_susie_anchor`. The old total fitted-y drift, matched-basis drift, and unweighted matched-component relative drift columns are retained in `paper_real_data_matched_component_drift_summary.csv` for audit. The y-coordinates (PIP L2) are recomputed live in the workbook from the variant-posterior parquet, not read from a stored column:
+The x-coordinates come straight from `highest_weight_refit_basin` columns `matched_component_signed_pve_weighted_highest_weight_vs_susie_anchor` and `matched_component_signed_pve_weighted_refit_vs_susie_anchor`. The old total fitted-y drift, matched-basis drift, unweighted matched-component relative drift, and component-mass-weighted columns are retained in `paper_real_data_matched_component_drift_summary.csv` for audit. The y-coordinates (PIP L2) are recomputed live in the workbook from the variant-posterior parquet, not read from a stored column:
 
 - highest-weight fit: `run_pip_l2(locus_id, susie_anchor_run_id,
   highest_weight_source_run_id)`;
@@ -1317,7 +1325,7 @@ auxiliary diagnostics, but the paper-facing overall panel is the L2 version.
 Loci are labeled (only on the highest-weight-fit point) when:
 
 ```text
-matched_component_signed_mass_weighted > 0.10 OR pip_l2 > 1.0
+matched_component_signed_pve_weighted > 0.10 OR pip_l2 > 1.0
 ```
 
 Panel C: local genetic variance / PVE.
@@ -1441,11 +1449,11 @@ The L2-drift figure is a one-row-per-locus grid; each row is FOUR patchwork
 cells (`plot_layout(widths = c(0.07, 1, 1, 1))`): a rotated locus-name strip,
 then three data columns. Column titles appear only on the first row.
 
-Column 1 — "PIPs for shifted effects" (`paper_lollipop_l2_plot` ->
+Column 1 â€” "PIPs for shifted effects" (`paper_lollipop_l2_plot` ->
 `plot_aggregated_lollipop(locus, n_variants = 6, selection_metric =
 "posterior_mean_delta")`). The 6 displayed variants are the top variants by
 `abs_delta_posterior_mean = abs(aggregated_posterior_mean -
-baseline_posterior_mean)` (NOT the PIP delta — note the standalone
+baseline_posterior_mean)` (NOT the PIP delta â€” note the standalone
 `plot_aggregated_lollipop` default is `selection_metric = "pip_delta"`, but the
 paper L2 column overrides it to `posterior_mean_delta`). Each variant shows three
 points plus a grey segment from baseline to ensemble PIP:
@@ -1456,7 +1464,7 @@ points plus a grey segment from baseline to ensemble PIP:
 - SuSiNE ensemble: `aggregated_pip`;
 - SuSiE warm refit: PIP from `highest_weight_refit_variant_posteriors.parquet`.
 
-Column 2 — "Fitted effect size" (`paper_signal_contribution_l2_plot`; despite
+Column 2 â€” "Fitted effect size" (`paper_signal_contribution_l2_plot`; despite
 the legacy function name it plots the signed conditional posterior-mean effect,
 not a signal contribution). For the same 6 variants it plots the
 floored-alpha-weighted conditional effect `E[b_j | gamma_j = 1]` for baseline,
@@ -1469,7 +1477,7 @@ weighted by `agg_weight_run` (Option-B aggregation,
 (`scales::pseudo_log_trans(sigma = 1, base = 2)`) with hardcoded breaks
 `{0, +/-1, +/-5, +/-20}`.
 
-Column 3 — "PIP L2 drift from baseline" (`paper_pip_drift_l2_plot` ->
+Column 3 â€” "PIP L2 drift from baseline" (`paper_pip_drift_l2_plot` ->
 `paper_pip_drift_metric_plot(drift_col = "l2_from_reference_c0_sigma02")`). For
 each functional-grid run it plots:
 
@@ -1524,7 +1532,7 @@ read from
 background is filtered to `architecture == "susie2_oligogenic"` and, when
 present, `spec_name == "C-CS"`.
 
-IMPORTANT — both axes use the **credible-shift** multimodal metrics, NOT the JSD
+IMPORTANT â€” both axes use the **credible-shift** multimodal metrics, NOT the JSD
 metrics. The figure plots:
 
 ```text
@@ -1596,7 +1604,7 @@ Rows are sorted by descending `pip_l2_susine_ensemble_vs_susie`, then
 `R/real_data_pipeline.R`). The export script recomputes
 `pip_l2_susie_anchor_vs_susine_ensemble` from the anchor `variant_posteriors`
 and the aggregated PIP parquet when the column is not already present in the
-summary (anchor vs aggregated-ensemble L2 — distinct from the Panel B
+summary (anchor vs aggregated-ensemble L2 â€” distinct from the Panel B
 anchor-vs-highest-weight-fit L2). The totals CSV is `n_loci`,
 `total_susie_pip_gt_05`, `total_susine_pip_gt_05`, `total_agreed_pip_gt_05`.
 
@@ -1755,7 +1763,8 @@ Expected validation:
 - `paper_real_data_ensemble_summary.csv` exists.
 - `aggregated_variant_pips_cluster_weight.parquet` exists.
 - `highest_weight_refit_variant_posteriors.parquet` exists.
-- `highest_weight_refit_basin_r2_drift.csv` exists and includes `matched_basis_drift_var_y_*`, `matched_component_signed_rel_l2_*`, and `matched_component_signed_mass_weighted_*` columns.
+- `highest_weight_refit_basin_r2_drift.csv` exists and includes `matched_basis_drift_var_y_*`, `matched_component_signed_rel_l2_*`, and `matched_component_signed_pve_weighted_*` columns.
+- `highest_weight_refit_matched_component_pairs.csv` exists and includes `comparison`, `match_status`, `var_y_a_component`, `var_y_b_component`, `cov_y_ab_component`, `signed_l2_var_y`, `fit_a_fitted_var_y`, and `fit_b_fitted_var_y` columns.
 - No selected loci failed. The final paper-side
   `paper_real_data_ensemble_summary.csv` has 20 rows and non-missing anchor,
   highest-weight-source, and warm-refit run ids for all 20 loci.

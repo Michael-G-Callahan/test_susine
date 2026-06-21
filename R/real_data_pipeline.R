@@ -1411,6 +1411,124 @@ real_data_matched_basis_drift_var_y_pair_cached <- function(cache_a, cache_b) {
   )
 }
 
+real_data_matched_component_pair_stats_cached <- function(cache_a, cache_b) {
+  empty <- function() tibble::tibble(
+    component_index_a = integer(), component_index_b = integer(),
+    match_status = character(), var_y_a_component = numeric(),
+    var_y_b_component = numeric(), cov_y_ab_component = numeric(),
+    cor_y_ab_component = numeric(), abs_cor_y_ab_component = numeric(),
+    signed_l2_var_y = numeric(), unsigned_l2_var_y = numeric(),
+    pair_component_var_sum = numeric(), min_component_var_y = numeric(),
+    fit_a_n_effects = integer(), fit_b_n_effects = integer(),
+    fit_a_component_mass_var_y = numeric(), fit_b_component_mass_var_y = numeric(),
+    fit_component_mass_weight_var_y = numeric(), fit_a_fitted_var_y = numeric(),
+    fit_b_fitted_var_y = numeric(), fit_fitted_var_weight_var_y = numeric()
+  )
+
+  if (is.null(cache_a) || is.null(cache_b)) return(empty())
+  L_a <- nrow(cache_a$b)
+  L_b <- nrow(cache_b$b)
+  if (L_a == 0L && L_b == 0L) return(empty())
+  if (!requireNamespace("clue", quietly = TRUE)) {
+    stop("Package 'clue' is required for Hungarian matched component diagnostics.", call. = FALSE)
+  }
+
+  component_mass_a <- sum(cache_a$var, na.rm = TRUE)
+  component_mass_b <- sum(cache_b$var, na.rm = TRUE)
+  component_mass_weight <- max(component_mass_a, component_mass_b)
+  b_a_total <- if (L_a > 0L) colSums(cache_a$b) else rep(0, ncol(cache_b$b))
+  b_b_total <- if (L_b > 0L) colSums(cache_b$b) else rep(0, ncol(cache_a$b))
+  Rb_a_total <- if (L_a > 0L) colSums(cache_a$Rb) else rep(0, length(b_b_total))
+  Rb_b_total <- if (L_b > 0L) colSums(cache_b$Rb) else rep(0, length(b_a_total))
+  fitted_var_a <- max(sum(b_a_total * Rb_a_total), 0)
+  fitted_var_b <- max(sum(b_b_total * Rb_b_total), 0)
+  fitted_var_weight <- max(fitted_var_a, fitted_var_b)
+
+  add_common <- function(tbl) {
+    dplyr::mutate(
+      tbl,
+      fit_a_n_effects = L_a, fit_b_n_effects = L_b,
+      fit_a_component_mass_var_y = component_mass_a,
+      fit_b_component_mass_var_y = component_mass_b,
+      fit_component_mass_weight_var_y = component_mass_weight,
+      fit_a_fitted_var_y = fitted_var_a,
+      fit_b_fitted_var_y = fitted_var_b,
+      fit_fitted_var_weight_var_y = fitted_var_weight
+    )
+  }
+
+  if (L_a == 0L) {
+    return(add_common(tibble::tibble(
+      component_index_a = NA_integer_, component_index_b = seq_len(L_b),
+      match_status = "b_unmatched", var_y_a_component = 0,
+      var_y_b_component = cache_b$var, cov_y_ab_component = 0,
+      cor_y_ab_component = NA_real_, abs_cor_y_ab_component = NA_real_,
+      signed_l2_var_y = cache_b$var, unsigned_l2_var_y = cache_b$var,
+      pair_component_var_sum = cache_b$var, min_component_var_y = 0
+    )))
+  }
+  if (L_b == 0L) {
+    return(add_common(tibble::tibble(
+      component_index_a = seq_len(L_a), component_index_b = NA_integer_,
+      match_status = "a_unmatched", var_y_a_component = cache_a$var,
+      var_y_b_component = 0, cov_y_ab_component = 0,
+      cor_y_ab_component = NA_real_, abs_cor_y_ab_component = NA_real_,
+      signed_l2_var_y = cache_a$var, unsigned_l2_var_y = cache_a$var,
+      pair_component_var_sum = cache_a$var, min_component_var_y = 0
+    )))
+  }
+
+  num <- cache_a$b %*% t(cache_b$Rb)
+  denom <- sqrt(outer(cache_a$var, cache_b$var))
+  cor_mat <- ifelse(denom > 0, num / denom, 0)
+  cor_mat <- pmin(pmax(cor_mat, -1), 1)
+  L <- max(L_a, L_b)
+  score <- matrix(0, nrow = L, ncol = L)
+  score[seq_len(L_a), seq_len(L_b)] <- 1 + abs(cor_mat)
+  assignment <- as.integer(clue::solve_LSAP(score, maximum = TRUE))
+
+  rows <- vector("list", L_a + L_b)
+  used_b <- rep(FALSE, L_b)
+  n_rows <- 0L
+  for (i in seq_len(L_a)) {
+    j <- assignment[i]
+    if (j <= L_b) {
+      used_b[j] <- TRUE
+      va <- cache_a$var[i]; vb <- cache_b$var[j]
+      cov_ab <- num[i, j]; cor_ab <- cor_mat[i, j]
+      status <- "matched"
+    } else {
+      va <- cache_a$var[i]; vb <- 0; cov_ab <- 0; cor_ab <- NA_real_
+      status <- "a_unmatched"; j <- NA_integer_
+    }
+    n_rows <- n_rows + 1L
+    rows[[n_rows]] <- tibble::tibble(
+      component_index_a = i, component_index_b = j, match_status = status,
+      var_y_a_component = va, var_y_b_component = vb,
+      cov_y_ab_component = cov_ab, cor_y_ab_component = cor_ab,
+      abs_cor_y_ab_component = abs(cor_ab),
+      signed_l2_var_y = max(va + vb - 2 * cov_ab, 0),
+      unsigned_l2_var_y = max(va + vb - 2 * abs(cov_ab), 0),
+      pair_component_var_sum = va + vb, min_component_var_y = min(va, vb)
+    )
+  }
+  if (any(!used_b)) {
+    for (j in which(!used_b)) {
+      vb <- cache_b$var[j]
+      n_rows <- n_rows + 1L
+      rows[[n_rows]] <- tibble::tibble(
+        component_index_a = NA_integer_, component_index_b = j,
+        match_status = "b_unmatched", var_y_a_component = 0,
+        var_y_b_component = vb, cov_y_ab_component = 0,
+        cor_y_ab_component = NA_real_, abs_cor_y_ab_component = NA_real_,
+        signed_l2_var_y = vb, unsigned_l2_var_y = vb,
+        pair_component_var_sum = vb, min_component_var_y = 0
+      )
+    }
+  }
+  add_common(dplyr::bind_rows(rows[seq_len(n_rows)]))
+}
+
 real_data_matched_component_relative_drift_pair_cached <- function(cache_a, cache_b) {
   if (is.null(cache_a) || is.null(cache_b)) {
     return(list(
@@ -1421,6 +1539,11 @@ real_data_matched_component_relative_drift_pair_cached <- function(cache_a, cach
       pair_var_sum = NA_real_,
       signed_mass_weighted_drift = NA_real_,
       unsigned_mass_weighted_drift = NA_real_,
+      signed_pve_weighted_drift = NA_real_,
+      unsigned_pve_weighted_drift = NA_real_,
+      fitted_var_weight_var_y = NA_real_,
+      fitted_var_a_var_y = NA_real_,
+      fitted_var_b_var_y = NA_real_,
       component_mass_weight_var_y = NA_real_,
       component_mass_a_var_y = NA_real_,
       component_mass_b_var_y = NA_real_,
@@ -1440,6 +1563,11 @@ real_data_matched_component_relative_drift_pair_cached <- function(cache_a, cach
       pair_var_sum = NA_real_,
       signed_mass_weighted_drift = NA_real_,
       unsigned_mass_weighted_drift = NA_real_,
+      signed_pve_weighted_drift = NA_real_,
+      unsigned_pve_weighted_drift = NA_real_,
+      fitted_var_weight_var_y = NA_real_,
+      fitted_var_a_var_y = NA_real_,
+      fitted_var_b_var_y = NA_real_,
       component_mass_weight_var_y = NA_real_,
       component_mass_a_var_y = NA_real_,
       component_mass_b_var_y = NA_real_,
@@ -1485,6 +1613,13 @@ real_data_matched_component_relative_drift_pair_cached <- function(cache_a, cach
   component_mass_a <- sum(cache_a$var, na.rm = TRUE)
   component_mass_b <- sum(cache_b$var, na.rm = TRUE)
   component_mass_weight <- max(component_mass_a, component_mass_b)
+  b_a_total <- colSums(cache_a$b)
+  b_b_total <- colSums(cache_b$b)
+  Rb_a_total <- colSums(cache_a$Rb)
+  Rb_b_total <- colSums(cache_b$Rb)
+  fitted_var_a <- max(sum(b_a_total * Rb_a_total), 0)
+  fitted_var_b <- max(sum(b_b_total * Rb_b_total), 0)
+  fitted_var_weight <- max(fitted_var_a, fitted_var_b)
   global_var_sum <- component_mass_a + component_mass_b
   signed_relative_drift <- if (pair_var_sum > 0) signed_l2_sum / pair_var_sum else NA_real_
   unsigned_relative_drift <- if (pair_var_sum > 0) unsigned_l2_sum / pair_var_sum else NA_real_
@@ -1496,6 +1631,11 @@ real_data_matched_component_relative_drift_pair_cached <- function(cache_a, cach
     pair_var_sum = if (pair_var_sum > 0) pair_var_sum else NA_real_,
     signed_mass_weighted_drift = if (is.finite(signed_relative_drift) && component_mass_weight > 0) signed_relative_drift * component_mass_weight else NA_real_,
     unsigned_mass_weighted_drift = if (is.finite(unsigned_relative_drift) && component_mass_weight > 0) unsigned_relative_drift * component_mass_weight else NA_real_,
+    signed_pve_weighted_drift = if (is.finite(signed_relative_drift) && fitted_var_weight > 0) signed_relative_drift * fitted_var_weight else NA_real_,
+    unsigned_pve_weighted_drift = if (is.finite(unsigned_relative_drift) && fitted_var_weight > 0) unsigned_relative_drift * fitted_var_weight else NA_real_,
+    fitted_var_weight_var_y = if (fitted_var_weight > 0) fitted_var_weight else NA_real_,
+    fitted_var_a_var_y = if (fitted_var_a > 0) fitted_var_a else NA_real_,
+    fitted_var_b_var_y = if (fitted_var_b > 0) fitted_var_b else NA_real_,
     component_mass_weight_var_y = if (component_mass_weight > 0) component_mass_weight else NA_real_,
     component_mass_a_var_y = if (component_mass_a > 0) component_mass_a else NA_real_,
     component_mass_b_var_y = if (component_mass_b > 0) component_mass_b else NA_real_,
@@ -1581,6 +1721,11 @@ real_data_basin_r2_drift_locus <- function(R, runs_tbl, progress = NULL) {
           matched_component_pair_var_sum = NA_real_,
           matched_component_signed_mass_weighted = NA_real_,
           matched_component_unsigned_mass_weighted = NA_real_,
+          matched_component_signed_pve_weighted = NA_real_,
+          matched_component_unsigned_pve_weighted = NA_real_,
+          matched_component_fitted_var_weight_var_y = NA_real_,
+          matched_component_fitted_var_a_var_y = NA_real_,
+          matched_component_fitted_var_b_var_y = NA_real_,
           matched_component_mass_weight_var_y = NA_real_,
           matched_component_mass_a_var_y = NA_real_,
           matched_component_mass_b_var_y = NA_real_,
@@ -1616,6 +1761,11 @@ real_data_basin_r2_drift_locus <- function(R, runs_tbl, progress = NULL) {
         matched_component_pair_var_sum = matched_component_res$pair_var_sum,
         matched_component_signed_mass_weighted = matched_component_res$signed_mass_weighted_drift,
         matched_component_unsigned_mass_weighted = matched_component_res$unsigned_mass_weighted_drift,
+        matched_component_signed_pve_weighted = matched_component_res$signed_pve_weighted_drift,
+        matched_component_unsigned_pve_weighted = matched_component_res$unsigned_pve_weighted_drift,
+        matched_component_fitted_var_weight_var_y = matched_component_res$fitted_var_weight_var_y,
+        matched_component_fitted_var_a_var_y = matched_component_res$fitted_var_a_var_y,
+        matched_component_fitted_var_b_var_y = matched_component_res$fitted_var_b_var_y,
         matched_component_mass_weight_var_y = matched_component_res$component_mass_weight_var_y,
         matched_component_mass_a_var_y = matched_component_res$component_mass_a_var_y,
         matched_component_mass_b_var_y = matched_component_res$component_mass_b_var_y,
@@ -2211,6 +2361,7 @@ collect_real_data_results <- function(
   highest_weight_refit_summary_rows <- list()
   highest_weight_refit_variant_rows <- list()
   highest_weight_refit_basin_rows <- list()
+  highest_weight_refit_component_pair_rows <- list()
   paper_summary_rows <- list()
 
   run_metrics_tbl <- csv_tables$run_metrics
@@ -2855,6 +3006,44 @@ collect_real_data_results <- function(
           source_vs_anchor_component <- real_data_matched_component_relative_drift_pair_cached(source_cache, anchor_cache)
           refit_vs_anchor_component <- real_data_matched_component_relative_drift_pair_cached(refit_cache, anchor_cache)
           refit_vs_source_component <- real_data_matched_component_relative_drift_pair_cached(refit_cache, source_cache)
+          component_pair_tbl <- dplyr::bind_rows(
+            real_data_matched_component_pair_stats_cached(source_cache, anchor_cache) %>%
+              dplyr::mutate(
+                comparison = "highest_weight_vs_susie_anchor",
+                fit_a_role = "highest_weight_source",
+                fit_b_role = "susie_anchor",
+                fit_a_run_id = source_run_id,
+                fit_b_run_id = anchor_id,
+                .before = 1L
+              ),
+            real_data_matched_component_pair_stats_cached(refit_cache, anchor_cache) %>%
+              dplyr::mutate(
+                comparison = "refit_vs_susie_anchor",
+                fit_a_role = "highest_weight_refit",
+                fit_b_role = "susie_anchor",
+                fit_a_run_id = refit_run_id,
+                fit_b_run_id = anchor_id,
+                .before = 1L
+              ),
+            real_data_matched_component_pair_stats_cached(refit_cache, source_cache) %>%
+              dplyr::mutate(
+                comparison = "refit_vs_highest_weight",
+                fit_a_role = "highest_weight_refit",
+                fit_b_role = "highest_weight_source",
+                fit_a_run_id = refit_run_id,
+                fit_b_run_id = source_run_id,
+                .before = 1L
+              )
+          ) %>%
+            dplyr::mutate(
+              locus_id = locus_id,
+              gene_name = locus_row$gene_name[[1]],
+              susie_anchor_run_id = anchor_id,
+              highest_weight_source_run_id = source_run_id,
+              highest_weight_refit_run_id = refit_run_id,
+              .before = 1L
+            )
+          highest_weight_refit_component_pair_rows[[length(highest_weight_refit_component_pair_rows) + 1L]] <- component_pair_tbl
           highest_weight_refit_basin_rows[[length(highest_weight_refit_basin_rows) + 1L]] <- tibble::tibble(
             locus_id = locus_id,
             gene_name = locus_row$gene_name[[1]],
@@ -2894,6 +3083,21 @@ collect_real_data_results <- function(
             matched_component_unsigned_mass_weighted_highest_weight_vs_susie_anchor = source_vs_anchor_component$unsigned_mass_weighted_drift,
             matched_component_unsigned_mass_weighted_refit_vs_susie_anchor = refit_vs_anchor_component$unsigned_mass_weighted_drift,
             matched_component_unsigned_mass_weighted_refit_vs_highest_weight = refit_vs_source_component$unsigned_mass_weighted_drift,
+            matched_component_signed_pve_weighted_highest_weight_vs_susie_anchor = source_vs_anchor_component$signed_pve_weighted_drift,
+            matched_component_signed_pve_weighted_refit_vs_susie_anchor = refit_vs_anchor_component$signed_pve_weighted_drift,
+            matched_component_signed_pve_weighted_refit_vs_highest_weight = refit_vs_source_component$signed_pve_weighted_drift,
+            matched_component_unsigned_pve_weighted_highest_weight_vs_susie_anchor = source_vs_anchor_component$unsigned_pve_weighted_drift,
+            matched_component_unsigned_pve_weighted_refit_vs_susie_anchor = refit_vs_anchor_component$unsigned_pve_weighted_drift,
+            matched_component_unsigned_pve_weighted_refit_vs_highest_weight = refit_vs_source_component$unsigned_pve_weighted_drift,
+            matched_component_fitted_var_weight_var_y_highest_weight_vs_susie_anchor = source_vs_anchor_component$fitted_var_weight_var_y,
+            matched_component_fitted_var_weight_var_y_refit_vs_susie_anchor = refit_vs_anchor_component$fitted_var_weight_var_y,
+            matched_component_fitted_var_weight_var_y_refit_vs_highest_weight = refit_vs_source_component$fitted_var_weight_var_y,
+            matched_component_fitted_var_a_var_y_highest_weight_vs_susie_anchor = source_vs_anchor_component$fitted_var_a_var_y,
+            matched_component_fitted_var_a_var_y_refit_vs_susie_anchor = refit_vs_anchor_component$fitted_var_a_var_y,
+            matched_component_fitted_var_a_var_y_refit_vs_highest_weight = refit_vs_source_component$fitted_var_a_var_y,
+            matched_component_fitted_var_b_var_y_highest_weight_vs_susie_anchor = source_vs_anchor_component$fitted_var_b_var_y,
+            matched_component_fitted_var_b_var_y_refit_vs_susie_anchor = refit_vs_anchor_component$fitted_var_b_var_y,
+            matched_component_fitted_var_b_var_y_refit_vs_highest_weight = refit_vs_source_component$fitted_var_b_var_y,
             matched_component_mass_weight_var_y_highest_weight_vs_susie_anchor = source_vs_anchor_component$component_mass_weight_var_y,
             matched_component_mass_weight_var_y_refit_vs_susie_anchor = refit_vs_anchor_component$component_mass_weight_var_y,
             matched_component_mass_weight_var_y_refit_vs_highest_weight = refit_vs_source_component$component_mass_weight_var_y,
@@ -2924,6 +3128,7 @@ collect_real_data_results <- function(
   highest_weight_refit_summary_tbl <- dplyr::bind_rows(highest_weight_refit_summary_rows)
   highest_weight_refit_variants_tbl <- dplyr::bind_rows(highest_weight_refit_variant_rows)
   highest_weight_refit_basin_tbl <- dplyr::bind_rows(highest_weight_refit_basin_rows)
+  highest_weight_refit_component_pairs_tbl <- dplyr::bind_rows(highest_weight_refit_component_pair_rows)
   paper_summary_tbl <- dplyr::bind_rows(paper_summary_rows)
   top_variants_tbl <- dplyr::bind_rows(top_variant_rows)
   comparisons_tbl <- dplyr::bind_rows(comparison_rows)
@@ -2939,6 +3144,7 @@ collect_real_data_results <- function(
   if (nrow(anchor_summary_tbl)) readr::write_csv(anchor_summary_tbl, file.path(output_dir, "susie_anchor_summary.csv"))
   if (nrow(highest_weight_refit_summary_tbl)) readr::write_csv(highest_weight_refit_summary_tbl, file.path(output_dir, "highest_weight_refit_summary.csv"))
   if (nrow(highest_weight_refit_basin_tbl)) readr::write_csv(highest_weight_refit_basin_tbl, file.path(output_dir, "highest_weight_refit_basin_r2_drift.csv"))
+  if (nrow(highest_weight_refit_component_pairs_tbl)) readr::write_csv(highest_weight_refit_component_pairs_tbl, file.path(output_dir, "highest_weight_refit_matched_component_pairs.csv"))
   if (nrow(paper_summary_tbl)) readr::write_csv(paper_summary_tbl, file.path(output_dir, "paper_real_data_ensemble_summary.csv"))
   if (nrow(top_variants_tbl)) readr::write_csv(top_variants_tbl, file.path(output_dir, "top_variants_cluster_weight.csv"))
   if (nrow(comparisons_tbl)) readr::write_csv(comparisons_tbl, file.path(output_dir, "run_comparisons.csv"))
@@ -2962,7 +3168,8 @@ collect_real_data_results <- function(
     "functional_grid_summary", file.path(output_dir, "functional_grid_summary.csv"), "csv", "run", "Functional grid summary joined to cluster and drift metrics",
     "susie_anchor_summary", file.path(output_dir, "susie_anchor_summary.csv"), "csv", "locus", "susieR anchor vs functional baseline summary",
     "highest_weight_refit_summary", file.path(output_dir, "highest_weight_refit_summary.csv"), "csv", "locus", "Warm baseline refit initialized from the highest-weight SuSiNE ensemble member",
-    "highest_weight_refit_basin_r2_drift", file.path(output_dir, "highest_weight_refit_basin_r2_drift.csv"), "csv", "locus", "Basin r2 drift, total fitted-y drift, Hungarian matched basis drift, normalized matched-component drift, and component-mass-weighted matched drift among susie anchor, highest-weight source, and warm refit",
+    "highest_weight_refit_basin_r2_drift", file.path(output_dir, "highest_weight_refit_basin_r2_drift.csv"), "csv", "locus", "Basin r2 drift, total fitted-y drift, Hungarian matched basis drift, normalized matched-component drift, and PVE-weighted matched drift with component-mass audit fields among susie anchor, highest-weight source, and warm refit",
+    "highest_weight_refit_matched_component_pairs", file.path(output_dir, "highest_weight_refit_matched_component_pairs.csv"), "csv", "locus-comparison-component", "Matched and unmatched component-level fitted-y sufficient statistics for rebuilding basin drift metrics in visualization",
     "paper_real_data_ensemble_summary", file.path(output_dir, "paper_real_data_ensemble_summary.csv"), "csv", "locus", "Paper-facing summary of PIP counts, overlaps, PVE, and JSD",
     "top_variants_cluster_weight", file.path(output_dir, "top_variants_cluster_weight.csv"), "csv", "locus-variant", "Top aggregated variants per locus",
     "run_comparisons", file.path(output_dir, "run_comparisons.csv"), "csv", "run-target", "Per-run comparison metrics against baselines",
@@ -2998,6 +3205,7 @@ validate_real_data_outputs <- function(output_dir) {
     functional_grid_summary = c("run_id", "locus_id", "cluster_id", "agg_weight_run"),
     susie_anchor_summary = c("locus_id", "susie_anchor_run_id", "baseline_run_id"),
     top_variants_cluster_weight = c("locus_id", "variant_id", "aggregated_pip"),
+    highest_weight_refit_matched_component_pairs = c("locus_id", "comparison", "match_status", "var_y_a_component", "var_y_b_component", "cov_y_ab_component", "fit_a_fitted_var_y", "fit_b_fitted_var_y"),
     run_comparisons = c("run_id", "target_run_id", "comparison_target", "jsd_pip"),
     metric_inventory = c("artifact", "path", "format", "granularity")
   )

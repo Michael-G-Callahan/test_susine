@@ -1,5 +1,5 @@
 ---
-title: "Real-Data Ensemble â€” Visualize Results"
+title: "Real-Data Ensemble Ã¢â‚¬â€ Visualize Results"
 output:
   html_document:
     toc: true
@@ -135,10 +135,45 @@ highest_weight_refit_basin <- if (file.exists(file.path(aggregated_dir, "highest
     matched_component_unsigned_rel_l2_refit_vs_susie_anchor = numeric(),
     matched_component_signed_mass_weighted_highest_weight_vs_susie_anchor = numeric(),
     matched_component_signed_mass_weighted_refit_vs_susie_anchor = numeric(),
+    matched_component_signed_pve_weighted_highest_weight_vs_susie_anchor = numeric(),
+    matched_component_signed_pve_weighted_refit_vs_susie_anchor = numeric(),
+    matched_component_fitted_var_weight_var_y_highest_weight_vs_susie_anchor = numeric(),
+    matched_component_fitted_var_weight_var_y_refit_vs_susie_anchor = numeric(),
     matched_component_mass_weight_var_y_highest_weight_vs_susie_anchor = numeric(),
     matched_component_mass_weight_var_y_refit_vs_susie_anchor = numeric(),
     matched_component_mass_ratio_highest_weight_vs_susie_anchor = numeric(),
     matched_component_mass_ratio_refit_vs_susie_anchor = numeric()
+  )
+}
+matched_component_pairs <- if (file.exists(file.path(aggregated_dir, "highest_weight_refit_matched_component_pairs.csv"))) {
+  readr::read_csv(file.path(aggregated_dir, "highest_weight_refit_matched_component_pairs.csv"), show_col_types = FALSE)
+} else {
+  tibble::tibble(
+    locus_id = character(),
+    gene_name = character(),
+    comparison = character(),
+    fit_a_role = character(),
+    fit_b_role = character(),
+    fit_a_run_id = integer(),
+    fit_b_run_id = integer(),
+    component_index_a = integer(),
+    component_index_b = integer(),
+    match_status = character(),
+    var_y_a_component = numeric(),
+    var_y_b_component = numeric(),
+    cov_y_ab_component = numeric(),
+    cor_y_ab_component = numeric(),
+    abs_cor_y_ab_component = numeric(),
+    signed_l2_var_y = numeric(),
+    unsigned_l2_var_y = numeric(),
+    pair_component_var_sum = numeric(),
+    min_component_var_y = numeric(),
+    fit_a_component_mass_var_y = numeric(),
+    fit_b_component_mass_var_y = numeric(),
+    fit_component_mass_weight_var_y = numeric(),
+    fit_a_fitted_var_y = numeric(),
+    fit_b_fitted_var_y = numeric(),
+    fit_fitted_var_weight_var_y = numeric()
   )
 }
 for (nm in c(
@@ -169,6 +204,21 @@ for (nm in c(
   "matched_component_unsigned_mass_weighted_highest_weight_vs_susie_anchor",
   "matched_component_unsigned_mass_weighted_refit_vs_susie_anchor",
   "matched_component_unsigned_mass_weighted_refit_vs_highest_weight",
+  "matched_component_signed_pve_weighted_highest_weight_vs_susie_anchor",
+  "matched_component_signed_pve_weighted_refit_vs_susie_anchor",
+  "matched_component_signed_pve_weighted_refit_vs_highest_weight",
+  "matched_component_unsigned_pve_weighted_highest_weight_vs_susie_anchor",
+  "matched_component_unsigned_pve_weighted_refit_vs_susie_anchor",
+  "matched_component_unsigned_pve_weighted_refit_vs_highest_weight",
+  "matched_component_fitted_var_weight_var_y_highest_weight_vs_susie_anchor",
+  "matched_component_fitted_var_weight_var_y_refit_vs_susie_anchor",
+  "matched_component_fitted_var_weight_var_y_refit_vs_highest_weight",
+  "matched_component_fitted_var_a_var_y_highest_weight_vs_susie_anchor",
+  "matched_component_fitted_var_a_var_y_refit_vs_susie_anchor",
+  "matched_component_fitted_var_a_var_y_refit_vs_highest_weight",
+  "matched_component_fitted_var_b_var_y_highest_weight_vs_susie_anchor",
+  "matched_component_fitted_var_b_var_y_refit_vs_susie_anchor",
+  "matched_component_fitted_var_b_var_y_refit_vs_highest_weight",
   "matched_component_mass_weight_var_y_highest_weight_vs_susie_anchor",
   "matched_component_mass_weight_var_y_refit_vs_susie_anchor",
   "matched_component_mass_weight_var_y_refit_vs_highest_weight",
@@ -1045,7 +1095,7 @@ plot_aggregated_lollipop <- function(locus_id) {
 
   if (identical(status, "failed")) {
     base_plot <- base_plot + labs(
-      subtitle = paste0("susieR anchor fit FAILED â€” no susieR overlay",
+      subtitle = paste0("susieR anchor fit FAILED Ã¢â‚¬â€ no susieR overlay",
                         if (!is.na(err_msg)) paste0(" (", err_msg, ")") else "")
     )
   }
@@ -1917,6 +1967,11 @@ drift_pip_l2_long_tbl <- dplyr::bind_rows(
       matched_component_unsigned_rel_l2 = .data$matched_component_unsigned_rel_l2_highest_weight_vs_susie_anchor,
       matched_component_signed_mass_weighted = .data$matched_component_signed_mass_weighted_highest_weight_vs_susie_anchor,
       matched_component_unsigned_mass_weighted = .data$matched_component_unsigned_mass_weighted_highest_weight_vs_susie_anchor,
+      matched_component_signed_pve_weighted = .data$matched_component_signed_pve_weighted_highest_weight_vs_susie_anchor,
+      matched_component_unsigned_pve_weighted = .data$matched_component_unsigned_pve_weighted_highest_weight_vs_susie_anchor,
+      matched_component_fitted_var_weight_var_y = .data$matched_component_fitted_var_weight_var_y_highest_weight_vs_susie_anchor,
+      matched_component_fitted_var_a_var_y = .data$matched_component_fitted_var_a_var_y_highest_weight_vs_susie_anchor,
+      matched_component_fitted_var_b_var_y = .data$matched_component_fitted_var_b_var_y_highest_weight_vs_susie_anchor,
       matched_component_mass_weight_var_y = .data$matched_component_mass_weight_var_y_highest_weight_vs_susie_anchor,
       matched_component_mass_a_var_y = .data$matched_component_mass_a_var_y_highest_weight_vs_susie_anchor,
       matched_component_mass_b_var_y = .data$matched_component_mass_b_var_y_highest_weight_vs_susie_anchor,
@@ -1935,6 +1990,11 @@ drift_pip_l2_long_tbl <- dplyr::bind_rows(
       matched_component_unsigned_rel_l2 = .data$matched_component_unsigned_rel_l2_refit_vs_susie_anchor,
       matched_component_signed_mass_weighted = .data$matched_component_signed_mass_weighted_refit_vs_susie_anchor,
       matched_component_unsigned_mass_weighted = .data$matched_component_unsigned_mass_weighted_refit_vs_susie_anchor,
+      matched_component_signed_pve_weighted = .data$matched_component_signed_pve_weighted_refit_vs_susie_anchor,
+      matched_component_unsigned_pve_weighted = .data$matched_component_unsigned_pve_weighted_refit_vs_susie_anchor,
+      matched_component_fitted_var_weight_var_y = .data$matched_component_fitted_var_weight_var_y_refit_vs_susie_anchor,
+      matched_component_fitted_var_a_var_y = .data$matched_component_fitted_var_a_var_y_refit_vs_susie_anchor,
+      matched_component_fitted_var_b_var_y = .data$matched_component_fitted_var_b_var_y_refit_vs_susie_anchor,
       matched_component_mass_weight_var_y = .data$matched_component_mass_weight_var_y_refit_vs_susie_anchor,
       matched_component_mass_a_var_y = .data$matched_component_mass_a_var_y_refit_vs_susie_anchor,
       matched_component_mass_b_var_y = .data$matched_component_mass_b_var_y_refit_vs_susie_anchor,
@@ -1950,15 +2010,15 @@ drift_pip_l2_long_tbl <- dplyr::bind_rows(
     fit_type = factor(.data$fit_type, levels = c("Highest-weight SuSiNE fit", "SuSiE warm refit")),
     locus_label = dplyr::if_else(
       .data$fit_type == "Highest-weight SuSiNE fit" &
-        (.data$matched_component_signed_mass_weighted > 0.10 | .data$pip_l2 > 1.0),
+        (.data$matched_component_signed_pve_weighted > 0.10 | .data$pip_l2 > 1.0),
       sub("_lung$", "", .data$locus_id),
       ""
     )
   ) %>%
-  dplyr::filter(is.finite(.data$matched_component_signed_mass_weighted), is.finite(.data$pip_l2))
+  dplyr::filter(is.finite(.data$matched_component_signed_pve_weighted), is.finite(.data$pip_l2))
 
 paper_matched_component_drift_summary_tbl <- drift_pip_l2_long_tbl %>%
-  dplyr::arrange(desc(.data$matched_component_signed_mass_weighted), desc(.data$pip_l2))
+  dplyr::arrange(desc(.data$matched_component_signed_pve_weighted), desc(.data$pip_l2))
 readr::write_csv(
   paper_matched_component_drift_summary_tbl,
   file.path(overall_figure_dir, "paper_real_data_matched_component_drift_summary.csv")
@@ -1972,7 +2032,7 @@ if (dir.exists(paper_real_data_case_study_dir)) {
 
 paper_drift_pip_l2_plot <- ggplot(
   drift_pip_l2_long_tbl,
-  aes(x = matched_component_signed_mass_weighted, y = pip_l2)
+  aes(x = matched_component_signed_pve_weighted, y = pip_l2)
 ) +
   geom_path(
     aes(group = locus_id),
@@ -1997,7 +2057,7 @@ paper_drift_pip_l2_plot <- ggplot(
   ) +
   labs(
     title = "Annotations change inference and prediction",
-    x = "Matched component drift from SuSiE baseline (component-mass weighted)",
+    x = "Matched component drift from SuSiE baseline (PVE weighted)",
     y = expression("PIP shift from SuSiE baseline  " * "||" * Delta * "PIP" * "||"[2])
   ) +
   paper_panel_theme
@@ -2748,6 +2808,11 @@ ensure_basin_r2_drift_tbl <- function() {
       matched_component_pair_var_sum = numeric(),
       matched_component_signed_mass_weighted = numeric(),
       matched_component_unsigned_mass_weighted = numeric(),
+      matched_component_signed_pve_weighted = numeric(),
+      matched_component_unsigned_pve_weighted = numeric(),
+      matched_component_fitted_var_weight_var_y = numeric(),
+      matched_component_fitted_var_a_var_y = numeric(),
+      matched_component_fitted_var_b_var_y = numeric(),
       matched_component_mass_weight_var_y = numeric(),
       matched_component_mass_a_var_y = numeric(),
       matched_component_mass_b_var_y = numeric(),
@@ -3412,9 +3477,9 @@ rm(list = ls(envir = selected_locus_R_cache), envir = selected_locus_R_cache)
 invisible(gc(full = TRUE))
 ```
 
-# 9. Basin rÂ² Drift From c = 0 (one panel per locus)
+# 9. Basin rÃ‚Â² Drift From c = 0 (one panel per locus)
 
-Drift metric: weighted (1 - rÂ²) on max-weight 1-1 matched per-effect coefficient
+Drift metric: weighted (1 - rÃ‚Â²) on max-weight 1-1 matched per-effect coefficient
 vectors, weighted by `min(var_y_explained_a, var_y_explained_b)`. RSS analog of
 `weighted_r2_drift` from `effect_matching_drift_analysis_5arm.Rmd`. Uses the
 R-weighted cosine `(b_i' R b_j) / sqrt((b_i' R b_i)(b_j' R b_j))` since X is
@@ -3436,11 +3501,11 @@ plot_basin_r2_drift <- function(loc) {
     geom_line() +
     geom_point(size = 2) +
     labs(
-      title = paste0("Basin rÂ² Drift From c = 0: ", loc,
+      title = paste0("Basin rÃ‚Â² Drift From c = 0: ", loc,
                      if (flagged) "  [LD/z inconsistent]" else ""),
-      subtitle = "Weighted (1 - rÂ²) on matched per-effect b_l, R-weighted cosine",
+      subtitle = "Weighted (1 - rÃ‚Â²) on matched per-effect b_l, R-weighted cosine",
       x = "Annotation scale c",
-      y = "Weighted (1 - rÂ²) drift",
+      y = "Weighted (1 - rÃ‚Â²) drift",
       color = expression(sigma[0]^2)
     )
 }
