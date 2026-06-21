@@ -133,6 +133,10 @@ highest_weight_refit_basin <- if (file.exists(file.path(aggregated_dir, "highest
     matched_component_signed_rel_l2_refit_vs_susie_anchor = numeric(),
     matched_component_unsigned_rel_l2_highest_weight_vs_susie_anchor = numeric(),
     matched_component_unsigned_rel_l2_refit_vs_susie_anchor = numeric(),
+    matched_component_signed_mass_weighted_highest_weight_vs_susie_anchor = numeric(),
+    matched_component_signed_mass_weighted_refit_vs_susie_anchor = numeric(),
+    matched_component_mass_weight_var_y_highest_weight_vs_susie_anchor = numeric(),
+    matched_component_mass_weight_var_y_refit_vs_susie_anchor = numeric(),
     matched_component_mass_ratio_highest_weight_vs_susie_anchor = numeric(),
     matched_component_mass_ratio_refit_vs_susie_anchor = numeric()
   )
@@ -159,6 +163,21 @@ for (nm in c(
   "matched_component_pair_var_sum_highest_weight_vs_susie_anchor",
   "matched_component_pair_var_sum_refit_vs_susie_anchor",
   "matched_component_pair_var_sum_refit_vs_highest_weight",
+  "matched_component_signed_mass_weighted_highest_weight_vs_susie_anchor",
+  "matched_component_signed_mass_weighted_refit_vs_susie_anchor",
+  "matched_component_signed_mass_weighted_refit_vs_highest_weight",
+  "matched_component_unsigned_mass_weighted_highest_weight_vs_susie_anchor",
+  "matched_component_unsigned_mass_weighted_refit_vs_susie_anchor",
+  "matched_component_unsigned_mass_weighted_refit_vs_highest_weight",
+  "matched_component_mass_weight_var_y_highest_weight_vs_susie_anchor",
+  "matched_component_mass_weight_var_y_refit_vs_susie_anchor",
+  "matched_component_mass_weight_var_y_refit_vs_highest_weight",
+  "matched_component_mass_a_var_y_highest_weight_vs_susie_anchor",
+  "matched_component_mass_a_var_y_refit_vs_susie_anchor",
+  "matched_component_mass_a_var_y_refit_vs_highest_weight",
+  "matched_component_mass_b_var_y_highest_weight_vs_susie_anchor",
+  "matched_component_mass_b_var_y_refit_vs_susie_anchor",
+  "matched_component_mass_b_var_y_refit_vs_highest_weight",
   "matched_component_mass_ratio_highest_weight_vs_susie_anchor",
   "matched_component_mass_ratio_refit_vs_susie_anchor",
   "matched_component_mass_ratio_refit_vs_highest_weight"
@@ -1896,6 +1915,11 @@ drift_pip_l2_long_tbl <- dplyr::bind_rows(
       fit_type = "Highest-weight SuSiNE fit",
       matched_component_signed_rel_l2 = .data$matched_component_signed_rel_l2_highest_weight_vs_susie_anchor,
       matched_component_unsigned_rel_l2 = .data$matched_component_unsigned_rel_l2_highest_weight_vs_susie_anchor,
+      matched_component_signed_mass_weighted = .data$matched_component_signed_mass_weighted_highest_weight_vs_susie_anchor,
+      matched_component_unsigned_mass_weighted = .data$matched_component_unsigned_mass_weighted_highest_weight_vs_susie_anchor,
+      matched_component_mass_weight_var_y = .data$matched_component_mass_weight_var_y_highest_weight_vs_susie_anchor,
+      matched_component_mass_a_var_y = .data$matched_component_mass_a_var_y_highest_weight_vs_susie_anchor,
+      matched_component_mass_b_var_y = .data$matched_component_mass_b_var_y_highest_weight_vs_susie_anchor,
       matched_component_mass_ratio = .data$matched_component_mass_ratio_highest_weight_vs_susie_anchor,
       matched_basis_drift_var_y = .data$matched_basis_drift_var_y_highest_weight_vs_susie_anchor,
       matched_basis_var_y = .data$matched_basis_var_y_highest_weight_vs_susie_anchor,
@@ -1909,6 +1933,11 @@ drift_pip_l2_long_tbl <- dplyr::bind_rows(
       fit_type = "SuSiE warm refit",
       matched_component_signed_rel_l2 = .data$matched_component_signed_rel_l2_refit_vs_susie_anchor,
       matched_component_unsigned_rel_l2 = .data$matched_component_unsigned_rel_l2_refit_vs_susie_anchor,
+      matched_component_signed_mass_weighted = .data$matched_component_signed_mass_weighted_refit_vs_susie_anchor,
+      matched_component_unsigned_mass_weighted = .data$matched_component_unsigned_mass_weighted_refit_vs_susie_anchor,
+      matched_component_mass_weight_var_y = .data$matched_component_mass_weight_var_y_refit_vs_susie_anchor,
+      matched_component_mass_a_var_y = .data$matched_component_mass_a_var_y_refit_vs_susie_anchor,
+      matched_component_mass_b_var_y = .data$matched_component_mass_b_var_y_refit_vs_susie_anchor,
       matched_component_mass_ratio = .data$matched_component_mass_ratio_refit_vs_susie_anchor,
       matched_basis_drift_var_y = .data$matched_basis_drift_var_y_refit_vs_susie_anchor,
       matched_basis_var_y = .data$matched_basis_var_y_refit_vs_susie_anchor,
@@ -1921,15 +1950,15 @@ drift_pip_l2_long_tbl <- dplyr::bind_rows(
     fit_type = factor(.data$fit_type, levels = c("Highest-weight SuSiNE fit", "SuSiE warm refit")),
     locus_label = dplyr::if_else(
       .data$fit_type == "Highest-weight SuSiNE fit" &
-        (.data$matched_component_signed_rel_l2 > 0.25 | .data$pip_l2 > 1.0),
+        (.data$matched_component_signed_mass_weighted > 0.10 | .data$pip_l2 > 1.0),
       sub("_lung$", "", .data$locus_id),
       ""
     )
   ) %>%
-  dplyr::filter(is.finite(.data$matched_component_signed_rel_l2), is.finite(.data$pip_l2))
+  dplyr::filter(is.finite(.data$matched_component_signed_mass_weighted), is.finite(.data$pip_l2))
 
 paper_matched_component_drift_summary_tbl <- drift_pip_l2_long_tbl %>%
-  dplyr::arrange(desc(.data$matched_component_signed_rel_l2), desc(.data$pip_l2))
+  dplyr::arrange(desc(.data$matched_component_signed_mass_weighted), desc(.data$pip_l2))
 readr::write_csv(
   paper_matched_component_drift_summary_tbl,
   file.path(overall_figure_dir, "paper_real_data_matched_component_drift_summary.csv")
@@ -1943,7 +1972,7 @@ if (dir.exists(paper_real_data_case_study_dir)) {
 
 paper_drift_pip_l2_plot <- ggplot(
   drift_pip_l2_long_tbl,
-  aes(x = matched_component_signed_rel_l2, y = pip_l2)
+  aes(x = matched_component_signed_mass_weighted, y = pip_l2)
 ) +
   geom_path(
     aes(group = locus_id),
@@ -1968,7 +1997,7 @@ paper_drift_pip_l2_plot <- ggplot(
   ) +
   labs(
     title = "Annotations change inference and prediction",
-    x = "Matched component drift from SuSiE baseline (relative L2)",
+    x = "Matched component drift from SuSiE baseline (component-mass weighted)",
     y = expression("PIP shift from SuSiE baseline  " * "||" * Delta * "PIP" * "||"[2])
   ) +
   paper_panel_theme
@@ -2717,6 +2746,11 @@ ensure_basin_r2_drift_tbl <- function() {
       matched_component_unsigned_rel_l2 = numeric(),
       matched_component_signed_l2_sum = numeric(),
       matched_component_pair_var_sum = numeric(),
+      matched_component_signed_mass_weighted = numeric(),
+      matched_component_unsigned_mass_weighted = numeric(),
+      matched_component_mass_weight_var_y = numeric(),
+      matched_component_mass_a_var_y = numeric(),
+      matched_component_mass_b_var_y = numeric(),
       matched_component_mass_ratio = numeric()
     )
   }

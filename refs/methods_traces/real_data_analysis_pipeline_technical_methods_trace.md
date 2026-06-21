@@ -1135,7 +1135,7 @@ and 0 for dummy padding, so real pairs are preferred over unmatched dummy slots
 even when the matched correlation is near zero. This is retained for audit and backward comparison. Panel B now uses the normalized matched-component metric instead.
 
 
-(4) Normalized Hungarian matched-component drift
+(4) Hungarian matched-component drift
 (`real_data_matched_component_relative_drift_pair_cached`,
 `R/real_data_pipeline.R`). This keeps truth-agnostic effect matching, but it
 matches by absolute fitted-effect correlation and then computes a signed
@@ -1145,14 +1145,20 @@ component L2 distance:
 signed_l2_sum = sum_matched ||b_a - b_match||_R^2
 pair_var_sum  = sum_matched (||b_a||_R^2 + ||b_match||_R^2)
 matched_component_signed_rel_l2 = signed_l2_sum / pair_var_sum
+component_mass_weight = max(sum_l ||b_l^a||_R^2, sum_m ||b_m^b||_R^2)
+matched_component_signed_mass_weighted = matched_component_signed_rel_l2 * component_mass_weight
 ```
 
-The signed numerator captures sign and amplitude changes that `1 - r^2` misses.
-The denominator makes the metric relative to the matched component mass, which is
-important because real RSS components can have large opposing fitted effects that
-cancel in the whole model. This metric is not a fraction of `var(y)`. It is a
-scale-free matched-component rearrangement diagnostic. The current paper overall
-Panel B uses `matched_component_signed_rel_l2_*` as its x-axis.
+The relative diagnostic captures sign and amplitude changes that `1 - r^2`
+misses while staying scale-free within the matched components. The mass-weighted
+diagnostic keeps that matched-component rearrangement signal, but downweights
+small fitted-signal loci by multiplying by the larger summed component mass from
+the two compared fits. Because real RSS components can have opposing fitted
+effects that cancel in the whole model, the component mass can exceed ordinary
+whole-model PVE. The current paper overall Panel B uses
+`matched_component_signed_mass_weighted_*` as its x-axis. The unweighted
+`matched_component_signed_rel_l2_*` columns are retained in the summary CSV for
+audit.
 All four metric families are written for the same three comparisons:
 
 - highest-weight source vs SuSiE anchor
@@ -1292,12 +1298,12 @@ paper_real_data_ensemble_summary.csv
 variant_posteriors_dataset/
 ```
 
-The x-axis is normalized Hungarian matched-component drift from the SuSiE baseline: the `matched_component_signed_rel_l2_*` scalar of Section 10.4(4). The workbook axis title is `Matched component drift from SuSiE baseline (relative L2)`. The y-axis is PIP L2 distance from the SuSiE baseline. Each locus contributes up to two points, joined by a grey path:
+The x-axis is component-mass-weighted Hungarian matched-component drift from the SuSiE baseline: the `matched_component_signed_mass_weighted_*` scalar of Section 10.4(4). The workbook axis title is `Matched component drift from SuSiE baseline (component-mass weighted)`. The y-axis is PIP L2 distance from the SuSiE baseline. Each locus contributes up to two points, joined by a grey path:
 
 - highest-weight SuSiNE fit (point color `#0B6E4F`);
 - SuSiE warm refit (point color `#C65D00`).
 
-The x-coordinates come straight from `highest_weight_refit_basin` columns `matched_component_signed_rel_l2_highest_weight_vs_susie_anchor` and `matched_component_signed_rel_l2_refit_vs_susie_anchor`. The old total fitted-y drift and matched-basis drift columns are retained in `paper_real_data_matched_component_drift_summary.csv` for audit. The y-coordinates (PIP L2) are recomputed live in the workbook from the variant-posterior parquet, not read from a stored column:
+The x-coordinates come straight from `highest_weight_refit_basin` columns `matched_component_signed_mass_weighted_highest_weight_vs_susie_anchor` and `matched_component_signed_mass_weighted_refit_vs_susie_anchor`. The old total fitted-y drift, matched-basis drift, and unweighted matched-component relative drift columns are retained in `paper_real_data_matched_component_drift_summary.csv` for audit. The y-coordinates (PIP L2) are recomputed live in the workbook from the variant-posterior parquet, not read from a stored column:
 
 - highest-weight fit: `run_pip_l2(locus_id, susie_anchor_run_id,
   highest_weight_source_run_id)`;
@@ -1311,7 +1317,7 @@ auxiliary diagnostics, but the paper-facing overall panel is the L2 version.
 Loci are labeled (only on the highest-weight-fit point) when:
 
 ```text
-matched_component_signed_rel_l2 > 0.25 OR pip_l2 > 1.0
+matched_component_signed_mass_weighted > 0.10 OR pip_l2 > 1.0
 ```
 
 Panel C: local genetic variance / PVE.
@@ -1749,7 +1755,7 @@ Expected validation:
 - `paper_real_data_ensemble_summary.csv` exists.
 - `aggregated_variant_pips_cluster_weight.parquet` exists.
 - `highest_weight_refit_variant_posteriors.parquet` exists.
-- `highest_weight_refit_basin_r2_drift.csv` exists and includes `matched_basis_drift_var_y_*` and `matched_component_signed_rel_l2_*` columns.
+- `highest_weight_refit_basin_r2_drift.csv` exists and includes `matched_basis_drift_var_y_*`, `matched_component_signed_rel_l2_*`, and `matched_component_signed_mass_weighted_*` columns.
 - No selected loci failed. The final paper-side
   `paper_real_data_ensemble_summary.csv` has 20 rows and non-missing anchor,
   highest-weight-source, and warm-refit run ids for all 20 loci.

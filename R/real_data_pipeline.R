@@ -1419,6 +1419,11 @@ real_data_matched_component_relative_drift_pair_cached <- function(cache_a, cach
       signed_l2_sum = NA_real_,
       unsigned_l2_sum = NA_real_,
       pair_var_sum = NA_real_,
+      signed_mass_weighted_drift = NA_real_,
+      unsigned_mass_weighted_drift = NA_real_,
+      component_mass_weight_var_y = NA_real_,
+      component_mass_a_var_y = NA_real_,
+      component_mass_b_var_y = NA_real_,
       component_mass_ratio = NA_real_,
       n_matched = 0L
     ))
@@ -1433,6 +1438,11 @@ real_data_matched_component_relative_drift_pair_cached <- function(cache_a, cach
       signed_l2_sum = NA_real_,
       unsigned_l2_sum = NA_real_,
       pair_var_sum = NA_real_,
+      signed_mass_weighted_drift = NA_real_,
+      unsigned_mass_weighted_drift = NA_real_,
+      component_mass_weight_var_y = NA_real_,
+      component_mass_a_var_y = NA_real_,
+      component_mass_b_var_y = NA_real_,
       component_mass_ratio = NA_real_,
       n_matched = 0L
     ))
@@ -1472,13 +1482,23 @@ real_data_matched_component_relative_drift_pair_cached <- function(cache_a, cach
     n_matched <- n_matched + 1L
   }
 
-  global_var_sum <- sum(cache_a$var, na.rm = TRUE) + sum(cache_b$var, na.rm = TRUE)
+  component_mass_a <- sum(cache_a$var, na.rm = TRUE)
+  component_mass_b <- sum(cache_b$var, na.rm = TRUE)
+  component_mass_weight <- max(component_mass_a, component_mass_b)
+  global_var_sum <- component_mass_a + component_mass_b
+  signed_relative_drift <- if (pair_var_sum > 0) signed_l2_sum / pair_var_sum else NA_real_
+  unsigned_relative_drift <- if (pair_var_sum > 0) unsigned_l2_sum / pair_var_sum else NA_real_
   list(
-    signed_relative_drift = if (pair_var_sum > 0) signed_l2_sum / pair_var_sum else NA_real_,
-    unsigned_relative_drift = if (pair_var_sum > 0) unsigned_l2_sum / pair_var_sum else NA_real_,
+    signed_relative_drift = signed_relative_drift,
+    unsigned_relative_drift = unsigned_relative_drift,
     signed_l2_sum = if (pair_var_sum > 0) signed_l2_sum else NA_real_,
     unsigned_l2_sum = if (pair_var_sum > 0) unsigned_l2_sum else NA_real_,
     pair_var_sum = if (pair_var_sum > 0) pair_var_sum else NA_real_,
+    signed_mass_weighted_drift = if (is.finite(signed_relative_drift) && component_mass_weight > 0) signed_relative_drift * component_mass_weight else NA_real_,
+    unsigned_mass_weighted_drift = if (is.finite(unsigned_relative_drift) && component_mass_weight > 0) unsigned_relative_drift * component_mass_weight else NA_real_,
+    component_mass_weight_var_y = if (component_mass_weight > 0) component_mass_weight else NA_real_,
+    component_mass_a_var_y = if (component_mass_a > 0) component_mass_a else NA_real_,
+    component_mass_b_var_y = if (component_mass_b > 0) component_mass_b else NA_real_,
     component_mass_ratio = if (global_var_sum > 0) pair_var_sum / global_var_sum else NA_real_,
     n_matched = n_matched
   )
@@ -1559,6 +1579,11 @@ real_data_basin_r2_drift_locus <- function(R, runs_tbl, progress = NULL) {
           matched_component_unsigned_rel_l2 = NA_real_,
           matched_component_signed_l2_sum = NA_real_,
           matched_component_pair_var_sum = NA_real_,
+          matched_component_signed_mass_weighted = NA_real_,
+          matched_component_unsigned_mass_weighted = NA_real_,
+          matched_component_mass_weight_var_y = NA_real_,
+          matched_component_mass_a_var_y = NA_real_,
+          matched_component_mass_b_var_y = NA_real_,
           matched_component_mass_ratio = NA_real_,
           n_matched_effects = NA_integer_,
           run_id = row$run_id[[1]]
@@ -1589,6 +1614,11 @@ real_data_basin_r2_drift_locus <- function(R, runs_tbl, progress = NULL) {
         matched_component_unsigned_rel_l2 = matched_component_res$unsigned_relative_drift,
         matched_component_signed_l2_sum = matched_component_res$signed_l2_sum,
         matched_component_pair_var_sum = matched_component_res$pair_var_sum,
+        matched_component_signed_mass_weighted = matched_component_res$signed_mass_weighted_drift,
+        matched_component_unsigned_mass_weighted = matched_component_res$unsigned_mass_weighted_drift,
+        matched_component_mass_weight_var_y = matched_component_res$component_mass_weight_var_y,
+        matched_component_mass_a_var_y = matched_component_res$component_mass_a_var_y,
+        matched_component_mass_b_var_y = matched_component_res$component_mass_b_var_y,
         matched_component_mass_ratio = matched_component_res$component_mass_ratio,
         n_matched_effects = drift_res$n_matched,
         run_id = row$run_id[[1]]
@@ -2858,6 +2888,21 @@ collect_real_data_results <- function(
             matched_component_pair_var_sum_highest_weight_vs_susie_anchor = source_vs_anchor_component$pair_var_sum,
             matched_component_pair_var_sum_refit_vs_susie_anchor = refit_vs_anchor_component$pair_var_sum,
             matched_component_pair_var_sum_refit_vs_highest_weight = refit_vs_source_component$pair_var_sum,
+            matched_component_signed_mass_weighted_highest_weight_vs_susie_anchor = source_vs_anchor_component$signed_mass_weighted_drift,
+            matched_component_signed_mass_weighted_refit_vs_susie_anchor = refit_vs_anchor_component$signed_mass_weighted_drift,
+            matched_component_signed_mass_weighted_refit_vs_highest_weight = refit_vs_source_component$signed_mass_weighted_drift,
+            matched_component_unsigned_mass_weighted_highest_weight_vs_susie_anchor = source_vs_anchor_component$unsigned_mass_weighted_drift,
+            matched_component_unsigned_mass_weighted_refit_vs_susie_anchor = refit_vs_anchor_component$unsigned_mass_weighted_drift,
+            matched_component_unsigned_mass_weighted_refit_vs_highest_weight = refit_vs_source_component$unsigned_mass_weighted_drift,
+            matched_component_mass_weight_var_y_highest_weight_vs_susie_anchor = source_vs_anchor_component$component_mass_weight_var_y,
+            matched_component_mass_weight_var_y_refit_vs_susie_anchor = refit_vs_anchor_component$component_mass_weight_var_y,
+            matched_component_mass_weight_var_y_refit_vs_highest_weight = refit_vs_source_component$component_mass_weight_var_y,
+            matched_component_mass_a_var_y_highest_weight_vs_susie_anchor = source_vs_anchor_component$component_mass_a_var_y,
+            matched_component_mass_a_var_y_refit_vs_susie_anchor = refit_vs_anchor_component$component_mass_a_var_y,
+            matched_component_mass_a_var_y_refit_vs_highest_weight = refit_vs_source_component$component_mass_a_var_y,
+            matched_component_mass_b_var_y_highest_weight_vs_susie_anchor = source_vs_anchor_component$component_mass_b_var_y,
+            matched_component_mass_b_var_y_refit_vs_susie_anchor = refit_vs_anchor_component$component_mass_b_var_y,
+            matched_component_mass_b_var_y_refit_vs_highest_weight = refit_vs_source_component$component_mass_b_var_y,
             matched_component_mass_ratio_highest_weight_vs_susie_anchor = source_vs_anchor_component$component_mass_ratio,
             matched_component_mass_ratio_refit_vs_susie_anchor = refit_vs_anchor_component$component_mass_ratio,
             matched_component_mass_ratio_refit_vs_highest_weight = refit_vs_source_component$component_mass_ratio,
@@ -2917,7 +2962,7 @@ collect_real_data_results <- function(
     "functional_grid_summary", file.path(output_dir, "functional_grid_summary.csv"), "csv", "run", "Functional grid summary joined to cluster and drift metrics",
     "susie_anchor_summary", file.path(output_dir, "susie_anchor_summary.csv"), "csv", "locus", "susieR anchor vs functional baseline summary",
     "highest_weight_refit_summary", file.path(output_dir, "highest_weight_refit_summary.csv"), "csv", "locus", "Warm baseline refit initialized from the highest-weight SuSiNE ensemble member",
-    "highest_weight_refit_basin_r2_drift", file.path(output_dir, "highest_weight_refit_basin_r2_drift.csv"), "csv", "locus", "Basin r2 drift, total fitted-y drift, Hungarian matched basis drift, and normalized matched-component drift among susie anchor, highest-weight source, and warm refit",
+    "highest_weight_refit_basin_r2_drift", file.path(output_dir, "highest_weight_refit_basin_r2_drift.csv"), "csv", "locus", "Basin r2 drift, total fitted-y drift, Hungarian matched basis drift, normalized matched-component drift, and component-mass-weighted matched drift among susie anchor, highest-weight source, and warm refit",
     "paper_real_data_ensemble_summary", file.path(output_dir, "paper_real_data_ensemble_summary.csv"), "csv", "locus", "Paper-facing summary of PIP counts, overlaps, PVE, and JSD",
     "top_variants_cluster_weight", file.path(output_dir, "top_variants_cluster_weight.csv"), "csv", "locus-variant", "Top aggregated variants per locus",
     "run_comparisons", file.path(output_dir, "run_comparisons.csv"), "csv", "run-target", "Per-run comparison metrics against baselines",
