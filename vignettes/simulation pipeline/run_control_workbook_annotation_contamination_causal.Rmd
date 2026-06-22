@@ -1,0 +1,228 @@
+---
+title: "Annotation Contamination Sensitivity -- Causal-block positive control"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+---
+
+Builds the reviewer-requested annotation-contamination sensitivity job for the
+Causal-block positive control arm. The job uses the standard oligogenic simulation substrate,
+central annotation setting (`annotation_r2 = 0.3`, `inflate_match = 0.95`), a
+4 x 4 C-CS grid, and a single annotation-free baseline.
+
+```{r setup, message=FALSE}
+here::i_am("vignettes/simulation pipeline/run_control_workbook_annotation_contamination_causal.Rmd")
+library(here)
+library(devtools)
+susine_path <- here("..", "susine")
+if (file.exists(file.path(susine_path, "DESCRIPTION"))) {
+  options(test_susine.local_susine_path = normalizePath(susine_path, winslash = "/", mustWork = TRUE))
+  devtools::load_all(susine_path)
+} else {
+  warning("susine package not found at: ", susine_path)
+}
+devtools::load_all(".")
+
+library(dplyr)
+library(tidyr)
+library(readr)
+library(knitr)
+```
+
+# Configuration
+
+```{r user-config}
+job_name <- "annotation_contamination_causal_positive"
+email    <- "mgc5166@psu.edu"
+
+slurm_time <- "11:59:59"
+slurm_mem  <- "8G"
+
+n_matrices_target <- 150L
+seeds             <- 1:4
+
+L_grid            <- 10L
+y_noise_grid      <- NA_real_
+p_star_grid       <- NA_integer_
+architecture_grid <- "susie2_oligogenic"
+
+annotation_r2 <- 0.3
+inflate_match <- 0.95
+lambda_grid <- c(0, 0.1, 0.2, 0.3, 0.5, 0.7, 1.0)
+annotation_arm <- "causal"
+
+c_grid_4 <- c(0.00, 0.43, 1.07, 1.50)
+sigma_grid_4 <- c(0.01, 0.10, 0.40, 1.00)
+
+max_iter <- 100L
+bundles_per_task <- 4L
+task_assignment_seed <- 42L
+aggregation_methods <- "cluster_weight_credible"
+include_overall_pool <- FALSE
+softmax_temperature <- 1
+
+credible_set_rho <- 0.95
+purity_threshold <- 0.50
+verbose_file_output <- FALSE
+write_snps_parquet <- FALSE
+write_confusion_bins <- TRUE
+write_tier_cs_metrics <- FALSE
+write_scaling_confusion_bins <- FALSE
+
+pip_breaks <- sort(unique(c(
+  seq(0.00, 0.05, by = 0.005),
+  seq(0.05, 0.10, by = 0.01),
+  seq(0.10, 1.00, by = 0.02)
+)))
+```
+
+# Specs
+
+```{r specs}
+spec_C_CS_4x4 <- list(
+  name = "C-CS-annotation-contamination",
+  use_case_ids = "susine_functional_mu",
+  exploration_methods = c("c_grid", "sigma_0_2_grid"),
+  exploration_mode = "intersect",
+  K = 16L,
+  c_grid_values = c_grid_4,
+  sigma_0_2_grid_values = sigma_grid_4
+)
+
+spec_baseline_single <- list(
+  name = "baseline-single",
+  use_case_ids = "susine_vanilla",
+  exploration_methods = "single",
+  exploration_mode = "separate",
+  K = 1L
+)
+
+all_specs <- list(spec_C_CS_4x4, spec_baseline_single)
+```
+
+# Matrix Selection
+
+```{r matrix-selection}
+data_matrix_catalog_full <- test_susine:::build_data_matrix_catalog(
+  requested_scenarios = "scenario_1",
+  repo_root = here(),
+  summary_path = here("data", "sampled_simulated_genotypes", "scenario_sampling_summary.csv")
+)
+
+m1_summary_path <- here("data", "sampled_simulated_genotypes", "scenario_sampling_summary_with_m1.csv")
+if (file.exists(m1_summary_path)) {
+  catalog_with_m1 <- readr::read_csv(m1_summary_path, show_col_types = FALSE)
+} else {
+  m1_tbl <- test_susine::build_x_metrics_table(
+    matrix_paths_df = data_matrix_catalog_full %>% dplyr::select(matrix_id, matrix_path),
+    base_dir = here()
+  ) %>% dplyr::select(matrix_id, M1)
+  catalog_with_m1 <- data_matrix_catalog_full %>% dplyr::left_join(m1_tbl, by = "matrix_id")
+  readr::write_csv(catalog_with_m1, m1_summary_path)
+}
+if (!"matrix_id" %in% names(catalog_with_m1)) {
+  if ("gene" %in% names(catalog_with_m1)) {
+    catalog_with_m1 <- dplyr::rename(catalog_with_m1, dataset_label = gene)
+  }
+  join_col <- intersect(c("dataset_label", "matrix_path"), names(catalog_with_m1))[[1L]]
+  catalog_with_m1 <- catalog_with_m1 %>%
+    dplyr::left_join(
+      data_matrix_catalog_full %>% dplyr::select(matrix_id, dplyr::all_of(join_col)),
+      by = join_col
+    )
+}
+catalog_with_m1 <- catalog_with_m1 %>% dplyr::filter(!is.na(M1)) %>% dplyr::arrange(M1)
+idx <- unique(round(seq(1, nrow(catalog_with_m1), length.out = min(n_matrices_target, nrow(catalog_with_m1)))))
+selected <- catalog_with_m1[idx, , drop = FALSE]
+data_matrix_catalog <- data_matrix_catalog_full %>%
+  dplyr::semi_join(dplyr::select(selected, matrix_id), by = "matrix_id")
+```
+
+# Build Job
+
+```{r build-config}
+prior_quality <- tidyr::expand_grid(
+  annotation_r2 = annotation_r2,
+  inflate_match = inflate_match,
+  annotation_contamination_arm = annotation_arm,
+  annotation_contamination_lambda = lambda_grid,
+  annotation_contamination_shuffle_z = FALSE
+)
+
+cfg <- make_job_config(
+  job_name = job_name,
+  HPC = TRUE,
+  time = slurm_time,
+  mem = slurm_mem,
+  email = email,
+  output_root = here("output"),
+  grid_mode = "full",
+  use_case_ids = c("susine_vanilla", "susine_functional_mu"),
+  exploration_specs = all_specs,
+  L_grid = L_grid,
+  y_noise_grid = y_noise_grid,
+  p_star_grid = p_star_grid,
+  architecture_grid = architecture_grid,
+  seeds = seeds,
+  prior_quality = prior_quality,
+  sigma_0_2_scalars = 0.2,
+  data_scenarios = "scenario_1",
+  repo_root = here(),
+  data_matrix_catalog = data_matrix_catalog,
+  sampled_scenario_summary = here("data", "sampled_simulated_genotypes", "scenario_sampling_summary.csv"),
+  task_unit = "dataset",
+  bundles_per_task = bundles_per_task,
+  task_assignment_seed = task_assignment_seed,
+  max_iter = max_iter,
+  aggregation_methods = aggregation_methods,
+  include_overall_pool = include_overall_pool,
+  softmax_temperature = softmax_temperature,
+  credible_set_rho = credible_set_rho,
+  purity_threshold = purity_threshold,
+  verbose_file_output = verbose_file_output,
+  write_snps_parquet = write_snps_parquet,
+  write_confusion_bins = write_confusion_bins,
+  write_prior_diagnostics = TRUE,
+  write_tier_cs_metrics = write_tier_cs_metrics,
+  write_scaling_confusion_bins = write_scaling_confusion_bins,
+  metrics_settings = list(
+    pip_breaks = pip_breaks,
+    z_top_k = 10,
+    jsd_threshold = 0.15
+  )
+)
+```
+
+# Budget
+
+```{r budget}
+runs <- cfg$tables$runs
+cat("Total run rows:", nrow(runs), "\n")
+cat("Datasets:", dplyr::n_distinct(runs$dataset_bundle_id), "\n")
+runs %>%
+  dplyr::group_by(spec_name, annotation_contamination_arm, annotation_contamination_lambda) %>%
+  dplyr::summarise(n_runs = dplyr::n(), n_datasets = dplyr::n_distinct(dataset_bundle_id), .groups = "drop") %>%
+  knitr::kable()
+```
+
+# Write Artifacts
+
+```{r write-artifacts}
+artifacts <- write_job_artifacts(
+  cfg,
+  run_task_script = here("inst", "scripts", "run_task.R")
+)
+artifacts
+cat("Submit with:\n")
+cat("sbatch", normalizePath(artifacts$slurm_script, winslash = "/", mustWork = FALSE), "\n")
+```
+# Reporting Gates
+
+Before reporting this run, validate the collected outputs:
+
+- `annotation_diagnostics.csv`: the contaminated block RMS relative error should be below `1e-8`, and the untouched block flag should be `TRUE` for every row.
+- Lambda zero: compare the `annotation_contamination_lambda == 0` C-CS aggregate against the clean C-CS run with the same dataset bundles; pooled AUPRC and recall at precision 0.75 should match to numerical tolerance.
+- `prior_diagnostics.csv`: fixed-c C-CS contaminated fits should have `c_l == 1`, confirming that `estimate_mu_0_scale_factor` did not run.
+- Anchor diagnostic: `anchor_sigma_0_2_scalar` records which `c = 0` fit defines the low-PIP anchor set; the pipeline chooses the smallest `sigma_0_2_scalar` when multiple anchors are available.

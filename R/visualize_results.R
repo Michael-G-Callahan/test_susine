@@ -478,6 +478,79 @@ compute_tpr05_from_pooled_confusion_dt <- function(pooled_bins,
   tibble::as_tibble(out)
 }
 
+#' Compute recall at a target precision from confusion-bin counts.
+#'
+#' @param confusion_df Confusion-bin table.
+#' @param group_vars Character vector of grouping columns.
+#' @param precision_threshold Target precision, default 0.75.
+#' @return Tibble with recall_at_precision, max_achievable_precision, and a
+#'   fallback flag for groups that never reach the requested precision.
+#' @export
+compute_recall_at_precision_from_confusion <- function(confusion_df,
+                                                       group_vars,
+                                                       precision_threshold = 0.75) {
+  pooled <- pool_confusion_bins(confusion_df, group_vars)
+  compute_recall_at_precision_from_pooled_confusion(
+    pooled,
+    group_vars = group_vars,
+    precision_threshold = precision_threshold
+  )
+}
+
+#' @keywords internal
+compute_recall_at_precision_from_pooled_confusion <- function(pooled_bins,
+                                                              group_vars,
+                                                              precision_threshold = 0.75) {
+  if (!length(group_vars)) {
+    stop("group_vars must contain at least one column.")
+  }
+  if (!nrow(pooled_bins)) {
+    out <- pooled_bins[, group_vars, drop = FALSE]
+    out$recall_at_precision <- numeric(0)
+    out$precision_threshold <- numeric(0)
+    out$max_achievable_precision <- numeric(0)
+    out$precision_threshold_reached <- logical(0)
+    return(out)
+  }
+
+  group_info <- split_pooled_confusion_groups(pooled_bins, group_vars)
+  pooled_bins <- group_info$pooled_bins
+  group_rows <- group_info$group_rows
+  group_keys <- group_info$group_keys
+
+  rows <- vector("list", length(group_rows))
+  for (i in seq_along(group_rows)) {
+    idx <- group_rows[[i]]
+    bins_i <- pooled_bins[idx, c("n_causal_at_bucket", "n_noncausal_at_bucket"), drop = FALSE]
+    total_p <- sum(bins_i$n_causal_at_bucket, na.rm = TRUE)
+    if (!is.finite(total_p) || total_p <= 0) {
+      recall <- NA_real_
+      max_precision <- NA_real_
+      reached <- FALSE
+    } else {
+      cum_tp <- cumsum(bins_i$n_causal_at_bucket)
+      cum_fp <- cumsum(bins_i$n_noncausal_at_bucket)
+      denom <- cum_tp + cum_fp
+      precision <- ifelse(denom > 0, cum_tp / denom, NA_real_)
+      recall_curve <- cum_tp / total_p
+      max_precision <- suppressWarnings(max(precision, na.rm = TRUE))
+      if (!is.finite(max_precision)) max_precision <- NA_real_
+      ok <- is.finite(precision) & precision >= precision_threshold
+      reached <- any(ok)
+      recall <- if (reached) max(recall_curve[ok], na.rm = TRUE) else 0
+    }
+    rows[[i]] <- dplyr::bind_cols(
+      group_keys[i, , drop = FALSE],
+      tibble::tibble(
+        recall_at_precision = recall,
+        precision_threshold = as.numeric(precision_threshold),
+        max_achievable_precision = max_precision,
+        precision_threshold_reached = reached
+      )
+    )
+  }
+  dplyr::bind_rows(rows)
+}
 #' Compute AUPRC for a single precision-recall curve
 #'
 #' Uses the step-function average precision (AP) formula:

@@ -40,6 +40,7 @@ run_task <- function(job_name,
       scaling_bins = list(),
       validation = list(),
       prior_diagnostics = list(),
+      annotation_diagnostics = list(),
       hg2_by_agg = list()
     )
     buffer_ctx$base_output <- determine_base_output(job_config)
@@ -299,6 +300,64 @@ get_priors_cached <- function(cache_env,
   priors
 }
 
+annotation_contamination_spec <- function(run_row) {
+  arm <- as.character(run_row$annotation_contamination_arm %||% NA_character_)
+  if (is.na(arm) || !nzchar(arm)) arm <- "none"
+  arm <- tolower(arm)
+  if (!arm %in% c("none", "null", "causal")) {
+    stop("Unknown annotation_contamination_arm: ", arm)
+  }
+  lambda <- suppressWarnings(as.numeric(run_row$annotation_contamination_lambda %||% 0))
+  if (!is.finite(lambda)) lambda <- 0
+  shuffle_z <- as.logical(run_row$annotation_contamination_shuffle_z %||% FALSE)
+  if (is.na(shuffle_z)) shuffle_z <- FALSE
+  list(arm = arm, lambda = lambda, shuffle_z = shuffle_z)
+}
+
+annotation_contamination_cache_key <- function(run_row) {
+  spec <- annotation_contamination_spec(run_row)
+  sprintf(
+    "arm=%s|lambda=%s|shuffle=%s",
+    spec$arm,
+    format(spec$lambda, digits = 16, scientific = FALSE, trim = TRUE),
+    as.character(isTRUE(spec$shuffle_z))
+  )
+}
+
+apply_annotation_contamination_for_run <- function(run_row,
+                                                   data_bundle,
+                                                   annotation_vec,
+                                                   anchor_pip = NULL) {
+  spec <- annotation_contamination_spec(run_row)
+  z <- data_bundle$marginal_z
+  if (is.null(z)) {
+    z <- compute_marginal_z_scores(data_bundle$X, data_bundle$y)
+  }
+  seed <- suppressWarnings(as.integer(run_row$annotation_seed %||% data_bundle$phenotype_seed %||% 1L))
+  out <- contaminate_annotation_vector(
+    a_orig = annotation_vec,
+    z = z,
+    causal_idx = data_bundle$causal_idx,
+    arm = spec$arm,
+    lambda = spec$lambda,
+    shuffle_z = spec$shuffle_z,
+    seed = seed
+  )
+  if (!is.null(anchor_pip)) {
+    out$diagnostics <- annotation_contamination_diagnostics(
+      a_orig = annotation_vec,
+      a_new = out$mu_0,
+      z = z,
+      causal_idx = data_bundle$causal_idx,
+      arm = spec$arm,
+      lambda = spec$lambda,
+      shuffle_z = spec$shuffle_z,
+      anchor_pip = anchor_pip
+    )
+  }
+  out
+}
+
 normalize_blocked_idx <- function(blocked_idx, p) {
   idx <- unique(as.integer(blocked_idx))
   idx <- idx[is.finite(idx) & idx >= 1L & idx <= as.integer(p)]
@@ -381,6 +440,13 @@ execution_cache_key <- function(use_case,
   c_value <- as.numeric(run_row$c_value %||% NA_real_)
   if (!is.finite(c_value)) c_value <- 1
   c_key <- if (prior_mean_strategy == "functional_mu") fmt_num(c_value) else "NA"
+  annotation_affects_fit <- inclusion_prior_strategy == "functional_pi" ||
+    (prior_mean_strategy == "functional_mu" && is.finite(c_value) && c_value != 0)
+  contam_key <- if (annotation_active && annotation_affects_fit) {
+    annotation_contamination_cache_key(run_row)
+  } else {
+    "NA"
+  }
 
   tau_value <- as.numeric(run_row$tau_value %||% NA_real_)
   if (!is.finite(tau_value) || tau_value <= 0) tau_value <- 1
@@ -408,6 +474,7 @@ execution_cache_key <- function(use_case,
     paste0("alpha_conc=", if (identical(run_type, "warm")) fmt_num(alpha_conc) else "NA"),
     paste0("ann_r2=", ann_r2_key),
     paste0("inflate=", inflate_key),
+    paste0("ann_contam=", contam_key),
     paste0("ann_seed=", ann_seed_key),
     paste0("c=", c_key),
     paste0("tau=", tau_key),
@@ -621,6 +688,7 @@ generate_data_for_bundle <- function(bundle_row, job_config) {
     architecture = architecture,
     phenotype_seed = seed,
     effect_tier = effects$effect_tier %||% rep("sparse", ncol(X)),
+    marginal_z = compute_marginal_z_scores(X, phenotype$y),
     priors_cache = new.env(parent = emptyenv())
   )
 }
@@ -1269,6 +1337,57 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
       }
     }
 
+    # Annotation-contamination diagnostics: one row per dataset/use-case/group.
+    # The observable signature uses the c=0 member as the annotation-free anchor
+    # when that member is present in the group.
+    if (!is.null(buffer_ctx)) {
+      for (group_key in names(primary_pips_by_group)) {
+        grr <- group_run_map[[group_key]] %||% uc_runs[1, , drop = FALSE]
+        if (!"annotation_contamination_arm" %in% names(grr)) next
+        spec <- annotation_contamination_spec(grr)
+        if (identical(spec$arm, "none")) next
+        pip_list <- primary_pips_by_group[[group_key]]
+        meta_list <- primary_run_meta_by_group[[group_key]]
+        c_vals <- vapply(meta_list, function(m) as.numeric(m$c_value %||% NA_real_), numeric(1L))
+        sigma_vals <- vapply(meta_list, function(m) as.numeric(m$sigma_0_2_scalar %||% NA_real_), numeric(1L))
+        anchor_idx <- which(is.finite(c_vals) & abs(c_vals) < .Machine$double.eps)
+        if (length(anchor_idx)) {
+          anchor_idx <- anchor_idx[order(sigma_vals[anchor_idx], na.last = TRUE)]
+        }
+        anchor_member <- if (length(anchor_idx)) anchor_idx[[1L]] else NA_integer_
+        anchor_pip <- if (length(anchor_idx)) pip_list[[anchor_member]] else NULL
+        priors <- get_priors_cached(
+          cache_env = data_bundle$priors_cache,
+          beta = data_bundle$beta,
+          annotation_r2 = as.numeric(grr$annotation_r2 %||% NA_real_),
+          inflate_match = as.numeric(grr$inflate_match %||% NA_real_),
+          base_sigma2 = stats::var(data_bundle$y),
+          effect_sd = data_bundle$effect_sd,
+          annotation_seed = grr$annotation_seed %||% NA_integer_
+        )
+        ann_diag <- apply_annotation_contamination_for_run(
+          run_row = grr,
+          data_bundle = data_bundle,
+          annotation_vec = priors$mu_0,
+          anchor_pip = anchor_pip
+        )$diagnostics %>%
+          dplyr::mutate(
+            run_id = as.integer(grr$run_id),
+            dataset_bundle_id = as.integer(bundle_id),
+            use_case_id = as.character(uc_id),
+            spec_name = as.character(grr$spec_name %||% NA_character_),
+            group_key = as.character(group_key),
+            annotation_r2 = as.numeric(grr$annotation_r2 %||% NA_real_),
+            inflate_match = as.numeric(grr$inflate_match %||% NA_real_),
+            anchor_run_id = if (length(anchor_idx)) as.integer(meta_list[[anchor_member]]$run_id) else NA_integer_,
+            anchor_sigma_0_2_scalar = if (length(anchor_idx)) as.numeric(meta_list[[anchor_member]]$sigma_0_2_scalar) else NA_real_
+          )
+        buffer_ctx$buffers$annotation_diagnostics[[
+          length(buffer_ctx$buffers$annotation_diagnostics) + 1L
+        ]] <- ann_diag
+      }
+    }
+
     # hg2 by aggregation method (one scalar per agg_method per group, full K fits).
     if (!is.null(buffer_ctx)) {
       for (group_key in names(primary_pips_by_group)) {
@@ -1443,9 +1562,9 @@ parse_sigma_0_2_scalar <- function(scalar_spec, var_y, L) {
   if (is.null(scalar_spec) || (length(scalar_spec) == 1 && is.na(scalar_spec))) {
     return(NULL)
   }
-  
+
   spec_str <- as.character(scalar_spec)
-  
+
   # Check for /L suffix
   if (grepl("/L$", spec_str, ignore.case = TRUE)) {
     # Extract the multiplier before /L
@@ -1456,7 +1575,7 @@ parse_sigma_0_2_scalar <- function(scalar_spec, var_y, L) {
     }
     return(multiplier / L)
   }
-  
+
   # Plain numeric multiplier
   multiplier <- as.numeric(spec_str)
   if (is.na(multiplier)) {
@@ -1737,7 +1856,14 @@ run_use_case <- function(use_case, run_row, data_bundle, job_config,
       effect_sd = data_bundle$effect_sd,
       annotation_seed = annotation_seed
     )
-    annotation_vec <- priors$mu_0
+    annotation_contam <- apply_annotation_contamination_for_run(
+      run_row = run_row,
+      data_bundle = data_bundle,
+      annotation_vec = priors$mu_0
+    )
+    annotation_vec <- annotation_contam$mu_0
+  } else {
+    annotation_contam <- NULL
   }
 
   base_prior_weights <- rep(1 / p, p)
@@ -1958,7 +2084,8 @@ run_use_case <- function(use_case, run_row, data_bundle, job_config,
     fits = fits,
     fit_meta = fit_meta,
     mu_0 = if (length(mu_0) == 1L) rep(mu_0, p) else mu_0,
-    sigma_0_2 = sigma_0_2_truth
+    sigma_0_2 = sigma_0_2_truth,
+    annotation_diagnostics = annotation_contam$diagnostics %||% NULL
   )
 }
 
@@ -2971,7 +3098,7 @@ flush_task_buffers <- function(buffer_ctx) {
       !length(buf$confusion) && !length(buf$dataset_metrics) && !length(buf$multimodal) &&
       !length(buf$refine_depth) && !length(buf$scaling_bins) &&
       !length(buf$validation) && !length(buf$prior_diagnostics) &&
-      !length(buf$tier_cs_metrics) && !length(buf$hg2_by_agg)) {
+      !length(buf$annotation_diagnostics) && !length(buf$tier_cs_metrics) && !length(buf$hg2_by_agg)) {
     return(invisible(NULL))
   }
   base_output <- buffer_ctx$base_output
@@ -2997,6 +3124,7 @@ flush_task_buffers <- function(buffer_ctx) {
   refine_depth_tbl   <- if (length(buf$refine_depth))      dplyr::bind_rows(buf$refine_depth)      else NULL
   scaling_bins_tbl   <- if (length(buf$scaling_bins))      dplyr::bind_rows(buf$scaling_bins)      else NULL
   prior_diag_tbl     <- if (length(buf$prior_diagnostics)) dplyr::bind_rows(buf$prior_diagnostics) else NULL
+  annotation_diag_tbl <- if (length(buf$annotation_diagnostics)) dplyr::bind_rows(buf$annotation_diagnostics) else NULL
   tier_cs_tbl        <- if (length(buf$tier_cs_metrics))   dplyr::bind_rows(buf$tier_cs_metrics)   else NULL
   hg2_by_agg_tbl     <- if (length(buf$hg2_by_agg))        dplyr::bind_rows(buf$hg2_by_agg)        else NULL
 
@@ -3015,6 +3143,7 @@ flush_task_buffers <- function(buffer_ctx) {
     refine_depth = refine_depth_tbl,
     scaling_bins = scaling_bins_tbl,
     prior_diagnostics = prior_diag_tbl,
+    annotation_diagnostics = annotation_diag_tbl,
     tier_cs_metrics = tier_cs_tbl,
     hg2_by_agg = hg2_by_agg_tbl,
     pip_only = isTRUE(buffer_ctx$pip_only)
@@ -3042,6 +3171,7 @@ flush_task_buffers <- function(buffer_ctx) {
     scaling_bins = list(),
     validation = list(),
     prior_diagnostics = list(),
+    annotation_diagnostics = list(),
     tier_cs_metrics = list(),
     hg2_by_agg = list()
   )
@@ -3062,6 +3192,7 @@ write_flush_outputs <- function(staging_dir,
                                 refine_depth = NULL,
                                 scaling_bins = NULL,
                                 prior_diagnostics = NULL,
+                                annotation_diagnostics = NULL,
                                 tier_cs_metrics = NULL,
                                 hg2_by_agg = NULL,
                                 pip_only = FALSE) {
@@ -3120,6 +3251,10 @@ write_flush_outputs <- function(staging_dir,
   if (!is.null(prior_diagnostics) && nrow(prior_diagnostics)) {
     prior_diagnostics <- dplyr::mutate(prior_diagnostics, task_id = task_id, flush_id = flush_label)
     readr::write_csv(prior_diagnostics, file.path(staging_dir, sprintf("%s_prior_diagnostics.csv", flush_label)))
+  }
+  if (!is.null(annotation_diagnostics) && nrow(annotation_diagnostics)) {
+    annotation_diagnostics <- dplyr::mutate(annotation_diagnostics, task_id = task_id, flush_id = flush_label)
+    readr::write_csv(annotation_diagnostics, file.path(staging_dir, sprintf("%s_annotation_diagnostics.csv", flush_label)))
   }
   if (!is.null(tier_cs_metrics) && nrow(tier_cs_metrics)) {
     tier_cs_metrics <- dplyr::mutate(tier_cs_metrics, task_id = task_id, flush_id = flush_label)

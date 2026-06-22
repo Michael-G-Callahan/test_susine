@@ -1,0 +1,301 @@
+---
+title: "Annotation Contamination Sensitivity - Visualize Results"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+Visualization workbook for the reviewer annotation-contamination sensitivity
+analysis. It reads the combined tables written by
+`collect_results_workbook_annotation_contamination.Rmd`, generates the primary
+metric curves, and saves paper-facing figures and CSVs.
+
+```{r setup, message=FALSE}
+here::i_am("vignettes/simulation pipeline/visualize_results_workbook_annotation_contamination.Rmd")
+library(here)
+library(devtools)
+
+susine_path <- here("..", "susine")
+if (file.exists(file.path(susine_path, "DESCRIPTION"))) {
+  options(test_susine.local_susine_path = normalizePath(susine_path, winslash = "/", mustWork = TRUE))
+  devtools::load_all(susine_path)
+}
+devtools::load_all(".")
+
+library(dplyr)
+library(readr)
+library(tidyr)
+library(ggplot2)
+library(knitr)
+
+theme_set(
+  theme_bw(base_size = 11) +
+    theme(
+      panel.grid.minor = element_blank(),
+      panel.grid.major = element_line(color = "grey92"),
+      strip.background = element_rect(fill = "grey95", color = NA),
+      strip.text = element_text(face = "bold"),
+      legend.position = "bottom",
+      plot.title = element_text(face = "bold")
+    )
+)
+```
+
+# Load Data
+
+```{r load}
+output_root <- here("output")
+combined_dir <- file.path(output_root, "annotation_contamination_sensitivity", "combined")
+fig_dir <- file.path(output_root, "annotation_contamination_sensitivity", "figures")
+dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
+
+read_req <- function(filename) {
+  path <- file.path(combined_dir, filename)
+  if (!file.exists(path)) stop("Missing required file: ", path)
+  readr::read_csv(path, show_col_types = FALSE)
+}
+
+metric_summary <- read_req("metric_summary.csv")
+baseline_summary <- read_req("baseline_summary.csv")
+annotation_diagnostics <- read_req("annotation_diagnostics_full.csv")
+annotation_gate <- read_req("annotation_gate.csv")
+lambda0_gate <- read_req("lambda0_gate.csv")
+prior_gate <- read_req("prior_gate.csv")
+
+arm_labels <- c(
+  null = "Null-block contamination",
+  causal = "Causal-block positive control"
+)
+
+metric_summary <- metric_summary %>%
+  dplyr::mutate(
+    arm_label = dplyr::recode(.data$arm, !!!arm_labels),
+    lambda = as.numeric(.data$annotation_contamination_lambda)
+  )
+
+baseline_summary <- baseline_summary %>%
+  dplyr::mutate(
+    arm_label = dplyr::recode(.data$arm, !!!arm_labels)
+  )
+
+annotation_diagnostics <- annotation_diagnostics %>%
+  dplyr::mutate(
+    arm_label = dplyr::recode(.data$arm, !!!arm_labels),
+    lambda = as.numeric(.data$annotation_contamination_lambda)
+  )
+
+cat("Combined dir:", combined_dir, "\n")
+cat("Figure dir:", fig_dir, "\n")
+```
+
+# Validation Summary
+
+```{r validation-summary}
+kable(annotation_gate, digits = 4, caption = "Annotation construction gate by arm and lambda")
+kable(lambda0_gate, digits = 4, caption = "Lambda-zero cross-arm metric gate")
+kable(prior_gate, digits = 4, caption = "Fixed-c prior gate")
+```
+
+# Metric Curves
+
+```{r metric-curves, fig.width=8, fig.height=5}
+p_auprc <- ggplot(
+  metric_summary,
+  aes(x = .data$lambda, y = .data$AUPRC, color = .data$arm_label, group = .data$arm_label)
+) +
+  geom_hline(
+    data = baseline_summary,
+    aes(yintercept = .data$AUPRC, color = .data$arm_label),
+    linetype = "dashed",
+    linewidth = 0.65,
+    show.legend = FALSE
+  ) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 2) +
+  labs(
+    x = expression(lambda),
+    y = "Pooled AUPRC",
+    color = "Arm",
+    title = "Annotation contamination sensitivity: pooled AUPRC",
+    caption = "Dashed horizontal lines show the annotation-free SuSiE-equivalent baseline."
+  )
+
+ggsave(file.path(fig_dir, "auprc_by_lambda.png"), p_auprc, width = 8, height = 5, dpi = 220)
+p_auprc
+```
+
+```{r recall75-curve, fig.width=8, fig.height=5}
+p_recall <- ggplot(
+  metric_summary,
+  aes(x = .data$lambda, y = .data$recall_at_precision, color = .data$arm_label, group = .data$arm_label)
+) +
+  geom_hline(
+    data = baseline_summary,
+    aes(yintercept = .data$recall_at_precision, color = .data$arm_label),
+    linetype = "dashed",
+    linewidth = 0.65,
+    show.legend = FALSE
+  ) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 2) +
+  labs(
+    x = expression(lambda),
+    y = "Recall at precision >= 0.75",
+    color = "Arm",
+    title = "Annotation contamination sensitivity: recall at precision 0.75",
+    caption = "Dashed horizontal lines show the annotation-free SuSiE-equivalent baseline."
+  )
+
+ggsave(file.path(fig_dir, "recall75_by_lambda.png"), p_recall, width = 8, height = 5, dpi = 220)
+p_recall
+```
+
+# Combined Metric Figure
+
+```{r combined-metric-figure, fig.width=9, fig.height=5}
+metric_long <- metric_summary %>%
+  dplyr::select(.data$arm_label, .data$lambda, .data$AUPRC, .data$recall_at_precision) %>%
+  tidyr::pivot_longer(
+    cols = c("AUPRC", "recall_at_precision"),
+    names_to = "metric",
+    values_to = "value"
+  ) %>%
+  dplyr::mutate(
+    metric = dplyr::recode(
+      .data$metric,
+      AUPRC = "Pooled AUPRC",
+      recall_at_precision = "Recall at precision >= 0.75"
+    )
+  )
+
+baseline_long <- baseline_summary %>%
+  dplyr::select(.data$arm_label, .data$AUPRC, .data$recall_at_precision) %>%
+  tidyr::pivot_longer(
+    cols = c("AUPRC", "recall_at_precision"),
+    names_to = "metric",
+    values_to = "value"
+  ) %>%
+  dplyr::mutate(
+    metric = dplyr::recode(
+      .data$metric,
+      AUPRC = "Pooled AUPRC",
+      recall_at_precision = "Recall at precision >= 0.75"
+    )
+  )
+
+p_metrics <- ggplot(
+  metric_long,
+  aes(x = .data$lambda, y = .data$value, color = .data$arm_label, group = .data$arm_label)
+) +
+  geom_hline(
+    data = baseline_long,
+    aes(yintercept = .data$value, color = .data$arm_label),
+    linetype = "dashed",
+    linewidth = 0.65,
+    show.legend = FALSE
+  ) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 2) +
+  facet_wrap(~metric, scales = "free_y") +
+  labs(
+    x = expression(lambda),
+    y = NULL,
+    color = "Arm",
+    title = "Annotation sensitivity metrics",
+    caption = "Dashed horizontal lines show the annotation-free SuSiE-equivalent baseline."
+  )
+
+ggsave(file.path(fig_dir, "annotation_sensitivity_metrics.png"), p_metrics, width = 9, height = 5, dpi = 240)
+p_metrics
+```
+
+# Annotation-Z Diagnostics
+
+```{r annotation-z-diagnostics, fig.width=9, fig.height=5}
+diag_summary <- annotation_diagnostics %>%
+  dplyr::group_by(.data$arm_label, .data$lambda) %>%
+  dplyr::summarise(
+    cor_a_z_null = mean(.data$cor_a_z_null, na.rm = TRUE),
+    cor_a_z_causal = mean(.data$cor_a_z_causal, na.rm = TRUE),
+    cor_a_z_anchor_low_pip = mean(.data$cor_a_z_anchor_low_pip, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+diag_long <- diag_summary %>%
+  tidyr::pivot_longer(
+    cols = c("cor_a_z_null", "cor_a_z_causal", "cor_a_z_anchor_low_pip"),
+    names_to = "diagnostic",
+    values_to = "correlation"
+  ) %>%
+  dplyr::mutate(
+    diagnostic = dplyr::recode(
+      .data$diagnostic,
+      cor_a_z_null = "Null variants",
+      cor_a_z_causal = "Causal variants",
+      cor_a_z_anchor_low_pip = "Anchor low-PIP variants"
+    )
+  )
+
+p_diag <- ggplot(
+  diag_long,
+  aes(x = .data$lambda, y = .data$correlation, color = .data$diagnostic, group = .data$diagnostic)
+) +
+  geom_hline(yintercept = 0, color = "grey70", linewidth = 0.3) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 1.8) +
+  facet_wrap(~arm_label) +
+  labs(
+    x = expression(lambda),
+    y = "Mean cor(annotation, z)",
+    color = "Block",
+    title = "Annotation/z alignment diagnostics"
+  )
+
+ggsave(file.path(fig_dir, "annotation_z_correlations.png"), p_diag, width = 9, height = 5, dpi = 220)
+p_diag
+```
+
+# RMS And Untouched-Block Diagnostics
+
+```{r construction-diagnostics, fig.width=8, fig.height=5}
+construction_long <- annotation_gate %>%
+  dplyr::mutate(
+    arm_label = dplyr::recode(.data$arm, !!!arm_labels),
+    lambda = as.numeric(.data$annotation_contamination_lambda),
+    max_active_rms_rel_error_plot = pmax(.data$max_active_rms_rel_error, 1e-16)
+  )
+
+p_rms <- ggplot(
+  construction_long,
+  aes(x = .data$lambda, y = .data$max_active_rms_rel_error_plot, color = .data$arm_label, group = .data$arm_label)
+) +
+  geom_hline(yintercept = 1e-8, linetype = "dashed", color = "grey50") +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 2) +
+  scale_y_log10() +
+  labs(
+    x = expression(lambda),
+    y = "Max active-block RMS relative error",
+    color = "Arm",
+    title = "RMS construction invariant"
+  )
+
+ggsave(file.path(fig_dir, "rms_invariant_by_lambda.png"), p_rms, width = 8, height = 5, dpi = 220)
+p_rms
+```
+
+# Export Plot Data
+
+```{r export-plot-data}
+readr::write_csv(metric_summary, file.path(fig_dir, "metric_summary_plot_data.csv"))
+readr::write_csv(baseline_summary, file.path(fig_dir, "baseline_summary_plot_data.csv"))
+readr::write_csv(diag_summary, file.path(fig_dir, "annotation_z_diagnostic_plot_data.csv"))
+readr::write_csv(construction_long, file.path(fig_dir, "construction_gate_plot_data.csv"))
+
+cat("Saved figures and plot data to:", fig_dir, "\n")
+```

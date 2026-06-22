@@ -1,0 +1,344 @@
+---
+title: "Annotation Contamination Sensitivity - Collect Results"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+Post-hoc collection for the reviewer annotation-contamination sensitivity jobs.
+This workbook aggregates the null-arm and causal-positive-control Slurm outputs,
+validates the annotation construction gates, and writes combined tables for the
+visualization workbook.
+
+```{r setup, message=FALSE}
+here::i_am("vignettes/simulation pipeline/collect_results_workbook_annotation_contamination.Rmd")
+library(here)
+library(devtools)
+
+susine_path <- here("..", "susine")
+if (file.exists(file.path(susine_path, "DESCRIPTION"))) {
+  options(test_susine.local_susine_path = normalizePath(susine_path, winslash = "/", mustWork = TRUE))
+  devtools::load_all(susine_path)
+}
+devtools::load_all(".")
+
+library(dplyr)
+library(readr)
+library(tidyr)
+library(knitr)
+```
+
+# Configuration
+
+Set the parent Slurm array IDs returned by `sbatch` before rendering.
+
+```{r user-config}
+output_root <- here("output")
+
+null_job_name <- "annotation_contamination_null"
+null_parent_job_id <- "SET_NULL_PARENT_JOB_ID"
+
+causal_job_name <- "annotation_contamination_causal_positive"
+causal_parent_job_id <- "SET_CAUSAL_PARENT_JOB_ID"
+
+force_reaggregate <- TRUE
+write_snps_dataset <- FALSE
+precision_threshold <- 0.75
+
+combined_root <- file.path(output_root, "annotation_contamination_sensitivity")
+combined_dir <- file.path(combined_root, "combined")
+dir.create(combined_dir, recursive = TRUE, showWarnings = FALSE)
+
+if (identical(null_parent_job_id, "SET_NULL_PARENT_JOB_ID") ||
+    identical(causal_parent_job_id, "SET_CAUSAL_PARENT_JOB_ID")) {
+  stop("Set null_parent_job_id and causal_parent_job_id before collecting.")
+}
+```
+
+# Aggregate Arms
+
+```{r aggregate-arms}
+collect_arm <- function(job_name, parent_job_id, arm_label) {
+  job_dir <- file.path(output_root, "slurm_output", job_name, parent_job_id)
+  aggregated_dir <- file.path(job_dir, "aggregated")
+  run_table_path <- file.path(output_root, "run_history", job_name, parent_job_id, "run_table.csv")
+
+  if (force_reaggregate || !file.exists(file.path(aggregated_dir, "confusion_bins.csv"))) {
+    test_susine::aggregate_staging_outputs(
+      job_name = job_name,
+      parent_job_id = parent_job_id,
+      output_root = output_root,
+      validate = TRUE,
+      output_dir = aggregated_dir,
+      write_snps_dataset = write_snps_dataset
+    )
+  }
+
+  if (!file.exists(run_table_path)) {
+    stop("Run table not found: ", run_table_path)
+  }
+
+  list(
+    arm = arm_label,
+    job_name = job_name,
+    parent_job_id = parent_job_id,
+    job_dir = job_dir,
+    aggregated_dir = aggregated_dir,
+    run_table = readr::read_csv(run_table_path, show_col_types = FALSE)
+  )
+}
+
+arms <- list(
+  null = collect_arm(null_job_name, null_parent_job_id, "null"),
+  causal = collect_arm(causal_job_name, causal_parent_job_id, "causal")
+)
+
+arm_index <- tibble::tibble(
+  arm = vapply(arms, `[[`, character(1), "arm"),
+  job_name = vapply(arms, `[[`, character(1), "job_name"),
+  parent_job_id = vapply(arms, `[[`, character(1), "parent_job_id"),
+  aggregated_dir = vapply(arms, `[[`, character(1), "aggregated_dir")
+)
+readr::write_csv(arm_index, file.path(combined_dir, "arm_index.csv"))
+kable(arm_index)
+```
+
+# Load Tables
+
+```{r load-tables}
+read_optional_csv <- function(dir, filename) {
+  path <- file.path(dir, filename)
+  if (!file.exists(path)) return(NULL)
+  readr::read_csv(path, show_col_types = FALSE)
+}
+
+bind_arm_table <- function(filename, join_run_table = FALSE) {
+  pieces <- lapply(arms, function(a) {
+    tbl <- read_optional_csv(a$aggregated_dir, filename)
+    if (is.null(tbl)) return(NULL)
+    tbl <- dplyr::mutate(tbl, arm = a$arm, source_job_name = a$job_name, source_parent_job_id = a$parent_job_id)
+    if (join_run_table && "run_id" %in% names(tbl)) {
+      run_lookup <- a$run_table %>%
+        dplyr::distinct(.data$run_id, .keep_all = TRUE) %>%
+        dplyr::select(
+          .data$run_id,
+          dplyr::any_of(c(
+            "spec_name", "use_case_id", "group_key", "annotation_contamination_arm",
+            "annotation_contamination_lambda", "annotation_contamination_shuffle_z",
+            "c_value", "sigma_0_2_scalar", "L", "dataset_bundle_id"
+          ))
+        )
+      tbl <- tbl %>%
+        dplyr::select(-dplyr::any_of(setdiff(names(run_lookup), "run_id"))) %>%
+        dplyr::left_join(run_lookup, by = "run_id")
+    }
+    tbl
+  })
+  dplyr::bind_rows(pieces)
+}
+
+confusion_bins <- bind_arm_table("confusion_bins.csv")
+model_metrics <- bind_arm_table("model_metrics.csv")
+effect_metrics <- bind_arm_table("effect_metrics.csv")
+effect_metrics_unfiltered <- bind_arm_table("effect_metrics_unfiltered.csv")
+annotation_diagnostics <- bind_arm_table("annotation_diagnostics.csv")
+prior_diagnostics <- bind_arm_table("prior_diagnostics.csv", join_run_table = TRUE)
+validation <- bind_arm_table("validation.csv")
+
+cat("Confusion-bin rows:", nrow(confusion_bins), "\n")
+cat("Annotation diagnostic rows:", nrow(annotation_diagnostics), "\n")
+cat("Prior diagnostic rows:", nrow(prior_diagnostics), "\n")
+```
+
+# Validation Gates
+
+```{r validation-gates}
+required_annotation_cols <- c(
+  "annotation_contamination_arm", "annotation_contamination_lambda",
+  "null_rms_rel_error", "causal_rms_rel_error", "causal_unchanged", "null_unchanged"
+)
+missing_annotation_cols <- setdiff(required_annotation_cols, names(annotation_diagnostics))
+if (!nrow(annotation_diagnostics) || length(missing_annotation_cols)) {
+  stop(
+    "annotation_diagnostics.csv is missing or incomplete. Missing columns: ",
+    paste(missing_annotation_cols, collapse = ", ")
+  )
+}
+
+annotation_gate <- annotation_diagnostics %>%
+  dplyr::mutate(
+    active_rms_rel_error = dplyr::if_else(
+      .data$annotation_contamination_arm == "null",
+      .data$null_rms_rel_error,
+      .data$causal_rms_rel_error
+    ),
+    untouched_block_ok = dplyr::if_else(
+      .data$annotation_contamination_arm == "null",
+      .data$causal_unchanged,
+      .data$null_unchanged
+    )
+  ) %>%
+  dplyr::group_by(.data$arm, .data$annotation_contamination_lambda) %>%
+  dplyr::summarise(
+    n_rows = dplyr::n(),
+    max_active_rms_rel_error = max(.data$active_rms_rel_error, na.rm = TRUE),
+    all_untouched_block_ok = all(.data$untouched_block_ok, na.rm = TRUE),
+    max_abs_cor_anchor_low_pip = max(abs(.data$cor_a_z_anchor_low_pip), na.rm = TRUE),
+    .groups = "drop"
+  )
+
+annotation_gate_overall <- annotation_gate %>%
+  dplyr::summarise(
+    n_rows = sum(.data$n_rows),
+    max_active_rms_rel_error = max(.data$max_active_rms_rel_error, na.rm = TRUE),
+    all_untouched_block_ok = all(.data$all_untouched_block_ok, na.rm = TRUE)
+  )
+
+required_prior_cols <- c("spec_name", "c_l")
+missing_prior_cols <- setdiff(required_prior_cols, names(prior_diagnostics))
+if (!nrow(prior_diagnostics) || length(missing_prior_cols)) {
+  stop(
+    "prior_diagnostics.csv is missing or incomplete. Set write_prior_diagnostics = TRUE before launch. Missing columns: ",
+    paste(missing_prior_cols, collapse = ", ")
+  )
+}
+
+prior_gate <- prior_diagnostics %>%
+  dplyr::filter(.data$spec_name == "C-CS-annotation-contamination") %>%
+  dplyr::summarise(
+    n_rows = dplyr::n(),
+    max_abs_c_l_minus_1 = max(abs(.data$c_l - 1), na.rm = TRUE),
+    all_c_l_one = all(abs(.data$c_l - 1) < 1e-12, na.rm = TRUE)
+  )
+
+if (annotation_gate_overall$n_rows <= 0L ||
+    annotation_gate_overall$max_active_rms_rel_error > 1e-8 ||
+    !isTRUE(annotation_gate_overall$all_untouched_block_ok)) {
+  stop("Annotation construction gate failed. Inspect annotation_gate.csv.")
+}
+if (prior_gate$n_rows <= 0L || !isTRUE(prior_gate$all_c_l_one)) {
+  stop("Fixed-c prior gate failed: c_l differs from 1 or no C-CS prior rows were found.")
+}
+
+readr::write_csv(annotation_gate, file.path(combined_dir, "annotation_gate.csv"))
+readr::write_csv(annotation_gate_overall, file.path(combined_dir, "annotation_gate_overall.csv"))
+readr::write_csv(prior_gate, file.path(combined_dir, "prior_gate.csv"))
+
+kable(annotation_gate_overall, digits = 4, caption = "Annotation construction gate")
+kable(prior_gate, digits = 4, caption = "Fixed-c prior gate")
+```
+
+# Metrics
+
+```{r metrics}
+ccs_confusion <- confusion_bins %>%
+  dplyr::filter(
+    .data$spec_name == "C-CS-annotation-contamination",
+    .data$explore_method == "aggregation",
+    .data$agg_method == "cluster_weight_credible"
+  )
+
+baseline_confusion <- confusion_bins %>%
+  dplyr::filter(
+    .data$spec_name == "baseline-single",
+    .data$explore_method == "base"
+  )
+
+if (!nrow(ccs_confusion)) {
+  stop("No C-CS aggregate confusion-bin rows found.")
+}
+if (!nrow(baseline_confusion)) {
+  stop("No baseline-single base confusion-bin rows found.")
+}
+
+metric_group_vars <- c("arm", "annotation_contamination_arm", "annotation_contamination_lambda")
+baseline_group_vars <- "arm"
+
+auprc_pooled <- test_susine::compute_auprc_from_confusion(
+  ccs_confusion,
+  group_vars = metric_group_vars
+)
+
+recall75_pooled <- test_susine::compute_recall_at_precision_from_confusion(
+  ccs_confusion,
+  group_vars = metric_group_vars,
+  precision_threshold = precision_threshold
+)
+
+baseline_auprc <- test_susine::compute_auprc_from_confusion(
+  baseline_confusion,
+  group_vars = baseline_group_vars
+)
+
+baseline_recall75 <- test_susine::compute_recall_at_precision_from_confusion(
+  baseline_confusion,
+  group_vars = baseline_group_vars,
+  precision_threshold = precision_threshold
+)
+
+metric_summary <- auprc_pooled %>%
+  dplyr::left_join(recall75_pooled, by = metric_group_vars) %>%
+  dplyr::mutate(series = "C-CS annotation contamination") %>%
+  dplyr::arrange(.data$arm, .data$annotation_contamination_lambda)
+
+baseline_summary <- baseline_auprc %>%
+  dplyr::left_join(baseline_recall75, by = baseline_group_vars) %>%
+  dplyr::mutate(
+    series = "Annotation-free SuSiE-equivalent baseline",
+    annotation_contamination_arm = NA_character_,
+    annotation_contamination_lambda = NA_real_
+  ) %>%
+  dplyr::select(
+    .data$arm,
+    .data$annotation_contamination_arm,
+    .data$annotation_contamination_lambda,
+    dplyr::everything()
+  )
+
+lambda0_gate <- metric_summary %>%
+  dplyr::filter(abs(.data$annotation_contamination_lambda) < .Machine$double.eps) %>%
+  dplyr::summarise(
+    n_lambda0_rows = dplyr::n(),
+    auprc_range = max(.data$AUPRC, na.rm = TRUE) - min(.data$AUPRC, na.rm = TRUE),
+    recall75_range = max(.data$recall_at_precision, na.rm = TRUE) - min(.data$recall_at_precision, na.rm = TRUE),
+    gate = "cross-arm C-CS lambda-zero agreement"
+  )
+
+if (lambda0_gate$n_lambda0_rows < 2L ||
+    lambda0_gate$auprc_range > 1e-12 || lambda0_gate$recall75_range > 1e-12) {
+  stop("Lambda-zero cross-arm C-CS metric gate failed.")
+}
+
+readr::write_csv(metric_summary, file.path(combined_dir, "metric_summary.csv"))
+readr::write_csv(baseline_summary, file.path(combined_dir, "baseline_summary.csv"))
+readr::write_csv(lambda0_gate, file.path(combined_dir, "lambda0_gate.csv"))
+
+kable(metric_summary, digits = 4, caption = "Pooled annotation sensitivity metrics")
+kable(baseline_summary, digits = 4, caption = "Annotation-free baseline metrics")
+kable(lambda0_gate, digits = 4, caption = "Lambda-zero cross-arm C-CS gate")
+```
+
+# Export Combined Raw Tables
+
+```{r export}
+write_if_present <- function(tbl, filename) {
+  if (!is.null(tbl) && nrow(tbl)) {
+    readr::write_csv(tbl, file.path(combined_dir, filename))
+  }
+}
+
+write_if_present(confusion_bins, "confusion_bins_full.csv")
+write_if_present(model_metrics, "model_metrics_full.csv")
+write_if_present(effect_metrics, "effect_metrics_full.csv")
+write_if_present(effect_metrics_unfiltered, "effect_metrics_unfiltered_full.csv")
+write_if_present(annotation_diagnostics, "annotation_diagnostics_full.csv")
+write_if_present(prior_diagnostics, "prior_diagnostics_full.csv")
+write_if_present(validation, "validation_full.csv")
+
+cat("Combined annotation sensitivity outputs written to:", combined_dir, "\n")
+```

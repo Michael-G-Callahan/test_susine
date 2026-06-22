@@ -310,11 +310,31 @@ make_run_tables <- function(use_case_ids,
     dplyr::rename(L = L_vals) %>%
     dplyr::select(.data$dataset_bundle_id, .data$L)
 
+  annotation_setting_cols <- intersect(
+    c(
+      "annotation_r2",
+      "inflate_match",
+      "annotation_contamination_arm",
+      "annotation_contamination_lambda",
+      "annotation_contamination_shuffle_z"
+    ),
+    names(prior_quality)
+  )
+  annotation_extra_cols <- setdiff(annotation_setting_cols, c("annotation_r2", "inflate_match"))
+
+  empty_annotation_grid <- function() {
+    out <- tibble::tibble(annotation_r2 = NA_real_, inflate_match = NA_real_)
+    for (col in annotation_extra_cols) {
+      out[[col]] <- NA
+    }
+    out
+  }
+
   annotation_grid_for_spec <- function(spec_row) {
     if (!isTRUE(spec_row$supports_annotation)) {
-      return(tibble::tibble(annotation_r2 = NA_real_, inflate_match = NA_real_))
+      return(empty_annotation_grid())
     }
-    dplyr::distinct(dplyr::select(prior_quality, .data$annotation_r2, .data$inflate_match))
+    dplyr::distinct(dplyr::select(prior_quality, dplyr::all_of(annotation_setting_cols)))
   }
 
   make_default_grid <- function(what, k) {
@@ -575,7 +595,7 @@ make_run_tables <- function(use_case_ids,
   # Minimal-mode cycling state for annotation quality -------------------------
   if (grid_mode == "minimal") {
     ann_full_grid <- dplyr::distinct(
-      dplyr::select(prior_quality, .data$annotation_r2, .data$inflate_match)
+      dplyr::select(prior_quality, dplyr::all_of(annotation_setting_cols))
     )
     minimal_ann_idx <- 0L
   }
@@ -586,9 +606,7 @@ make_run_tables <- function(use_case_ids,
     if (grid_mode == "minimal") {
       # 1 annotation combo per annotation-supporting spec, cycling through combos
       if (!isTRUE(spec$supports_annotation)) {
-        ann_grid <- tibble::tibble(
-          annotation_r2 = NA_real_, inflate_match = NA_real_
-        )
+        ann_grid <- empty_annotation_grid()
       } else {
         minimal_ann_idx <<- minimal_ann_idx + 1L
         row_idx <- ((minimal_ann_idx - 1L) %% nrow(ann_full_grid)) + 1L
@@ -624,6 +642,9 @@ make_run_tables <- function(use_case_ids,
         "L=", as.integer(.data$L),
         "|r2=", ifelse(is.na(.data$annotation_r2), "NA", trimws(format(.data$annotation_r2, digits = 6, scientific = FALSE))),
         "|inflate=", ifelse(is.na(.data$inflate_match), "NA", trimws(format(.data$inflate_match, digits = 6, scientific = FALSE))),
+        if ("annotation_contamination_arm" %in% names(.)) paste0("|ann_arm=", dplyr::coalesce(as.character(.data$annotation_contamination_arm), "NA")) else "",
+        if ("annotation_contamination_lambda" %in% names(.)) paste0("|ann_lambda=", dplyr::coalesce(trimws(format(.data$annotation_contamination_lambda, digits = 6, scientific = FALSE)), "NA")) else "",
+        if ("annotation_contamination_shuffle_z" %in% names(.)) paste0("|ann_shuffle=", dplyr::coalesce(as.character(.data$annotation_contamination_shuffle_z), "NA")) else "",
         "|explore=", .data$exploration_mode, ":", .data$exploration_methods
       )
     ) %>%

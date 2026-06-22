@@ -66,6 +66,7 @@ index_staging_outputs <- function(job_name,
     if (grepl("_multimodal_metrics\\.csv$", fname)) return("multimodal_metrics")
     if (grepl("_refine_depth\\.csv$", fname)) return("refine_depth")
     if (grepl("_prior_diagnostics\\.csv$", fname)) return("prior_diagnostics")
+    if (grepl("_annotation_diagnostics\\.csv$", fname)) return("annotation_diagnostics")
     if (grepl("_tier_cs_metrics\\.csv$", fname)) return("tier_cs_metrics")
     if (grepl("_scaling_bins\\.csv$", fname)) return("scaling_bins")
     if (grepl("_hg2_by_agg\\.csv$", fname)) return("hg2_by_agg")
@@ -127,6 +128,7 @@ validate_staging_outputs <- function(file_index) {
       multimodal_metrics = function(p) readr::read_csv(p, show_col_types = FALSE, n_max = 1L, progress = FALSE),
       refine_depth = function(p) readr::read_csv(p, show_col_types = FALSE, n_max = 1L, progress = FALSE),
       prior_diagnostics = function(p) readr::read_csv(p, show_col_types = FALSE, n_max = 1L, progress = FALSE),
+      annotation_diagnostics = function(p) readr::read_csv(p, show_col_types = FALSE, n_max = 1L, progress = FALSE),
       tier_cs_metrics = function(p) readr::read_csv(p, show_col_types = FALSE, n_max = 1L, progress = FALSE),
       scaling_bins = function(p) readr::read_csv(p, show_col_types = FALSE, n_max = 1L, progress = FALSE),
       hg2_by_agg = function(p) readr::read_csv(p, show_col_types = FALSE, n_max = 1L, progress = FALSE),
@@ -317,6 +319,7 @@ aggregate_staging_outputs <- function(job_name,
   multimodal_files <- dplyr::filter(idx, .data$type == "multimodal_metrics")$path
   refine_depth_files <- dplyr::filter(idx, .data$type == "refine_depth")$path
   prior_diag_files   <- dplyr::filter(idx, .data$type == "prior_diagnostics")$path
+  annotation_diag_files <- dplyr::filter(idx, .data$type == "annotation_diagnostics")$path
   tier_cs_files      <- dplyr::filter(idx, .data$type == "tier_cs_metrics")$path
   scaling_bin_files <- dplyr::filter(idx, .data$type == "scaling_bins")$path
   hg2_by_agg_files  <- dplyr::filter(idx, .data$type == "hg2_by_agg")$path
@@ -329,7 +332,10 @@ aggregate_staging_outputs <- function(job_name,
                        "inflate_match", "sigma_0_2_scalar", "c_value", "tau_value",
                        "matrix_id", "y_noise", "p_star", "exploration_mode",
                        "exploration_methods", "exploration_group",
-                       "alpha_concentration", "warm_method")
+                       "alpha_concentration", "warm_method",
+                       "annotation_contamination_arm",
+                       "annotation_contamination_lambda",
+                       "annotation_contamination_shuffle_z")
   bundle_enrich_cols <- c("matrix_id", "architecture", "y_noise", "p_star",
                           "phenotype_seed")
 
@@ -404,6 +410,14 @@ aggregate_staging_outputs <- function(job_name,
     readr::write_csv(prior_diag_tbl, file.path(output_dir, "prior_diagnostics.csv"))
     log_progress("Wrote prior_diagnostics.csv")
     rm(prior_diag_tbl, prior_diag_files)
+    gc()
+  }
+  if (length(annotation_diag_files)) {
+    annotation_diag_tbl <- read_csv_safe(annotation_diag_files, idx) %>%
+      enrich_from_run_table(cols = run_enrich_full)
+    readr::write_csv(annotation_diag_tbl, file.path(output_dir, "annotation_diagnostics.csv"))
+    log_progress("Wrote annotation_diagnostics.csv")
+    rm(annotation_diag_tbl, annotation_diag_files)
     gc()
   }
   if (length(tier_cs_files)) {

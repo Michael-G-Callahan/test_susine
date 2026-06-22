@@ -444,6 +444,231 @@ simulate_priors <- function(beta,
   )
 }
 
+#' Root mean square.
+#' @keywords internal
+annotation_rms <- function(x) {
+  x <- as.numeric(x)
+  if (!length(x)) return(NA_real_)
+  sqrt(mean(x^2))
+}
+
+#' Correlation that returns NA for degenerate inputs.
+#' @keywords internal
+safe_cor <- function(x, y) {
+  x <- as.numeric(x)
+  y <- as.numeric(y)
+  ok <- is.finite(x) & is.finite(y)
+  if (sum(ok) < 2L || stats::sd(x[ok]) <= 0 || stats::sd(y[ok]) <= 0) {
+    return(NA_real_)
+  }
+  as.numeric(stats::cor(x[ok], y[ok]))
+}
+
+#' Evaluate an expression without leaving RNG state changes behind.
+#' @keywords internal
+with_preserved_rng_seed <- function(expr) {
+  had_seed <- exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)
+  old_seed <- if (had_seed) get(".Random.seed", envir = .GlobalEnv, inherits = FALSE) else NULL
+  on.exit({
+    if (had_seed) {
+      assign(".Random.seed", old_seed, envir = .GlobalEnv)
+    } else if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) {
+      rm(".Random.seed", envir = .GlobalEnv)
+    }
+  }, add = TRUE)
+  force(expr)
+}
+
+#' Marginal signed z-scores for each variant.
+#'
+#' Computes the simple univariate regression z-score for each column of `X`.
+#' This is intentionally pre-fit and model-agnostic for the annotation
+#' contamination sensitivity analysis.
+#'
+#' @param X Numeric design matrix.
+#' @param y Numeric response vector.
+#' @return Numeric vector of length `ncol(X)`.
+#' @keywords internal
+compute_marginal_z_scores <- function(X, y) {
+  X <- as.matrix(X)
+  y <- as.numeric(y)
+  if (nrow(X) != length(y)) {
+    stop("X and y have incompatible dimensions.")
+  }
+  n <- nrow(X)
+  p <- ncol(X)
+  if (n < 3L) {
+    return(rep(NA_real_, p))
+  }
+
+  yc <- y - mean(y)
+  Xc <- sweep(X, 2L, matrixStats::colMeans2(X), "-")
+  sxx <- matrixStats::colSums2(Xc^2)
+  sxy <- as.numeric(crossprod(Xc, yc))
+  beta_hat <- sxy / sxx
+  rss <- sum(yc^2) - (sxy^2 / sxx)
+  sigma2_hat <- rss / (n - 2L)
+  se <- sqrt(sigma2_hat / sxx)
+  z <- beta_hat / se
+  z[!is.finite(z)] <- NA_real_
+  z
+}
+
+contaminate_annotation_vector <- function(a_orig,
+                                          z,
+                                          causal_idx,
+                                          arm = c("none", "null", "causal"),
+                                          lambda = 0,
+                                          shuffle_z = FALSE,
+                                          seed = NULL,
+                                          tol = 1e-10) {
+  arm <- match.arg(arm)
+  a_orig <- as.numeric(a_orig)
+  z <- as.numeric(z)
+  p <- length(a_orig)
+  if (length(z) != p) {
+    stop("Annotation and z-score vectors must have the same length.")
+  }
+  causal_idx <- sort(unique(as.integer(causal_idx)))
+  causal_idx <- causal_idx[is.finite(causal_idx) & causal_idx >= 1L & causal_idx <= p]
+  null_idx <- setdiff(seq_len(p), causal_idx)
+  lambda <- as.numeric(lambda %||% 0)
+  if (!is.finite(lambda)) lambda <- 0
+
+  if (identical(arm, "none") || lambda == 0) {
+    return(list(
+      mu_0 = a_orig,
+      diagnostics = annotation_contamination_diagnostics(
+        a_orig = a_orig,
+        a_new = a_orig,
+        z = z,
+        causal_idx = causal_idx,
+        arm = arm,
+        lambda = lambda,
+        shuffle_z = isTRUE(shuffle_z),
+        tol = tol
+      )
+    ))
+  }
+
+  block_idx <- if (identical(arm, "null")) null_idx else causal_idx
+  if (!length(block_idx)) {
+    stop("Selected annotation contamination block is empty.")
+  }
+  z_block <- z[block_idx]
+  if (isTRUE(shuffle_z)) {
+    z_block <- with_preserved_rng_seed({
+      if (!is.null(seed) && is.finite(seed)) set.seed(as.integer(seed))
+      sample(z_block, length(z_block), replace = FALSE)
+    })
+  }
+  rms_a0 <- annotation_rms(a_orig[block_idx])
+  rms_z <- annotation_rms(z_block)
+  if (!is.finite(rms_a0) || rms_a0 <= 0 || !is.finite(rms_z) || rms_z <= 0) {
+    stop("Cannot contaminate annotation block with degenerate RMS.")
+  }
+
+  z_scaled <- z_block * rms_a0 / rms_z
+  blend <- (1 - lambda) * a_orig[block_idx] + lambda * z_scaled
+  rms_blend <- annotation_rms(blend)
+  if (!is.finite(rms_blend) || rms_blend <= 0) {
+    stop("Contaminated annotation blend has degenerate RMS.")
+  }
+
+  a_new <- a_orig
+  a_new[block_idx] <- blend * rms_a0 / rms_blend
+  diagnostics <- annotation_contamination_diagnostics(
+    a_orig = a_orig,
+    a_new = a_new,
+    z = z,
+    causal_idx = causal_idx,
+    arm = arm,
+    lambda = lambda,
+    shuffle_z = isTRUE(shuffle_z),
+    tol = tol
+  )
+  rel_col <- if (identical(arm, "null")) "null_rms_rel_error" else "causal_rms_rel_error"
+  rel_error <- as.numeric(diagnostics[[rel_col]])
+  if (!is.finite(rel_error) || rel_error > tol) {
+    stop(
+      "Annotation contamination RMS invariant failed for ", arm,
+      " arm: relative error = ", signif(rel_error, 6), "."
+    )
+  }
+  if (identical(arm, "null") && length(causal_idx) && !isTRUE(diagnostics$causal_unchanged)) {
+    stop("Annotation contamination modified causal variants in the null arm.")
+  }
+  if (identical(arm, "causal") && length(null_idx) && !isTRUE(diagnostics$null_unchanged)) {
+    stop("Annotation contamination modified null variants in the causal arm.")
+  }
+
+  list(
+    mu_0 = a_new,
+    diagnostics = diagnostics
+  )
+}
+
+#' Diagnostics for an annotation contamination transform.
+#' @keywords internal
+annotation_contamination_diagnostics <- function(a_orig,
+                                                 a_new,
+                                                 z,
+                                                 causal_idx,
+                                                 arm,
+                                                 lambda,
+                                                 shuffle_z,
+                                                 anchor_pip = NULL,
+                                                 anchor_threshold = 0.01,
+                                                 tol = 1e-10) {
+  p <- length(a_orig)
+  causal_idx <- sort(unique(as.integer(causal_idx)))
+  causal_idx <- causal_idx[is.finite(causal_idx) & causal_idx >= 1L & causal_idx <= p]
+  null_idx <- setdiff(seq_len(p), causal_idx)
+  causal_rms_orig <- annotation_rms(a_orig[causal_idx])
+  causal_rms_new <- annotation_rms(a_new[causal_idx])
+  null_rms_orig <- annotation_rms(a_orig[null_idx])
+  null_rms_new <- annotation_rms(a_new[null_idx])
+  causal_unchanged <- if (length(causal_idx)) {
+    isTRUE(all.equal(a_new[causal_idx], a_orig[causal_idx], tolerance = tol))
+  } else {
+    NA
+  }
+  null_unchanged <- if (length(null_idx)) {
+    isTRUE(all.equal(a_new[null_idx], a_orig[null_idx], tolerance = tol))
+  } else {
+    NA
+  }
+
+  n0_idx <- null_idx
+  if (!is.null(anchor_pip)) {
+    anchor_pip <- as.numeric(anchor_pip)
+    if (length(anchor_pip) == p) {
+      n0_idx <- which(anchor_pip < anchor_threshold)
+    }
+  }
+
+  tibble::tibble(
+    annotation_contamination_arm = as.character(arm),
+    annotation_contamination_lambda = as.numeric(lambda),
+    annotation_contamination_shuffle_z = isTRUE(shuffle_z),
+    n_causal = length(causal_idx),
+    n_null = length(null_idx),
+    causal_rms_orig = causal_rms_orig,
+    causal_rms_new = causal_rms_new,
+    null_rms_orig = null_rms_orig,
+    null_rms_new = null_rms_new,
+    causal_rms_rel_error = abs(causal_rms_new - causal_rms_orig) / max(causal_rms_orig, .Machine$double.eps),
+    null_rms_rel_error = abs(null_rms_new - null_rms_orig) / max(null_rms_orig, .Machine$double.eps),
+    causal_unchanged = causal_unchanged,
+    null_unchanged = null_unchanged,
+    cor_a_z_null = safe_cor(a_new[null_idx], z[null_idx]),
+    cor_a_z_causal = safe_cor(a_new[causal_idx], z[causal_idx]),
+    anchor_pip_threshold = as.numeric(anchor_threshold),
+    n_anchor_low_pip = length(n0_idx),
+    cor_a_z_anchor_low_pip = safe_cor(a_new[n0_idx], z[n0_idx])
+  )
+}
+
 #' Simulate phenotype with a target noise fraction.
 #'
 #' @param X Design matrix.
