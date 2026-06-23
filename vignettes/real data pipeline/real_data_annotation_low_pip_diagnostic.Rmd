@@ -1,0 +1,319 @@
+---
+title: "Real-Data Annotation Low-PIP Diagnostic"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+    dev: ragg_png
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+This one-off workbook computes the reviewer-requested real-data diagnostic:
+the correlation between marginal z-scores and annotations among variants with
+low SuSiE-anchor posterior inclusion probability.
+
+The workbook is intended to run after the real-data ensemble collect step, using
+the existing aggregated outputs only. It does not refit any model.
+
+```{r setup, message=FALSE, fig.keep='none'}
+here::i_am("vignettes/real data pipeline/real_data_annotation_low_pip_diagnostic.Rmd")
+library(here)
+library(dplyr)
+library(readr)
+library(purrr)
+library(ggplot2)
+library(arrow)
+library(knitr)
+
+theme_set(theme_bw(base_size = 12))
+
+# Headless HPC has no X11/Cairo, so base png()/svg() fail. During preview/paper
+# renders (env var set), route knitted figures and every .png save through ragg.
+.headless_preview <- nzchar(Sys.getenv("RD_PREVIEW_FIG_DIR")) ||
+  nzchar(Sys.getenv("RD_PREVIEW_PAPER_DIR"))
+if (.headless_preview && !requireNamespace("ragg", quietly = TRUE)) {
+  stop("Headless preview render requires the ragg package for PNG output.")
+}
+if (.headless_preview) {
+  knitr::opts_chunk$set(dev = "ragg_png")
+  ggsave <- function(filename, plot = ggplot2::last_plot(), ..., device = NULL) {
+    if (is.null(device) && grepl("\\.png$", filename, ignore.case = TRUE)) {
+      device <- ragg::agg_png
+    }
+    ggplot2::ggsave(filename, plot = plot, ..., device = device)
+  }
+}
+```
+
+# 1. User Configuration
+
+```{r config}
+job_name <- "real_data_ensemble_geometric_n20"
+parent_job_id <- "52906940"
+low_pip_threshold <- 0.01
+
+if (identical(parent_job_id, "REPLACE_WITH_SLURM_JOB_ID")) {
+  stop("Set parent_job_id to the SLURM job id returned by sbatch before running.")
+}
+
+aggregated_dir <- {
+  ov <- Sys.getenv("RD_PREVIEW_AGG_DIR", "")
+  if (nzchar(ov)) ov else here("output", "slurm_output", job_name, parent_job_id, "aggregated")
+}
+figure_dir <- {
+  ov <- Sys.getenv("RD_PREVIEW_FIG_DIR", "")
+  if (nzchar(ov)) ov else here("output", "slurm_output", job_name, parent_job_id, "figures", "real_data_ensemble")
+}
+overall_figure_dir <- file.path(figure_dir, "overall")
+paper_real_data_case_study_dir <- {
+  ov <- Sys.getenv("RD_PREVIEW_PAPER_DIR", "")
+  if (nzchar(ov)) ov else here("..", "..", "Writings", "plots", "real_data_case_study")
+}
+
+dir.create(overall_figure_dir, recursive = TRUE, showWarnings = FALSE)
+```
+
+# 2. Load Aggregated Outputs
+
+```{r load}
+paper_summary_path <- file.path(aggregated_dir, "paper_real_data_ensemble_summary.csv")
+variant_posteriors_path <- file.path(aggregated_dir, "variant_posteriors_dataset")
+
+if (!file.exists(paper_summary_path)) {
+  stop("Missing paper summary: ", paper_summary_path)
+}
+if (!dir.exists(variant_posteriors_path)) {
+  stop("Missing variant posterior dataset: ", variant_posteriors_path)
+}
+
+paper_summary <- readr::read_csv(paper_summary_path, show_col_types = FALSE)
+required_summary_cols <- c("locus_id", "susie_anchor_run_id")
+missing_summary_cols <- setdiff(required_summary_cols, names(paper_summary))
+if (length(missing_summary_cols) > 0) {
+  stop("paper_real_data_ensemble_summary.csv is missing columns: ",
+       paste(missing_summary_cols, collapse = ", "))
+}
+if (!"gene_name" %in% names(paper_summary)) {
+  paper_summary$gene_name <- NA_character_
+}
+if (nrow(paper_summary) == 0) {
+  stop("paper_real_data_ensemble_summary.csv has zero rows.")
+}
+
+variant_posteriors <- arrow::open_dataset(variant_posteriors_path)
+required_variant_cols <- c(
+  "locus_id", "run_id", "variant_id", "pip", "z_score", "annotation_a"
+)
+missing_variant_cols <- setdiff(required_variant_cols, names(variant_posteriors))
+if (length(missing_variant_cols) > 0) {
+  stop("variant_posteriors_dataset is missing columns: ",
+       paste(missing_variant_cols, collapse = ", "))
+}
+
+tibble::tibble(
+  aggregated_dir = aggregated_dir,
+  n_loci = nrow(paper_summary),
+  low_pip_threshold = low_pip_threshold
+)
+```
+
+# 3. Compute Diagnostic
+
+```{r helpers}
+safe_cor <- function(x, y) {
+  ok <- is.finite(x) & is.finite(y)
+  if (sum(ok) < 2L) return(NA_real_)
+  suppressWarnings(stats::cor(x[ok], y[ok]))
+}
+
+safe_cor_p_value <- function(x, y) {
+  ok <- is.finite(x) & is.finite(y)
+  if (sum(ok) < 3L) return(NA_real_)
+  suppressWarnings(
+    tryCatch(
+      stats::cor.test(x[ok], y[ok])$p.value,
+      error = function(e) NA_real_
+    )
+  )
+}
+
+pull_anchor_variants <- function(locus_id, anchor_run_id) {
+  variant_posteriors %>%
+    dplyr::filter(
+      .data$locus_id == !!locus_id,
+      .data$run_id == !!anchor_run_id
+    ) %>%
+    dplyr::select(
+      .data$locus_id,
+      .data$run_id,
+      .data$variant_id,
+      .data$pip,
+      .data$z_score,
+      .data$annotation_a
+    ) %>%
+    dplyr::collect()
+}
+```
+
+```{r compute}
+annotation_low_pip_diagnostic <- purrr::map_dfr(seq_len(nrow(paper_summary)), function(i) {
+  loc <- paper_summary$locus_id[[i]]
+  gene <- paper_summary$gene_name[[i]]
+  anchor_run_id <- paper_summary$susie_anchor_run_id[[i]]
+
+  if (is.na(anchor_run_id)) {
+    return(tibble::tibble(
+      locus_id = loc,
+      gene_name = gene,
+      susie_anchor_run_id = NA_integer_,
+      n_variants = 0L,
+      n_anchor_low_pip = 0L,
+      n_finite_low_pip = 0L,
+      low_pip_fraction = NA_real_,
+      cor_a_z_anchor_low_pip = NA_real_,
+      cor_a_z_anchor_low_pip_p_value = NA_real_,
+      abs_cor_a_z_anchor_low_pip = NA_real_,
+      mean_abs_z_anchor_low_pip = NA_real_,
+      mean_abs_a_anchor_low_pip = NA_real_
+    ))
+  }
+
+  anchor_variants <- pull_anchor_variants(loc, anchor_run_id)
+  low_pip <- anchor_variants %>%
+    dplyr::filter(.data$pip < low_pip_threshold)
+  finite_low_pip <- is.finite(low_pip$z_score) & is.finite(low_pip$annotation_a)
+
+  cor_val <- safe_cor(low_pip$annotation_a, low_pip$z_score)
+  tibble::tibble(
+    locus_id = loc,
+    gene_name = gene,
+    susie_anchor_run_id = anchor_run_id,
+    n_variants = nrow(anchor_variants),
+    n_anchor_low_pip = nrow(low_pip),
+    n_finite_low_pip = sum(finite_low_pip),
+    low_pip_fraction = nrow(low_pip) / nrow(anchor_variants),
+    cor_a_z_anchor_low_pip = cor_val,
+    cor_a_z_anchor_low_pip_p_value = safe_cor_p_value(low_pip$annotation_a, low_pip$z_score),
+    abs_cor_a_z_anchor_low_pip = abs(cor_val),
+    mean_abs_z_anchor_low_pip = mean(abs(low_pip$z_score[finite_low_pip]), na.rm = TRUE),
+    mean_abs_a_anchor_low_pip = mean(abs(low_pip$annotation_a[finite_low_pip]), na.rm = TRUE)
+  )
+})
+
+if (nrow(annotation_low_pip_diagnostic) == 0) {
+  stop("Annotation low-PIP diagnostic produced zero rows.")
+}
+if (any(annotation_low_pip_diagnostic$n_finite_low_pip < 2L)) {
+  warning("At least one locus has fewer than two finite low-PIP variants; correlation is NA.")
+}
+
+annotation_low_pip_summary <- annotation_low_pip_diagnostic %>%
+  dplyr::summarise(
+    n_loci = dplyr::n(),
+    n_loci_with_finite_cor = sum(is.finite(.data$cor_a_z_anchor_low_pip)),
+    median_cor = median(.data$cor_a_z_anchor_low_pip, na.rm = TRUE),
+    max_abs_cor = max(.data$abs_cor_a_z_anchor_low_pip, na.rm = TRUE),
+    median_abs_cor = median(.data$abs_cor_a_z_anchor_low_pip, na.rm = TRUE),
+    median_n_anchor_low_pip = median(.data$n_anchor_low_pip, na.rm = TRUE),
+    min_n_anchor_low_pip = min(.data$n_anchor_low_pip, na.rm = TRUE)
+  )
+
+annotation_low_pip_summary
+```
+
+# 4. Save Outputs
+
+```{r save}
+diagnostic_csv <- file.path(
+  overall_figure_dir,
+  "paper_real_data_annotation_low_pip_alignment.csv"
+)
+summary_csv <- file.path(
+  overall_figure_dir,
+  "paper_real_data_annotation_low_pip_alignment_summary.csv"
+)
+
+readr::write_csv(annotation_low_pip_diagnostic, diagnostic_csv)
+readr::write_csv(annotation_low_pip_summary, summary_csv)
+
+if (dir.exists(paper_real_data_case_study_dir)) {
+  file.copy(
+    diagnostic_csv,
+    file.path(paper_real_data_case_study_dir, basename(diagnostic_csv)),
+    overwrite = TRUE
+  )
+  file.copy(
+    summary_csv,
+    file.path(paper_real_data_case_study_dir, basename(summary_csv)),
+    overwrite = TRUE
+  )
+}
+
+tibble::tibble(
+  diagnostic_csv = diagnostic_csv,
+  summary_csv = summary_csv,
+  copied_to_paper_dir = dir.exists(paper_real_data_case_study_dir)
+)
+```
+
+# 5. Visualize
+
+```{r plot, fig.width=8, fig.height=5}
+plot_tbl <- annotation_low_pip_diagnostic %>%
+  dplyr::mutate(
+    locus_label = dplyr::if_else(
+      is.na(.data$gene_name) | .data$gene_name == "",
+      .data$locus_id,
+      paste0(.data$gene_name, " (", .data$locus_id, ")")
+    ),
+    locus_label = stats::reorder(.data$locus_label, .data$cor_a_z_anchor_low_pip)
+  )
+
+p_alignment <- ggplot(
+  plot_tbl,
+  aes(x = .data$locus_label, y = .data$cor_a_z_anchor_low_pip)
+) +
+  geom_hline(yintercept = 0, linewidth = 0.3, color = "grey55") +
+  geom_point(aes(size = .data$n_anchor_low_pip), alpha = 0.85) +
+  coord_flip() +
+  scale_size_continuous(name = "Variants with\nanchor PIP < 0.01", range = c(1.8, 5.5)) +
+  labs(
+    x = NULL,
+    y = "cor(annotation, marginal z) among low-anchor-PIP variants",
+    title = "Real-data annotation alignment on SuSiE-anchor low-PIP variants",
+    subtitle = paste0("Low-PIP threshold: PIP < ", low_pip_threshold)
+  ) +
+  theme(
+    legend.position = "right",
+    plot.title.position = "plot"
+  )
+
+p_alignment
+
+alignment_png <- file.path(
+  overall_figure_dir,
+  "paper_real_data_annotation_low_pip_alignment.png"
+)
+ggsave(alignment_png, p_alignment, width = 8, height = 5, dpi = 300)
+
+if (dir.exists(paper_real_data_case_study_dir)) {
+  ggsave(
+    file.path(paper_real_data_case_study_dir, basename(alignment_png)),
+    p_alignment,
+    width = 8,
+    height = 5,
+    dpi = 300
+  )
+}
+```
+
+# 6. Table
+
+```{r table}
+annotation_low_pip_diagnostic %>%
+  dplyr::arrange(dplyr::desc(.data$abs_cor_a_z_anchor_low_pip)) %>%
+  knitr::kable(digits = 4)
+```
