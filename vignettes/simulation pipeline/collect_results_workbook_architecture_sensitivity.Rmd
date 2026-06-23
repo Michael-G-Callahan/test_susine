@@ -1,0 +1,299 @@
+---
+title: "Architecture Sensitivity - Collect Results"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+Post-hoc collection for the reviewer genetic-architecture sensitivity jobs. This
+workbook aggregates the sparse and diffuse Slurm outputs, validates the fixed-c
+prior gate, and writes combined tables for the visualization workbook.
+
+```{r setup, message=FALSE}
+here::i_am("vignettes/simulation pipeline/collect_results_workbook_architecture_sensitivity.Rmd")
+library(here)
+library(devtools)
+
+susine_path <- here("..", "susine")
+if (file.exists(file.path(susine_path, "DESCRIPTION"))) {
+  options(test_susine.local_susine_path = normalizePath(susine_path, winslash = "/", mustWork = TRUE))
+  devtools::load_all(susine_path)
+}
+devtools::load_all(".")
+
+library(dplyr)
+library(readr)
+library(tidyr)
+library(knitr)
+```
+
+# Configuration
+
+Set the parent Slurm array IDs returned by `sbatch` before rendering.
+
+```{r user-config}
+output_root <- here("output")
+
+sparse_job_name <- "architecture_sparse_sensitivity"
+sparse_parent_job_id <- "SET_SPARSE_PARENT_JOB_ID"
+
+diffuse_job_name <- "architecture_diffuse_sensitivity"
+diffuse_parent_job_id <- "SET_DIFFUSE_PARENT_JOB_ID"
+
+force_reaggregate <- TRUE
+write_snps_dataset <- FALSE
+precision_threshold <- 0.75
+
+combined_root <- file.path(output_root, "architecture_sensitivity")
+combined_dir <- file.path(combined_root, "combined")
+dir.create(combined_dir, recursive = TRUE, showWarnings = FALSE)
+
+if (identical(sparse_parent_job_id, "SET_SPARSE_PARENT_JOB_ID") ||
+    identical(diffuse_parent_job_id, "SET_DIFFUSE_PARENT_JOB_ID")) {
+  stop("Set sparse_parent_job_id and diffuse_parent_job_id before collecting.")
+}
+```
+
+# Aggregate Jobs
+
+```{r aggregate-jobs}
+collect_job <- function(job_name, parent_job_id, analysis_label) {
+  job_dir <- file.path(output_root, "slurm_output", job_name, parent_job_id)
+  aggregated_dir <- file.path(job_dir, "aggregated")
+  run_table_path <- file.path(output_root, "run_history", job_name, parent_job_id, "run_table.csv")
+
+  if (force_reaggregate || !file.exists(file.path(aggregated_dir, "confusion_bins.csv"))) {
+    test_susine::aggregate_staging_outputs(
+      job_name = job_name,
+      parent_job_id = parent_job_id,
+      output_root = output_root,
+      validate = TRUE,
+      output_dir = aggregated_dir,
+      write_snps_dataset = write_snps_dataset
+    )
+  }
+
+  if (!file.exists(run_table_path)) {
+    stop("Run table not found: ", run_table_path)
+  }
+
+  list(
+    analysis = analysis_label,
+    job_name = job_name,
+    parent_job_id = parent_job_id,
+    job_dir = job_dir,
+    aggregated_dir = aggregated_dir,
+    run_table = readr::read_csv(run_table_path, show_col_types = FALSE)
+  )
+}
+
+jobs <- list(
+  sparse = collect_job(sparse_job_name, sparse_parent_job_id, "sparse"),
+  diffuse = collect_job(diffuse_job_name, diffuse_parent_job_id, "diffuse")
+)
+
+job_index <- tibble::tibble(
+  analysis = vapply(jobs, `[[`, character(1), "analysis"),
+  job_name = vapply(jobs, `[[`, character(1), "job_name"),
+  parent_job_id = vapply(jobs, `[[`, character(1), "parent_job_id"),
+  aggregated_dir = vapply(jobs, `[[`, character(1), "aggregated_dir")
+)
+readr::write_csv(job_index, file.path(combined_dir, "job_index.csv"))
+kable(job_index)
+```
+
+# Load Tables
+
+```{r load-tables}
+read_optional_csv <- function(dir, filename) {
+  path <- file.path(dir, filename)
+  if (!file.exists(path)) return(NULL)
+  readr::read_csv(path, show_col_types = FALSE)
+}
+
+bind_job_table <- function(filename) {
+  pieces <- lapply(jobs, function(a) {
+    tbl <- read_optional_csv(a$aggregated_dir, filename)
+    if (is.null(tbl)) return(NULL)
+    dplyr::mutate(
+      tbl,
+      analysis = a$analysis,
+      source_job_name = a$job_name,
+      source_parent_job_id = a$parent_job_id
+    )
+  })
+  dplyr::bind_rows(pieces)
+}
+
+confusion_bins <- bind_job_table("confusion_bins.csv")
+model_metrics <- bind_job_table("model_metrics.csv")
+effect_metrics <- bind_job_table("effect_metrics.csv")
+effect_metrics_unfiltered <- bind_job_table("effect_metrics_unfiltered.csv")
+prior_diagnostics <- bind_job_table("prior_diagnostics.csv")
+validation <- bind_job_table("validation.csv")
+
+cat("Confusion-bin rows:", nrow(confusion_bins), "\n")
+cat("Prior diagnostic rows:", nrow(prior_diagnostics), "\n")
+```
+
+# Validation Gates
+
+```{r validation-gates}
+required_confusion_cols <- c(
+  "analysis", "spec_name", "explore_method", "architecture", "p_star",
+  "h2_snp_per_causal", "h2_total", "diffuse_k"
+)
+missing_confusion_cols <- setdiff(required_confusion_cols, names(confusion_bins))
+if (!nrow(confusion_bins) || length(missing_confusion_cols)) {
+  stop(
+    "confusion_bins.csv is missing or incomplete. Missing columns: ",
+    paste(missing_confusion_cols, collapse = ", ")
+  )
+}
+
+required_prior_cols <- c("spec_name", "c_l")
+missing_prior_cols <- setdiff(required_prior_cols, names(prior_diagnostics))
+if (!nrow(prior_diagnostics) || length(missing_prior_cols)) {
+  stop(
+    "prior_diagnostics.csv is missing or incomplete. Set write_prior_diagnostics = TRUE before launch. Missing columns: ",
+    paste(missing_prior_cols, collapse = ", ")
+  )
+}
+
+ccs_specs <- c("C-CS-architecture-sparse", "C-CS-architecture-diffuse")
+prior_gate <- prior_diagnostics %>%
+  dplyr::filter(.data$spec_name %in% ccs_specs) %>%
+  dplyr::group_by(.data$analysis, .data$spec_name) %>%
+  dplyr::summarise(
+    n_rows = dplyr::n(),
+    max_abs_c_l_minus_1 = max(abs(.data$c_l - 1), na.rm = TRUE),
+    all_c_l_one = all(abs(.data$c_l - 1) < 1e-12, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+if (!nrow(prior_gate) || any(prior_gate$n_rows <= 0L) || !all(prior_gate$all_c_l_one)) {
+  stop("Fixed-c prior gate failed: c_l differs from 1 or no C-CS prior rows were found.")
+}
+
+confusion_presence <- confusion_bins %>%
+  dplyr::filter(.data$spec_name %in% c(ccs_specs, "baseline-single")) %>%
+  dplyr::group_by(
+    .data$analysis, .data$spec_name, .data$architecture,
+    .data$p_star, .data$h2_snp_per_causal, .data$h2_total, .data$diffuse_k
+  ) %>%
+  dplyr::summarise(n_rows = dplyr::n(), .groups = "drop")
+
+if (!nrow(confusion_presence)) {
+  stop("No architecture-sensitivity confusion bins were found.")
+}
+
+readr::write_csv(prior_gate, file.path(combined_dir, "prior_gate.csv"))
+readr::write_csv(confusion_presence, file.path(combined_dir, "confusion_presence.csv"))
+
+kable(prior_gate, digits = 4, caption = "Fixed-c prior gate")
+kable(confusion_presence, caption = "Confusion-bin presence by architecture setting")
+```
+
+# Metrics
+
+```{r metrics}
+ccs_confusion <- confusion_bins %>%
+  dplyr::filter(
+    .data$spec_name %in% ccs_specs,
+    .data$explore_method == "aggregation",
+    .data$agg_method == "cluster_weight_credible"
+  )
+
+baseline_confusion <- confusion_bins %>%
+  dplyr::filter(
+    .data$spec_name == "baseline-single",
+    .data$explore_method == "base"
+  )
+
+if (!nrow(ccs_confusion)) {
+  stop("No C-CS aggregate confusion-bin rows found.")
+}
+if (!nrow(baseline_confusion)) {
+  stop("No baseline-single base confusion-bin rows found.")
+}
+
+metric_group_vars <- c(
+  "analysis", "architecture", "p_star", "h2_snp_per_causal", "h2_total", "diffuse_k"
+)
+
+auprc_pooled <- test_susine::compute_auprc_from_confusion(
+  ccs_confusion,
+  group_vars = metric_group_vars
+)
+
+recall75_pooled <- test_susine::compute_recall_at_precision_from_confusion(
+  ccs_confusion,
+  group_vars = metric_group_vars,
+  precision_threshold = precision_threshold
+)
+
+baseline_auprc <- test_susine::compute_auprc_from_confusion(
+  baseline_confusion,
+  group_vars = metric_group_vars
+)
+
+baseline_recall75 <- test_susine::compute_recall_at_precision_from_confusion(
+  baseline_confusion,
+  group_vars = metric_group_vars,
+  precision_threshold = precision_threshold
+)
+
+metric_summary <- auprc_pooled %>%
+  dplyr::left_join(recall75_pooled, by = metric_group_vars) %>%
+  dplyr::mutate(
+    series = "C-CS",
+    total_h2 = dplyr::if_else(
+      .data$analysis == "sparse",
+      as.numeric(.data$p_star) * as.numeric(.data$h2_snp_per_causal),
+      as.numeric(.data$h2_total)
+    )
+  ) %>%
+  dplyr::arrange(.data$analysis, .data$h2_snp_per_causal, .data$p_star, .data$h2_total)
+
+baseline_summary <- baseline_auprc %>%
+  dplyr::left_join(baseline_recall75, by = metric_group_vars) %>%
+  dplyr::mutate(
+    series = "Annotation-free baseline",
+    total_h2 = dplyr::if_else(
+      .data$analysis == "sparse",
+      as.numeric(.data$p_star) * as.numeric(.data$h2_snp_per_causal),
+      as.numeric(.data$h2_total)
+    )
+  ) %>%
+  dplyr::arrange(.data$analysis, .data$h2_snp_per_causal, .data$p_star, .data$h2_total)
+
+readr::write_csv(metric_summary, file.path(combined_dir, "metric_summary.csv"))
+readr::write_csv(baseline_summary, file.path(combined_dir, "baseline_summary.csv"))
+
+kable(metric_summary, digits = 4, caption = "Pooled architecture sensitivity C-CS metrics")
+kable(baseline_summary, digits = 4, caption = "Annotation-free baseline metrics")
+```
+
+# Export Combined Raw Tables
+
+```{r export}
+write_if_present <- function(tbl, filename) {
+  if (!is.null(tbl) && nrow(tbl)) {
+    readr::write_csv(tbl, file.path(combined_dir, filename))
+  }
+}
+
+write_if_present(confusion_bins, "confusion_bins_full.csv")
+write_if_present(model_metrics, "model_metrics_full.csv")
+write_if_present(effect_metrics, "effect_metrics_full.csv")
+write_if_present(effect_metrics_unfiltered, "effect_metrics_unfiltered_full.csv")
+write_if_present(prior_diagnostics, "prior_diagnostics_full.csv")
+write_if_present(validation, "validation_full.csv")
+
+cat("Combined architecture sensitivity outputs written to:", combined_dir, "\n")
+```

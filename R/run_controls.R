@@ -137,6 +137,9 @@ ensure_repo_root <- function(path) {
 #' @param y_noise_grid Numeric vector of noise fractions (0-1).
 #' @param prior_quality Tibble from [prior_quality_grid()].
 #' @param p_star_grid Integer vector for number of causal SNPs.
+#' @param h2_snp_per_causal_grid Numeric per-causal PVE grid for `susie2_sparse`.
+#' @param h2_total_grid Numeric total locus h2 grid for total-h2 calibrated architectures.
+#' @param diffuse_k_grid Integer causal-count grid for `susie2_diffuse`.
 #' @param seeds Integer vector of RNG seeds for phenotype simulation.
 #' @param data_scenarios Character vector naming the data sources.
 #' @param pair_L_p_star Logical; when TRUE (and `grid_mode == "full"`), the grid pairs matching
@@ -151,6 +154,9 @@ make_run_tables <- function(use_case_ids,
                             y_noise_grid,
                             prior_quality,
                             p_star_grid,
+                            h2_snp_per_causal_grid = NULL,
+                            h2_total_grid = NULL,
+                            diffuse_k_grid = NULL,
                             seeds,
                             architecture_grid = c("sparse"),
                             data_scenarios,
@@ -209,6 +215,9 @@ make_run_tables <- function(use_case_ids,
     scenario_vals <- unique(data_scenarios)
     y_vals <- unique(y_noise_grid)
     p_vals <- unique(p_star_grid)
+    h2_snp_vals <- unique(h2_snp_per_causal_grid %||% 0.03)
+    h2_total_vals <- unique(h2_total_grid %||% 0.25)
+    diffuse_k_vals <- unique(diffuse_k_grid %||% 100L)
     arch_vals <- unique(as.character(architecture_grid %||% "sparse"))
     candidate_matrices <- matrix_catalog_subset %>%
       dplyr::arrange(.data$data_scenario, .data$matrix_id) %>%
@@ -219,6 +228,9 @@ make_run_tables <- function(use_case_ids,
       values <- list(
         y_noise = y_vals,
         p_star = p_vals,
+        h2_snp_per_causal = h2_snp_vals,
+        h2_total = h2_total_vals,
+        diffuse_k = diffuse_k_vals,
         phenotype_seed = seed_values,
         architecture = arch_vals,
         matrix_id = candidate_matrices
@@ -228,6 +240,9 @@ make_run_tables <- function(use_case_ids,
       bundles <- tibble::tibble(
         y_noise = rep_len(values$y_noise, n_rows),
         p_star = rep_len(values$p_star, n_rows),
+        h2_snp_per_causal = rep_len(values$h2_snp_per_causal, n_rows),
+        h2_total = rep_len(values$h2_total, n_rows),
+        diffuse_k = rep_len(values$diffuse_k, n_rows),
         phenotype_seed = rep_len(values$phenotype_seed, n_rows),
         architecture = rep_len(values$architecture, n_rows),
         matrix_id = rep_len(values$matrix_id, n_rows)
@@ -239,6 +254,9 @@ make_run_tables <- function(use_case_ids,
       values <- list(
         y_noise = y_vals,
         p_star = p_vals,
+        h2_snp_per_causal = h2_snp_vals,
+        h2_total = h2_total_vals,
+        diffuse_k = diffuse_k_vals,
         phenotype_seed = seed_values,
         architecture = arch_vals,
         matrix_id = candidate_matrices
@@ -248,6 +266,9 @@ make_run_tables <- function(use_case_ids,
       bundles <- tibble::tibble(
         y_noise = rep_len(values$y_noise, n_rows),
         p_star = rep_len(values$p_star, n_rows),
+        h2_snp_per_causal = rep_len(values$h2_snp_per_causal, n_rows),
+        h2_total = rep_len(values$h2_total, n_rows),
+        diffuse_k = rep_len(values$diffuse_k, n_rows),
         phenotype_seed = rep_len(values$phenotype_seed, n_rows),
         architecture = rep_len(values$architecture, n_rows),
         matrix_id = rep_len(values$matrix_id, n_rows)
@@ -260,6 +281,9 @@ make_run_tables <- function(use_case_ids,
       matrix_id = candidate_matrices,
       y_noise = y_vals,
       p_star = p_vals,
+      h2_snp_per_causal = h2_snp_vals,
+      h2_total = h2_total_vals,
+      diffuse_k = diffuse_k_vals,
       phenotype_seed = seed_values,
       architecture = arch_vals
     )
@@ -268,18 +292,32 @@ make_run_tables <- function(use_case_ids,
 
   dataset_bundles <- build_dataset_bundles()
 
-  # h2-based architectures: y_noise and p_star are not meaningful parameters.
-  # Set to NA and collapse duplicate rows to avoid redundant datasets.
-  h2_archs <- c("susie2_sparse", "susie2_oligogenic")
+  # h2-based architectures use calibrated noise and architecture-specific h2 grids.
+  h2_archs <- c("susie2_sparse", "susie2_oligogenic", "susie2_diffuse")
   if (any(dataset_bundles$architecture %in% h2_archs)) {
     dataset_bundles <- dataset_bundles %>%
       dplyr::mutate(
-        y_noise = dplyr::if_else(.data$architecture %in% h2_archs, NA_real_, .data$y_noise)
-      )
-    # susie2_oligogenic has fixed tier counts — p_star not applicable
-    dataset_bundles <- dataset_bundles %>%
-      dplyr::mutate(
-        p_star = dplyr::if_else(.data$architecture == "susie2_oligogenic", NA_integer_, .data$p_star)
+        y_noise = dplyr::if_else(.data$architecture %in% h2_archs, NA_real_, .data$y_noise),
+        p_star = dplyr::if_else(
+          .data$architecture %in% c("susie2_oligogenic", "susie2_diffuse"),
+          NA_integer_,
+          as.integer(.data$p_star)
+        ),
+        h2_snp_per_causal = dplyr::if_else(
+          .data$architecture == "susie2_sparse",
+          as.numeric(.data$h2_snp_per_causal),
+          NA_real_
+        ),
+        h2_total = dplyr::if_else(
+          .data$architecture %in% c("susie2_oligogenic", "susie2_diffuse"),
+          as.numeric(.data$h2_total),
+          NA_real_
+        ),
+        diffuse_k = dplyr::if_else(
+          .data$architecture == "susie2_diffuse",
+          as.integer(.data$diffuse_k),
+          NA_integer_
+        )
       ) %>%
       dplyr::distinct()
   }
@@ -734,6 +772,9 @@ assign_task_ids_by_bundle <- function(runs,
 #' @param y_noise_grid Numeric vector of noise fractions.
 #' @param prior_quality Tibble with prior noise settings.
 #' @param p_star_grid Integer vector.
+#' @param h2_snp_per_causal_grid Numeric per-causal PVE grid for `susie2_sparse`.
+#' @param h2_total_grid Numeric total locus h2 grid for total-h2 calibrated architectures.
+#' @param diffuse_k_grid Integer causal-count grid for `susie2_diffuse`.
 #' @param seeds Integer vector of RNG seeds for phenotype simulation.
 #' @param data_scenarios Character vector.
 #' @param task_unit One of "dataset" or "run"; controls how tasks are assigned.
@@ -780,6 +821,9 @@ make_job_config <- function(job_name,
                             y_noise_grid,
                             prior_quality,
                             p_star_grid,
+                            h2_snp_per_causal_grid = NULL,
+                            h2_total_grid = NULL,
+                            diffuse_k_grid = NULL,
                             seeds,
                             architecture_grid = c("sparse"),
                             data_scenarios = "simulation_n3",
@@ -871,6 +915,9 @@ make_job_config <- function(job_name,
         y_noise_grid = y_noise_grid,
         prior_quality = prior_quality,
         p_star_grid = p_star_grid,
+        h2_snp_per_causal_grid = spec$h2_snp_per_causal_grid %||% h2_snp_per_causal_grid,
+        h2_total_grid = spec$h2_total_grid %||% h2_total_grid,
+        diffuse_k_grid = spec$diffuse_k_grid %||% diffuse_k_grid,
         seeds = seeds,
         architecture_grid = architecture_grid,
         data_scenarios = data_scenarios,
@@ -908,6 +955,9 @@ make_job_config <- function(job_name,
       y_noise_grid = y_noise_grid,
       prior_quality = prior_quality,
       p_star_grid = p_star_grid,
+      h2_snp_per_causal_grid = h2_snp_per_causal_grid,
+      h2_total_grid = h2_total_grid,
+      diffuse_k_grid = diffuse_k_grid,
       seeds = seeds,
       architecture_grid = architecture_grid,
       data_scenarios = data_scenarios,

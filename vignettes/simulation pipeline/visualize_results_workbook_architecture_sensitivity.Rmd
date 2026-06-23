@@ -1,0 +1,231 @@
+---
+title: "Architecture Sensitivity - Visualize Results"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+Visualization workbook for the reviewer genetic-architecture sensitivity
+analysis. It reads the combined tables written by
+`collect_results_workbook_architecture_sensitivity.Rmd`, generates the sparse and
+diffuse metric figures, and saves paper-facing figures and CSVs.
+
+```{r setup, message=FALSE}
+here::i_am("vignettes/simulation pipeline/visualize_results_workbook_architecture_sensitivity.Rmd")
+library(here)
+library(devtools)
+
+susine_path <- here("..", "susine")
+if (file.exists(file.path(susine_path, "DESCRIPTION"))) {
+  options(test_susine.local_susine_path = normalizePath(susine_path, winslash = "/", mustWork = TRUE))
+  devtools::load_all(susine_path)
+}
+devtools::load_all(".")
+
+library(dplyr)
+library(readr)
+library(tidyr)
+library(ggplot2)
+library(knitr)
+
+readr::local_edition(2)
+
+theme_set(
+  theme_bw(base_size = 11) +
+    theme(
+      panel.grid.minor = element_blank(),
+      panel.grid.major = element_line(color = "grey92"),
+      strip.background = element_rect(fill = "grey95", color = NA),
+      strip.text = element_text(face = "bold"),
+      legend.position = "bottom",
+      plot.title = element_text(face = "bold")
+    )
+)
+```
+
+# Load Data
+
+```{r load}
+output_root <- here("output")
+combined_dir <- file.path(output_root, "architecture_sensitivity", "combined")
+fig_dir <- file.path(output_root, "architecture_sensitivity", "figures")
+dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
+
+read_req <- function(filename) {
+  path <- file.path(combined_dir, filename)
+  if (!file.exists(path)) stop("Missing required file: ", path)
+  readr::read_csv(path, show_col_types = FALSE)
+}
+
+metric_summary <- read_req("metric_summary.csv")
+baseline_summary <- read_req("baseline_summary.csv")
+prior_gate <- read_req("prior_gate.csv")
+confusion_presence <- read_req("confusion_presence.csv")
+
+plot_data <- dplyr::bind_rows(metric_summary, baseline_summary) %>%
+  dplyr::mutate(
+    series = factor(.data$series, levels = c("C-CS", "Annotation-free baseline")),
+    p_star = as.integer(.data$p_star),
+    h2_snp_per_causal = as.numeric(.data$h2_snp_per_causal),
+    h2_total = as.numeric(.data$h2_total),
+    diffuse_k = as.integer(.data$diffuse_k),
+    total_h2 = as.numeric(.data$total_h2),
+    pve_label = paste0("Per-causal PVE = ", formatC(.data$h2_snp_per_causal, format = "f", digits = 2))
+  )
+
+cat("Combined dir:", combined_dir, "\n")
+cat("Figure dir:", fig_dir, "\n")
+```
+
+# Validation Summary
+
+```{r validation-summary}
+kable(prior_gate, digits = 4, caption = "Fixed-c prior gate")
+kable(confusion_presence, caption = "Confusion-bin presence by architecture setting")
+```
+
+# Sparse Architecture Metrics
+
+```{r sparse-metrics, fig.width=10, fig.height=6}
+sparse_long <- plot_data %>%
+  dplyr::filter(.data$analysis == "sparse") %>%
+  dplyr::select(
+    .data$series, .data$p_star, .data$h2_snp_per_causal, .data$pve_label,
+    .data$total_h2, .data$AUPRC, .data$recall_at_precision
+  ) %>%
+  tidyr::pivot_longer(
+    cols = c("AUPRC", "recall_at_precision"),
+    names_to = "metric",
+    values_to = "value"
+  ) %>%
+  dplyr::mutate(
+    metric = dplyr::recode(
+      .data$metric,
+      AUPRC = "Pooled AUPRC",
+      recall_at_precision = "Recall at precision >= 0.75"
+    ),
+    p_star_label = factor(.data$p_star, levels = sort(unique(.data$p_star)))
+  )
+
+if (!nrow(sparse_long)) {
+  stop("No sparse architecture metrics found.")
+}
+
+p_sparse <- ggplot(
+  sparse_long,
+  aes(
+    x = .data$p_star_label,
+    y = .data$value,
+    color = .data$series,
+    linetype = .data$series,
+    group = .data$series
+  )
+) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 2) +
+  facet_grid(metric ~ pve_label, scales = "free_y") +
+  labs(
+    x = "Number of causal variants (k)",
+    y = NULL,
+    color = "Series",
+    linetype = "Series",
+    title = "Sparse architecture sensitivity",
+    caption = "Positive set is all causal variants for k <= 5."
+  )
+
+ggsave(file.path(fig_dir, "sparse_architecture_metrics.png"), p_sparse, width = 10, height = 6, dpi = 240)
+p_sparse
+```
+
+```{r sparse-total-h2, fig.width=8, fig.height=5}
+p_sparse_h2 <- ggplot(
+  sparse_long,
+  aes(
+    x = .data$total_h2,
+    y = .data$value,
+    color = .data$series,
+    linetype = .data$series,
+    group = interaction(.data$series, .data$h2_snp_per_causal)
+  )
+) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 2) +
+  facet_wrap(~metric, scales = "free_y") +
+  labs(
+    x = "Approximate total locus h2 (k x per-causal PVE)",
+    y = NULL,
+    color = "Series",
+    linetype = "Series",
+    title = "Sparse architecture sensitivity by total signal"
+  )
+
+ggsave(file.path(fig_dir, "sparse_architecture_by_total_h2.png"), p_sparse_h2, width = 8, height = 5, dpi = 240)
+p_sparse_h2
+```
+
+# Diffuse Architecture Metrics
+
+```{r diffuse-metrics, fig.width=8, fig.height=5}
+diffuse_long <- plot_data %>%
+  dplyr::filter(.data$analysis == "diffuse") %>%
+  dplyr::select(
+    .data$series, .data$h2_total, .data$diffuse_k,
+    .data$AUPRC, .data$recall_at_precision
+  ) %>%
+  tidyr::pivot_longer(
+    cols = c("AUPRC", "recall_at_precision"),
+    names_to = "metric",
+    values_to = "value"
+  ) %>%
+  dplyr::mutate(
+    metric = dplyr::recode(
+      .data$metric,
+      AUPRC = "Pooled AUPRC",
+      recall_at_precision = "Recall at precision >= 0.75"
+    )
+  )
+
+if (!nrow(diffuse_long)) {
+  stop("No diffuse architecture metrics found.")
+}
+
+p_diffuse <- ggplot(
+  diffuse_long,
+  aes(
+    x = .data$h2_total,
+    y = .data$value,
+    color = .data$series,
+    linetype = .data$series,
+    group = .data$series
+  )
+) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 2) +
+  facet_wrap(~metric, scales = "free_y") +
+  labs(
+    x = "Total locus h2",
+    y = NULL,
+    color = "Series",
+    linetype = "Series",
+    title = "Diffuse architecture sensitivity",
+    caption = "Positive set is the top eight causal variants by absolute effect."
+  )
+
+ggsave(file.path(fig_dir, "diffuse_architecture_metrics.png"), p_diffuse, width = 8, height = 5, dpi = 240)
+p_diffuse
+```
+
+# Export Plot Data
+
+```{r export-plot-data}
+readr::write_csv(plot_data, file.path(fig_dir, "architecture_metric_plot_data.csv"))
+readr::write_csv(sparse_long, file.path(fig_dir, "sparse_architecture_plot_data.csv"))
+readr::write_csv(diffuse_long, file.path(fig_dir, "diffuse_architecture_plot_data.csv"))
+
+cat("Saved figures and plot data to:", fig_dir, "\n")
+```

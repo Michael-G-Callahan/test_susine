@@ -240,6 +240,35 @@ simulate_effect_sizes_susie2_oligogenic <- function(
   list(beta = beta, causal_idx = causal_idx, effect_tier = effect_tier)
 }
 
+#' Simulate diffuse effect sizes for a polygenic sensitivity check.
+#'
+#' This architecture uses many weak causal variants with mildly heterogeneous
+#' signed effects. The phenotype generator calibrates the final total h2, so the
+#' absolute beta scale matters only for relative ranking among causals.
+#'
+#' @param p Number of SNPs.
+#' @param k Number of causal SNPs.
+#' @param seed Optional seed for reproducibility.
+#'
+#' @return List with `beta`, `causal_idx`, and `effect_tier`.
+#' @keywords internal
+simulate_effect_sizes_susie2_diffuse <- function(p, k = 100L, seed = NULL) {
+  stopifnot(p > 0, k >= 0)
+  if (!is.null(seed)) set.seed(seed)
+  k <- as.integer(min(k, p))
+  causal_idx <- if (k > 0L) sort(sample.int(p, size = k, replace = FALSE)) else integer(0)
+  beta <- numeric(p)
+  if (length(causal_idx)) {
+    beta_raw <- stats::rnorm(length(causal_idx), mean = 0, sd = 1)
+    rms_beta <- sqrt(mean(beta_raw^2))
+    if (!is.finite(rms_beta) || rms_beta <= 0) rms_beta <- 1
+    beta[causal_idx] <- beta_raw / rms_beta
+  }
+  effect_tier <- rep("none", p)
+  effect_tier[causal_idx] <- "diffuse"
+  list(beta = beta, causal_idx = causal_idx, effect_tier = effect_tier)
+}
+
 #' Simulate phenotype with heritability-calibrated noise (SuSiE 2.0 style).
 #'
 #' Instead of specifying a noise fraction, the residual variance is calibrated
@@ -302,6 +331,8 @@ simulate_phenotype_h2 <- function(X, beta,
 #' @param gamma_shrink Deprecated. Ignored when provided.
 #' @param base_sigma2 Optional baseline prior variance.
 #' @param effect_sd Nominal standard deviation used for causal effects (fallback when beta variance is zero).
+#' @param annotation_signal_mode Causal annotation signal: `effect` correlates with centered causal effects;
+#'   `sign` uses a per-variant sign/SNR construction for constant-effect sparse architectures.
 #' @param seed Optional seed for reproducibility of annotation draws.
 #'
 #' @return List with `mu_0`, `sigma_0_2`, and `observed_r2`.
@@ -353,12 +384,27 @@ draw_centered_noise <- function(n, target_scale = 1, orthogonal_to = NULL) {
   stop("Unable to generate non-degenerate centered annotation noise.")
 }
 
+draw_rms_noise <- function(n, target_scale = 1) {
+  if (n <= 0) {
+    return(numeric(0))
+  }
+  for (attempt in seq_len(8L)) {
+    noise <- stats::rnorm(n)
+    rms <- sqrt(mean(noise^2))
+    if (is.finite(rms) && rms > 0) {
+      return(noise / rms * target_scale)
+    }
+  }
+  stop("Unable to generate non-degenerate annotation noise.")
+}
+
 simulate_priors <- function(beta,
                             annotation_r2,
                             inflate_match,
                             gamma_shrink = NA_real_,
                             base_sigma2 = NULL,
                             effect_sd = NULL,
+                            annotation_signal_mode = c("effect", "sign"),
                             seed = NULL) {
   if (!is.null(seed) && is.finite(seed)) {
     set.seed(as.integer(seed))
@@ -366,6 +412,7 @@ simulate_priors <- function(beta,
   if (!is.null(gamma_shrink) && is.finite(gamma_shrink)) {
     warning("`gamma_shrink` is deprecated and ignored.")
   }
+  annotation_signal_mode <- match.arg(annotation_signal_mode)
   p <- length(beta)
   causal_idx <- which(beta != 0)
   noncausal_idx <- setdiff(seq_len(p), causal_idx)
@@ -394,7 +441,20 @@ simulate_priors <- function(beta,
       causal_scale <- sqrt(causal_var)
     }
 
-    if (length(causal_idx) == 1L || !is.finite(causal_scale) || causal_scale <= 0) {
+    if (identical(annotation_signal_mode, "sign")) {
+      signal_unit <- sign(causal_beta)
+      signal_unit[signal_unit == 0] <- 1
+      signal_rms <- sqrt(mean(signal_unit^2))
+      if (!is.finite(signal_rms) || signal_rms <= 0) {
+        signal_rms <- 1
+      }
+      signal_unit <- signal_unit / signal_rms
+      noise_unit <- draw_rms_noise(length(causal_idx), target_scale = 1)
+      mu_0[causal_idx] <- causal_scale * (
+        sqrt(annotation_r2) * signal_unit +
+          sqrt(1 - annotation_r2) * noise_unit
+      )
+    } else if (length(causal_idx) == 1L || !is.finite(causal_scale) || causal_scale <= 0) {
       mu_0[causal_idx] <- causal_beta
     } else {
       signal_unit <- causal_centered / causal_scale
@@ -741,6 +801,12 @@ generate_simulation_data <- function(spec,
       p = ncol(X),
       seed = seed
     )
+  } else if (identical(architecture, "susie2_diffuse")) {
+    simulate_effect_sizes_susie2_diffuse(
+      p = ncol(X),
+      k = spec$diffuse_k %||% 100L,
+      seed = seed
+    )
   } else {
     simulate_effect_sizes(
       p = ncol(X),
@@ -751,7 +817,7 @@ generate_simulation_data <- function(spec,
   }
 
   # SuSiE 2.0 architectures use h2-calibrated noise; others use noise_fraction
-  phenotype <- if (architecture %in% c("susie2_sparse", "susie2_oligogenic")) {
+  phenotype <- if (architecture %in% c("susie2_sparse", "susie2_oligogenic", "susie2_diffuse")) {
     simulate_phenotype_h2(
       X = X,
       beta = effects$beta,
@@ -760,7 +826,7 @@ generate_simulation_data <- function(spec,
       } else {
         NA_real_
       },
-      h2_total = if (identical(architecture, "susie2_oligogenic")) {
+      h2_total = if (architecture %in% c("susie2_oligogenic", "susie2_diffuse")) {
         spec$h2_total %||% 0.25
       } else {
         NA_real_
@@ -782,6 +848,7 @@ generate_simulation_data <- function(spec,
     gamma_shrink = spec$gamma_shrink,
     base_sigma2 = stats::var(phenotype$y),
     effect_sd = spec$effect_sd %||% 1,
+    annotation_signal_mode = if (identical(architecture, "susie2_sparse")) "sign" else "effect",
     seed = spec$annotation_seed %||% NULL
   )
 

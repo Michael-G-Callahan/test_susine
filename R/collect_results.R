@@ -330,13 +330,15 @@ aggregate_staging_outputs <- function(job_name,
                        "architecture", "refine_step", "run_type")
   run_enrich_full <- c(run_enrich_core, "group_key", "L", "annotation_r2",
                        "inflate_match", "sigma_0_2_scalar", "c_value", "tau_value",
-                       "matrix_id", "y_noise", "p_star", "exploration_mode",
+                       "matrix_id", "y_noise", "p_star", "h2_snp_per_causal",
+                       "h2_total", "diffuse_k", "exploration_mode",
                        "exploration_methods", "exploration_group",
                        "alpha_concentration", "warm_method",
                        "annotation_contamination_arm",
                        "annotation_contamination_lambda",
                        "annotation_contamination_shuffle_z")
   bundle_enrich_cols <- c("matrix_id", "architecture", "y_noise", "p_star",
+                          "h2_snp_per_causal", "h2_total", "diffuse_k",
                           "phenotype_seed")
 
   if (length(model_files)) {

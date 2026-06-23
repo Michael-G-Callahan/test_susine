@@ -270,11 +270,13 @@ pip_breaks_variable <- function() {
   )
 }
 
-prior_cache_key <- function(annotation_r2, inflate_match, annotation_seed = NA_integer_) {
-  sprintf("r2=%s|inflate=%s|seed=%s",
+prior_cache_key <- function(annotation_r2, inflate_match, annotation_seed = NA_integer_,
+                            annotation_signal_mode = "effect") {
+  sprintf("r2=%s|inflate=%s|seed=%s|mode=%s",
           format(annotation_r2, digits = 6, scientific = FALSE),
           format(inflate_match, digits = 6, scientific = FALSE),
-          format(annotation_seed, digits = 10, scientific = FALSE))
+          format(annotation_seed, digits = 10, scientific = FALSE),
+          as.character(annotation_signal_mode))
 }
 
 get_priors_cached <- function(cache_env,
@@ -283,8 +285,9 @@ get_priors_cached <- function(cache_env,
                               inflate_match,
                               base_sigma2,
                               effect_sd,
-                              annotation_seed = NA_integer_) {
-  key <- prior_cache_key(annotation_r2, inflate_match, annotation_seed)
+                              annotation_seed = NA_integer_,
+                              annotation_signal_mode = "effect") {
+  key <- prior_cache_key(annotation_r2, inflate_match, annotation_seed, annotation_signal_mode)
   if (exists(key, envir = cache_env, inherits = FALSE)) {
     return(get(key, envir = cache_env, inherits = FALSE))
   }
@@ -294,6 +297,7 @@ get_priors_cached <- function(cache_env,
     inflate_match = inflate_match,
     base_sigma2 = base_sigma2,
     effect_sd = effect_sd,
+    annotation_signal_mode = annotation_signal_mode,
     seed = annotation_seed
   )
   assign(key, priors, envir = cache_env)
@@ -641,6 +645,12 @@ generate_data_for_bundle <- function(bundle_row, job_config) {
       p = ncol(X),
       seed = seed
     )
+  } else if (identical(architecture, "susie2_diffuse")) {
+    simulate_effect_sizes_susie2_diffuse(
+      p = ncol(X),
+      k = as.integer(bundle_row[["diffuse_k"]] %||% 100L),
+      seed = seed
+    )
   } else {
     simulate_effect_sizes(
       p = ncol(X),
@@ -651,7 +661,7 @@ generate_data_for_bundle <- function(bundle_row, job_config) {
   }
 
   # SuSiE 2.0 architectures use h2-calibrated noise; others use noise_fraction
-  phenotype <- if (architecture %in% c("susie2_sparse", "susie2_oligogenic")) {
+  phenotype <- if (architecture %in% c("susie2_sparse", "susie2_oligogenic", "susie2_diffuse")) {
     simulate_phenotype_h2(
       X = X,
       beta = effects$beta,
@@ -660,7 +670,7 @@ generate_data_for_bundle <- function(bundle_row, job_config) {
       } else {
         NA_real_
       },
-      h2_total = if (identical(architecture, "susie2_oligogenic")) {
+      h2_total = if (architecture %in% c("susie2_oligogenic", "susie2_diffuse")) {
         as.numeric(bundle_row[["h2_total"]] %||% 0.25)
       } else {
         NA_real_
@@ -1363,7 +1373,8 @@ execute_dataset_bundle <- function(bundle_runs, job_config, quiet = FALSE, buffe
           inflate_match = as.numeric(grr$inflate_match %||% NA_real_),
           base_sigma2 = stats::var(data_bundle$y),
           effect_sd = data_bundle$effect_sd,
-          annotation_seed = grr$annotation_seed %||% NA_integer_
+          annotation_seed = grr$annotation_seed %||% NA_integer_,
+          annotation_signal_mode = if (identical(data_bundle$architecture, "susie2_sparse")) "sign" else "effect"
         )
         ann_diag <- apply_annotation_contamination_for_run(
           run_row = grr,
@@ -1854,7 +1865,8 @@ run_use_case <- function(use_case, run_row, data_bundle, job_config,
       inflate_match = inflate_match,
       base_sigma2 = stats::var(data_bundle$y),
       effect_sd = data_bundle$effect_sd,
-      annotation_seed = annotation_seed
+      annotation_seed = annotation_seed,
+      annotation_signal_mode = if (identical(data_bundle$architecture, "susie2_sparse")) "sign" else "effect"
     )
     annotation_contam <- apply_annotation_contamination_for_run(
       run_row = run_row,
