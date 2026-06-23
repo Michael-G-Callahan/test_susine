@@ -65,8 +65,9 @@ c_grid_4 <- c(0.00, 0.43, 1.07, 1.50)
 sigma_grid_4 <- c(0.01, 0.10, 0.40, 1.00)
 
 max_iter <- 100L
-bundles_per_task <- 4L
+bundles_per_task <- 48L
 task_assignment_seed <- 42L
+buffer_flush_interval <- 16L
 aggregation_methods <- "cluster_weight_credible"
 include_overall_pool <- FALSE
 softmax_temperature <- 1
@@ -183,6 +184,7 @@ cfg <- make_job_config(
   task_unit = "dataset",
   bundles_per_task = bundles_per_task,
   task_assignment_seed = task_assignment_seed,
+  buffer_flush_interval = buffer_flush_interval,
   max_iter = max_iter,
   aggregation_methods = aggregation_methods,
   include_overall_pool = include_overall_pool,

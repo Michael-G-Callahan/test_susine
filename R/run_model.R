@@ -60,11 +60,15 @@ run_task <- function(job_name,
     stop("run_table is missing dataset_bundle_id; regenerate job config.")
   }
   bundle_ids <- unique(task_runs$dataset_bundle_id)
+  flush_interval <- as.integer(job_config$job$buffer_flush_interval %||% 1L)
+  if (!is.finite(flush_interval) || flush_interval < 1L) {
+    flush_interval <- 1L
+  }
   results <- purrr::map_dfr(seq_along(bundle_ids), function(i) {
     bundle_id <- bundle_ids[i]
     bundle_runs <- dplyr::filter(task_runs, dataset_bundle_id == !!bundle_id)
     res <- execute_dataset_bundle(bundle_runs, job_config, quiet = quiet, buffer_ctx = buffer_ctx)
-    if (!is.null(buffer_ctx)) {
+    if (!is.null(buffer_ctx) && i %% flush_interval == 0L) {
       flush_task_buffers(buffer_ctx)
     }
     res
